@@ -136,6 +136,14 @@ def _find_mkvmerge():
     found = shutil.which("mkvmerge") or shutil.which("mkvmerge.exe")
     if found:
         return found
+    # nunif-windows root, e.g. <root>\mkvtoolnix\mkvmerge.exe (same layout as ffmpeg.exe/dovi_tool.exe)
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    for candidate in (
+        path.join(here, "mkvtoolnix", "mkvmerge.exe"),
+        path.join(here, "mkvmerge.exe"),
+    ):
+        if path.exists(candidate):
+            return candidate
     for prog_dir in (r"C:\Program Files\MKVToolNix", r"C:\Program Files (x86)\MKVToolNix"):
         candidate = path.join(prog_dir, "mkvmerge.exe")
         if path.exists(candidate):

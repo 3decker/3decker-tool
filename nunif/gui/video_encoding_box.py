@@ -8,7 +8,9 @@ LEVEL_ALL = ["auto"] + sorted(list(set(LEVEL_LIBX264) | set(LEVEL_LIBX265)), key
 
 TUNE_LIBX264 = ["film", "animation", "grain", "stillimage", "psnr"]
 TUNE_LIBX265 = ["grain", "animation", "psnr", "fastdecode", "zerolatency"]
-TUNE_NVENC = ["hq", "ll", "ull"]
+TUNE_NVENC_H264 = ["hq", "ll", "ull", "lossless"]
+TUNE_NVENC_HEVC = ["hq", "uhq", "ll", "ull", "lossless"]
+TUNE_NVENC = TUNE_NVENC_HEVC
 TUNE_ALL = [""] + list(dict.fromkeys(TUNE_LIBX264 + TUNE_LIBX265 + TUNE_NVENC))
 
 PRESET_LIBX264 = ["ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -64,24 +66,47 @@ class VideoEncodingBox():
                                             name=f"{prefix}cbo_video_format")
         self.cbo_video_format.SetEditable(False)
         self.cbo_video_format.SetSelection(0)
+        self.cbo_video_format.SetToolTip(
+            T("The output container/file type. mp4 is the most universally compatible. mkv supports more "
+              "advanced features (like Dolby Vision/HDR10+ metadata and lossless codecs). avi is mainly "
+              "for the lossless utvideo codec. Recommended: mkv if you need HDR/Dolby Vision or lossless "
+              "output, mp4 otherwise."))
 
         self.lbl_video_codec = wx.StaticText(self.grp_video, label=T("Video Codec"))
         self.cbo_video_codec = EditableComboBox(
             self.grp_video, choices=CODEC_ALL,
             name=f"{prefix}cbo_video_codec")
         self.cbo_video_codec.SetSelection(0)
+        self.cbo_video_codec.SetToolTip(
+            T("The compression format used to encode the output video. libx264/libx265 (CPU-based, "
+              "h264/HEVC) give the best quality-per-file-size and work everywhere. h264_nvenc/hevc_nvenc "
+              "use your NVIDIA GPU's hardware encoder — much faster, slightly lower quality-per-file-size. "
+              "utvideo/ffv1 are lossless (huge files, no quality loss at all) for archival/further editing. "
+              "Recommended: libx265 for best quality, hevc_nvenc if encoding speed matters and you have an "
+              "NVIDIA GPU."))
 
         self.lbl_fps = wx.StaticText(self.grp_video, label=T("Max FPS"))
         self.cbo_fps = EditableComboBox(
             self.grp_video, choices=["1000", "60", "59.94", "30", "29.97", "24", "23.976", "15", "1", "0.25"],
             name=f"{prefix}cbo_fps")
         self.cbo_fps.SetSelection(3)
+        self.cbo_fps.SetToolTip(
+            T("Caps the output frame rate. If the source is already at or below this, nothing changes. "
+              "Lowering it reduces processing time roughly proportionally (half the frames = about half "
+              "the time), at the cost of less smooth motion. Recommended: leave high (e.g. 1000) to just "
+              "keep the source's own frame rate, unless you specifically want to reduce it for speed."))
 
         self.lbl_pix_fmt = wx.StaticText(self.grp_video, label=T("Pixel Format"))
         self.cbo_pix_fmt = wx.ComboBox(self.grp_video, choices=PIX_FMT_ALL,
                                        name=f"{prefix}cbo_pix_fmt")
         self.cbo_pix_fmt.SetEditable(False)
         self.cbo_pix_fmt.SetSelection(0)
+        self.cbo_pix_fmt.SetToolTip(
+            T("The color sampling/precision the encoder stores internally. yuv420p (8-bit) is the most "
+              "compatible default. yuv420p10le adds the precision-boosting benefit described under Bit "
+              "Depth Upgrade (where available, that setting can apply on top of this). yuv444p/rgb24/gbrp* "
+              "avoid color-detail loss around sharp red/edge areas, at a larger file size — see this "
+              "project's README for when that matters. Recommended: yuv420p10le for most uses."))
 
         self.lbl_colorspace = wx.StaticText(self.grp_video, label=T("Colorspace"))
         self.cbo_colorspace = wx.ComboBox(
@@ -92,20 +117,36 @@ class VideoEncodingBox():
             name=f"{prefix}cbo_colorspace")
         self.cbo_colorspace.SetEditable(False)
         self.cbo_colorspace.SetSelection(0)
+        self.cbo_colorspace.SetToolTip(
+            T("How color values are tagged/interpreted (affects color accuracy on playback, not detail). "
+              "\"auto\" matches the source's own colorspace and is correct for virtually all sources. "
+              "Only change this if you know your source's colorspace is mistagged."))
 
         self.lbl_crf = wx.StaticText(self.grp_video, label=T("CRF"))
         self.cbo_crf = EditableComboBox(self.grp_video, choices=[str(n) for n in range(16, 28)],
                                         name=f"{prefix}cbo_crf")
         self.cbo_crf.SetSelection(4)
+        self.cbo_crf.SetToolTip(
+            T("Constant Rate Factor: the main quality/file-size dial for most codecs. Lower number = "
+              "higher quality and bigger file; higher number = smaller file and lower quality. "
+              "Recommended: 15-18 for near-lossless/archival quality, 20-23 for a good everyday balance."))
 
         self.lbl_bitrate = wx.StaticText(self.grp_video, label=T("Bitrate"))
         self.cbo_bitrate = EditableComboBox(self.grp_video, choices=["160M", "50M", "16M", "12M", "8M", "4M"],
                                             name=f"{prefix}cbo_bitrate")
         self.cbo_bitrate.SetSelection(4)
+        self.cbo_bitrate.SetToolTip(
+            T("Only used by libopenh264, which doesn't support CRF. Sets a fixed data rate for the video "
+              "(M = megabits/second) — higher = better quality and bigger file. Recommended: 8M-16M for "
+              "1080p, higher for 4K."))
 
         self.lbl_profile_level = wx.StaticText(self.grp_video, label=T("Level"))
         self.cbo_profile_level = EditableComboBox(self.grp_video, choices=LEVEL_ALL, name=f"{prefix}cbo_profile_level")
         self.cbo_profile_level.SetSelection(0)
+        self.cbo_profile_level.SetToolTip(
+            T("A technical compatibility limit (resolution/bitrate ceiling) some older TVs/players check "
+              "before they'll play a file. Recommended: \"auto\" — only set this manually if a specific "
+              "playback device of yours refuses to play the output."))
 
         self.lbl_preset = wx.StaticText(self.grp_video, label=T("Preset"))
         self.cbo_preset = wx.ComboBox(
@@ -113,18 +154,40 @@ class VideoEncodingBox():
             name=f"{prefix}cbo_preset")
         self.cbo_preset.SetEditable(False)
         self.cbo_preset.SetSelection(PRESET_ALL.index(PRESET_DEFAULT))
+        self.cbo_preset.SetToolTip(
+            T("How hard the encoder works to compress efficiently. Slower presets (slow/slower/veryslow) "
+              "give a smaller file at the same quality (CRF), but take longer to encode. Faster presets "
+              "(fast/veryfast/ultrafast) encode quicker but produce a larger file for the same quality. "
+              "Recommended: medium-slow for a good balance; veryfast if encoding time matters more than "
+              "file size."))
 
         self.lbl_tune = wx.StaticText(self.grp_video, label=T("Tune"))
         self.cbo_tune = wx.ComboBox(
             self.grp_video, choices=TUNE_ALL, name=f"{prefix}cbo_tune")
         self.cbo_tune.SetEditable(False)
         self.cbo_tune.SetSelection(0)
+        self.cbo_tune.SetToolTip(
+            T("For libx264/libx265: nudges the encoder's choices for a specific kind of content — "
+              "e.g. \"grain\" preserves film grain/noise better, \"animation\" suits flat-color cartoon "
+              "content. Leave blank unless your source clearly matches one of these categories.\n"
+              "For hevc_nvenc/h264_nvenc: chooses the GPU encoder's quality/speed tradeoff. \"hq\" = "
+              "high quality (good default). \"uhq\" (HEVC only, needs a recent NVIDIA GPU) = an even "
+              "higher quality mode than hq, using extra quality heuristics, for a modest speed cost — "
+              "worth using if your GPU supports it and you want the best NVENC result. \"lossless\" = "
+              "no quality loss at all, but a very large file. \"ll\"/\"ull\" are for low-latency "
+              "live-streaming, not useful for a normal conversion."))
         self.chk_tune_fastdecode = wx.CheckBox(self.grp_video, label=T("fastdecode"),
                                                name=f"{prefix}chk_tune_fastdecode")
         self.chk_tune_fastdecode.SetValue(False)
+        self.chk_tune_fastdecode.SetToolTip(
+            T("Makes the resulting file easier/cheaper to decode during playback (helpful on weaker "
+              "playback devices), at a small cost to compression efficiency (slightly bigger file)."))
         self.chk_tune_zerolatency = wx.CheckBox(self.grp_video, label=T("zerolatency"),
                                                 name=f"{prefix}chk_tune_zerolatency")
         self.chk_tune_zerolatency.SetValue(False)
+        self.chk_tune_zerolatency.SetToolTip(
+            T("For live-streaming/real-time use cases — not useful for a normal movie file conversion "
+              "like this. Leave off."))
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -395,7 +458,7 @@ class VideoEncodingBox():
                 self.chk_tune_zerolatency.SetValue("zerolatency" in tune)
             elif codec in {"h264_nvenc", "hevc_nvenc"}:
                 tune = self.cbo_tune.GetValue()
-                choices = [""] + TUNE_NVENC
+                choices = [""] + (TUNE_NVENC_HEVC if codec == "hevc_nvenc" else TUNE_NVENC_H264)
                 self.cbo_tune.SetItems(choices)
                 if tune in choices:
                     self.cbo_tune.SetSelection(choices.index(tune))

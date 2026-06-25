@@ -5,6 +5,9 @@ import os
 from os import path
 import traceback
 import functools
+import tempfile
+import subprocess
+import copy
 from time import time
 import threading
 import wx
@@ -15,6 +18,7 @@ import torch
 from .utils import (
     create_parser, set_state_args, iw3_main,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
+    _get_ffmpeg_bin, _find_mkvmerge,
 )
 from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available, create_device
@@ -26,6 +30,7 @@ from nunif.utils.video import (
     has_qsv,
     pyav_init_cuda_primary_context,
 )
+from nunif.utils.video.metadata import parse_time
 from nunif.utils.filename import sanitize_filename
 from nunif.utils.git import get_current_branch
 from nunif.utils.home_dir import ensure_home_dir
@@ -159,6 +164,9 @@ class MainFrame(wx.Frame):
         self.chk_recursive = wx.CheckBox(self.pnl_file_option, label=T("Process all subfolders"),
                                          name="chk_recursive")
         self.chk_recursive.SetValue(False)
+        self.chk_recursive.SetToolTip(T("When the input is a folder, also process videos/images inside its "
+                                        "subfolders, not just the top level. Recommended: on, if you organize "
+                                        "your movies into subfolders."))
 
         self.chk_skip_error = wx.CheckBox(self.pnl_file_option, label=T("Skip Error"), name="chk_skip_erro")
         self.chk_skip_error.SetToolTip(T("Skip videos that cause errors during batch processing and those that previously encountered errors."))
@@ -174,6 +182,10 @@ class MainFrame(wx.Frame):
         self.chk_metadata = wx.CheckBox(self.pnl_file_option, label=T("Add metadata to filename"),
                                         name="chk_metadata")
         self.chk_metadata.SetValue(False)
+        self.chk_metadata.SetToolTip(T("Encode your current settings (model, 3D strength, convergence, etc.) "
+                                       "into the output filename, so you can tell which settings made which "
+                                       "file later, and so Auto Resume can find a matching in-progress job. "
+                                       "Recommended: on."))
 
         self.sep_image_format = wx.StaticLine(self.pnl_file_option, size=self.FromDIP((2, 16)), style=wx.LI_VERTICAL)
         self.lbl_image_format = wx.StaticText(self.pnl_file_option, label=" " + T("Image Format"))
@@ -215,24 +227,51 @@ class MainFrame(wx.Frame):
         self.lbl_divergence_warning.SetForegroundColour(WARNING_COLOR)
         self.lbl_divergence_warning.Hide()
 
-        self.cbo_divergence.SetToolTip("Divergence")
+        self.cbo_divergence.SetToolTip(
+            T("Also called Divergence. The master strength of the whole 3D effect — how far things "
+              "shift between the left/right eye. Higher = more dramatic depth, but more edge artifacts. "
+              "Lower = subtler, cleaner. Recommended: 2.0-3.0 for most movies."))
         self.cbo_divergence.SetSelection(4)
 
         self.lbl_convergence = wx.StaticText(self.grp_stereo, label=T("Convergence Plane"))
-        self.cbo_convergence_mode = wx.ComboBox(self.grp_stereo, choices=["constant", "sod_v1"],
+        self.cbo_convergence_mode = wx.ComboBox(self.grp_stereo, choices=["constant", "sod_v1", "face_detect"],
                                                 name="cbo_convergence_mode")
         self.cbo_convergence_mode.SetEditable(False)
         self.cbo_convergence_mode.SetSelection(0)
+        self.cbo_convergence_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_mode)
+        self.cbo_convergence_mode.SetToolTip(
+            T("How the \"screen depth\" (which point looks like it's exactly at the screen surface) is "
+              "chosen.\nconstant: you set a fixed position with the value box.\n"
+              "sod_v1: AI automatically picks a focus point based on the most visually important subject.\n"
+              "face_detect: automatically centers on detected faces, ignoring the value box.\n"
+              "Recommended: constant for predictable results, sod_v1 for movies with a clear subject."))
 
         self.cbo_convergence = EditableComboBox(self.grp_stereo, choices=["0.0", "0.25", "0.5", "1.0"],
                                                 name="cbo_convergence")
         self.cbo_convergence.SetSelection(1)
-        self.cbo_convergence.SetToolTip("Convergence")
+        self.cbo_convergence.SetToolTip(
+            T("Also called Convergence Plane. Where the \"screen depth\" sits, from 0 (everything pops "
+              "out toward you) to 1 (everything sits behind the screen). Only used directly when mode is "
+              "\"constant\" — for sod_v1 it acts as a relative offset within the detected subject's depth "
+              "range. Recommended: 0.5 as a balanced starting point."))
+
+        self.lbl_convergence_smoothing = wx.StaticText(self.grp_stereo, label=T("Convergence Smoothing"))
+        self.cbo_convergence_smoothing = EditableComboBox(
+            self.grp_stereo, choices=["0.95", "0.9", "0.75", "0.5", "0.25", "0"],
+            name="cbo_convergence_smoothing")
+        self.cbo_convergence_smoothing.SetSelection(1)
+        self.cbo_convergence_smoothing.SetToolTip(
+            T("Only affects sod_v1 / Face Detect convergence modes. Controls how quickly the automatic "
+              "convergence point reacts to scene changes. Higher = smoother but slower to react. Lower = "
+              "more aggressive/dynamic, reacts faster but may jitter more. 0 = no smoothing at all."))
 
         self.lbl_ipd_offset = wx.StaticText(self.grp_stereo, label=T("Your Own Size"))
         # SpinCtrlDouble is better, but cannot save with PersistenceManager
         self.sld_ipd_offset = wx.SpinCtrl(self.grp_stereo, value="0", min=-10, max=20, name="sld_ipd_offset")
-        self.sld_ipd_offset.SetToolTip("IPD Offset")
+        self.sld_ipd_offset.SetToolTip(
+            T("Also called IPD Offset (distance between your eyes). Fine-tunes the 3D effect for your own "
+              "eye spacing. 0 is average; higher values widen the simulated eye distance. Most people can "
+              "leave this at 0."))
 
         self.lbl_synthetic_view = wx.StaticText(self.grp_stereo, label=T("Synthetic View"))
         self.cbo_synthetic_view = wx.ComboBox(self.grp_stereo,
@@ -240,6 +279,10 @@ class MainFrame(wx.Frame):
                                               name="cbo_synthetic_view")
         self.cbo_synthetic_view.SetEditable(False)
         self.cbo_synthetic_view.SetSelection(0)
+        self.cbo_synthetic_view.SetToolTip(
+            T("Which eye view gets newly generated by AI. \"both\" generates both eyes from the original "
+              "center image (recommended, most natural). \"right\"/\"left\" keep the original image as one "
+              "eye unchanged and only synthesize the other — faster, but can look slightly less balanced."))
 
         self.lbl_method = wx.StaticText(self.grp_stereo, label=T("Method"))
         self.cbo_method = wx.ComboBox(self.grp_stereo,
@@ -252,6 +295,13 @@ class MainFrame(wx.Frame):
                                       name="cbo_method")
         self.cbo_method.SetEditable(False)
         self.cbo_method.SetSelection(2)
+        self.cbo_method.SetToolTip(
+            T("How the second eye view is generated from the depth map. row_flow_v3 / row_flow_v3_sym: fast, "
+              "AI-based, the default and a solid all-rounder. mlbw_l2/l4: more advanced layered AI warping, "
+              "supports stronger 3D strength. *_inpaint variants additionally fill in the hidden areas behind "
+              "objects instead of stretching/smearing them — slower, but cleaner edges. forward_fill / "
+              "monobw / grid_sample / backward: older, simpler, non-AI methods — mainly for testing/speed. "
+              "Recommended: mlbw_l2_inpaint or forward_inpaint for best quality; row_flow_v3_sym for speed."))
 
         self.lbl_inpaint_model = wx.StaticText(self.grp_stereo, label=T("Inpainting Model"))
         self.cbo_inpaint_model = wx.ComboBox(self.grp_stereo,
@@ -259,45 +309,66 @@ class MainFrame(wx.Frame):
                                              name="cbo_inpaint_model")
         self.cbo_inpaint_model.SetEditable(False)
         self.cbo_inpaint_model.SetSelection(0)
+        self.cbo_inpaint_model.SetToolTip(
+            T("Only used by forward_inpaint / monobw_inpaint. Which AI model fills in the hidden areas "
+              "behind objects. Larger/\"Large\" models give cleaner results but are slower. "
+              "light_inpaint_v1 is the fast built-in default."))
 
         self.lbl_overlap_frames = wx.StaticText(self.grp_stereo, label=T("Inpaint Overlap Frames"))
         self.cbo_overlap_frames_pre = EditableComboBox(self.grp_stereo,
                                                        choices=["0", "3"],
                                                        name="cbo_overlap_frames_pre")
         self.cbo_overlap_frames_pre.SetSelection(1)
-        self.cbo_overlap_frames_pre.SetToolTip(T("Overlap Pre"))
+        self.cbo_overlap_frames_pre.SetToolTip(
+            T("Overlap Pre: how many extra frames before each processed chunk are fed to the inpainting "
+              "model for context, to keep filled-in areas consistent frame to frame. Higher = smoother but "
+              "slower. Recommended: default (3)."))
 
         self.cbo_overlap_frames_post = EditableComboBox(self.grp_stereo,
                                                         choices=["0", "3"],
                                                         name="cbo_overlap_frames_post")
         self.cbo_overlap_frames_post.SetSelection(1)
-        self.cbo_overlap_frames_post.SetToolTip(T("Overlap Post"))
+        self.cbo_overlap_frames_post.SetToolTip(
+            T("Overlap Post: same idea as Overlap Pre, but for extra frames after each chunk. "
+              "Recommended: default (3)."))
 
         self.lbl_mask_dilation = wx.StaticText(self.grp_stereo, label=T("Inpaint Mask Dilation"))
         self.cbo_mask_inner_dilation = EditableComboBox(self.grp_stereo,
                                                         choices=["0", "1", "2"],
                                                         name="cbo_mask_inner_dilation")
         self.cbo_mask_inner_dilation.SetSelection(0)
-        self.cbo_mask_inner_dilation.SetToolTip(T("Inner"))
+        self.cbo_mask_inner_dilation.SetToolTip(
+            T("Inner: grows the \"needs filling in\" area inward, slightly shrinking the foreground object's "
+              "edge so the inpainting blends in more smoothly. Recommended: 0, raise only if you see a thin "
+              "halo around foreground objects."))
 
         self.cbo_mask_outer_dilation = EditableComboBox(self.grp_stereo,
                                                         choices=["0", "1", "2"],
                                                         name="cbo_mask_outer_dilation")
         self.cbo_mask_outer_dilation.SetSelection(0)
-        self.cbo_mask_outer_dilation.SetToolTip(T("Outer"))
+        self.cbo_mask_outer_dilation.SetToolTip(
+            T("Outer: grows the \"needs filling in\" area outward into the background, giving the "
+              "inpainting model more room to work with. Recommended: 0, raise only if you still see leftover "
+              "smearing right behind foreground objects."))
 
         self.lbl_inpaint_max_width = wx.StaticText(self.grp_stereo, label=T("Inpaint Max Width"))
         self.cbo_inpaint_max_width = EditableComboBox(self.grp_stereo,
                                                       choices=["", "1920"],
                                                       name="cbo_inpaint_max_width")
         self.cbo_inpaint_max_width.SetSelection(0)
+        self.cbo_inpaint_max_width.SetToolTip(
+            T("Caps the resolution the inpainting model processes at, to save VRAM/time on large videos. "
+              "Leave blank for no limit (best quality). Lower it only if you run out of memory."))
 
         self.lbl_stereo_width = wx.StaticText(self.grp_stereo, label=T("Stereo Processing Width"))
         self.cbo_stereo_width = EditableComboBox(self.grp_stereo,
                                                  choices=["Default", "1920", "1280", "640"],
                                                  name="cbo_stereo_width")
         self.cbo_stereo_width.SetSelection(0)
-        self.cbo_stereo_width.SetToolTip(T("Only used for row_flow_v3 and row_flow_v2"))
+        self.cbo_stereo_width.SetToolTip(
+            T("Only used for row_flow_v3 and row_flow_v2. Resizes the image to this width before "
+              "generating the 3D effect (separate from output resolution). Default uses the source size. "
+              "Lowering it can speed things up at some quality cost."))
 
         self.lbl_depth_model = wx.StaticText(self.grp_stereo, label=T("Depth Model"))
         self.cbo_depth_model = wx.ComboBox(self.grp_stereo,
@@ -305,25 +376,56 @@ class MainFrame(wx.Frame):
                                            name="cbo_depth_model")
         self.cbo_depth_model.SetEditable(False)
         self.cbo_depth_model.SetSelection(3)
+        self.cbo_depth_model.SetToolTip(
+            T("Which AI model estimates depth from the image. VDA_* (Video Depth Anything) models are "
+              "built for video and keep depth stable/flicker-free across frames — best for movies. "
+              "Any_V2_*/Any_V3_*/Distill_Any_* are image models — sharper on single photos, but can "
+              "flicker if used on video. *_Metric variants estimate real-world distances, useful for some "
+              "specialized use cases. Larger (_L) = better quality but slower and more VRAM."))
 
         self.lbl_resolution = wx.StaticText(self.grp_stereo, label=T("Depth") + " " + T("Resolution"))
         self.cbo_resolution = EditableComboBox(self.grp_stereo,
                                                choices=["Default", "512"],
                                                name="cbo_zoed_resolution")
         self.cbo_resolution.SetSelection(0)
+        self.cbo_resolution.SetToolTip(
+            T("How much detail the depth model works with internally (its short-side resolution in "
+              "pixels). \"Default\" uses ~392. Higher = finer depth detail but more VRAM/time — roughly "
+              "squares the cost as you increase it. Recommended: Default for most content; try 448-512 "
+              "if you have VRAM to spare and want finer depth detail."))
 
         self.chk_limit_resolution = wx.CheckBox(self.grp_stereo, label=T("Limit to source"),
                                                 name="chk_limit_resolution")
-        self.chk_limit_resolution.SetToolTip(T("Limit to source resolution"))
+        self.chk_limit_resolution.SetToolTip(
+            T("Safety cap only: if your typed Depth Resolution is HIGHER than the source video's own "
+              "resolution, this brings it back down to match the source instead of wasting time asking "
+              "for detail that doesn't exist. It never raises a lower value up. Recommended: on."))
 
         self.lbl_foreground_scale = wx.StaticText(self.grp_stereo, label=T("Foreground Scale"))
         self.cbo_foreground_scale = EditableComboBox(self.grp_stereo,
                                                      choices=["-3", "-2", "-1", "0", "1", "2", "3"],
                                                      name="cbo_foreground_scale")
         self.cbo_foreground_scale.SetSelection(3)
+        self.cbo_foreground_scale.SetToolTip(
+            T("Reshapes the depth curve for the whole image (-3 to 3), affecting foreground AND background. "
+              "Different from Foreground Pop, which only pushes the nearest pixels."))
 
         self.chk_depth_aa = wx.CheckBox(self.grp_stereo, label=T("Depth Anti-aliasing"), name="chk_depth_aa")
         self.chk_depth_aa.SetValue(False)
+        self.chk_depth_aa.SetToolTip(
+            T("Smooths small jagged/staircase artifacts in the depth map using a dedicated AI model, "
+              "without changing the actual depth values much. Only available for certain depth models "
+              "(grayed out otherwise). Recommended: on, when available — minor cost, generally cleaner result."))
+
+        self.lbl_foreground_pop = wx.StaticText(self.grp_stereo, label=T("Foreground Pop"))
+        self.cbo_foreground_pop = EditableComboBox(self.grp_stereo,
+                                                   choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
+                                                   name="cbo_foreground_pop")
+        self.cbo_foreground_pop.SetSelection(0)
+        self.cbo_foreground_pop.SetToolTip(
+            T("Push nearest pixels further toward the audience (0=off, 1=strong). Only affects the closest "
+              "objects, leaving background untouched. Different from Foreground Scale, which reshapes the "
+              "whole depth curve."))
 
         self.lbl_edge_dilation = wx.StaticText(self.grp_stereo, label=T("Edge Fix"))
         self.cbo_edge_dilation = EditableComboBox(self.grp_stereo,
@@ -342,34 +444,55 @@ class MainFrame(wx.Frame):
         self.chk_ema_normalize = wx.CheckBox(self.grp_stereo,
                                              label=T("Flicker Reduction"),
                                              name="chk_ema_normalize")
-        self.chk_ema_normalize.SetToolTip(T("Video Only") + " " + T("(experimental)"))
+        self.chk_ema_normalize.SetToolTip(
+            T("Video Only (experimental). Smooths the depth map over time so it doesn't flicker/wobble "
+              "between frames. Uses the Decay Rate and Lookahead Buffer settings below. "
+              "Recommended: on for most videos, paired with Scene Boundary Detection."))
 
-        self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.95", "0.9", "0.75", "0.5"],
+        self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.95", "0.9", "0.75", "0.5", "0"],
                                               name="cbo_ema_decay")
         self.cbo_ema_decay.SetSelection(2)
-        self.cbo_ema_decay.SetToolTip(T("Decay Rate"))
+        self.cbo_ema_decay.SetToolTip(
+            T("Decay Rate: how much the depth map is smoothed frame to frame. Higher (0.9-0.99) = smoother "
+              "but slower to react, good for slow/calm footage. Lower (0.5-0.75) = reacts faster, better "
+              "for fast motion/action, but may flicker more. 0 = no smoothing."))
 
         self.cbo_ema_buffer = EditableComboBox(self.grp_stereo, choices=["150", "60", "30", "1"],
                                                name="cbo_ema_buffer")
         self.cbo_ema_buffer.SetSelection(2)
-        self.cbo_ema_buffer.SetToolTip(T("Lookahead Buffer Size"))
+        self.cbo_ema_buffer.SetToolTip(
+            T("Lookahead Buffer Size (in frames): how many frames are looked at together to judge the "
+              "near/far depth range. Bigger = more stable range but slower to adapt within a shot; "
+              "smaller = reacts faster to sudden depth changes within a single continuous shot. "
+              "Scene Boundary Detection resets this at every real cut regardless of this setting."))
 
         self.chk_scene_detect = wx.CheckBox(self.grp_stereo,
                                             label=T("Scene Boundary Detection"),
                                             name="chk_scene_detect")
         self.chk_scene_detect.SetValue(False)
-        self.chk_scene_detect.SetToolTip(T("Reset model and Flicker Reduction states at scene boundaries"))
+        self.chk_scene_detect.SetToolTip(
+            T("Detects real scene/shot cuts and resets the depth model and Flicker Reduction exactly at "
+              "those points, instead of letting smoothing bleed across unrelated scenes. Also makes Auto "
+              "Resume align its chunk boundaries to real cuts. Recommended: on for movies/TV, especially "
+              "with Flicker Reduction or Auto Resume enabled."))
 
         self.chk_scene_detect_cache = wx.CheckBox(self.grp_stereo,
                                                   label=T("Use scene boundary cache"),
                                                   name="chk_scene_detect_cache")
         self.chk_scene_detect_cache.SetValue(True)
+        self.chk_scene_detect_cache.SetToolTip(
+            T("Saves detected scene cuts to disk so re-running the same video (e.g. after a crash, or "
+              "just testing different 3D settings) doesn't need to re-scan for cuts every time. "
+              "Recommended: on."))
 
         self.chk_preserve_screen_border = wx.CheckBox(self.grp_stereo,
                                                       label=T("Preserve Screen Border"),
                                                       name="chk_preserve_screen_border")
         self.chk_preserve_screen_border.SetValue(False)
-        self.chk_preserve_screen_border.SetToolTip(T("Force set screen border parallax to zero"))
+        self.chk_preserve_screen_border.SetToolTip(
+            T("Forces the very edges of the frame to have zero 3D shift (zero parallax), preventing "
+              "objects from being cut off oddly at the left/right edges. Recommended: on if you notice "
+              "distracting edge artifacts; off for maximum 3D strength everywhere."))
 
         self.lbl_stereo_format = wx.StaticText(self.grp_stereo, label=T("Stereo Format"))
         self.cbo_stereo_format = wx.ComboBox(
@@ -387,6 +510,14 @@ class MainFrame(wx.Frame):
             name="cbo_stereo_format")
         self.cbo_stereo_format.SetEditable(False)
         self.cbo_stereo_format.SetSelection(0)
+        self.cbo_stereo_format.SetToolTip(
+            T("The final output layout. Full/Half SBS (side-by-side) and Full/Half TB (top-bottom) are "
+              "the standard formats most 3D TVs and players expect — Full keeps both eyes at full "
+              "resolution (bigger file), Half squeezes both into the original frame size (smaller file, "
+              "common for streaming/playback compatibility). VR90 is for VR headsets. Cross Eyed is for "
+              "viewing without any equipment. Anaglyph is the red/cyan glasses look. RGB-D / Export save "
+              "the depth data itself instead of a finished 3D image. Recommended: Half SBS for most TVs "
+              "and 3D players, unless you know you need a different format."))
 
         self.lbl_anaglyph_method = wx.StaticText(self.grp_stereo, label=T("Anaglyph Method"))
         self.cbo_anaglyph_method = wx.ComboBox(
@@ -398,6 +529,11 @@ class MainFrame(wx.Frame):
             name="cbo_anaglyph_method")
         self.cbo_anaglyph_method.SetEditable(False)
         self.cbo_anaglyph_method.SetSelection(0)
+        self.cbo_anaglyph_method.SetToolTip(
+            T("Only used when Stereo Format is Anaglyph. The color-filtering recipe used for red/cyan "
+              "glasses viewing. dubois/dubois2 give the most natural, least color-distorted result for "
+              "most red/cyan glasses. gray avoids color distortion entirely but loses color in the image. "
+              "Recommended: dubois2."))
         self.lbl_anaglyph_method.Hide()
         self.cbo_anaglyph_method.Hide()
 
@@ -423,6 +559,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_convergence, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_smoothing, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_smoothing, (i, 1), (1, 2), flag=wx.EXPAND)
 
         layout.Add(self.lbl_ipd_offset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.sld_ipd_offset, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -430,6 +568,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_synthetic_view, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_method, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_method, (i, 1), (1, 2), flag=wx.EXPAND)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
         layout.Add(self.lbl_inpaint_model, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_inpaint_model, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_overlap_frames, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -440,6 +582,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_mask_outer_dilation, (i, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_inpaint_max_width, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_inpaint_max_width, (i, 1), (1, 2), flag=wx.EXPAND)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
         layout.Add(self.lbl_stereo_width, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_stereo_width, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_depth_model, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -448,18 +594,35 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_resolution, (i, 1), flag=wx.EXPAND)
         layout.Add(self.chk_limit_resolution, (i, 2), flag=wx.EXPAND)
 
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
         layout.Add(self.lbl_foreground_scale, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_foreground_scale, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_edge_dilation, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_edge_dilation, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_edge_dilation_y, (i, 2), flag=wx.EXPAND)
         layout.Add(self.chk_depth_aa, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
+        layout.Add(self.lbl_foreground_pop, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_foreground_pop, (i, 1), (1, 2), flag=wx.EXPAND)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
         layout.Add(self.chk_ema_normalize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_ema_decay, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_ema_buffer, (i, 2), flag=wx.EXPAND)
         layout.Add(self.chk_scene_detect, (i := i + 1, 0), (0, 1), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_scene_detect_cache, (i, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_preserve_screen_border, (i := i + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
         layout.Add(self.lbl_stereo_format, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_stereo_format, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_anaglyph_method, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -485,9 +648,13 @@ class MainFrame(wx.Frame):
         self.grp_video_filter = wx.StaticBox(self.pnl_options, label=T("Video Filter"))
         self.chk_start_time = wx.CheckBox(self.grp_video_filter, label=T("Start Time"),
                                           name="chk_start_time")
+        self.chk_start_time.SetToolTip(
+            T("Only process the video from this timestamp onward, instead of from the beginning. "
+              "Useful for testing settings on a specific scene, or trimming unwanted intro footage."))
         self.txt_start_time = TimeCtrl(self.grp_video_filter, value="00:00:00", fmt24hr=True,
                                        name="txt_start_time")
         self.chk_end_time = wx.CheckBox(self.grp_video_filter, label=T("End Time"), name="chk_end_time")
+        self.chk_end_time.SetToolTip(T("Stop processing at this timestamp instead of the end of the video."))
         self.txt_end_time = TimeCtrl(self.grp_video_filter, value="00:00:00", fmt24hr=True,
                                      name="txt_end_time")
 
@@ -496,9 +663,17 @@ class MainFrame(wx.Frame):
                                            name="cbo_deinterlace")
         self.cbo_deinterlace.SetEditable(False)
         self.cbo_deinterlace.SetSelection(0)
+        self.cbo_deinterlace.SetToolTip(
+            T("For old interlaced video sources (combed/striped look on motion). \"yadif\" converts it to "
+              "normal progressive video before 3D conversion. Leave blank for modern, already-progressive "
+              "sources (most streaming/BluRay video)."))
 
         self.lbl_vf = wx.StaticText(self.grp_video_filter, label=T("-vf (src)"))
         self.txt_vf = wx.TextCtrl(self.grp_video_filter, name="txt_vf")
+        self.txt_vf.SetToolTip(
+            T("Advanced: a raw ffmpeg video filter string applied to the source before 3D conversion "
+              "(e.g. cropping, scaling). Leave blank unless you specifically need this — most common "
+              "needs (crop, rotate, pad, resize) already have their own simpler controls below."))
 
         self.lbl_rotate = wx.StaticText(self.grp_video_filter, label=T("Rotate"))
         self.cbo_rotate = wx.ComboBox(self.grp_video_filter, size=self.FromDIP((200, -1)),
@@ -508,6 +683,8 @@ class MainFrame(wx.Frame):
         self.cbo_rotate.Append(T("Left 90 (counterclockwise)"), "left")
         self.cbo_rotate.Append(T("Right 90 (clockwise)"), "right")
         self.cbo_rotate.SetSelection(0)
+        self.cbo_rotate.SetToolTip(T("Rotate the source video before 3D conversion, e.g. for footage shot "
+                                     "sideways on a phone."))
 
         self.lbl_pad = wx.StaticText(self.grp_video_filter, label=T("Padding"))
         self.cbo_pad_mode = wx.ComboBox(self.grp_video_filter, choices=["", "tb", "lr", "top", "16:9"],
@@ -524,16 +701,65 @@ class MainFrame(wx.Frame):
         self.cbo_max_output_size = wx.ComboBox(self.grp_video_filter,
                                                choices=["",
                                                         "7680x2160",
+                                                        "3840x2160",
                                                         "3840x1080",
                                                         "1920x1080", "1280x720", "640x360",
+                                                        "1920x3200",
                                                         "1080x1920", "720x1280", "360x640"],
                                                name="cbo_max_output_size")
         self.cbo_max_output_size.SetEditable(False)
         self.cbo_max_output_size.SetSelection(0)
+        self.cbo_max_output_size.SetToolTip(
+            T("Caps the final output's resolution (each eye), e.g. to keep file size/playback "
+              "requirements manageable on a 4K source. Leave blank to keep the source's native size."))
 
         self.chk_keep_aspect_ratio = wx.CheckBox(self.grp_video_filter, label=T("Keep Aspect Ratio"),
                                                  name="chk_keep_aspect_ratio")
         self.chk_keep_aspect_ratio.SetValue(False)
+        self.chk_keep_aspect_ratio.SetToolTip(
+            T("When Output Size Limit is set, preserve the source's original width/height proportions "
+              "instead of stretching to exactly fill the limit's dimensions."))
+
+        self.chk_preserve_dowi = wx.CheckBox(self.grp_video_filter, label=T("Preserve Dolby Vision"),
+                                              name="chk_preserve_dowi")
+        self.chk_preserve_dowi.SetValue(False)
+        self.chk_preserve_dowi.SetToolTip(T("Detect and preserve Dolby Vision RPU and/or HDR10+ dynamic metadata through 3D conversion. Requires HEVC output (Video Codec: hevc_nvenc or libx265) and MKVToolNix installed for MKV output."))
+
+        self.chk_auto_resume = wx.CheckBox(self.grp_video_filter, label=T("Auto Resume"),
+                                            name="chk_auto_resume")
+        self.chk_auto_resume.SetValue(False)
+        self.chk_auto_resume.SetToolTip(T("Lets a long conversion pick back up exactly where it left off if "
+                                          "it's interrupted (crash, power loss, or clicking Cancel), instead "
+                                          "of starting over from the beginning.\n"
+                                          "Processes the whole video in one continuous pass — it does NOT "
+                                          "split it into fixed-size pieces on a schedule. A new piece is only "
+                                          "ever created at the exact point an interruption actually happened, "
+                                          "so a normal, uninterrupted run has zero seams, identical to not "
+                                          "using this option at all. If interrupted, you get exactly one seam "
+                                          "at that point, not many. Recommended: on for any long/overnight "
+                                          "conversion."))
+
+        self.chk_denoise = wx.CheckBox(self.grp_video_filter, label=T("Denoise"), name="chk_denoise")
+        self.chk_denoise.SetValue(False)
+        self.chk_denoise.SetToolTip(T("Apply temporal denoising before depth estimation. Reduces film grain for better 3D quality on old films."))
+
+        self.chk_preview = wx.CheckBox(self.grp_video_filter, label=T("Preview Mode"), name="chk_preview")
+        self.chk_preview.SetValue(False)
+        self.chk_preview.SetToolTip(T("Quick preview: 1fps at low resolution for the first 60 seconds. Use this to check 3D settings before full processing."))
+
+        self.lbl_upgrade_pix_fmt = wx.StaticText(self.grp_video_filter, label=T("Bit Depth Upgrade"))
+        self.cbo_upgrade_pix_fmt = wx.ComboBox(self.grp_video_filter,
+                                               choices=["", "10", "12"],
+                                               name="cbo_upgrade_pix_fmt")
+        self.cbo_upgrade_pix_fmt.SetEditable(False)
+        self.cbo_upgrade_pix_fmt.SetSelection(0)
+        self.cbo_upgrade_pix_fmt.SetToolTip(
+            T("Gives the internal depth/3D math more color precision to work with, reducing banding "
+              "(visible color \"steps\" in skies/shadows) — it doesn't add detail that wasn't in the "
+              "source. Recommended: 10 for most sources, a real, visible improvement over 8-bit with "
+              "low cost. 12 adds little you can actually see on a normal screen, for extra file size "
+              "and slower encoding — usually not worth it. No effect if your Pixel Format below is "
+              "already higher bit-depth than what you pick here."))
 
         self.lbl_autocrop = wx.StaticText(self.grp_video_filter, label=T("AutoCrop"))
         self.cbo_autocrop = wx.ComboBox(self.grp_video_filter,
@@ -541,6 +767,11 @@ class MainFrame(wx.Frame):
                                         name="cbo_autocrop")
         self.cbo_autocrop.SetEditable(False)
         self.cbo_autocrop.SetSelection(0)
+        self.cbo_autocrop.SetToolTip(
+            T("Automatically detects and removes black bars or plain/flat borders before 3D conversion "
+              "(so they don't waste depth detail or get distorted). _TB variants only crop top/bottom "
+              "bars; the non-TB variants crop on all sides. Use the \"Test\" button to preview the "
+              "detected crop before running a full conversion."))
 
         self.btn_autocrop_test = wx.Button(self.grp_video_filter, label=T("Test"))
         self.txt_autocrop_test = wx.TextCtrl(self.grp_video_filter, name="txt_autocrop_test", style=wx.TE_READONLY)
@@ -569,6 +800,12 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_max_output_size, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_output_size, (8, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_keep_aspect_ratio, (9, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_preserve_dowi, (10, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_auto_resume, (11, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_upgrade_pix_fmt, (12, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upgrade_pix_fmt, (12, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_denoise, (13, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_preview, (14, 1), (0, 2), flag=wx.EXPAND)
 
         sizer_video_filter = wx.StaticBoxSizer(self.grp_video_filter, wx.VERTICAL)
         sizer_video_filter.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -594,35 +831,62 @@ class MainFrame(wx.Frame):
 
         self.cbo_device.Append("CPU", -1)
         self.cbo_device.SetSelection(0)
+        self.cbo_device.SetToolTip(
+            T("Which GPU (or CPU) does the AI processing. \"All CUDA Device\" splits work across every "
+              "GPU you have for faster batch processing. CPU works without a GPU but is dramatically "
+              "slower — only use it if you have no compatible graphics card."))
 
         self.lbl_batch_size = wx.StaticText(self.grp_processor, label=T("Depth") + " " + T("Batch Size"))
         self.cbo_batch_size = wx.ComboBox(self.grp_processor,
-                                          choices=[str(n) for n in (64, 32, 16, 8, 4, 2, 1)],
+                                          choices=[str(n) for n in (64, 32, 16, 8, 4, 3, 2, 1)],
                                           name="cbo_zoed_batch_size")
         self.cbo_batch_size.SetEditable(False)
-        self.cbo_batch_size.SetToolTip(T("Video Only"))
-        self.cbo_batch_size.SetSelection(5)
+        self.cbo_batch_size.SetToolTip(
+            T("Video Only. How many frames are sent to the depth model at once. Higher = faster overall "
+              "but uses more VRAM. Lower it if you run out of memory; raise it if you have VRAM to spare "
+              "and want faster processing."))
+        self.cbo_batch_size.SetSelection(6)
 
         self.lbl_max_workers = wx.StaticText(self.grp_processor, label=T("Worker Threads"))
         self.cbo_max_workers = wx.ComboBox(self.grp_processor,
                                            choices=[str(n) for n in (16, 8, 4, 3, 2, 1, 0)],
                                            name="cbo_max_workers")
         self.cbo_max_workers.SetEditable(False)
-        self.cbo_max_workers.SetToolTip(T("Video Only"))
+        self.cbo_max_workers.SetToolTip(
+            T("Video Only. How many CPU threads handle the stereo/inpainting step and frame I/O in "
+              "parallel. Higher can speed things up on a multi-core CPU, but uses more RAM/VRAM. "
+              "Lower it if you run into memory issues or system slowdowns while converting."))
         self.cbo_max_workers.SetSelection(6)
 
         self.chk_low_vram = wx.CheckBox(self.grp_processor, label=T("Low VRAM"), name="chk_low_vram")
+        self.chk_low_vram.SetToolTip(
+            T("Trades speed for lower memory use, by processing in a way that needs less VRAM at once. "
+              "Only turn this on if you're actually running out of memory — it will make things slower."))
         self.chk_tta = wx.CheckBox(self.grp_processor, label=T("TTA"), name="chk_tta")
-        self.chk_tta.SetToolTip(T("Use flip augmentation to improve depth quality (slow)"))
+        self.chk_tta.SetToolTip(
+            T("Use flip augmentation to improve depth quality (slow). Runs the depth model on both the "
+              "normal and mirrored image and blends the result, often a little cleaner/more accurate, at "
+              "roughly double the processing time. Recommended: off for long videos, worth trying for a "
+              "single hero image."))
         self.chk_fp16 = wx.CheckBox(self.grp_processor, label=T("FP16"), name="chk_fp16")
-        self.chk_fp16.SetToolTip(T("Use FP16 (fast)"))
+        self.chk_fp16.SetToolTip(
+            T("Use FP16 (fast) — runs the AI math at lower numeric precision, which is significantly "
+              "faster and uses less VRAM on modern GPUs, with no visible quality cost in virtually all "
+              "cases. Recommended: on."))
         self.chk_fp16.SetValue(True)
         self.chk_cuda_stream = wx.CheckBox(self.grp_processor, label=T("Stream"), name="chk_cuda_stream")
-        self.chk_cuda_stream.SetToolTip(T("Use per-thread CUDA Stream (experimental: fast or slow or crash)"))
+        self.chk_cuda_stream.SetToolTip(
+            T("Use per-thread CUDA Stream (experimental: fast or slow or crash). Lets multiple worker "
+              "threads share the GPU more aggressively. May speed things up, may do nothing, may "
+              "occasionally cause instability — try it and turn it back off if you see crashes."))
         self.chk_cuda_stream.SetValue(False)
 
         self.chk_compile = wx.CheckBox(self.grp_processor, label=T("torch.compile"), name="chk_compile")
-        self.chk_compile.SetToolTip(T("Enable model compiling"))
+        self.chk_compile.SetToolTip(
+            T("Enable model compiling: optimizes the AI model before running, trading a slower startup "
+              "(the first run after changing settings has to compile) for faster processing afterward. "
+              "Worth it for long videos; not worth it for a single quick image or short clip. Requires "
+              "extra setup (see this project's torch_compile docs) to actually take effect."))
         self.chk_compile.SetValue(False)
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
@@ -665,6 +929,20 @@ class MainFrame(wx.Frame):
         self.btn_save_preset = wx.Button(self.pnl_preset, label=T("Save"))
         self.btn_delete_preset = wx.Button(self.pnl_preset, label=T("Delete"))
 
+        # quick presets
+        self.sep_quick_preset = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
+        self.btn_quick_preset_movie = wx.Button(self.pnl_preset, label=T("Movie"))
+        self.btn_quick_preset_movie.SetToolTip(T("Quick preset: subtle, comfortable 3D for movies"))
+        self.btn_quick_preset_action = wx.Button(self.pnl_preset, label=T("Action"))
+        self.btn_quick_preset_action.SetToolTip(T("Quick preset: strong pop effects for action/VFX scenes"))
+
+        # preset comparison test
+        self.sep_compare_preset = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
+        self.btn_compare_presets = wx.Button(self.pnl_preset, label=T("Compare Presets..."))
+        self.btn_compare_presets.SetToolTip(
+            T("Render the same short test clip with 2 or more saved presets, "
+              "then join the results back-to-back into one comparison video"))
+
         # copy command
         self.sep_command = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
         self.btn_copy_command = wx.Button(self.pnl_preset, label=T("Copy Command"))
@@ -691,6 +969,15 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_save_preset, flag=wx.ALL, border=2)
         layout.Add(self.btn_delete_preset, flag=wx.ALL, border=2)
         layout.AddSpacer(2)
+        layout.Add(self.sep_quick_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
+        layout.AddSpacer(4)
+        layout.Add(self.btn_quick_preset_movie, flag=wx.ALL, border=2)
+        layout.Add(self.btn_quick_preset_action, flag=wx.ALL, border=2)
+        layout.AddSpacer(2)
+        layout.Add(self.sep_compare_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
+        layout.AddSpacer(4)
+        layout.Add(self.btn_compare_presets, flag=wx.ALL, border=2)
+        layout.AddSpacer(2)
         layout.Add(self.sep_command, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
         layout.AddSpacer(4)
         layout.Add(self.btn_copy_command, flag=wx.ALL, border=2)
@@ -708,12 +995,17 @@ class MainFrame(wx.Frame):
         if LAYOUT_DEBUG:
             self.pnl_process.SetBackgroundColour("#fcc")
         self.prg_tqdm = wx.Gauge(self.pnl_process, style=wx.GA_HORIZONTAL)
+        self.btn_quick_preview = wx.Button(self.pnl_process, label=T("Quick Preview"))
+        self.btn_quick_preview.SetToolTip(
+            T("Process a short 45 second clip (or a single frame for images) with the "
+              "current settings to quickly check the result"))
         self.btn_start = wx.Button(self.pnl_process, label=T("Start"))
         self.btn_suspend = wx.Button(self.pnl_process, label=T("Suspend"))
         self.btn_cancel = wx.Button(self.pnl_process, label=T("Cancel"))
 
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.prg_tqdm, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        layout.Add(self.btn_quick_preview, 0, wx.ALL, 4)
         layout.Add(self.btn_start, 0, wx.ALL, 4)
         layout.Add(self.btn_suspend, 0, wx.ALL, 4)
         layout.Add(self.btn_cancel, 0, wx.ALL, 4)
@@ -752,6 +1044,9 @@ class MainFrame(wx.Frame):
         self.btn_load_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_load_preset)
         self.btn_save_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_save_preset)
         self.btn_delete_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_delete_preset)
+        self.btn_quick_preset_movie.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("movie"))
+        self.btn_quick_preset_action.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("action"))
+        self.btn_compare_presets.Bind(wx.EVT_BUTTON, self.on_click_btn_compare_presets)
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
         self.cbo_language.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_language)
 
@@ -760,6 +1055,7 @@ class MainFrame(wx.Frame):
         self.btn_start.Bind(wx.EVT_BUTTON, self.on_click_btn_start)
         self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_cancel)
         self.btn_suspend.Bind(wx.EVT_BUTTON, self.on_click_btn_suspend)
+        self.btn_quick_preview.Bind(wx.EVT_BUTTON, self.on_click_btn_quick_preview)
 
         self.Bind(EVT_TQDM, self.on_tqdm)
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -792,6 +1088,7 @@ class MainFrame(wx.Frame):
         self.update_edge_dilation()
         self.update_inpaint_options()
         self.update_ema_normalize()
+        self.update_convergence_mode()
         self.update_scene_segment()
         self.grp_video.update_controls()
 
@@ -858,6 +1155,7 @@ class MainFrame(wx.Frame):
         editable_comboboxes = [
             self.cbo_divergence,
             self.cbo_convergence,
+            self.cbo_convergence_smoothing,
             self.cbo_resolution,
             self.cbo_stereo_width,
             self.cbo_edge_dilation,
@@ -870,6 +1168,7 @@ class MainFrame(wx.Frame):
             *self.grp_video.get_editable_comboboxes(),
             *self.grp_video_dec.get_editable_comboboxes(),
             self.cbo_foreground_scale,
+            self.cbo_foreground_pop,
             self.cbo_pad,
             self.cbo_app_preset,
         ]
@@ -1067,6 +1366,15 @@ class MainFrame(wx.Frame):
     def on_changed_edge_dilation(self, event):
         self.update_edge_dilation()
 
+    def update_convergence_mode(self):
+        if self.cbo_convergence_mode.GetValue() == "constant":
+            self.cbo_convergence_smoothing.Disable()
+        else:
+            self.cbo_convergence_smoothing.Enable()
+
+    def on_changed_cbo_convergence_mode(self, event):
+        self.update_convergence_mode()
+
     def update_ema_normalize(self):
         if self.chk_ema_normalize.IsChecked():
             self.cbo_ema_decay.Enable()
@@ -1140,6 +1448,9 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_convergence.GetValue(), -100.0, 100.0):
             self.show_validation_error_message(T("Convergence Plane"), -100.0, 100.0)
             return None
+        if not validate_number(self.cbo_convergence_smoothing.GetValue(), 0.0, 0.999):
+            self.show_validation_error_message(T("Convergence Smoothing"), 0.0, 0.999)
+            return None
         if not validate_number(self.cbo_pad.GetValue(), 0.0, 10.0, allow_empty=True):
             self.show_validation_error_message(T("Padding"), 0.0, 10.0)
             return None
@@ -1173,7 +1484,7 @@ class MainFrame(wx.Frame):
         if not validate_number(self.grp_video.crf, 0, 51, is_int=True):
             self.show_validation_error_message(T("CRF"), 0, 51)
             return None
-        if not validate_number(self.cbo_ema_decay.GetValue(), 0.1, 0.999):
+        if not validate_number(self.cbo_ema_decay.GetValue(), 0.0, 0.999):
             self.show_validation_error_message(T("Flicker Reduction"), 0.1, 0.999)
             return None
         if not validate_number(self.cbo_ema_buffer.GetValue(), 1, 1800, is_int=True):
@@ -1319,12 +1630,14 @@ class MainFrame(wx.Frame):
             divergence=float(self.cbo_divergence.GetValue()),
             convergence=float(self.cbo_convergence.GetValue()),
             convergence_mode=self.cbo_convergence_mode.GetValue(),
+            convergence_smoothing=float(self.cbo_convergence_smoothing.GetValue()),
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
             synthetic_view=self.cbo_synthetic_view.GetValue(),
             method=self.cbo_method.GetValue(),
             preserve_screen_border=preserve_screen_border,
             depth_model=depth_model_type,
             foreground_scale=float(self.cbo_foreground_scale.GetValue()),
+            foreground_pop=float(self.cbo_foreground_pop.GetValue()),
             depth_aa=depth_aa,
             edge_dilation=edge_dilation,
             inpaint_model=inpaint_model,
@@ -1375,6 +1688,12 @@ class MainFrame(wx.Frame):
             max_output_width=max_output_width,
             max_output_height=max_output_height,
             keep_aspect_ratio=self.chk_keep_aspect_ratio.GetValue(),
+            preserve_dowi=self.chk_preserve_dowi.GetValue(),
+            auto_resume=self.chk_auto_resume.GetValue(),
+            resume_chunk_duration=300,
+            upgrade_pix_fmt=int(self.cbo_upgrade_pix_fmt.GetValue()) if self.cbo_upgrade_pix_fmt.GetValue() else None,
+            denoise=self.chk_denoise.GetValue(),
+            preview=self.chk_preview.GetValue(),
             autocrop=self.cbo_autocrop.GetValue() if self.cbo_autocrop.GetValue() else None,
             gpu=device_id,
             batch_size=int(self.cbo_batch_size.GetValue()),
@@ -1510,6 +1829,20 @@ class MainFrame(wx.Frame):
         elif type == 2:
             # close
             pass
+
+    def apply_quick_preset(self, name):
+        if name == "movie":
+            self.cbo_divergence.SetValue("2.0")
+            self.cbo_convergence.SetValue("0.5")
+            self.cbo_convergence_mode.SetStringSelection("sod_v1")
+            self.cbo_foreground_pop.SetValue("0.0")
+            self.SetStatusText(T("Applied preset: Movie (subtle 3D)"))
+        elif name == "action":
+            self.cbo_divergence.SetValue("3.0")
+            self.cbo_convergence.SetValue("0.5")
+            self.cbo_convergence_mode.SetStringSelection("face_detect")
+            self.cbo_foreground_pop.SetValue("0.5")
+            self.SetStatusText(T("Applied preset: Action (strong pop effects)"))
 
     def save_preset(self, name=None):
         if not name:
@@ -1845,6 +2178,397 @@ class MainFrame(wx.Frame):
             pass
         else:
             raise RuntimeError("Unsupported format")
+
+    def show_preview_dialog(self, image_path):
+        img = wx.Image(image_path, wx.BITMAP_TYPE_PNG)
+        if not img.IsOk():
+            raise RuntimeError(T("Could not load preview image"))
+
+        max_w, max_h = self.FromDIP((1000, 700))
+        w, h = img.GetWidth(), img.GetHeight()
+        scale = min(max_w / w, max_h / h, 1.0)
+        if scale < 1.0:
+            img = img.Scale(int(w * scale), int(h * scale), wx.IMAGE_QUALITY_HIGH)
+
+        dlg = wx.Dialog(self, title=T("Quick Preview"),
+                        style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        bitmap = wx.StaticBitmap(dlg, bitmap=wx.Bitmap(img))
+        btn_close = wx.Button(dlg, id=wx.ID_OK, label=T("Close"))
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(bitmap, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        sizer.Add(btn_close, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        dlg.SetSizerAndFit(sizer)
+        dlg.CentreOnParent()
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    PREVIEW_CLIP_SECONDS = 45.0
+
+    def test_quick_preview(self):
+        args = self.parse_args()
+        if args is None:
+            return
+
+        is_video_input = is_video(args.input)
+        is_image_input = is_image(args.input)
+        if not is_video_input and not is_image_input:
+            wx.MessageBox(T("Quick Preview only supports a single image or a single video file"),
+                          T("Quick Preview"), wx.OK | wx.ICON_INFORMATION)
+            return
+
+        preview_args = copy.copy(args)
+        preview_args.resume = False
+        preview_args.recursive = False
+        preview_args.auto_resume = False
+        preview_args.export = False
+        preview_args.export_disparity = False
+        preview_args.metadata = None
+
+        if is_video_input:
+            timestamp = parse_time(args.start_time) if args.start_time else 1.0
+            tmp_output = path.join(
+                tempfile.gettempdir(), "iw3_quick_preview_output" + preview_args.video_extension)
+            if path.exists(tmp_output):
+                os.remove(tmp_output)
+            preview_args.input = args.input
+            preview_args.output = tmp_output
+            preview_args.start_time = str(timestamp)
+            preview_args.end_time = str(timestamp + self.PREVIEW_CLIP_SECONDS)
+        else:
+            tmp_output = path.join(tempfile.gettempdir(), "iw3_quick_preview_output.png")
+            if path.exists(tmp_output):
+                os.remove(tmp_output)
+            preview_args.input = args.input
+            preview_args.output = tmp_output
+            preview_args.format = "png"
+            preview_args.start_time = None
+            preview_args.end_time = None
+
+        self.btn_quick_preview.Disable()
+        self.btn_start.Disable()
+        self.SetStatusText(T("Generating preview..."))
+        try:
+            with wx.BusyCursor():
+                wx.Yield()
+                preview_args = iw3_main(preview_args)
+                self.depth_model = preview_args.state["depth_model"]
+                self.depth_model_type = preview_args.depth_model
+                self.depth_model_device_id = preview_args.gpu
+                self.depth_model_height = preview_args.resolution
+                self.depth_model_limit_resolution = preview_args.limit_resolution
+
+            if not path.exists(tmp_output):
+                raise RuntimeError(T("Preview generation failed: no output file was produced"))
+
+            self.SetStatusText(T("Preview ready"))
+            if is_video_input:
+                os.startfile(tmp_output)
+            else:
+                self.show_preview_dialog(tmp_output)
+        finally:
+            self.btn_quick_preview.Enable()
+            self.update_start_button_state()
+
+    def on_click_btn_quick_preview(self, event):
+        try:
+            self.test_quick_preview()
+        except: # noqa
+            self.SetStatusText(T("Error"))
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+
+    COMPARE_CLIP_SECONDS_DEFAULT = "15"
+
+    def _snapshot_gui_state(self):
+        snapshot_path = path.join(tempfile.gettempdir(), "iw3_gui_compare_snapshot.cfg")
+        manager = persist.PersistenceManager.Get()
+        manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+        manager.SetPersistenceFile(snapshot_path)
+        persistent_manager_register_all(manager, self)
+        for control in self.get_editable_comboboxes():
+            persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+        manager.SaveAndUnregister()
+        return snapshot_path
+
+    def _restore_gui_state(self, snapshot_path):
+        manager = persist.PersistenceManager.Get()
+        manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+        manager.SetPersistenceFile(snapshot_path)
+        persistent_manager_register_all(manager, self)
+        for control in self.get_editable_comboboxes():
+            persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+        persistent_manager_restore_all(manager, {"cbo_language"})
+        persistent_manager_unregister_all(manager)
+        self.update_controls()
+        if path.exists(snapshot_path):
+            try:
+                os.remove(snapshot_path)
+            except Exception:
+                pass
+
+    def _concat_comparison_clips(self, clip_files, output_path):
+        ffmpeg_bin = _get_ffmpeg_bin()
+        ext = path.splitext(output_path)[1].lower()
+        mkvmerge_bin = _find_mkvmerge() if ext == ".mkv" else None
+        if mkvmerge_bin:
+            mkvmerge_args = [mkvmerge_bin, "-o", output_path, clip_files[0]]
+            for cf in clip_files[1:]:
+                mkvmerge_args += ["+", cf]
+            result = subprocess.run(mkvmerge_args, capture_output=True)
+            if result.returncode in (0, 1) and path.exists(output_path):
+                return
+        concat_list = output_path + "_concat.txt"
+        with open(concat_list, "w", encoding="utf-8") as f:
+            for cf in clip_files:
+                f.write("file '{}'\n".format(cf.replace("'", "'\\''")))
+        try:
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", output_path],
+                check=True, capture_output=True)
+        finally:
+            if path.exists(concat_list):
+                try:
+                    os.remove(concat_list)
+                except Exception:
+                    pass
+
+    def _stack_comparison_images(self, image_files, output_path):
+        from PIL import Image
+        images = [Image.open(f).convert("RGB") for f in image_files]
+        h = max(im.height for im in images)
+        images = [im.resize((max(1, int(im.width * h / im.height)), h)) for im in images]
+        total_w = sum(im.width for im in images)
+        canvas = Image.new("RGB", (total_w, h))
+        x = 0
+        for im in images:
+            canvas.paste(im, (x, 0))
+            x += im.width
+        canvas.save(output_path)
+
+    def _caption_video_clip(self, clip_path, label_text):
+        ffmpeg_bin = _get_ffmpeg_bin()
+        ext = path.splitext(clip_path)[1]
+        captioned_path = path.splitext(clip_path)[0] + "_caption" + ext
+        # Escape for the ffmpeg drawtext "text" parameter: backslash first, then the
+        # other characters that are special inside a filtergraph option string.
+        escaped = (label_text.replace("\\", "\\\\").replace(":", "\\:")
+                  .replace("'", "\\'").replace("%", "\\%"))
+        drawtext = (
+            f"drawtext=font=Arial:text='{escaped}':fontcolor=white:fontsize=42:"
+            f"box=1:boxcolor=black@0.6:boxborderw=14:x=30:y=30:enable='lt(t,3)'"
+        )
+        subprocess.run(
+            [ffmpeg_bin, "-y", "-i", clip_path, "-vf", drawtext,
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+             "-c:a", "copy", captioned_path],
+            check=True, capture_output=True,
+        )
+        return captioned_path
+
+    def _caption_image(self, image_path, label_text):
+        from PIL import Image, ImageDraw, ImageFont
+        im = Image.open(image_path).convert("RGB")
+        draw = ImageDraw.Draw(im)
+        try:
+            font = ImageFont.truetype("arial.ttf", max(20, im.height // 20))
+        except Exception:
+            font = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), label_text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad = 10
+        draw.rectangle([10, 10, 10 + tw + pad * 2, 10 + th + pad * 2], fill=(0, 0, 0))
+        draw.text((10 + pad, 10 + pad), label_text, fill=(255, 255, 255), font=font)
+        im.save(image_path)
+
+    def run_preset_comparison(self, args_list, label_names, output_path, is_video_input):
+        clip_files = []
+        try:
+            for a, label_text in zip(args_list, label_names):
+                if self.stop_event.is_set():
+                    return None
+                iw3_main(a)
+                if not path.exists(a.output):
+                    raise RuntimeError(f"Failed to generate test clip for preset settings: {a.output}")
+
+                if is_video_input:
+                    captioned_path = self._caption_video_clip(a.output, label_text)
+                    os.remove(a.output)
+                    clip_files.append(captioned_path)
+                else:
+                    self._caption_image(a.output, label_text)
+                    clip_files.append(a.output)
+
+            if is_video_input:
+                self._concat_comparison_clips(clip_files, output_path)
+            else:
+                self._stack_comparison_images(clip_files, output_path)
+            return output_path
+        finally:
+            for cf in clip_files:
+                if path.exists(cf):
+                    try:
+                        os.remove(cf)
+                    except Exception:
+                        pass
+
+    def on_exit_compare_worker(self, result):
+        try:
+            output_path = result.get()
+            if not self.stop_event.is_set() and output_path:
+                self.prg_tqdm.SetValue(self.prg_tqdm.GetRange())
+                self.SetStatusText(T("Finished"))
+                if wx.MessageBox(
+                        T("Comparison video ready:") + "\n" + output_path + "\n\n" + T("Open it now?"),
+                        T("Compare Presets"), wx.YES_NO | wx.ICON_INFORMATION) == wx.YES:
+                    os.startfile(output_path)
+            else:
+                self.SetStatusText(T("Cancelled"))
+        except:  # noqa
+            self.SetStatusText(T("Error"))
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+
+        self.processing = False
+        self.btn_cancel.Disable()
+        self.btn_compare_presets.Enable()
+        self.btn_autocrop_test.Enable()
+        self.update_start_button_state()
+        gc_collect()
+
+    def on_click_btn_compare_presets(self, event):
+        presets = [p for p in self.list_preset() if p]
+        if len(presets) < 2:
+            wx.MessageBox(T("You need at least 2 saved presets to use this feature. "
+                            "Save some presets first with the \"Save\" button."),
+                          T("Compare Presets"), wx.OK | wx.ICON_INFORMATION)
+            return
+
+        base_args = self.parse_args(skip_set_state=True)
+        if base_args is None:
+            return
+        if not (is_video(base_args.input) or is_image(base_args.input)):
+            wx.MessageBox(T("Compare Presets only supports a single image or a single video file"),
+                          T("Compare Presets"), wx.OK | wx.ICON_INFORMATION)
+            return
+        is_video_input = is_video(base_args.input)
+
+        dlg = wx.Dialog(self, title=T("Compare Presets"), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        lbl = wx.StaticText(
+            dlg, label=T("Select 2 or more presets to test (clips play in the order shown below):"))
+        chk_list = wx.CheckListBox(dlg, choices=presets, size=dlg.FromDIP((320, 160)))
+
+        lbl_duration = wx.StaticText(dlg, label=T("Test Clip Duration (seconds)"))
+        txt_duration = wx.TextCtrl(dlg, value=self.COMPARE_CLIP_SECONDS_DEFAULT)
+        duration_row = wx.BoxSizer(wx.HORIZONTAL)
+        duration_row.Add(lbl_duration, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+        duration_row.Add(txt_duration, 0, wx.ALL, 4)
+
+        btn_sizer = dlg.CreateButtonSizer(wx.OK | wx.CANCEL)
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(lbl, 0, wx.ALL, 8)
+        sizer.Add(chk_list, 1, wx.ALL | wx.EXPAND, 8)
+        if is_video_input:
+            sizer.Add(duration_row, 0, wx.ALL, 4)
+        sizer.Add(btn_sizer, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        dlg.SetSizerAndFit(sizer)
+        dlg.CentreOnParent()
+
+        modal_result = dlg.ShowModal()
+        selected = [presets[i] for i in chk_list.GetCheckedItems()]
+        duration_str = txt_duration.GetValue()
+        dlg.Destroy()
+
+        if modal_result != wx.ID_OK:
+            return
+        if len(selected) < 2:
+            wx.MessageBox(T("Please select at least 2 presets."), T("Compare Presets"), wx.OK | wx.ICON_WARNING)
+            return
+        if is_video_input and not validate_number(duration_str, 1, 600, allow_empty=False):
+            wx.MessageBox(T("Test Clip Duration must be a number between 1 and 600."),
+                          T("Compare Presets"), wx.OK | wx.ICON_WARNING)
+            return
+        duration = float(duration_str) if is_video_input else None
+
+        default_ext = base_args.video_extension if is_video_input else ".png"
+        wildcard = VIDEO_EXTENSIONS if is_video_input else IMAGE_EXTENSIONS
+        with wx.FileDialog(self, message=T("Save Comparison Output"),
+                           defaultFile="preset_comparison" + default_ext,
+                           wildcard=wildcard,
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as file_dlg:
+            if file_dlg.ShowModal() != wx.ID_OK:
+                return
+            output_path = file_dlg.GetPath()
+
+        # Snapshot the user's live settings; each preset load below overwrites every
+        # control on this window, so we must restore everything afterward.
+        snapshot_path = self._snapshot_gui_state()
+        timestamp = parse_time(base_args.start_time) if base_args.start_time else 1.0
+        tmp_dir = tempfile.gettempdir()
+        args_list = []
+        try:
+            for i, name in enumerate(selected):
+                self.load_preset(name, exclude_names={self.GetName()})
+                self.update_controls()
+                preset_args = self.parse_args(skip_set_state=True)
+                if preset_args is None:
+                    wx.MessageBox(
+                        T("Preset \"{name}\" has invalid settings, aborting.").format(name=name),
+                        T("Compare Presets"), wx.OK | wx.ICON_ERROR)
+                    return
+
+                preset_args.input = base_args.input
+                preset_args.resume = False
+                preset_args.recursive = False
+                preset_args.auto_resume = False
+                preset_args.export = False
+                preset_args.export_disparity = False
+                preset_args.metadata = None
+                preset_args.yes = True
+                if is_video_input:
+                    preset_args.output = path.join(tmp_dir, f"iw3_compare_{i:02d}{preset_args.video_extension}")
+                    preset_args.start_time = str(timestamp)
+                    preset_args.end_time = str(timestamp + duration)
+                else:
+                    preset_args.output = path.join(tmp_dir, f"iw3_compare_{i:02d}.png")
+                    preset_args.format = "png"
+                    preset_args.start_time = None
+                    preset_args.end_time = None
+                if path.exists(preset_args.output):
+                    os.remove(preset_args.output)
+
+                # Force a fresh depth model load per preset: presets can use different
+                # depth models, and reusing self.depth_model from a previous run/preset
+                # would silently run the wrong model.
+                set_state_args(
+                    preset_args,
+                    stop_event=self.stop_event,
+                    suspend_event=self.suspend_event,
+                    tqdm_fn=functools.partial(TQDMGUI, self),
+                    depth_model=None)
+                args_list.append(preset_args)
+        finally:
+            self._restore_gui_state(snapshot_path)
+
+        self.btn_autocrop_test.Disable()
+        self.btn_start.Disable()
+        self.btn_quick_preview.Disable()
+        self.btn_compare_presets.Disable()
+        self.btn_cancel.Enable()
+        self.stop_event.clear()
+        self.suspend_event.set()
+        self.prg_tqdm.SetValue(0)
+        self.SetStatusText(T("Rendering preset comparison..."))
+
+        startWorker(self.on_exit_compare_worker,
+                   self.run_preset_comparison,
+                   wargs=(args_list, selected, output_path, is_video_input))
+        self.processing = True
 
     def on_click_btn_autocrop_test(self, event):
         try:

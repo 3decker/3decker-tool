@@ -59,24 +59,25 @@ def save_cache(input_video_path, pts, max_fps, start_time, end_time, cache_dir=N
     )
 
 
-def is_within_range(data, start_time, end_time):
-    def to_sec(val, default):
-        if val is None:
-            return default
-        try:
-            parts = str(val).split(":")
-            if len(parts) > 3:
-                raise ValueError
-            units = [1, 60, 3600]
-            total_sec = sum(int(c) * u for c, u in zip(reversed(parts), units))
-            return max(total_sec, 0)
-        except (ValueError, TypeError):
-            raise ValueError("time must be hh:mm:ss, mm:ss or ss format")
+def time_to_sec(val, default):
+    if val is None:
+        return default
+    try:
+        parts = str(val).split(":")
+        if len(parts) > 3:
+            raise ValueError
+        units = [1, 60, 3600]
+        total_sec = sum(float(c) * u for c, u in zip(reversed(parts), units))
+        return max(total_sec, 0)
+    except (ValueError, TypeError):
+        raise ValueError("time must be hh:mm:ss, mm:ss or ss format")
 
-    data_start = to_sec(data.get("start_time"), 0)
-    data_end = to_sec(data.get("end_time"), float("inf"))
-    query_start = to_sec(start_time, 0)
-    query_end = to_sec(end_time, float("inf"))
+
+def is_within_range(data, start_time, end_time):
+    data_start = time_to_sec(data.get("start_time"), 0)
+    data_end = time_to_sec(data.get("end_time"), float("inf"))
+    query_start = time_to_sec(start_time, 0)
+    query_end = time_to_sec(end_time, float("inf"))
     return data_start <= query_start and query_end <= data_end
 
 
@@ -94,6 +95,28 @@ def try_load_cache_with_filename(cache_path, input_video_path, max_fps, start_ti
             return None
     else:
         return None
+
+
+def get_cached_range_with_filename(cache_path):
+    """
+    Returns the (start_time, end_time) already covered by the cache file, regardless
+    of whether it covers the currently requested range. Used to widen a rescan so the
+    cache only ever grows instead of being overwritten with a narrower range.
+    """
+    if path.exists(cache_path):
+        try:
+            with open(cache_path, mode="r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("start_time"), data.get("end_time")
+        except Exception:
+            return None
+    else:
+        return None
+
+
+def get_cached_range(input_video_path, max_fps, cache_dir=None):
+    cache_path = get_cache_path(input_video_path, max_fps=max_fps, cache_dir=cache_dir)
+    return get_cached_range_with_filename(cache_path)
 
 
 def try_load_cache(input_video_path, max_fps, start_time, end_time, cache_dir=None):

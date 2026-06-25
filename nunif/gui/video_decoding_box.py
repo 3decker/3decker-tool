@@ -23,10 +23,17 @@ class VideoDecodingBox():
                                        name=f"{prefix}cbo_hwaccel")
         self.cbo_hwaccel.SetEditable(False)
         self.cbo_hwaccel.SetSelection(0)
+        self.cbo_hwaccel.SetToolTip(
+            T("Use your GPU to decode (read) the source video instead of the CPU — much faster, and "
+              "frees up CPU time for other work, with no quality difference. Leave blank to always use "
+              "CPU decoding. Recommended: select your GPU's option (e.g. cuda/nvdec for NVIDIA) if "
+              "available."))
         self.chk_software_fallback = wx.CheckBox(self.grp_video_dec, label=T("Software Fallback"),
                                                  name=f"{prefix}chk_software_fallback")
         self.chk_software_fallback.SetValue(True)
-        self.chk_software_fallback.SetToolTip(T("Use software decoder if hardware acceleration fails or is unsupported"))
+        self.chk_software_fallback.SetToolTip(
+            T("Use software (CPU) decoder if hardware acceleration fails or is unsupported for a "
+              "particular file, instead of stopping with an error. Recommended: on."))
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))

@@ -1,6 +1,7 @@
 import sys
 import traceback
 import os
+import subprocess
 from os import path
 import warnings
 import numpy as np
@@ -21,6 +22,7 @@ import nunif.utils.shot_boundary_detection as SBD
 from nunif.models import compile_model
 import nunif.utils.video as VU
 from nunif.utils.video.hdr_metadata import get_hdr_metadata
+from nunif.utils.video.metadata import parse_time
 from nunif.utils.ui import is_image, is_video, is_text, is_output_dir, make_parent_dir, list_subdir, TorchHubDir
 from nunif.utils.ticket_lock import TicketLock
 from nunif.utils.autocrop import AutoCrop, AutoCropDummy
@@ -43,6 +45,8 @@ from .backward_warp import (
 from .stereo_model_factory import create_stereo_model
 from .inpaint_utils import INPAINT_MODELS
 from .convergence_estimator import ConvergenceEstimator
+from .face_convergence_estimator import FaceConvergenceEstimator
+from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
 
 
@@ -51,6 +55,286 @@ ROW_FLOW_V3_MAX_DIVERGENCE = 5.0
 ROW_FLOW_V2_AUTO_STEP_DIVERGENCE = 2.0
 ROW_FLOW_V3_AUTO_STEP_DIVERGENCE = 4.0
 IMAGE_IO_QUEUE_MAX = 100
+
+
+def _find_dovi_tool():
+    import shutil
+    found = shutil.which("dovi_tool") or shutil.which("dovi_tool.exe")
+    if found:
+        return found
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    for name in ("dovi_tool.exe", "dovi_tool"):
+        candidate = path.join(here, name)
+        if path.exists(candidate):
+            return candidate
+    return None
+
+
+def _get_ffmpeg_bin():
+    import shutil
+    # Check nunif-windows root first (same directory as dovi_tool.exe)
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    for name in ("ffmpeg.exe", "ffmpeg"):
+        candidate = path.join(here, name)
+        if path.exists(candidate):
+            return candidate
+    # PyAV bundled binary (older distributions)
+    try:
+        import av
+        bundled = path.join(path.dirname(av.__file__), "ffmpeg.exe")
+        if path.exists(bundled):
+            return bundled
+    except Exception:
+        pass
+    return shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _extract_dovi_rpu(input_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_hevc):
+    subprocess.run(
+        [ffmpeg_bin, "-y", "-i", str(input_path), "-c:v", "copy", "-an", "-f", "hevc", str(tmp_hevc)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        [dovi_bin, "extract-rpu", "-i", str(tmp_hevc), "-o", str(rpu_path)],
+        check=True, capture_output=True,
+    )
+
+
+def _inject_dovi_rpu(output_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_dir):
+    hevc_out = path.join(tmp_dir, "_iw3_out.hevc")
+    hevc_dv = path.join(tmp_dir, "_iw3_out_dv.hevc")
+    final_tmp = path.splitext(output_path)[0] + ".dv_inject" + path.splitext(output_path)[1]
+    try:
+        subprocess.run(
+            [ffmpeg_bin, "-y", "-i", str(output_path), "-c:v", "copy", "-an", "-f", "hevc", hevc_out],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            [dovi_bin, "inject-rpu", "-i", hevc_out, "-r", str(rpu_path), "-o", hevc_dv],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            [ffmpeg_bin, "-y",
+             "-i", str(output_path),
+             "-i", hevc_dv,
+             "-map", "1:v", "-map", "0:a?",
+             "-c", "copy", final_tmp],
+            check=True, capture_output=True,
+        )
+        os.replace(final_tmp, output_path)
+    finally:
+        for f in (hevc_out, hevc_dv):
+            if path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+
+def _find_mkvmerge():
+    import shutil
+    found = shutil.which("mkvmerge") or shutil.which("mkvmerge.exe")
+    if found:
+        return found
+    for prog_dir in (r"C:\Program Files\MKVToolNix", r"C:\Program Files (x86)\MKVToolNix"):
+        candidate = path.join(prog_dir, "mkvmerge.exe")
+        if path.exists(candidate):
+            return candidate
+    return None
+
+
+def _find_hdr10plus_tool():
+    import shutil
+    found = shutil.which("hdr10plus_tool") or shutil.which("hdr10plus_tool.exe")
+    if found:
+        return found
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    for name in ("hdr10plus_tool.exe", "hdr10plus_tool"):
+        candidate = path.join(here, name)
+        if path.exists(candidate):
+            return candidate
+    return None
+
+
+def _find_ffprobe():
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    for name in ("ffprobe.exe", "ffprobe"):
+        candidate = path.join(here, name)
+        if path.exists(candidate):
+            return candidate
+    import shutil
+    return shutil.which("ffprobe") or "ffprobe"
+
+
+def _detect_hdr_types(input_path, ffprobe_bin):
+    """Return which HDR metadata types are present in the source video stream."""
+    import json as _json
+    result = {"dv": False, "hdr10plus": False}
+    try:
+        proc = subprocess.run(
+            [ffprobe_bin, "-v", "quiet", "-print_format", "json",
+             "-show_streams", str(input_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        data = _json.loads(proc.stdout)
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") != "video":
+                continue
+            if stream.get("codec_tag_string", "") in ("dvh1", "dvhe", "dav1"):
+                result["dv"] = True
+            for sd in stream.get("side_data_list", []):
+                sdt = sd.get("side_data_type", "")
+                if "DOVI" in sdt or "Dolby" in sdt:
+                    result["dv"] = True
+                if "HDR Dynamic" in sdt or "SMPTE2094" in sdt:
+                    result["hdr10plus"] = True
+    except Exception:
+        pass
+    return result
+
+
+def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin, hdr10plus_bin, tmp_dir):
+    """Inject DV RPU and/or HDR10+ into the output HEVC, then remux back into the container."""
+    import json as _json
+    ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe").replace("ffmpeg.exe", "ffprobe.exe")
+    # Verify the output video is HEVC and get its frame rate
+    codec = None
+    fps_str = "30fps"
+    try:
+        probe = subprocess.run(
+            [ffprobe_bin, "-v", "quiet", "-print_format", "json", "-show_streams", str(output_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        streams = _json.loads(probe.stdout).get("streams", [])
+        vid = next((s for s in streams if s.get("codec_type") == "video"), None)
+        if vid:
+            codec = vid.get("codec_name")
+            r = vid.get("r_frame_rate", "30/1")
+            try:
+                num, den = r.split("/")
+                fps_str = f"{int(num)/int(den):.6f}fps"
+            except Exception:
+                fps_str = f"{r}fps"
+    except Exception:
+        pass
+    if codec != "hevc":
+        print(f"--preserve-dowi: output codec is '{codec}', not hevc — "
+              f"DV/HDR10+ injection requires HEVC output (use --video-codec libx265).", file=sys.stderr)
+        return
+
+    hevc_out = path.join(tmp_dir, "_iw3_out.hevc")
+    hevc_dv = path.join(tmp_dir, "_iw3_out_dv.hevc")
+    hevc_h10p = path.join(tmp_dir, "_iw3_out_h10p.hevc")
+    final_tmp = path.splitext(output_path)[0] + ".hdr_inject" + path.splitext(output_path)[1]
+    try:
+        subprocess.run(
+            [ffmpeg_bin, "-y", "-i", str(output_path), "-c:v", "copy", "-an", "-f", "hevc", hevc_out],
+            check=True, capture_output=True,
+        )
+        current = hevc_out
+
+        if rpu_path and path.exists(str(rpu_path)):
+            subprocess.run(
+                [dovi_bin, "inject-rpu", "-i", current, "-r", str(rpu_path), "-o", hevc_dv],
+                check=True, capture_output=True,
+            )
+            current = hevc_dv
+
+        if hdr10plus_json and path.exists(str(hdr10plus_json)):
+            subprocess.run(
+                [hdr10plus_bin, "inject", "-i", current, "-j", str(hdr10plus_json), "-o", hevc_h10p],
+                check=True, capture_output=True,
+            )
+            current = hevc_h10p
+
+        ext = path.splitext(output_path)[1].lower()
+        mkvmerge_bin = _find_mkvmerge() if ext == ".mkv" else None
+        if mkvmerge_bin:
+            # mkvmerge correctly handles raw HEVC timestamps
+            subprocess.run(
+                [mkvmerge_bin, "-o", final_tmp,
+                 "--default-duration", f"0:{fps_str}",
+                 current,
+                 "--no-video", str(output_path)],
+                check=True, capture_output=True,
+            )
+        else:
+            subprocess.run(
+                [ffmpeg_bin, "-y",
+                 "-i", str(output_path),
+                 "-i", current,
+                 "-map", "1:v", "-map", "0:a?",
+                 "-c", "copy", final_tmp],
+                check=True, capture_output=True,
+            )
+        os.replace(final_tmp, output_path)
+    finally:
+        for f in (hevc_out, hevc_dv, hevc_h10p, final_tmp):
+            if path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+
+_UPGRADE_PIX_FMT_MAP = {
+    10: {
+        "yuv420p":  "yuv420p10le",
+        "yuvj420p": "yuv420p10le",
+        "yuv422p":  "yuv422p10le",
+        "yuv444p":  "yuv444p10le",
+        "yuvj444p": "yuv444p10le",
+        "gbrp":     "gbrp10le",
+        "rgb24":    "gbrp10le",
+    },
+    12: {
+        "yuv420p":    "yuv420p12le",
+        "yuvj420p":   "yuv420p12le",
+        "yuv420p10le": "yuv420p12le",
+        "yuv422p":    "yuv422p12le",
+        "yuv422p10le": "yuv422p12le",
+        "yuv444p":    "yuv444p12le",
+        "yuvj444p":   "yuv444p12le",
+        "yuv444p10le": "yuv444p12le",
+        "gbrp":       "gbrp12le",
+        "gbrp10le":   "gbrp12le",
+        "rgb24":      "gbrp12le",
+    },
+}
+
+# NVENC/QSV hardware encoder chips can only encode 8-bit or 10-bit video — there is no
+# such thing as 12-bit hardware encoding on this kind of chip, on any GPU generation
+# including current ones. Asking avcodec_open2 for a 12-bit format on these codecs doesn't
+# get tone-mapped down like the CLI ffmpeg tool does for other pix_fmt mismatches; it just
+# fails outright. So for these codecs specifically, cap "Bit Depth Upgrade: 12" down to 10.
+#
+# Separately, only plain yuv420p/yuv420p10le get auto-translated to NVENC's native
+# nv12/p010le elsewhere in this project (see configure_video_codec() in
+# nunif/utils/video/color_transform.py). There is no equivalent translation for a 10-bit
+# yuv444p/yuv422p on NVENC/QSV, so requesting the upgrade on those would also crash — fall
+# back to the plain 8-bit version of those instead.
+_HW_ENCODER_NO_12BIT = {"h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv"}
+_12BIT_TO_10BIT_PIX_FMT = {
+    "yuv420p12le": "yuv420p10le",
+    "yuv422p12le": "yuv422p10le",
+    "yuv444p12le": "yuv444p10le",
+    "gbrp12le":    "gbrp10le",
+}
+_HW_ENCODER_NO_HIGHBIT_TRANSLATION = {
+    "yuv422p10le": "yuv422p",
+    "yuv444p10le": "yuv444p",
+}
+
+
+def _clamp_pix_fmt_for_codec(pix_fmt, video_codec):
+    if video_codec in _HW_ENCODER_NO_12BIT:
+        pix_fmt = _12BIT_TO_10BIT_PIX_FMT.get(pix_fmt, pix_fmt)
+        pix_fmt = _HW_ENCODER_NO_HIGHBIT_TRANSLATION.get(pix_fmt, pix_fmt)
+    return pix_fmt
+
+
+def _upgrade_pix_fmt(pix_fmt, target_bits):
+    return _UPGRADE_PIX_FMT_MAP.get(target_bits, {}).get(pix_fmt, pix_fmt)
 
 
 def print_exception(filename):
@@ -149,7 +433,7 @@ def make_output_filename(input_filename, args, video=False):
         else:
             tta = ""
         if args.ema_normalize and video:
-            ema = f"_ema{to_deciaml(args.ema_decay, 100, 2)}"
+            ema = f"_ema{to_deciaml(args.ema_decay, 100, 2)}b{args.ema_buffer}"
         else:
             ema = ""
         if isinstance(args.edge_dilation, (list, tuple)):
@@ -158,12 +442,21 @@ def make_output_filename(input_filename, args, video=False):
             edge_dilation = args.edge_dilation
         if args.convergence_mode != "constant":
             convergence_name = "ac"
+            convergence_smoothing = f"cs{to_deciaml(getattr(args, 'convergence_smoothing', 0.9), 100, 2)}"
         else:
             convergence_name = "c"
+            convergence_smoothing = ""
+        if video and args.video_codec == "libopenh264":
+            bitrate = f"_br{args.video_bitrate}"
+        elif video:
+            bitrate = f"_crf{args.crf}"
+        else:
+            bitrate = ""
 
         metadata = (f"_{args.depth_model}_{resolution}{tta}{args.method}_"
-                    f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}_ipd{to_deciaml(args.ipd_offset, 1)}{ema}")
+                    f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
+                    f"{convergence_smoothing}_"
+                    f"di{edge_dilation}_fs{args.foreground_scale}_ipd{to_deciaml(args.ipd_offset, 1)}{ema}{bitrate}")
     else:
         metadata = ""
 
@@ -281,6 +574,9 @@ def preprocess_image(x, args):
 def add_preprocess_vf(vf_org, args) -> str:
     vf = []
 
+    if getattr(args, "denoise", False):
+        vf.append("hqdn3d=1:1:6:6")
+
     # Rotation
     if getattr(args, "rotate_left", False):
         vf.append("transpose=2")
@@ -322,6 +618,11 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
     else:
         convergence = args.convergence
         depth = get_mapper(args.mapper)(depth)
+
+    # Depth pop effects
+    foreground_pop = getattr(args, "foreground_pop", 0.0)
+    if foreground_pop > 0:
+        depth = DE.apply_foreground_pop(depth, foreground_pop)
 
     if args.method == "NULL":
         left_eye, right_eye = im.clone(), im.clone()
@@ -926,19 +1227,21 @@ def try_compile_context(side_model, enabled):
         return contextlib.nullcontext()
 
 
-def try_load_scene_cache(video_path, args):
+def try_load_scene_cache(video_path, args, max_fps=None):
+    if max_fps is None:
+        max_fps = args.max_fps
     if args.scene_cache_file:
         segment_pts = SceneBoundaryCache.try_load_cache_with_filename(
             args.scene_cache_file,
             video_path,
-            max_fps=args.max_fps,
+            max_fps=max_fps,
             start_time=args.start_time,
             end_time=args.end_time
         )
     else:
         segment_pts = SceneBoundaryCache.try_load_cache(
             video_path,
-            max_fps=args.max_fps,
+            max_fps=max_fps,
             start_time=args.start_time,
             end_time=args.end_time,
             cache_dir=args.scene_cache_dir,
@@ -946,28 +1249,68 @@ def try_load_scene_cache(video_path, args):
     return segment_pts
 
 
-def save_scene_cache(video_path, segment_pts, args):
+def save_scene_cache(video_path, segment_pts, args, start_time=None, end_time=None, max_fps=None):
+    if start_time is None:
+        start_time = args.start_time
+    if end_time is None:
+        end_time = args.end_time
+    if max_fps is None:
+        max_fps = args.max_fps
     if args.scene_cache_file:
         SceneBoundaryCache.save_cache_with_filename(
             args.scene_cache_file,
             video_path,
             segment_pts,
-            max_fps=args.max_fps,
-            start_time=args.start_time,
-            end_time=args.end_time
+            max_fps=max_fps,
+            start_time=start_time,
+            end_time=end_time
         )
     else:
         SceneBoundaryCache.save_cache(
             video_path,
             segment_pts,
-            max_fps=args.max_fps,
-            start_time=args.start_time,
-            end_time=args.end_time,
+            max_fps=max_fps,
+            start_time=start_time,
+            end_time=end_time,
             cache_dir=args.scene_cache_dir,
         )
 
 
+def get_cached_scene_range(video_path, args, max_fps=None):
+    if max_fps is None:
+        max_fps = args.max_fps
+    if args.scene_cache_file:
+        return SceneBoundaryCache.get_cached_range_with_filename(args.scene_cache_file)
+    else:
+        return SceneBoundaryCache.get_cached_range(
+            video_path, max_fps=max_fps, cache_dir=args.scene_cache_dir)
+
+
+def widen_scene_scan_range(video_path, args, max_fps=None):
+    """
+    If a scene cache already exists for this video but doesn't cover the requested
+    start/end range, widen the scan to the union of the existing cached range and the
+    requested range, so the cache only ever grows and previously detected scene
+    boundaries (from testing a different clip of the same movie) are never discarded.
+    """
+    scan_start_time, scan_end_time = args.start_time, args.end_time
+    cached_range = get_cached_scene_range(video_path, args, max_fps=max_fps)
+    if cached_range is not None:
+        cached_start, cached_end = cached_range
+        query_start = SceneBoundaryCache.time_to_sec(args.start_time, 0)
+        query_end = SceneBoundaryCache.time_to_sec(args.end_time, float("inf"))
+        data_start = SceneBoundaryCache.time_to_sec(cached_start, 0)
+        data_end = SceneBoundaryCache.time_to_sec(cached_end, float("inf"))
+        union_start = min(query_start, data_start)
+        union_end = max(query_end, data_end)
+        scan_start_time = str(union_start)
+        scan_end_time = None if union_end == float("inf") else str(union_end)
+    return scan_start_time, scan_end_time
+
+
 def process_video_full(input_filename, output_path, args, depth_model, side_model):
+    is_preview = getattr(args, "preview", False)
+    scene_cache_max_fps = args.max_fps  # capture before --preview clamps it, so cache key stays stable
     use_16bit = VU.pix_fmt_requires_16bit(args.pix_fmt)
     is_video_depth_anything = depth_model.get_name() == "VideoDepthAnything"
     is_video_depth_anything_streaming = depth_model.get_name() == "VideoDepthAnythingStreaming"
@@ -984,6 +1327,15 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     ):
         side_model = compile_model(side_model, device=args.state["device"])
 
+    if getattr(args, "preview", False):
+        import copy as _copy
+        args = _copy.copy(args)
+        args.max_fps = min(args.max_fps, 1.0)
+        if args.limit_resolution is None or args.limit_resolution > 256:
+            args.limit_resolution = 256
+        if getattr(args, "end_time", None) is None:
+            args.end_time = 60.0
+
     output_parent_dir = path.basename(output_path)
     input_parent_dir = path.basename(path.dirname(input_filename))
     if is_output_dir(output_path) or (output_parent_dir != "" and output_parent_dir == input_parent_dir):
@@ -993,6 +1345,10 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             make_output_filename(path.basename(input_filename), args, video=True))
     else:
         output_filename = output_path
+
+    if getattr(args, "preview", False):
+        base, ext = path.splitext(output_filename)
+        output_filename = base + "_preview" + ext
 
     if (
             # --resume and already processed
@@ -1010,8 +1366,14 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     make_parent_dir(output_filename)
     if args.scene_detect or args.scene_detect_only:
         segment_pts = None
+        scan_start_time, scan_end_time = args.start_time, args.end_time
         if not args.disable_scene_cache:
-            segment_pts = try_load_scene_cache(input_filename, args)
+            # Look up the cache under the real (pre-preview-clamp) max_fps, so Quick Preview
+            # reuses the same cache as a full run instead of always missing and rescanning.
+            segment_pts = try_load_scene_cache(input_filename, args, max_fps=scene_cache_max_fps)
+            if segment_pts is None and not is_preview:
+                scan_start_time, scan_end_time = widen_scene_scan_range(
+                    input_filename, args, max_fps=scene_cache_max_fps)
 
         if segment_pts is None:
             with TorchHubDir(HUB_MODEL_DIR):
@@ -1021,14 +1383,19 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     device=args.state["device"],
                     hwaccel=args.hwaccel,
                     disable_software_fallback=args.disable_software_fallback,
-                    start_time=args.start_time,
-                    end_time=args.end_time,
+                    start_time=scan_start_time,
+                    end_time=scan_end_time,
                     stop_event=args.state["stop_event"],
                     suspend_event=args.state["suspend_event"],
                     tqdm_fn=args.state["tqdm_fn"],
                     tqdm_title=f"{path.basename(input_filename)}: Scene Boundary Detection",
                 )
-                save_scene_cache(input_filename, segment_pts, args)
+                # Don't let a fast/low-fps preview scan overwrite the real cache with
+                # lower-quality results.
+                if not args.disable_scene_cache and not is_preview:
+                    save_scene_cache(input_filename, segment_pts, args,
+                                      start_time=scan_start_time, end_time=scan_end_time,
+                                      max_fps=scene_cache_max_fps)
                 if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                     return
             gc_collect()
@@ -1063,16 +1430,82 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     # Integrate preprocess_image() logic into vf
     video_filter = add_preprocess_vf(video_filter, args)
 
+    # HDR metadata extraction (DV RPU + HDR10+) before encoding
+    _hdr_ffmpeg_bin = None
+    _hdr_dovi_bin = None
+    _hdr_hdr10plus_bin = None
+    _hdr_rpu_path = None
+    _hdr_h10p_path = None
+
+    if getattr(args, "preserve_dowi", False):
+        _hdr_ffmpeg_bin = _get_ffmpeg_bin()
+        _hdr_out_dir = path.dirname(path.abspath(output_filename))
+        hdr_types = _detect_hdr_types(input_filename, _find_ffprobe())
+
+        if not hdr_types["dv"] and not hdr_types["hdr10plus"]:
+            print("--preserve-dowi: no DV or HDR10+ detected in source, skipping extraction.",
+                  file=sys.stderr)
+        else:
+            _hdr_tmp_hevc = path.join(_hdr_out_dir, "_iw3_src.hevc")
+            try:
+                subprocess.run(
+                    [_hdr_ffmpeg_bin, "-y", "-i", str(input_filename),
+                     "-c:v", "copy", "-an", "-f", "hevc", _hdr_tmp_hevc],
+                    check=True, capture_output=True,
+                )
+                if hdr_types["dv"]:
+                    _hdr_dovi_bin = _find_dovi_tool()
+                    if _hdr_dovi_bin:
+                        _hdr_rpu_path = path.join(_hdr_out_dir, "_iw3_rpu.bin")
+                        try:
+                            subprocess.run(
+                                [_hdr_dovi_bin, "extract-rpu", "-i", _hdr_tmp_hevc, "-o", _hdr_rpu_path],
+                                check=True, capture_output=True,
+                            )
+                        except subprocess.CalledProcessError as e:
+                            print(f"--preserve-dowi: DV RPU extraction failed: "
+                                  f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+                            _hdr_rpu_path = None
+
+                if hdr_types["hdr10plus"]:
+                    _hdr_hdr10plus_bin = _find_hdr10plus_tool()
+                    if _hdr_hdr10plus_bin:
+                        _hdr_h10p_path = path.join(_hdr_out_dir, "_iw3_hdr10plus.json")
+                        try:
+                            subprocess.run(
+                                [_hdr_hdr10plus_bin, "extract", "-i", _hdr_tmp_hevc, "-o", _hdr_h10p_path],
+                                check=True, capture_output=True,
+                            )
+                        except subprocess.CalledProcessError as e:
+                            print(f"--preserve-dowi: HDR10+ extraction failed: "
+                                  f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+                            _hdr_h10p_path = None
+
+            except subprocess.CalledProcessError as e:
+                print(f"--preserve-dowi: source HEVC extraction failed: "
+                      f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+            finally:
+                if path.exists(_hdr_tmp_hevc):
+                    try:
+                        os.remove(_hdr_tmp_hevc)
+                    except Exception:
+                        pass
+
     def config_callback(metadata):
         fps = metadata.get_fps()
         if float(fps) > args.max_fps:
             fps = args.max_fps
+        pix_fmt = args.pix_fmt
+        upgrade = getattr(args, "upgrade_pix_fmt", None)
+        if upgrade and not metadata.use_16bit:
+            pix_fmt = _upgrade_pix_fmt(pix_fmt, upgrade)
+            pix_fmt = _clamp_pix_fmt_for_codec(pix_fmt, args.video_codec)
 
         return VU.VideoOutputConfig(
             fps=fps,
             container_format=args.video_format,
             video_codec=args.video_codec,
-            pix_fmt=args.pix_fmt,
+            pix_fmt=pix_fmt,
             colorspace=args.colorspace,
             options=make_video_codec_option(args, input_filename),
             container_options={"movflags": "+faststart"} if args.video_format == "mp4" else {},
@@ -1164,6 +1597,322 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
         finally:
             frame_callback.shutdown()
 
+    # HDR metadata injection (DV RPU + HDR10+) after encoding
+    if (_hdr_rpu_path or _hdr_h10p_path) and path.exists(output_filename):
+        try:
+            _inject_hdr_metadata(
+                output_filename,
+                _hdr_rpu_path, _hdr_h10p_path,
+                _hdr_ffmpeg_bin, _hdr_dovi_bin, _hdr_hdr10plus_bin,
+                path.dirname(path.abspath(output_filename)),
+            )
+        except Exception as e:
+            print(f"--preserve-dowi: HDR metadata injection failed: {e}", file=sys.stderr)
+        finally:
+            for f in filter(None, [_hdr_rpu_path, _hdr_h10p_path]):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+
+def _probe_video_duration(path_str):
+    """
+    Determine the true, actually-decodable duration of a (possibly not cleanly finalized,
+    e.g. after a crash) video file by scanning its packets directly, rather than trusting
+    container-level duration metadata that may be missing or stale if the file wasn't
+    closed properly.
+    """
+    import av as _av
+    try:
+        with _av.open(str(path_str)) as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            last_pts = None
+            for packet in container.demux(stream):
+                if packet.pts is not None:
+                    last_pts = packet.pts
+            if last_pts is None:
+                return None
+            frame_dur = float(1.0 / (stream.average_rate or 24))
+            return float(last_pts * stream.time_base) + frame_dur
+    except Exception:
+        return None
+
+
+def process_video_with_resume(input_filename, output_path, args, depth_model, side_model):
+    import json
+    import copy
+    import av as _av
+
+    if not getattr(args, "auto_resume", False):
+        process_video_full(input_filename, output_path, args, depth_model, side_model)
+        return
+
+    # Resolve final output filename (mirrors process_video_full logic)
+    output_parent_dir = path.basename(output_path)
+    input_parent_dir = path.basename(path.dirname(input_filename))
+    if is_output_dir(output_path) or (output_parent_dir != "" and output_parent_dir == input_parent_dir):
+        os.makedirs(output_path, exist_ok=True)
+        output_filename = path.join(output_path, make_output_filename(path.basename(input_filename), args, video=True))
+    else:
+        output_filename = output_path
+
+    if args.resume and path.exists(output_filename):
+        return
+
+    try:
+        with _av.open(str(input_filename)) as c:
+            duration = float(c.duration) / 1000000.0 if c.duration else None
+    except Exception:
+        duration = None
+
+    effective_start = parse_time(args.start_time) if getattr(args, "start_time", None) else 0.0
+    effective_end = parse_time(args.end_time) if getattr(args, "end_time", None) else (duration or 0.0)
+    if duration:
+        effective_end = min(effective_end, duration)
+
+    # Short clips: just run a single normal pass, no point wrapping this in the
+    # segment/checkpoint machinery below.
+    if not duration or (effective_end - effective_start) <= 60.0:
+        process_video_full(input_filename, output_path, args, depth_model, side_model)
+        return
+
+    ext = path.splitext(output_filename)[1]
+    base = path.splitext(output_filename)[0]
+    checkpoint_path = output_filename + ".iw3resume"
+
+    # Load any segments left over from a previous interrupted run, and re-verify each
+    # one's *actual* coverage by scanning the file itself — never trust a stale recorded
+    # position, since the file's real content is the only ground truth after a crash.
+    segments = []
+    if path.exists(checkpoint_path):
+        try:
+            with open(checkpoint_path) as f:
+                saved = json.load(f).get("segments", [])
+            for seg in saved:
+                seg_file = seg.get("file")
+                seg_start = seg.get("start")
+                if seg_file is None or seg_start is None or not path.exists(seg_file):
+                    continue
+                actual_dur = _probe_video_duration(seg_file)
+                if actual_dur is None or actual_dur <= 0.5:
+                    continue
+                segments.append({"start": seg_start, "end": seg_start + actual_dur, "file": seg_file})
+        except Exception:
+            segments = []
+
+    covered_end = max([s["end"] for s in segments], default=effective_start)
+    if segments:
+        print(f"[auto-resume] resuming continuously from {covered_end:.1f}s "
+              f"({len(segments)} segment(s) already on disk).", file=sys.stderr)
+
+    # Process the rest of the video in ONE continuous pass — no scheduled chunk
+    # boundaries. A new segment is only ever created here because we're picking up after
+    # an interruption, not on a fixed timer, so a run that completes without incident
+    # produces exactly one continuous file with zero internal seams.
+    if covered_end < effective_end - 0.5:
+        seg_index = len(segments)
+        seg_file = f"{base}_resume_seg_{seg_index:04d}{ext}"
+        seg_args = copy.copy(args)
+        seg_args.start_time = covered_end
+        seg_args.end_time = effective_end
+        seg_args.yes = True
+        seg_args.resume = False
+        seg_args.auto_resume = False
+        seg_args.preserve_dowi = False  # DV/HDR10+ handled once at the end, over the whole range
+
+        process_video_full(input_filename, seg_file, seg_args, depth_model, side_model)
+
+        actual_dur = _probe_video_duration(seg_file)
+        if actual_dur is not None and actual_dur > 0.5:
+            segments.append({"start": covered_end, "end": covered_end + actual_dur, "file": seg_file})
+            covered_end = covered_end + actual_dur
+
+        with open(checkpoint_path, "w") as f:
+            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments]}, f)
+
+        if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
+            # Stopped (cancel button or interruption) — checkpoint above already records
+            # everything completed so far; next run picks up exactly here.
+            return
+
+    if covered_end < effective_end - 1.0 or not segments:
+        # Nothing usable was produced this run (e.g. stopped almost immediately).
+        # Leave the checkpoint as-is so the next run retries from the same place.
+        return
+
+    segment_files = [s["file"] for s in segments]
+
+    # All segments together now cover the full range — join them into the final output.
+    # NOTE: each segment re-encodes its own short audio slice independently, and every
+    # independent AAC encode adds its own small priming delay. Stitching those segment-local
+    # audio tracks together (as a naive "-c copy" concat would) makes the delay grow by one
+    # increment at every segment boundary. To avoid that, concat video-only here and mux in a
+    # single audio track extracted once from the original source below.
+    ffmpeg_bin = _get_ffmpeg_bin()
+    concat_list = base + "_resume_concat.txt"
+    video_only_filename = base + "_resume_video_only" + ext
+
+    # Prefer mkvmerge to splice the segments together. Each segment was encoded by its own
+    # fresh encoder instance, so the raw bitstreams each carry their own SPS/PPS headers;
+    # ffmpeg's concat demuxer joins them at the byte level, which can make some players
+    # briefly hitch at the seam. mkvmerge's "+" append is built specifically for splicing
+    # encoded segments back together without that hiccup. With this continuous design, a
+    # successful run produces only one segment, so there is usually nothing to splice at all.
+    mkvmerge_bin = _find_mkvmerge() if ext.lower() == ".mkv" and len(segment_files) > 1 else None
+    concat_ok = len(segment_files) == 1
+    if concat_ok:
+        os.replace(segment_files[0], video_only_filename)
+    elif mkvmerge_bin:
+        mkvmerge_args = [mkvmerge_bin, "-o", video_only_filename, "--no-audio", segment_files[0]]
+        for cf in segment_files[1:]:
+            mkvmerge_args += ["+", cf]
+        result = subprocess.run(mkvmerge_args, capture_output=True)
+        # mkvmerge exit code: 0 = ok, 1 = warnings (output still produced), 2 = error
+        if result.returncode in (0, 1) and path.exists(video_only_filename):
+            concat_ok = True
+        else:
+            print(f"[auto-resume] mkvmerge splice failed, falling back to ffmpeg concat: "
+                  f"{result.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+
+    if not concat_ok:
+        with open(concat_list, "w", encoding="utf-8") as f:
+            for cf in segment_files:
+                # ffmpeg concat demuxer uses single quotes as the path delimiter; a literal
+                # single quote in the path (e.g. "Joe's Apartment") must be escaped as '\'' or
+                # ffmpeg truncates the path right there and fails with "No such file or directory".
+                f.write("file '{}'\n".format(cf.replace("'", "'\\''")))
+
+        try:
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
+                 "-i", concat_list, "-map", "0:v", "-c", "copy", "-an", video_only_filename],
+                check=True, capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            print(f"[auto-resume] concat failed: {e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+            return
+        finally:
+            if path.exists(concat_list):
+                try:
+                    os.remove(concat_list)
+                except Exception:
+                    pass
+
+    for cf in segment_files:
+        if path.exists(cf):
+            try:
+                os.remove(cf)
+            except Exception:
+                pass
+    if path.exists(checkpoint_path):
+        try:
+            os.remove(checkpoint_path)
+        except Exception:
+            pass
+
+    # Extract audio once, directly from the original source, over the full effective
+    # range — a single clean encode instead of N stitched chunk-local encodes.
+    audio_tmp = base + "_resume_audio.m4a"
+    has_audio = False
+    try:
+        has_audio = VU.export_audio(
+            input_filename, audio_tmp,
+            start_time=effective_start, end_time=effective_end,
+            title=f"{path.basename(input_filename)} Audio",
+            stop_event=args.state["stop_event"], suspend_event=args.state["suspend_event"],
+            tqdm_fn=args.state["tqdm_fn"],
+        )
+    except Exception as e:
+        print(f"[auto-resume] audio export failed: {e}", file=sys.stderr)
+        has_audio = False
+
+    try:
+        if has_audio:
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-i", video_only_filename, "-i", audio_tmp,
+                 "-map", "0:v", "-map", "1:a", "-c", "copy", "-shortest", output_filename],
+                check=True, capture_output=True,
+            )
+        else:
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-i", video_only_filename, "-map", "0:v", "-c", "copy", output_filename],
+                check=True, capture_output=True,
+            )
+    except subprocess.CalledProcessError as e:
+        print(f"[auto-resume] final mux failed: {e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        return
+    finally:
+        for f in (video_only_filename, audio_tmp):
+            if path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+    # HDR metadata injection on the final concatenated output
+    if getattr(args, "preserve_dowi", False) and path.exists(output_filename):
+        fb = _get_ffmpeg_bin()
+        out_dir = path.dirname(path.abspath(output_filename))
+        hdr_types = _detect_hdr_types(input_filename, _find_ffprobe())
+        rpu_path = path.join(out_dir, "_iw3_rpu.bin") if hdr_types["dv"] else None
+        h10p_path = path.join(out_dir, "_iw3_hdr10plus.json") if hdr_types["hdr10plus"] else None
+        dovi_b = _find_dovi_tool() if hdr_types["dv"] else None
+        h10p_b = _find_hdr10plus_tool() if hdr_types["hdr10plus"] else None
+        tmp_hevc = path.join(out_dir, "_iw3_src.hevc")
+
+        if (rpu_path and dovi_b) or (h10p_path and h10p_b):
+            try:
+                # Limit extraction to the same [effective_start, effective_end] window that
+                # was actually processed (e.g. when --start-time/--end-time trims the video),
+                # so the RPU's frame order lines up with the output instead of starting from
+                # frame 0 of the whole original file.
+                trim_args = []
+                if effective_start > 0:
+                    trim_args += ["-ss", str(effective_start)]
+                if duration and effective_end < duration:
+                    trim_args += ["-to", str(effective_end)]
+                subprocess.run(
+                    [fb, "-y", *trim_args, "-i", str(input_filename),
+                     "-c:v", "copy", "-an", "-f", "hevc", tmp_hevc],
+                    check=True, capture_output=True,
+                )
+                if rpu_path and dovi_b:
+                    subprocess.run(
+                        [dovi_b, "extract-rpu", "-i", tmp_hevc, "-o", rpu_path],
+                        check=True, capture_output=True,
+                    )
+                if h10p_path and h10p_b:
+                    subprocess.run(
+                        [h10p_b, "extract", "-i", tmp_hevc, "-o", h10p_path],
+                        check=True, capture_output=True,
+                    )
+            except subprocess.CalledProcessError as e:
+                print(f"--preserve-dowi: HDR extraction failed: "
+                      f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+                rpu_path = h10p_path = None
+            finally:
+                if path.exists(tmp_hevc):
+                    try:
+                        os.remove(tmp_hevc)
+                    except Exception:
+                        pass
+
+            if rpu_path or h10p_path:
+                try:
+                    _inject_hdr_metadata(output_filename, rpu_path, h10p_path,
+                                         fb, dovi_b, h10p_b, out_dir)
+                except Exception as e:
+                    print(f"--preserve-dowi: HDR injection failed: {e}", file=sys.stderr)
+                finally:
+                    for f in filter(None, [rpu_path, h10p_path]):
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+
 
 def process_video_keyframes(input_filename, output_path, args, depth_model, side_model):
     assert depth_model.get_name() not in {"VideoDepthAnything", "VideoDepthAnythingStreaming"}
@@ -1242,7 +1991,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
         if args.state["convergence_model"] is not None:
             args.state["convergence_model"].reset(enable_ema=True)
 
-        process_video_full(input_filename, output_path, args, depth_model, side_model)
+        process_video_with_resume(input_filename, output_path, args, depth_model, side_model)
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -1596,8 +2345,11 @@ def export_video(input_filename, output_dir, args, title=None):
 
     if args.scene_detect or args.scene_detect_only:
         segment_pts = None
+        scan_start_time, scan_end_time = args.start_time, args.end_time
         if not args.disable_scene_cache:
             segment_pts = try_load_scene_cache(input_filename, args)
+            if segment_pts is None:
+                scan_start_time, scan_end_time = widen_scene_scan_range(input_filename, args)
         if segment_pts is None:
             with TorchHubDir(HUB_MODEL_DIR):
                 segment_pts = SBD.detect_boundary(
@@ -1606,14 +2358,16 @@ def export_video(input_filename, output_dir, args, title=None):
                     device=args.state["device"],
                     hwaccel=args.hwaccel,
                     disable_software_fallback=args.disable_software_fallback,
-                    start_time=args.start_time,
-                    end_time=args.end_time,
+                    start_time=scan_start_time,
+                    end_time=scan_end_time,
                     stop_event=args.state["stop_event"],
                     suspend_event=args.state["suspend_event"],
                     tqdm_fn=args.state["tqdm_fn"],
                     tqdm_title=f"{path.basename(input_filename)}: Scene Boundary Detection",
                 )
-                save_scene_cache(input_filename, segment_pts, args)
+                if not args.disable_scene_cache:
+                    save_scene_cache(input_filename, segment_pts, args,
+                                      start_time=scan_start_time, end_time=scan_end_time)
                 if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                     return
             gc_collect()
@@ -1656,6 +2410,11 @@ def export_video(input_filename, output_dir, args, title=None):
         if float(fps) > args.max_fps:
             fps = args.max_fps
         config.fps = fps  # update fps
+        pix_fmt = args.pix_fmt
+        upgrade = getattr(args, "upgrade_pix_fmt", None)
+        if upgrade and not metadata.use_16bit:
+            pix_fmt = _upgrade_pix_fmt(pix_fmt, upgrade)
+            pix_fmt = _clamp_pix_fmt_for_codec(pix_fmt, args.video_codec)
 
         def state_update_callback(c):
             config.output_colorspace = c.output_colorspace
@@ -1663,7 +2422,7 @@ def export_video(input_filename, output_dir, args, title=None):
             config.output_color_trc = c.output_color_trc
             config.source_color_range = c.source_color_range
 
-        video_output_config = VU.VideoOutputConfig(fps=fps, pix_fmt=args.pix_fmt, colorspace=args.colorspace)
+        video_output_config = VU.VideoOutputConfig(fps=fps, pix_fmt=pix_fmt, colorspace=args.colorspace)
         video_output_config.state_updated = state_update_callback
 
         return video_output_config
@@ -2023,8 +2782,12 @@ def create_parser(required_true=True):
     parser.add_argument("--warp-steps", type=int, help=("warp steps for row_flow_v3"))
     parser.add_argument("--convergence", "-c", type=float, default=0.5,
                         help=("(normalized) distance of convergence plane(screen position). 0-1 is reasonable value"))
-    parser.add_argument("--convergence-mode", type=str, choices=["constant", "sod_v1"], default="constant",
+    parser.add_argument("--convergence-mode", type=str, choices=["constant", "sod_v1", "face_detect"], default="constant",
                         help=("auto convergence mode"))
+    parser.add_argument("--convergence-smoothing", type=float, default=0.9,
+                        help=("EMA decay for auto convergence modes (sod_v1/face_detect). "
+                              "Higher = smoother but slower to react. Lower = more aggressive/dynamic. "
+                              "0 = no smoothing"))
     parser.add_argument("--update", action="store_true",
                         help="force update midas models from torch hub")
     parser.add_argument("--recursive", "-r", action="store_true",
@@ -2107,6 +2870,8 @@ def create_parser(required_true=True):
                               "if auto, div_6 for ZoeDepth model, none for DepthAnything/DepthPro model. "
                               "directly using this option is not recommended. "
                               "use --foreground-scale instead."))
+    parser.add_argument("--foreground-pop", type=float, default=0.0,
+                        help="push the nearest pixels even further toward the audience (0.0=off, 0.5=medium, 1.0=strong)")
     parser.add_argument("--foreground-scale", type=float, choices=[Range(-3.0, 3.0)], default=0,
                         help="foreground scaling level. 0 is disabled")
     parser.add_argument("--mapper-type", type=str, choices=["div", "mul", "shift"], default=None,
@@ -2219,6 +2984,18 @@ def create_parser(required_true=True):
                                  "bt601", "bt601-pc", "bt601-tv",
                                  "bt2020-tv", "bt2020-pq-tv"],
                         help="video colorspace")
+    parser.add_argument("--preserve-dowi", action="store_true",
+                        help="preserve Dolby Vision RPU metadata in HEVC output (requires dovi_tool)")
+    parser.add_argument("--auto-resume", action="store_true",
+                        help="split video into chunks and resume from checkpoint if interrupted")
+    parser.add_argument("--resume-chunk-duration", type=int, default=300, metavar="SECONDS",
+                        help="chunk duration in seconds for --auto-resume (default: 300)")
+    parser.add_argument("--upgrade-pix-fmt", type=int, default=None, choices=[10, 12],
+                        help="upgrade 8-bit source to 10-bit or 12-bit output pixel format")
+    parser.add_argument("--denoise", action="store_true",
+                        help="apply temporal denoising (hqdn3d) before depth estimation to reduce film grain artifacts")
+    parser.add_argument("--preview", action="store_true",
+                        help="generate a quick 1fps/256p preview of the first 60 seconds to check 3D settings")
     # Deprecated
     parser.add_argument("--zoed-batch-size", type=int,
                         help="Deprecated. Use --batch-size instead")
@@ -2245,7 +3022,17 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
     convergence_model = None
     if args.convergence_mode == "sod_v1":
         convergence_model = ConvergenceEstimator(args.convergence, device_id=args.gpu[0],
+                                                 decay=getattr(args, "convergence_smoothing", 0.9),
                                                  compile=args.compile)
+    elif args.convergence_mode == "face_detect":
+        try:
+            convergence_model = FaceConvergenceEstimator(decay=getattr(args, "convergence_smoothing", 0.9))
+        except Exception as e:
+            raise RuntimeError(
+                f"face_detect convergence mode failed to initialize.\n"
+                f"If mediapipe is missing, run: pip install mediapipe absl-py protobuf attrs flatbuffers\n"
+                f"Error: {type(e).__name__}: {e}"
+            ) from e
 
     if args.export_disparity:
         args.export = True

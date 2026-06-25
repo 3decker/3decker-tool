@@ -325,6 +325,9 @@ def _process_video(
             if packet.stream.type == "video":
                 for frame in safe_decode(packet, strict=disable_software_fallback):
                     frame = fix_frame_color_av17(frame, sw_format)
+                    if start_time is not None and frame.pts is not None:
+                        if float(frame.pts * video_input_stream.time_base) < start_time:
+                            continue
                     for out_frame in video_preprocessor.update(frame):
                         if enable_gc_collect and (frame_count := frame_count + 1) % GC_INTERVAL == 0:
                             gc.collect()
@@ -351,6 +354,9 @@ def _process_video(
                             output_container.mux(packet)
                     else:
                         for frame in safe_decode(packet):
+                            if start_time is not None and frame.pts is not None:
+                                if float(frame.pts * audio_input_stream.time_base) < start_time:
+                                    continue
                             frame.pts = None
                             enc_packets = audio_output_stream.encode(frame)
                             if enc_packets:

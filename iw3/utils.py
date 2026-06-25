@@ -1725,6 +1725,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     # effective_end even without being interrupted (e.g. decoder/EOF quirks near the
     # very end of a long file) — looping here means the job still finishes in this same
     # run instead of silently stopping short and reporting "Finished" on an incomplete file.
+    interrupted = False
     stall_guard = 0
     while covered_end < effective_end - 0.5:
         seg_index = len(segments)
@@ -1751,26 +1752,33 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
         if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
             # Stopped (cancel button or interruption) — checkpoint above already records
             # everything completed so far; next run picks up exactly here.
-            return
+            interrupted = True
+            break
 
         if new_covered_end <= covered_end + 0.5:
-            # This attempt made no real progress (e.g. the remaining gap can't be
-            # decoded) — stop instead of looping forever, but keep the checkpoint so
-            # what's already done isn't lost.
-            print(f"[auto-resume] stopped {effective_end - covered_end:.1f}s short of the end "
-                  f"and isn't making further progress; leaving the partial result in place.",
-                  file=sys.stderr)
+            # This attempt made no real progress. This usually means the source file's
+            # own container metadata overstates its real duration (common with some
+            # WEB-DL releases — the video/audio streams genuinely have no more frames
+            # past this point even though the container header claims a longer runtime).
+            # Treat this as having reached the real end of the file rather than retrying
+            # forever or abandoning the job short of a target that can never be reached.
             stall_guard += 1
             if stall_guard >= 2:
-                return
+                print(f"[auto-resume] source file has no more decodable frames past "
+                      f"{covered_end:.1f}s (container metadata claims {effective_end:.1f}s) — "
+                      f"treating {covered_end:.1f}s as the real end and finishing up.",
+                      file=sys.stderr)
+                break
         else:
             stall_guard = 0
         covered_end = new_covered_end
 
-    if covered_end < effective_end - 1.0 or not segments:
-        # Nothing usable was produced this run (e.g. stopped almost immediately).
-        # Leave the checkpoint as-is so the next run retries from the same place.
+    if interrupted or not segments:
         return
+
+    # Reaching here means either the full requested range was covered, or the source
+    # genuinely has no more frames to give (see stall handling above) — either way,
+    # what's in `segments` is as complete as this job is ever going to get, so merge it.
 
     segment_files = [s["file"] for s in segments]
 

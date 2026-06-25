@@ -1720,7 +1720,13 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     # boundaries. A new segment is only ever created here because we're picking up after
     # an interruption, not on a fixed timer, so a run that completes without incident
     # produces exactly one continuous file with zero internal seams.
-    if covered_end < effective_end - 0.5:
+    # Keep creating segments until the whole range is actually covered, or we're
+    # genuinely interrupted. A single segment occasionally falls a little short of
+    # effective_end even without being interrupted (e.g. decoder/EOF quirks near the
+    # very end of a long file) — looping here means the job still finishes in this same
+    # run instead of silently stopping short and reporting "Finished" on an incomplete file.
+    stall_guard = 0
+    while covered_end < effective_end - 0.5:
         seg_index = len(segments)
         seg_file = f"{base}_resume_seg_{seg_index:04d}{ext}"
         seg_args = copy.copy(args)
@@ -1734,9 +1740,10 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
         process_video_full(input_filename, seg_file, seg_args, depth_model, side_model)
 
         actual_dur = _probe_video_duration(seg_file)
+        new_covered_end = covered_end
         if actual_dur is not None and actual_dur > 0.5:
             segments.append({"start": covered_end, "end": covered_end + actual_dur, "file": seg_file})
-            covered_end = covered_end + actual_dur
+            new_covered_end = covered_end + actual_dur
 
         with open(checkpoint_path, "w") as f:
             json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments]}, f)
@@ -1745,6 +1752,20 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
             # Stopped (cancel button or interruption) — checkpoint above already records
             # everything completed so far; next run picks up exactly here.
             return
+
+        if new_covered_end <= covered_end + 0.5:
+            # This attempt made no real progress (e.g. the remaining gap can't be
+            # decoded) — stop instead of looping forever, but keep the checkpoint so
+            # what's already done isn't lost.
+            print(f"[auto-resume] stopped {effective_end - covered_end:.1f}s short of the end "
+                  f"and isn't making further progress; leaving the partial result in place.",
+                  file=sys.stderr)
+            stall_guard += 1
+            if stall_guard >= 2:
+                return
+        else:
+            stall_guard = 0
+        covered_end = new_covered_end
 
     if covered_end < effective_end - 1.0 or not segments:
         # Nothing usable was produced this run (e.g. stopped almost immediately).

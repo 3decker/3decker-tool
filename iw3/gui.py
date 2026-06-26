@@ -725,6 +725,19 @@ class MainFrame(wx.Frame):
         self.chk_preserve_dowi.SetValue(False)
         self.chk_preserve_dowi.SetToolTip(T("Detect and preserve Dolby Vision RPU and/or HDR10+ dynamic metadata through 3D conversion. Requires HEVC output (Video Codec: hevc_nvenc or libx265) and MKVToolNix installed for MKV output."))
 
+        self.chk_hdr_to_sdr = wx.CheckBox(self.grp_video_filter, label=T("Convert HDR to SDR"),
+                                         name="chk_hdr_to_sdr")
+        self.chk_hdr_to_sdr.SetValue(False)
+        self.chk_hdr_to_sdr.SetToolTip(
+            T("Properly tone-maps a PQ/HDR10/HDR10+ or HLG source down to normal SDR brightness "
+              "before conversion, while keeping 10-bit color precision (reduces banding vs. plain "
+              "8-bit SDR). Adds one extra encoding pass. Automatically does nothing if the source "
+              "isn't actually PQ/HLG HDR. Turns off Preserve Dolby Vision, since the two are "
+              "contradictory (there's no HDR grade left to preserve once tone-mapped to SDR). "
+              "Recommended: on for HDR sources being watched on a non-HDR display (most projectors "
+              "and many 3D setups) -- see this project's guidance on HDR/Dolby Vision for projectors "
+              "and VR headsets."))
+
         self.chk_auto_resume = wx.CheckBox(self.grp_video_filter, label=T("Auto Resume"),
                                             name="chk_auto_resume")
         self.chk_auto_resume.SetValue(False)
@@ -801,11 +814,12 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_max_output_size, (8, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_keep_aspect_ratio, (9, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_preserve_dowi, (10, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_auto_resume, (11, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_upgrade_pix_fmt, (12, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_upgrade_pix_fmt, (12, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_denoise, (13, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_preview, (14, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_hdr_to_sdr, (11, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_auto_resume, (12, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_upgrade_pix_fmt, (13, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upgrade_pix_fmt, (13, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_denoise, (14, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_preview, (15, 1), (0, 2), flag=wx.EXPAND)
 
         sizer_video_filter = wx.StaticBoxSizer(self.grp_video_filter, wx.VERTICAL)
         sizer_video_filter.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -1718,6 +1732,7 @@ class MainFrame(wx.Frame):
             max_output_height=max_output_height,
             keep_aspect_ratio=self.chk_keep_aspect_ratio.GetValue(),
             preserve_dowi=self.chk_preserve_dowi.GetValue(),
+            hdr_to_sdr=self.chk_hdr_to_sdr.GetValue(),
             auto_resume=self.chk_auto_resume.GetValue(),
             resume_chunk_duration=300,
             upgrade_pix_fmt=int(self.cbo_upgrade_pix_fmt.GetValue()) if self.cbo_upgrade_pix_fmt.GetValue() else None,

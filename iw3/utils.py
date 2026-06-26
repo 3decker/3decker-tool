@@ -201,6 +201,89 @@ def _detect_hdr_types(input_path, ffprobe_bin):
     return result
 
 
+def _detect_pq_or_hlg(input_path, ffprobe_bin):
+    """True if the video stream's transfer characteristic is PQ (HDR10/HDR10+/most Dolby
+    Vision) or HLG — the two curves that need real tone-mapping to look correct as SDR,
+    as opposed to a plain SDR source that doesn't need any conversion at all."""
+    import json as _json
+    try:
+        proc = subprocess.run(
+            [ffprobe_bin, "-v", "quiet", "-print_format", "json", "-show_streams", str(input_path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        data = _json.loads(proc.stdout)
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") != "video":
+                continue
+            if stream.get("color_transfer", "") in ("smpte2084", "arib-std-b67"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _tonemap_hdr_to_sdr(input_filename, args):
+    """Pre-converts a PQ/HLG HDR source to a clean SDR 10-bit intermediate file using
+    ffmpeg's zscale+tonemap filters. This can't be done inside iw3's own (PyAV-based)
+    per-frame filter graph -- that build of PyAV doesn't have the zscale filter, and the
+    filter it does have (colorspace) has no notion of the PQ/HLG curve at all, so it can't
+    correctly linearize HDR. The standalone bundled ffmpeg.exe does have zscale, so this
+    runs as a one-time pass through that before iw3's own pipeline starts.
+
+    Returns (path_to_actually_process, temp_file_to_clean_up_or_None).
+    """
+    if not getattr(args, "hdr_to_sdr", False):
+        return input_filename, None
+
+    ffprobe_bin = _find_ffprobe()
+    if not _detect_pq_or_hlg(input_filename, ffprobe_bin):
+        print("[hdr-to-sdr] source isn't tagged as PQ/HLG HDR -- nothing to convert, "
+              "processing it as-is.", file=sys.stderr)
+        return input_filename, None
+
+    if getattr(args, "preserve_dowi", False):
+        # Preserving dynamic HDR/DV metadata on a deliberately-tonemapped SDR output is
+        # contradictory -- the metadata would describe a HDR grade that no longer exists.
+        print("[hdr-to-sdr] Preserve Dolby Vision is incompatible with converting to SDR; "
+              "disabling it for this run.", file=sys.stderr)
+        args.preserve_dowi = False
+
+    ffmpeg_bin = _get_ffmpeg_bin()
+    out_dir = path.dirname(path.abspath(input_filename))
+    tmp_sdr = path.join(
+        out_dir, "_iw3_hdr_to_sdr_" + path.splitext(path.basename(input_filename))[0] + ".mkv")
+
+    trim_args = []
+    if getattr(args, "start_time", None):
+        trim_args += ["-ss", str(parse_time(args.start_time))]
+    if getattr(args, "end_time", None):
+        trim_args += ["-to", str(parse_time(args.end_time))]
+
+    print("[hdr-to-sdr] converting HDR source to SDR (10-bit retained) before processing "
+          "-- this adds one extra encoding pass.", file=sys.stderr)
+    try:
+        subprocess.run(
+            [ffmpeg_bin, "-y", *trim_args, "-i", str(input_filename),
+             "-vf", "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+                    "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le",
+             "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "12",
+             "-c:a", "copy", tmp_sdr],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[hdr-to-sdr] conversion failed, processing the original HDR source instead: "
+              f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        return input_filename, None
+
+    if trim_args:
+        # The intermediate file already covers exactly [start_time, end_time]; clear those
+        # so the rest of the pipeline doesn't try to trim an already-trimmed file again.
+        args.start_time = None
+        args.end_time = None
+
+    return tmp_sdr, tmp_sdr
+
+
 def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin, hdr10plus_bin, tmp_dir):
     """Inject DV RPU and/or HDR10+ into the output HEVC, then remux back into the container."""
     import json as _json
@@ -2083,22 +2166,30 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     depth_model.reset()
     depth_model.disable_ema()
 
-    if args.keyframe:
-        if side_model is not None and hasattr(side_model, "set_mode"):
-            side_model.set_mode("image")
-            side_model.reset()
-        if args.state["convergence_model"] is not None:
-            args.state["convergence_model"].reset(enable_ema=False)
+    input_filename, hdr_tmp_file = _tonemap_hdr_to_sdr(input_filename, args)
+    try:
+        if args.keyframe:
+            if side_model is not None and hasattr(side_model, "set_mode"):
+                side_model.set_mode("image")
+                side_model.reset()
+            if args.state["convergence_model"] is not None:
+                args.state["convergence_model"].reset(enable_ema=False)
 
-        process_video_keyframes(input_filename, output_path, args, depth_model, side_model)
-    else:
-        if side_model is not None and hasattr(side_model, "set_mode"):
-            side_model.set_mode("video")
-            side_model.reset()
-        if args.state["convergence_model"] is not None:
-            args.state["convergence_model"].reset(enable_ema=True)
+            process_video_keyframes(input_filename, output_path, args, depth_model, side_model)
+        else:
+            if side_model is not None and hasattr(side_model, "set_mode"):
+                side_model.set_mode("video")
+                side_model.reset()
+            if args.state["convergence_model"] is not None:
+                args.state["convergence_model"].reset(enable_ema=True)
 
-        process_video_with_resume(input_filename, output_path, args, depth_model, side_model)
+            process_video_with_resume(input_filename, output_path, args, depth_model, side_model)
+    finally:
+        if hdr_tmp_file and path.exists(hdr_tmp_file):
+            try:
+                os.remove(hdr_tmp_file)
+            except Exception:
+                pass
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -3094,6 +3185,8 @@ def create_parser(required_true=True):
                         help="video colorspace")
     parser.add_argument("--preserve-dowi", action="store_true",
                         help="preserve Dolby Vision RPU metadata in HEVC output (requires dovi_tool)")
+    parser.add_argument("--hdr-to-sdr", action="store_true",
+                        help="tone-map a PQ/HLG HDR source down to SDR (10-bit retained) before conversion")
     parser.add_argument("--auto-resume", action="store_true",
                         help="split video into chunks and resume from checkpoint if interrupted")
     parser.add_argument("--resume-chunk-duration", type=int, default=300, metavar="SECONDS",

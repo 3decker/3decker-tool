@@ -1182,8 +1182,35 @@ class MainFrame(wx.Frame):
         return anaglyph
 
     def on_close(self, event):
+        if self.processing:
+            with wx.MessageDialog(
+                    self,
+                    message=(T("A conversion is currently running.") + "\n\n" +
+                             T("Closing right now will lose any progress made since the last "
+                               "checkpoint — the same as a crash. Stop it safely first instead?") + "\n\n" +
+                             T("Yes: stop safely (saves progress), then close.") + "\n" +
+                             T("No: close immediately, losing unsaved progress.")),
+                    caption=T("Conversion in progress"),
+                    style=wx.YES_NO | wx.ICON_WARNING) as dlg:
+                result = dlg.ShowModal()
+            if result == wx.ID_YES:
+                event.Veto()
+                self.SetStatusText(T("Stopping safely before closing..."))
+                self.suspend_event.set()
+                self.stop_event.set()
+                wx.CallLater(200, self._wait_then_close)
+                return
+            # else: fall through and close immediately, accepting the data loss
+
         self.save_preset()
         event.Skip()
+
+    def _wait_then_close(self):
+        if self.processing:
+            wx.CallLater(200, self._wait_then_close)
+            return
+        self.save_preset()
+        self.Destroy()
 
     def on_drop_files(self, x, y, filenames):
         if filenames:

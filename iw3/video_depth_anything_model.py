@@ -119,7 +119,12 @@ def _load_online_state(model, state):
      model.depth_list_aligned, model.ref_align) = state
 
 
-_EMPTY_ONLINE_STATE = ([], None, None, [], [])
+def _fresh_online_state():
+    # NOTE: must return a brand new tuple of brand new (mutable) lists every time, not a
+    # shared constant -- the underlying model mutates these lists in place (.append()),
+    # so reusing the same list object across resets silently leaks frames from one
+    # "empty" reset into the next, eventually overflowing the model's fixed-size buffer.
+    return ([], None, None, [], [])
 
 
 class VideoDepthAnythingModel(BaseDepthModel):
@@ -134,7 +139,7 @@ class VideoDepthAnythingModel(BaseDepthModel):
         # Holds the mirrored stream's temporal state (cur_list/pre_input/overlap_input/...)
         # between calls, so TTA can run a second, independent "flipped" pass through the
         # same model weights without keeping a whole second copy of the model in VRAM.
-        self._flip_state = _EMPTY_ONLINE_STATE
+        self._flip_state = _fresh_online_state()
 
     def _model_infer_tta(self, frame, use_amp):
         """
@@ -165,7 +170,7 @@ class VideoDepthAnythingModel(BaseDepthModel):
         return ret_main
 
     def reset_tta_state(self):
-        self._flip_state = _EMPTY_ONLINE_STATE
+        self._flip_state = _fresh_online_state()
 
     def load_model(self, model_type, resolution=None, device=None):
         # load aa model

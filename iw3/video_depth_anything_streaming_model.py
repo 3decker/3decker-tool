@@ -49,7 +49,12 @@ def _load_stream_state(model, state):
     model.id, model.frame_id_list, model.frame_cache_list = state
 
 
-_EMPTY_STREAM_STATE = (-1, [], [])
+def _fresh_stream_state():
+    # NOTE: must return a brand new tuple of brand new (mutable) lists every time, not a
+    # shared constant -- the underlying model mutates these lists in place (.append()),
+    # so reusing the same list object across resets silently leaks frames from one
+    # "empty" reset into the next.
+    return (-1, [], [])
 
 
 class VideoDepthAnythingStreamingModel(BaseDepthModel):
@@ -58,7 +63,7 @@ class VideoDepthAnythingStreamingModel(BaseDepthModel):
         self.metric_depth = model_type in METRIC_DEPTH_TYPES
         # if True, use 1 / depth and is_metric==False
         self.force_disparity = True
-        self._flip_state = _EMPTY_STREAM_STATE
+        self._flip_state = _fresh_stream_state()
 
     def _model_infer_tta(self, frame, use_amp, tta):
         # Same idea as VideoDepthAnythingModel's TTA: run an independent "mirrored" stream
@@ -101,7 +106,7 @@ class VideoDepthAnythingStreamingModel(BaseDepthModel):
 
     def reset_state(self):
         self.model.reset_state()
-        self._flip_state = _EMPTY_STREAM_STATE
+        self._flip_state = _fresh_stream_state()
 
     def infer(self, x, enable_amp=True, edge_dilation=0, depth_aa=False, tta=False, **kwargs):
         if not torch.is_tensor(x):

@@ -1692,14 +1692,40 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     base = path.splitext(output_filename)[0]
     checkpoint_path = output_filename + ".iw3resume"
 
+    # Settings that change the actual video stream's format (codec, pixel format, frame
+    # size/layout) can't safely differ between segments of the same job — the final merge
+    # just stream-copies pieces together, which requires them to all match. Settings that
+    # only affect quality/tuning (3D Strength, Convergence, Depth Resolution, EMA, the
+    # depth model itself, etc.) are fine to change between segments — e.g. via Cancel,
+    # adjusting settings, then Start again with the same output path.
+    fingerprint = {
+        "video_codec": getattr(args, "video_codec", None),
+        "pix_fmt": getattr(args, "pix_fmt", None),
+        "upgrade_pix_fmt": getattr(args, "upgrade_pix_fmt", None),
+        "vr180": getattr(args, "vr180", False),
+        "half_sbs": getattr(args, "half_sbs", False),
+        "tb": getattr(args, "tb", False),
+        "half_tb": getattr(args, "half_tb", False),
+        "cross_eyed": getattr(args, "cross_eyed", False),
+        "rgbd": getattr(args, "rgbd", False),
+        "half_rgbd": getattr(args, "half_rgbd", False),
+        "anaglyph": getattr(args, "anaglyph", None),
+        "max_output_width": getattr(args, "max_output_width", None),
+        "max_output_height": getattr(args, "max_output_height", None),
+        "keep_aspect_ratio": getattr(args, "keep_aspect_ratio", False),
+    }
+
     # Load any segments left over from a previous interrupted run, and re-verify each
     # one's *actual* coverage by scanning the file itself — never trust a stale recorded
     # position, since the file's real content is the only ground truth after a crash.
     segments = []
+    saved_fingerprint = None
     if path.exists(checkpoint_path):
         try:
             with open(checkpoint_path) as f:
-                saved = json.load(f).get("segments", [])
+                data = json.load(f)
+            saved = data.get("segments", [])
+            saved_fingerprint = data.get("fingerprint")
             for seg in saved:
                 seg_file = seg.get("file")
                 seg_start = seg.get("start")
@@ -1711,6 +1737,16 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
                 segments.append({"start": seg_start, "end": seg_start + actual_dur, "file": seg_file})
         except Exception:
             segments = []
+            saved_fingerprint = None
+
+    if segments and saved_fingerprint is not None and saved_fingerprint != fingerprint:
+        changed = {k: (saved_fingerprint.get(k), v) for k, v in fingerprint.items()
+                  if saved_fingerprint.get(k) != v}
+        print(f"[auto-resume] refusing to continue: this changed since the in-progress pieces "
+              f"were made, and would produce a broken/unplayable merge: {changed}. "
+              f"Revert that setting to resume normally, or use a different output filename "
+              f"to start a separate fresh job.", file=sys.stderr)
+        return
 
     covered_end = max([s["end"] for s in segments], default=effective_start)
 
@@ -1744,7 +1780,8 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
 
     if segments:
         with open(checkpoint_path, "w") as f:
-            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments]}, f)
+            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments],
+                      "fingerprint": fingerprint}, f)
         print(f"[auto-resume] resuming continuously from {covered_end:.1f}s "
               f"({len(segments)} segment(s) already on disk).", file=sys.stderr)
 
@@ -1779,7 +1816,8 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
             new_covered_end = covered_end + actual_dur
 
         with open(checkpoint_path, "w") as f:
-            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments]}, f)
+            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments],
+                      "fingerprint": fingerprint}, f)
 
         if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
             # Stopped (cancel button or interruption) — checkpoint above already records

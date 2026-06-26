@@ -1712,7 +1712,38 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
             segments = []
 
     covered_end = max([s["end"] for s in segments], default=effective_start)
+
+    # Recover from a HARD crash/power-loss, not just a graceful stop: if the process died
+    # mid-segment, that segment never got renamed from its "_tmp_..." working name to its
+    # final name, and never made it into the checkpoint at all. Look for that leftover
+    # temp file and salvage whatever of it is actually readable, instead of discarding it
+    # and re-encoding that whole stretch from scratch.
+    while True:
+        seg_index = len(segments)
+        seg_file = f"{base}_resume_seg_{seg_index:04d}{ext}"
+        orphaned_tmp = path.join(path.dirname(seg_file), "_tmp_" + path.basename(seg_file))
+        if not path.exists(orphaned_tmp):
+            break
+        actual_dur = _probe_video_duration(orphaned_tmp)
+        if actual_dur is None or actual_dur <= 0.5:
+            # Nothing usable was salvageable (e.g. killed before any frame was flushed).
+            try:
+                os.remove(orphaned_tmp)
+            except Exception:
+                pass
+            break
+        try:
+            os.replace(orphaned_tmp, seg_file)
+        except Exception:
+            break
+        segments.append({"start": covered_end, "end": covered_end + actual_dur, "file": seg_file})
+        print(f"[auto-resume] recovered {actual_dur:.1f}s from a leftover in-progress file "
+              f"(likely from a crash or power loss) instead of re-encoding it.", file=sys.stderr)
+        covered_end += actual_dur
+
     if segments:
+        with open(checkpoint_path, "w") as f:
+            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments]}, f)
         print(f"[auto-resume] resuming continuously from {covered_end:.1f}s "
               f"({len(segments)} segment(s) already on disk).", file=sys.stderr)
 

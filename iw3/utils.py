@@ -1192,7 +1192,8 @@ def bind_vda_frame_callback(depth_model, side_model, segment_pts, args):
             x, pts_queue, segment_pts,
             enable_amp=not args.disable_amp,
             edge_dilation=args.edge_dilation,
-            depth_aa=args.depth_aa)
+            depth_aa=args.depth_aa,
+            tta=args.tta)
 
         pts_queue.clear()
         batch_queue.clear()
@@ -2326,7 +2327,8 @@ def bind_export_vda_frame_callback(depth_model, segment_pts, rgb_dir, depth_dir,
             x, pts_queue, segment_pts,
             enable_amp=not args.disable_amp,
             edge_dilation=edge_dilation,
-            depth_aa=args.depth_aa)
+            depth_aa=args.depth_aa,
+            tta=args.tta)
 
         pts_queue.clear()
         batch_queue.clear()

@@ -41,12 +41,40 @@ METRIC_DEPTH_TYPES = {
 }
 
 
+def _save_stream_state(model):
+    return (model.id, model.frame_id_list, model.frame_cache_list)
+
+
+def _load_stream_state(model, state):
+    model.id, model.frame_id_list, model.frame_cache_list = state
+
+
+_EMPTY_STREAM_STATE = (-1, [], [])
+
+
 class VideoDepthAnythingStreamingModel(BaseDepthModel):
     def __init__(self, model_type):
         super().__init__(model_type)
         self.metric_depth = model_type in METRIC_DEPTH_TYPES
         # if True, use 1 / depth and is_metric==False
         self.force_disparity = True
+        self._flip_state = _EMPTY_STREAM_STATE
+
+    def _model_infer_tta(self, frame, use_amp, tta):
+        # Same idea as VideoDepthAnythingModel's TTA: run an independent "mirrored" stream
+        # through the same model weights, in lockstep with the normal stream's state, and
+        # blend the two. Only costs the extra compute, not a second copy of the model.
+        out_main = self.model.infer_video_depth_one(frame, use_amp=use_amp)
+        if not tta:
+            return out_main
+
+        main_state = _save_stream_state(self.model)
+        _load_stream_state(self.model, self._flip_state)
+        out_flip = self.model.infer_video_depth_one(torch.flip(frame, dims=[-1]), use_amp=use_amp)
+        self._flip_state = _save_stream_state(self.model)
+        _load_stream_state(self.model, main_state)
+
+        return (out_main + torch.flip(out_flip, dims=[-1])) * 0.5
 
     def load_model(self, model_type, resolution=None, device=None):
         # load aa model
@@ -73,8 +101,9 @@ class VideoDepthAnythingStreamingModel(BaseDepthModel):
 
     def reset_state(self):
         self.model.reset_state()
+        self._flip_state = _EMPTY_STREAM_STATE
 
-    def infer(self, x, enable_amp=True, edge_dilation=0, depth_aa=False, **kwargs):
+    def infer(self, x, enable_amp=True, edge_dilation=0, depth_aa=False, tta=False, **kwargs):
         if not torch.is_tensor(x):
             x = TF.to_tensor(x).to(self.device)
 
@@ -91,7 +120,7 @@ class VideoDepthAnythingStreamingModel(BaseDepthModel):
                              limit_resolution=self.limit_resolution)
         outputs = []
         for frame in x:
-            outputs.append(self.model.infer_video_depth_one(frame, use_amp=enable_amp).to(torch.float32))
+            outputs.append(self._model_infer_tta(frame, use_amp=enable_amp, tta=tta).to(torch.float32))
         depth = torch.stack(outputs)
         depth = depth.squeeze(1)  # (B, 1, H, W) -> (B, H, W) for compatibility of VDA
 

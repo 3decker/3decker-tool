@@ -109,6 +109,19 @@ def postprocess(out, edge_dilation, metric_depth, max_dist=None, depth_aa=None, 
         ) for batch in torch.split(out, micro_batch_size, dim=0)], dim=0)
 
 
+def _save_online_state(model):
+    return (model.cur_list, model.pre_input, model.overlap_input,
+            model.depth_list_aligned, model.ref_align)
+
+
+def _load_online_state(model, state):
+    (model.cur_list, model.pre_input, model.overlap_input,
+     model.depth_list_aligned, model.ref_align) = state
+
+
+_EMPTY_ONLINE_STATE = ([], None, None, [], [])
+
+
 class VideoDepthAnythingModel(BaseDepthModel):
     def __init__(self, model_type):
         super().__init__(model_type)
@@ -117,6 +130,42 @@ class VideoDepthAnythingModel(BaseDepthModel):
         self.metric_depth = model_type in METRIC_DEPTH_TYPES
         # if True, use 1 / depth and is_metric==False
         self.force_disparity = True
+        self.tta = False
+        # Holds the mirrored stream's temporal state (cur_list/pre_input/overlap_input/...)
+        # between calls, so TTA can run a second, independent "flipped" pass through the
+        # same model weights without keeping a whole second copy of the model in VRAM.
+        self._flip_state = _EMPTY_ONLINE_STATE
+
+    def _model_infer_tta(self, frame, use_amp):
+        """
+        Runs the model on `frame` normally, and if self.tta is enabled, also runs it on a
+        horizontally-flipped version using an independent temporal state, then blends the
+        two results. VDA models carry frame-to-frame state, so unlike image-model TTA this
+        can't just flip a single frame in isolation -- it has to track the flipped stream's
+        own state across the whole sequence, in lockstep with the normal one.
+        """
+        # The model's current attributes are always the main (non-flipped) stream's state
+        # on entry, since every exit path below restores them before returning.
+        ret_main = self.model.infer(frame, use_amp=use_amp)
+
+        if not self.tta:
+            return ret_main
+
+        main_state = _save_online_state(self.model)
+
+        _load_online_state(self.model, self._flip_state)
+        flipped_frame = None if frame is None else torch.flip(frame, dims=[-1])
+        ret_flip = self.model.infer(flipped_frame, use_amp=use_amp)
+        self._flip_state = _save_online_state(self.model)
+
+        _load_online_state(self.model, main_state)
+
+        if ret_main is not None and ret_flip is not None and len(ret_main) == len(ret_flip):
+            return [(a + torch.flip(b, dims=[-1])) * 0.5 for a, b in zip(ret_main, ret_flip)]
+        return ret_main
+
+    def reset_tta_state(self):
+        self._flip_state = _EMPTY_ONLINE_STATE
 
     def load_model(self, model_type, resolution=None, device=None):
         # load aa model
@@ -157,6 +206,7 @@ class VideoDepthAnythingModel(BaseDepthModel):
         self.model.reset_state()
         self.input_frame_count = 0
         self.output_frame_count = 0
+        self.reset_tta_state()
 
     def reset(self):
         self.reset_state()
@@ -192,9 +242,11 @@ class VideoDepthAnythingModel(BaseDepthModel):
 
         return out
 
-    def infer_with_normalize(self, x, pts, reset_pts, enable_amp=True, edge_dilation=0, depth_aa=None, **kwargs):
+    def infer_with_normalize(self, x, pts, reset_pts, enable_amp=True, edge_dilation=0, depth_aa=None,
+                             tta=False, **kwargs):
         assert x.ndim == 4
         depth_aa = self.depth_aa if depth_aa else None
+        self.tta = tta
 
         B = x.shape[0]
         x = batch_preprocess(x, self.model.prep_lower_bound,
@@ -203,7 +255,7 @@ class VideoDepthAnythingModel(BaseDepthModel):
         outputs = []
         for i in range(B):
             self.input_frame_count += 1
-            ret = self.model.infer(x[i], use_amp=enable_amp)
+            ret = self._model_infer_tta(x[i], use_amp=enable_amp)
             if ret is not None:
                 self.output_frame_count += len(ret)
                 out = torch.stack(ret)
@@ -242,7 +294,7 @@ class VideoDepthAnythingModel(BaseDepthModel):
     def _flush(self, enable_amp=True):
         results = []
         while self.output_frame_count < self.input_frame_count:
-            ret = self.model.infer(None, use_amp=enable_amp)
+            ret = self._model_infer_tta(None, use_amp=enable_amp)
             if ret is None:
                 continue
             results += ret

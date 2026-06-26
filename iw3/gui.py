@@ -865,9 +865,11 @@ class MainFrame(wx.Frame):
         self.chk_tta = wx.CheckBox(self.grp_processor, label=T("TTA"), name="chk_tta")
         self.chk_tta.SetToolTip(
             T("Use flip augmentation to improve depth quality (slow). Runs the depth model on both the "
-              "normal and mirrored image and blends the result, often a little cleaner/more accurate, at "
-              "roughly double the processing time. Recommended: off for long videos, worth trying for a "
-              "single hero image."))
+              "normal and mirrored image/video and blends the result, often a little cleaner/more "
+              "accurate, at roughly double the processing time. Works for both image depth models and "
+              "video (VDA_*) models. Recommended: off for long videos (Flicker Reduction already covers "
+              "similar ground there, for free) — worth trying for a single hero image, or a short clip "
+              "where the extra quality matters more than the time cost."))
         self.chk_fp16 = wx.CheckBox(self.grp_processor, label=T("FP16"), name="chk_fp16")
         self.chk_fp16.SetToolTip(
             T("Use FP16 (fast) — runs the AI math at lower numeric precision, which is significantly "

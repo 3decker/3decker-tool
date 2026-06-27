@@ -852,14 +852,14 @@ class MainFrame(wx.Frame):
 
         self.lbl_batch_size = wx.StaticText(self.grp_processor, label=T("Depth") + " " + T("Batch Size"))
         self.cbo_batch_size = wx.ComboBox(self.grp_processor,
-                                          choices=[str(n) for n in (64, 32, 16, 14, 13, 12, 10, 9, 8, 4, 3, 2, 1)],
+                                          choices=[str(n) for n in (64, 32, 16, 14, 13, 12, 11, 10, 9, 8, 4, 3, 2, 1)],
                                           name="cbo_zoed_batch_size")
         self.cbo_batch_size.SetEditable(False)
         self.cbo_batch_size.SetToolTip(
             T("Video Only. How many frames are sent to the depth model at once. Higher = faster overall "
               "but uses more VRAM. Lower it if you run out of memory; raise it if you have VRAM to spare "
               "and want faster processing."))
-        self.cbo_batch_size.SetSelection(11)  # "2"
+        self.cbo_batch_size.SetSelection(12)  # "2"
 
         self.lbl_max_workers = wx.StaticText(self.grp_processor, label=T("Worker Threads"))
         self.cbo_max_workers = wx.ComboBox(self.grp_processor,

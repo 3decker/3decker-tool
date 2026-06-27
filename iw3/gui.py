@@ -754,7 +754,9 @@ class MainFrame(wx.Frame):
 
         self.chk_denoise = wx.CheckBox(self.grp_video_filter, label=T("Denoise"), name="chk_denoise")
         self.chk_denoise.SetValue(False)
-        self.chk_denoise.SetToolTip(T("Apply temporal denoising before depth estimation. Reduces film grain for better 3D quality on old films."))
+        self.chk_denoise.SetToolTip(T("Apply temporal denoising before depth estimation. Reduces film grain for "
+                                      "better 3D quality on old films. Runs as a one-time extra ffmpeg pass before "
+                                      "conversion starts, so it adds a bit of extra time up front."))
 
         self.chk_preview = wx.CheckBox(self.grp_video_filter, label=T("Preview Mode"), name="chk_preview")
         self.chk_preview.SetValue(False)

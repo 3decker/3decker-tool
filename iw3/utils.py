@@ -284,6 +284,55 @@ def _tonemap_hdr_to_sdr(input_filename, args):
     return tmp_sdr, tmp_sdr
 
 
+def _denoise_preprocess(input_filename, args):
+    """Pre-denoises the source using the standalone bundled ffmpeg.exe's real hqdn3d filter,
+    producing a clean intermediate file before iw3's own pipeline starts. This can't be done
+    as a per-frame filter inside iw3's own pipeline -- PyAV's bundled libavfilter doesn't have
+    hqdn3d, and the GPU tensor-frame decode path (used whenever HWAccel=cuda) only supports a
+    small fixed set of geometric filters with no denoiser at all -- so neither internal path
+    can run a denoiser reliably. The standalone ffmpeg.exe does have hqdn3d, so this runs as a
+    one-time pass through that, the same way HDR-to-SDR tonemap does.
+
+    Returns (path_to_actually_process, temp_file_to_clean_up_or_None).
+    """
+    if not getattr(args, "denoise", False):
+        return input_filename, None
+
+    ffmpeg_bin = _get_ffmpeg_bin()
+    out_dir = path.dirname(path.abspath(input_filename))
+    tmp_denoised = path.join(
+        out_dir, "_iw3_denoise_" + path.splitext(path.basename(input_filename))[0] + ".mkv")
+
+    trim_args = []
+    if getattr(args, "start_time", None):
+        trim_args += ["-ss", str(parse_time(args.start_time))]
+    if getattr(args, "end_time", None):
+        trim_args += ["-to", str(parse_time(args.end_time))]
+
+    print("[denoise] pre-denoising source with hqdn3d before processing -- this adds one "
+          "extra encoding pass.", file=sys.stderr)
+    try:
+        subprocess.run(
+            [ffmpeg_bin, "-y", *trim_args, "-i", str(input_filename),
+             "-vf", "hqdn3d=1:1:6:6",
+             "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "12",
+             "-c:a", "copy", tmp_denoised],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[denoise] pre-denoise failed, processing the original source instead: "
+              f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        return input_filename, None
+
+    if trim_args:
+        # The intermediate file already covers exactly [start_time, end_time]; clear those
+        # so the rest of the pipeline doesn't try to trim an already-trimmed file again.
+        args.start_time = None
+        args.end_time = None
+
+    return tmp_denoised, tmp_denoised
+
+
 def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin, hdr10plus_bin, tmp_dir):
     """Inject DV RPU and/or HDR10+ into the output HEVC, then remux back into the container."""
     import json as _json
@@ -665,11 +714,11 @@ def preprocess_image(x, args):
 def add_preprocess_vf(vf_org, args) -> str:
     vf = []
 
-    if getattr(args, "denoise", False):
-        # NOTE: hqdn3d is not available in PyAV's bundled libavfilter ("no filter hqdn3d").
-        # atadenoise (adaptive temporal averaging denoiser) is available and gives a similar
-        # film-grain reduction effect.
-        vf.append("atadenoise=0a=0.04:0b=0.08:1a=0.04:1b=0.08:2a=0.04:2b=0.08")
+    # NOTE: Denoise is handled as a one-time ffmpeg pre-pass in _denoise_preprocess(), not
+    # as a per-frame filter here -- PyAV's bundled libavfilter doesn't have hqdn3d, and the
+    # GPU tensor-frame decode path (used whenever HWAccel=cuda) only supports a small fixed
+    # set of filters (scale/crop/bob/transpose/lut3d/setparams) that doesn't include any
+    # denoiser at all, so no per-frame filter choice here works in every decode mode.
 
     # Rotation
     if getattr(args, "rotate_left", False):
@@ -2170,6 +2219,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     depth_model.disable_ema()
 
     input_filename, hdr_tmp_file = _tonemap_hdr_to_sdr(input_filename, args)
+    input_filename, denoise_tmp_file = _denoise_preprocess(input_filename, args)
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -2188,11 +2238,12 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
 
             process_video_with_resume(input_filename, output_path, args, depth_model, side_model)
     finally:
-        if hdr_tmp_file and path.exists(hdr_tmp_file):
-            try:
-                os.remove(hdr_tmp_file)
-            except Exception:
-                pass
+        for tmp_file in (hdr_tmp_file, denoise_tmp_file):
+            if tmp_file and path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except Exception:
+                    pass
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -3197,7 +3248,8 @@ def create_parser(required_true=True):
     parser.add_argument("--upgrade-pix-fmt", type=int, default=None, choices=[10, 12],
                         help="upgrade 8-bit source to 10-bit or 12-bit output pixel format")
     parser.add_argument("--denoise", action="store_true",
-                        help="apply temporal denoising (atadenoise) before depth estimation to reduce film grain artifacts")
+                        help="apply temporal denoising (hqdn3d via a one-time ffmpeg pre-pass) before depth "
+                             "estimation to reduce film grain artifacts")
     parser.add_argument("--preview", action="store_true",
                         help="generate a quick 1fps/256p preview of the first 60 seconds to check 3D settings")
     # Deprecated

@@ -666,7 +666,10 @@ def add_preprocess_vf(vf_org, args) -> str:
     vf = []
 
     if getattr(args, "denoise", False):
-        vf.append("hqdn3d=1:1:6:6")
+        # NOTE: hqdn3d is not available in PyAV's bundled libavfilter ("no filter hqdn3d").
+        # atadenoise (adaptive temporal averaging denoiser) is available and gives a similar
+        # film-grain reduction effect.
+        vf.append("atadenoise=0a=0.04:0b=0.08:1a=0.04:1b=0.08:2a=0.04:2b=0.08")
 
     # Rotation
     if getattr(args, "rotate_left", False):
@@ -3194,7 +3197,7 @@ def create_parser(required_true=True):
     parser.add_argument("--upgrade-pix-fmt", type=int, default=None, choices=[10, 12],
                         help="upgrade 8-bit source to 10-bit or 12-bit output pixel format")
     parser.add_argument("--denoise", action="store_true",
-                        help="apply temporal denoising (hqdn3d) before depth estimation to reduce film grain artifacts")
+                        help="apply temporal denoising (atadenoise) before depth estimation to reduce film grain artifacts")
     parser.add_argument("--preview", action="store_true",
                         help="generate a quick 1fps/256p preview of the first 60 seconds to check 3D settings")
     # Deprecated

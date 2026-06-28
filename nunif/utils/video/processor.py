@@ -4,6 +4,7 @@ import math
 import os
 import sys
 import time
+from fractions import Fraction
 from os import path
 from types import GeneratorType
 from typing import List
@@ -904,7 +905,22 @@ def export_audio(
                 output_container.mux(packet)
             else:
                 for frame in safe_decode(packet):
-                    frame.pts = None
+                    if start_time is not None and frame.pts is not None:
+                        # NOTE: don't assume the first packet found after seeking IS start_time.
+                        # Some sources (e.g. certain BluRay "HYBRID REMUX" releases) have audio
+                        # elementary streams whose first decodable packet is well after pts=0 even
+                        # though the container's start_time metadata claims 0 -- blindly resetting
+                        # to a sequential pts here would silently shift all audio earlier than it
+                        # should be relative to the video. Anchor each frame to its true elapsed
+                        # time since start_time instead, so any real gap becomes silence/an
+                        # offset in the output rather than disappearing.
+                        relative_seconds = float(frame.pts * frame.time_base) - start_time
+                        if relative_seconds < 0:
+                            continue
+                        frame.time_base = Fraction(1, audio_input_stream.rate)
+                        frame.pts = round(relative_seconds * audio_input_stream.rate)
+                    else:
+                        frame.pts = None
                     enc_packet = audio_output_stream.encode(frame)
                     if enc_packet:
                         output_container.mux(enc_packet)

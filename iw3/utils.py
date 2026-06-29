@@ -596,7 +596,8 @@ def make_output_filename(input_filename, args, video=False):
         metadata = (f"_{args.depth_model}_{resolution}{tta}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}_ipd{to_deciaml(args.ipd_offset, 1)}{ema}{bitrate}")
+                    f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}_"
+                    f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{bitrate}")
     else:
         metadata = ""
 

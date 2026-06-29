@@ -118,7 +118,7 @@ def _inject_dovi_rpu(output_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_dir):
              "-i", str(output_path),
              "-i", hevc_dv,
              "-map", "1:v", "-map", "0:a?",
-             "-c", "copy", final_tmp],
+             "-c", "copy", "-copyts", final_tmp],
             check=True, capture_output=True,
         )
         os.replace(final_tmp, output_path)
@@ -404,7 +404,7 @@ def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi
                  "-i", str(output_path),
                  "-i", current,
                  "-map", "1:v", "-map", "0:a?",
-                 "-c", "copy", final_tmp],
+                 "-c", "copy", "-copyts", final_tmp],
                 check=True, capture_output=True,
             )
         os.replace(final_tmp, output_path)
@@ -2073,9 +2073,14 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
 
     try:
         if has_audio:
+            # NOTE: -copyts is required here -- ffmpeg normally resets each input's start time
+            # to 0 when muxing multiple separate input files together, which would silently
+            # discard any deliberate leading gap export_audio() preserved for sources whose
+            # audio elementary stream doesn't truly start at the video's pts=0 (see the
+            # frame.pts handling in export_audio()).
             subprocess.run(
                 [ffmpeg_bin, "-y", "-i", video_only_filename, "-i", audio_tmp,
-                 "-map", "0:v", "-map", "1:a", "-c", "copy", "-shortest", output_filename],
+                 "-map", "0:v", "-map", "1:a", "-c", "copy", "-copyts", "-shortest", output_filename],
                 check=True, capture_output=True,
             )
         else:

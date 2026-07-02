@@ -309,19 +309,65 @@ def _denoise_preprocess(input_filename, args):
     if getattr(args, "end_time", None):
         trim_args += ["-to", str(parse_time(args.end_time))]
 
+    # Get source duration for progress percentage
+    try:
+        import av as _av
+        with _av.open(str(input_filename), metadata_errors="ignore") as _c:
+            _dur = float(_c.duration) / 1000000.0 if _c.duration else None
+        start_sec = parse_time(getattr(args, "start_time", None)) if getattr(args, "start_time", None) else 0.0
+        end_sec = parse_time(getattr(args, "end_time", None)) if getattr(args, "end_time", None) else _dur
+        total_sec = (end_sec - start_sec) if (end_sec is not None) else _dur
+    except Exception:
+        total_sec = None
+
+    tqdm_fn = (getattr(args, "state", None) or {}).get("tqdm_fn") or tqdm
+    stop_event = (getattr(args, "state", None) or {}).get("stop_event")
+    desc = f"{path.basename(input_filename)}: Denoise"
+    pbar = tqdm_fn(desc=desc, total=100, ncols=len(desc) + 60)
+
     print("[denoise] pre-denoising source with hqdn3d before processing -- this adds one "
           "extra encoding pass.", file=sys.stderr)
     try:
-        subprocess.run(
+        # Use -progress pipe:2 so ffmpeg emits machine-readable key=value progress
+        # lines on stderr (e.g. out_time_ms=12345) that we can parse to drive the
+        # tqdm bar without relying on the carriage-return terminal output format.
+        proc = subprocess.Popen(
             [ffmpeg_bin, "-y", *trim_args, "-i", str(input_filename),
              "-vf", "hqdn3d=1:1:6:6",
              "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "12",
-             "-c:a", "copy", tmp_denoised],
-            check=True, capture_output=True,
+             "-c:a", "copy", "-progress", "pipe:2", tmp_denoised],
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
         )
+        last_pct = 0
+        for line in proc.stderr:
+            if stop_event is not None and stop_event.is_set():
+                proc.terminate()
+                break
+            line = line.strip()
+            if line.startswith("out_time_ms=") and total_sec and total_sec > 0:
+                try:
+                    us = int(line.split("=", 1)[1])  # value is microseconds despite the name
+                    current_sec = us / 1000000.0 - start_sec
+                    pct = min(int(current_sec / total_sec * 100), 100)
+                    if pct > last_pct:
+                        pbar.update(pct - last_pct)
+                        last_pct = pct
+                except (ValueError, IndexError):
+                    pass
+        proc.wait()
+        pbar.update(100 - last_pct)
+        pbar.close()
+        if proc.returncode not in (0, None) and not (stop_event is not None and stop_event.is_set()):
+            raise subprocess.CalledProcessError(proc.returncode, proc.args)
     except subprocess.CalledProcessError as e:
-        print(f"[denoise] pre-denoise failed, processing the original source instead: "
-              f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        pbar.close()
+        print(f"[denoise] pre-denoise failed, processing the original source instead.",
+              file=sys.stderr)
+        return input_filename, None
+    except Exception as e:
+        pbar.close()
+        print(f"[denoise] pre-denoise error: {e}", file=sys.stderr)
         return input_filename, None
 
     if trim_args:

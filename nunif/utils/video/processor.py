@@ -326,13 +326,23 @@ def _process_video(
             if packet.stream.type == "video":
                 for frame in safe_decode(packet, strict=disable_software_fallback):
                     frame = fix_frame_color_av17(frame, sw_format)
-                    if start_time is not None and frame.pts is not None:
-                        if float(frame.pts * video_input_stream.time_base) < start_time:
-                            continue
+                    # NOTE: when resuming a previously interrupted segment (start_time is set),
+                    # the source seek lands at the nearest keyframe BEFORE start_time. Frames
+                    # between the keyframe and start_time must still flow through the depth
+                    # model for temporal warm-up context (VDA_L and similar video depth models
+                    # carry state between frames — if they start cold at the exact resume point
+                    # the depth is wrong for several seconds, which viewers perceive as a sync
+                    # artifact). We pass these warmup frames through everything but suppress
+                    # their output to the encoder so no duplicate/extra video ends up in the
+                    # segment file.
+                    is_warmup_frame = (start_time is not None and frame.pts is not None and
+                                       float(frame.pts * video_input_stream.time_base) < start_time)
                     for out_frame in video_preprocessor.update(frame):
                         if enable_gc_collect and (frame_count := frame_count + 1) % GC_INTERVAL == 0:
                             gc.collect()
                         for new_frame in get_new_frames(frame_callback(out_frame)):
+                            if is_warmup_frame:
+                                continue  # depth model warmed up, don't encode this frame
                             reformatted_frame = output_reformatter(new_frame)
                             if uninitialized:
                                 set_output_size_and_flash(

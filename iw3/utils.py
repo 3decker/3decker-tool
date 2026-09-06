@@ -3,6 +3,7 @@ import traceback
 import os
 import subprocess
 from os import path
+from datetime import datetime
 import warnings
 import numpy as np
 import torch
@@ -87,6 +88,56 @@ def _get_ffmpeg_bin():
     except Exception:
         pass
     return shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _run_waifu2x_upscale(output_path, args):
+    """Optionally invokes waifu2x's own CLI as a subprocess against a just-finished
+    iw3 output, when the user explicitly opted in (GUI: "Upscale with waifu2x after
+    conversion" / --waifu2x-upscale). Runs as a genuinely separate subprocess rather
+    than an in-process import+call so waifu2x's own model loading never competes for
+    the same GPU memory iw3's depth/stereo models were just using in this same
+    process -- matches this project's existing convention of treating heavyweight
+    tools as subprocesses (see CODING_STANDARDS.md CS-SUBPROCESS-001). Uses
+    sys.executable (the same bundled Python already running this process) with -m,
+    so there's no separate interpreter path to discover the way ffmpeg/dovi_tool
+    need -- only the working directory needs to be pointed at the nunif/ package
+    root explicitly, since a subprocess does not inherit this process's in-memory
+    sys.path.
+
+    Returns the upscaled file's path on success, or None (having already logged why)
+    on failure -- a failure here must never be mistaken for the conversion itself
+    having failed, since output_path is untouched either way. Verifies the output
+    file actually exists rather than trusting the subprocess's exit code alone (see
+    the HDR extraction silent-failure lesson in docs/ai/AI_KNOWN_ISSUES.md)."""
+    if not getattr(args, "waifu2x_upscale", False):
+        return None
+    method = getattr(args, "waifu2x_method", None) or "noise_scale2x"
+    noise_level = getattr(args, "waifu2x_noise_level", None)
+    if noise_level is None:
+        noise_level = 1
+    style = getattr(args, "waifu2x_style", None) or "photo"
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+
+    base, ext = path.splitext(str(output_path))
+    upscaled_path = f"{base}_w2x{ext}"
+    cmd = [sys.executable, "-m", "waifu2x.cli",
+           "-i", str(output_path), "-o", upscaled_path,
+           "-m", method, "-n", str(int(noise_level)),
+           "--style", style, "-y"]
+
+    print(f"[iw3] Upscaling finished output with waifu2x ({method}, noise={noise_level}, "
+          f"style={style})...", file=sys.stderr)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace").strip()
+        print(f"[iw3] waifu2x upscale failed: {msg[:300]}", file=sys.stderr)
+        return None
+    if not path.exists(upscaled_path):
+        print("[iw3] waifu2x upscale exited 0 but produced no output file", file=sys.stderr)
+        return None
+    print(f"[iw3] waifu2x upscale done: {upscaled_path}", file=sys.stderr)
+    return upscaled_path
 
 
 def _extract_dovi_rpu(input_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_hevc):
@@ -379,46 +430,148 @@ def _denoise_preprocess(input_filename, args):
     return tmp_denoised, tmp_denoised
 
 
-def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin, hdr10plus_bin, tmp_dir):
-    """Inject DV RPU and/or HDR10+ into the output HEVC, then remux back into the container."""
+_HEVC_ENCODER_NAMES = {"libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf"}
+
+
+def _inject_hdr_rpu(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin, hdr10plus_bin, tmp_dir,
+                     configured_video_codec=None):
+    """Phase 1 of DV/HDR10+ injection: extract the output's video-only HEVC stream and
+    inject RPU and/or HDR10+ into it. Returns (injected_hevc_path, fps_str, reason) --
+    reason is None on success, or a human-readable string explaining why injection was
+    declined/failed on failure (injected_hevc_path is None in that case). The caller is
+    responsible for remuxing the result back into the container via
+    _remux_injected_hevc, and that call is what deletes the returned file.
+
+    `reason` exists specifically so the caller can put the real cause into
+    iw3_step_timing.log -- this previously only ever printed to stderr, which is
+    invisible in the GUI's windowless (pythonw) process, so a failure here looked
+    like an unexplained instant no-op with no way to diagnose it after the fact.
+
+    `configured_video_codec` (e.g. args.video_codec, pass-through from whatever
+    Final Render was actually told to encode with) lets the codec check be trusted
+    instead of re-read from disk -- see the two-tier logic below for why this
+    matters, found necessary by real testing on 2026-09-06."""
     import json as _json
+    import time as _time
+
+    def _wait_for_file_stable(p, checks=3, interval=2.0, max_wait=30.0):
+        """Waits until the file's size stops changing across `checks` consecutive
+        samples `interval` seconds apart -- a quick sanity check, NOT the main
+        defense (see the much longer ffprobe retry budget below): a real MKV job
+        was observed to fail ffprobe's stream check with "no usable video stream"
+        (not a crash, not a codec mismatch -- ffprobe ran fine and just found
+        nothing) for several real minutes after Final Render reported done and the
+        file's size had already stopped changing -- confirmed by manually re-running
+        the exact same check ~5 minutes later, which then worked first try. So file
+        SIZE stabilizing is necessary but not sufficient; something (most likely
+        antivirus real-time scanning a large freshly-written video file on Windows,
+        based on everything else already ruled out for this project) can still hold
+        the file in a not-fully-readable state well after its size looks final.
+        Returns True if size stabilized within max_wait, False otherwise (caller
+        proceeds anyway rather than waiting forever -- this is a head start against
+        the common case, not a guarantee)."""
+        start = _time.monotonic()
+        last_size = -1
+        stable = 0
+        while _time.monotonic() - start < max_wait:
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                size = -1
+            if size == last_size and size > 0:
+                stable += 1
+                if stable >= checks:
+                    return True
+            else:
+                stable = 0
+            last_size = size
+            _time.sleep(interval)
+        return False
+
     ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe").replace("ffmpeg.exe", "ffprobe.exe")
-    # Verify the output video is HEVC and get its frame rate
     codec = None
     fps_str = "30fps"
-    try:
-        probe = subprocess.run(
-            [ffprobe_bin, "-v", "quiet", "-print_format", "json", "-show_streams", str(output_path)],
-            capture_output=True, text=True, timeout=30,
-        )
-        streams = _json.loads(probe.stdout).get("streams", [])
-        vid = next((s for s in streams if s.get("codec_type") == "video"), None)
-        if vid:
-            codec = vid.get("codec_name")
-            r = vid.get("r_frame_rate", "30/1")
+    last_error = None
+    trusted_hevc = configured_video_codec in _HEVC_ENCODER_NAMES
+
+    if trusted_hevc:
+        # Trust what Final Render was actually configured to encode with, instead of
+        # re-reading the codec back from the file it just wrote. Real testing on
+        # 2026-09-06 found ffprobe reporting "no usable video stream" on a file that
+        # (a) was confirmed genuinely HEVC by a completely separate process reading
+        # it minutes later, and (b) STILL failed this same check from inside the
+        # SAME process after a full ~5-minute retry budget was exhausted -- pointing
+        # at something process-local (write buffering not yet visible to a re-open
+        # from the same process, not a generic external lock a longer wait would
+        # clear) rather than a simply slow external lock. Re-reading the codec back
+        # at all is unnecessary anyway: we already know what we told the encoder to
+        # produce. Still makes ONE quick attempt to read back the real frame rate
+        # for accurate remuxing, but a failure there is NOT fatal -- falls back to
+        # the "30fps" default rather than blocking injection entirely on it.
+        codec = "hevc"
+        try:
+            probe = subprocess.run(
+                [ffprobe_bin, "-v", "quiet", "-print_format", "json", "-show_streams", str(output_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            streams = _json.loads(probe.stdout).get("streams", [])
+            vid = next((s for s in streams if s.get("codec_type") == "video"), None)
+            if vid:
+                r = vid.get("r_frame_rate", "30/1")
+                try:
+                    num, den = r.split("/")
+                    fps_str = f"{int(num)/int(den):.6f}fps"
+                except Exception:
+                    fps_str = f"{r}fps"
+        except Exception:
+            pass  # fps_str stays at the safe default -- codec is already trusted
+    else:
+        # Unknown/non-HEVC-family configured codec, or the caller didn't pass one --
+        # can't trust a setting we don't recognize, so fall back to the full
+        # wait-and-retry verification against the actual file.
+        _wait_for_file_stable(str(output_path))
+        attempts = 20
+        for attempt in range(attempts):
             try:
-                num, den = r.split("/")
-                fps_str = f"{int(num)/int(den):.6f}fps"
-            except Exception:
-                fps_str = f"{r}fps"
-    except Exception:
-        pass
-    if codec != "hevc":
-        print(f"--preserve-dowi: output codec is '{codec}', not hevc — "
-              f"DV/HDR10+ injection requires HEVC output (use --video-codec libx265).", file=sys.stderr)
-        return
+                probe = subprocess.run(
+                    [ffprobe_bin, "-v", "quiet", "-print_format", "json", "-show_streams", str(output_path)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                streams = _json.loads(probe.stdout).get("streams", [])
+                vid = next((s for s in streams if s.get("codec_type") == "video"), None)
+                if vid:
+                    codec = vid.get("codec_name")
+                    r = vid.get("r_frame_rate", "30/1")
+                    try:
+                        num, den = r.split("/")
+                        fps_str = f"{int(num)/int(den):.6f}fps"
+                    except Exception:
+                        fps_str = f"{r}fps"
+                if not codec:
+                    last_error = f"ffprobe returned no usable video stream (stderr: {probe.stderr.strip()[:200]})"
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+            if codec:
+                break
+            if attempt < attempts - 1:
+                _time.sleep(15)
+        if codec != "hevc":
+            reason = (f"could not confirm HEVC output after {attempt + 1} attempt(s) over ~{15 * attempt}s "
+                      f"(plus an earlier file-stability wait) "
+                      f"(codec detected: {codec!r}{'; last error: ' + last_error if last_error else ''}) -- "
+                      f"DV/HDR10+ injection requires HEVC output (use --video-codec libx265)")
+            print(f"--preserve-dowi: {reason}.", file=sys.stderr)
+            return None, None, reason
 
     hevc_out = path.join(tmp_dir, "_iw3_out.hevc")
     hevc_dv = path.join(tmp_dir, "_iw3_out_dv.hevc")
     hevc_h10p = path.join(tmp_dir, "_iw3_out_h10p.hevc")
-    final_tmp = path.splitext(output_path)[0] + ".hdr_inject" + path.splitext(output_path)[1]
+    subprocess.run(
+        [ffmpeg_bin, "-y", "-i", str(output_path), "-c:v", "copy", "-an", "-f", "hevc", hevc_out],
+        check=True, capture_output=True,
+    )
+    current = hevc_out
     try:
-        subprocess.run(
-            [ffmpeg_bin, "-y", "-i", str(output_path), "-c:v", "copy", "-an", "-f", "hevc", hevc_out],
-            check=True, capture_output=True,
-        )
-        current = hevc_out
-
         if rpu_path and path.exists(str(rpu_path)):
             subprocess.run(
                 [dovi_bin, "inject-rpu", "-i", current, "-r", str(rpu_path), "-o", hevc_dv],
@@ -432,7 +585,24 @@ def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi
                 check=True, capture_output=True,
             )
             current = hevc_h10p
+    finally:
+        # clean up whichever intermediate(s) did NOT end up being the one returned
+        for f in (hevc_out, hevc_dv, hevc_h10p):
+            if f != current and path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+    return current, fps_str, None
 
+
+def _remux_injected_hevc(output_path, injected_hevc_path, fps_str, ffmpeg_bin, tmp_dir):
+    """Phase 2 of DV/HDR10+ injection: remux an already-injected HEVC stream (from
+    _inject_hdr_rpu) back into output_path's container in place of its original video
+    stream. Deletes injected_hevc_path (and its own temp file) when done, regardless
+    of success or failure."""
+    final_tmp = path.splitext(output_path)[0] + ".hdr_inject" + path.splitext(output_path)[1]
+    try:
         ext = path.splitext(output_path)[1].lower()
         mkvmerge_bin = _find_mkvmerge() if ext == ".mkv" else None
         if mkvmerge_bin:
@@ -440,7 +610,7 @@ def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi
             subprocess.run(
                 [mkvmerge_bin, "-o", final_tmp,
                  "--default-duration", f"0:{fps_str}",
-                 current,
+                 injected_hevc_path,
                  "--no-video", str(output_path)],
                 check=True, capture_output=True,
             )
@@ -448,19 +618,35 @@ def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi
             subprocess.run(
                 [ffmpeg_bin, "-y",
                  "-i", str(output_path),
-                 "-i", current,
+                 "-i", injected_hevc_path,
                  "-map", "1:v", "-map", "0:a?",
                  "-c", "copy", "-copyts", final_tmp],
                 check=True, capture_output=True,
             )
         os.replace(final_tmp, output_path)
     finally:
-        for f in (hevc_out, hevc_dv, hevc_h10p, final_tmp):
-            if path.exists(f):
+        for f in (injected_hevc_path, final_tmp):
+            if f and path.exists(f):
                 try:
                     os.remove(f)
                 except Exception:
                     pass
+
+
+def _inject_hdr_metadata(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin, hdr10plus_bin, tmp_dir,
+                          configured_video_codec=None):
+    """Inject DV RPU and/or HDR10+ into the output HEVC, then remux back into the
+    container. Convenience wrapper combining _inject_hdr_rpu + _remux_injected_hevc in
+    one call, for callers (a normal conversion) that don't need the two phases
+    reported as separate progress steps the way Dual-Pass Depth Blend does."""
+    # _inject_hdr_rpu already prints its own reason to stderr on failure -- nothing
+    # extra needed here, just don't crash on the 3rd (reason) element it now returns.
+    injected_hevc, fps_str, _reason = _inject_hdr_rpu(output_path, rpu_path, hdr10plus_json,
+                                                       ffmpeg_bin, dovi_bin, hdr10plus_bin, tmp_dir,
+                                                       configured_video_codec=configured_video_codec)
+    if injected_hevc is None:
+        return
+    _remux_injected_hevc(output_path, injected_hevc, fps_str, ffmpeg_bin, tmp_dir)
 
 
 _UPGRADE_PIX_FMT_MAP = {
@@ -618,8 +804,13 @@ def make_output_filename(input_filename, args, video=False):
             tta = "TTA_"
         else:
             tta = ""
+        if args.depth_aa:
+            daa = "AA_"
+        else:
+            daa = ""
         if args.ema_normalize and video:
-            ema = f"_ema{to_deciaml(args.ema_decay, 100, 2)}b{args.ema_buffer}"
+            ema_ma = "ma" if getattr(args, "ema_motion_adaptive", False) else ""
+            ema = f"_ema{to_deciaml(args.ema_decay, 100, 2)}b{args.ema_buffer}{ema_ma}"
         else:
             ema = ""
         if isinstance(args.edge_dilation, (list, tuple)):
@@ -639,15 +830,257 @@ def make_output_filename(input_filename, args, video=False):
         else:
             bitrate = ""
 
-        metadata = (f"_{args.depth_model}_{resolution}{tta}{args.method}_"
-                    f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
+        if getattr(args, "background_pop", 0.0) > 0:
+            bp = f"_bp{args.background_pop}"
+            if getattr(args, "background_pop_coverage", 0.15) != 0.15:
+                bp += f"c{to_deciaml(args.background_pop_coverage, 100, 2)}"
+        else:
+            bp = ""
+        if getattr(args, "foreground_divergence", None) is not None:
+            fd = f"_fd{to_deciaml(args.foreground_divergence, 10, 2)}"
+        else:
+            fd = ""
+        if getattr(args, "background_divergence", None) is not None:
+            bd = f"_bd{to_deciaml(args.background_divergence, 10, 2)}"
+        else:
+            bd = ""
+        if getattr(args, "depth_refine", False):
+            drefine = "_dr"
+        else:
+            drefine = ""
+        if getattr(args, "temporal_stabilize", False) and video:
+            ts_strength = getattr(args, "temporal_stabilize_strength", 0.7) or 0.7
+            tstab = f"_ts{to_deciaml(ts_strength, 100, 2)}"
+        else:
+            tstab = ""
+        if getattr(args, "depth_blend", False):
+            db_strength = getattr(args, "depth_blend_strength", 1.0) or 1.0
+            db_region = getattr(args, "depth_blend_region", None) or "detail"
+            if db_region == "detail":
+                db_region_tag = "detail"
+            else:
+                db_percent = getattr(args, "depth_blend_region_percent", 25.0) or 25.0
+                db_region_tag = f"{'fg' if db_region == 'foreground' else 'bg'}{int(db_percent)}"
+            dblend = (f"_db{getattr(args, 'depth_blend_model', None) or 'VDA_L'}"
+                      f"s{to_deciaml(db_strength, 100, 2)}{db_region_tag}")
+            # Feather/Bilateral/CLAHE are optional post-processing on top of the blend
+            # above -- each only appears in the name when actually enabled/non-default,
+            # same convention as everything else here, so the common case (all off)
+            # doesn't grow the filename at all.
+            db_feather = int(getattr(args, "depth_blend_feather_blur", 0) or 0)
+            if db_feather > 0:
+                dblend += f"f{db_feather}"
+            if getattr(args, "depth_blend_bilateral", False):
+                bi_d = int(getattr(args, "depth_blend_bilateral_d", 12) or 12)
+                bi_c = getattr(args, "depth_blend_bilateral_sigma_color", 75.0) or 75.0
+                bi_s = getattr(args, "depth_blend_bilateral_sigma_space", 75.0) or 75.0
+                dblend += f"bi{bi_d}c{int(bi_c)}s{int(bi_s)}"
+            if getattr(args, "depth_blend_clahe", False):
+                cl_clip = getattr(args, "depth_blend_clahe_clip", 2.0) or 2.0
+                cl_tile = int(getattr(args, "depth_blend_clahe_tile", 8) or 8)
+                dblend += f"cl{to_deciaml(cl_clip, 10, 1)}t{cl_tile}"
+            if getattr(args, "depth_blend_align", False):
+                dblend += "algn"
+                db_align_decay = getattr(args, "depth_blend_align_decay", 0.9) or 0.9
+                if db_align_decay != 0.9:
+                    dblend += f"d{to_deciaml(db_align_decay, 100, 2)}"
+            db_edge_supp = getattr(args, "depth_blend_edge_suppression", 0.5) or 0.5
+            if db_edge_supp != 0.5:
+                dblend += f"es{to_deciaml(db_edge_supp, 100, 2)}"
+        else:
+            dblend = ""
+
+        # Inpaint-specific settings only mean anything for inpaint stereo methods, and
+        # only worth naming when they differ from the effective default -- otherwise
+        # every single inpaint-method filename would carry the same fixed boilerplate.
+        inpaint_methods = {"forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"}
+        if args.method in inpaint_methods:
+            inpaint_model_val = getattr(args, "inpaint_model", None) or "light_inpaint_v1"
+            im_tag = f"_im{inpaint_model_val}" if inpaint_model_val != "light_inpaint_v1" else ""
+
+            overlap = getattr(args, "inpaint_overlap_frames", None) or [3, 3]
+            overlap = list(overlap) if isinstance(overlap, (list, tuple)) else [overlap, overlap]
+            iof_tag = f"_iof{overlap[0]}x{overlap[-1]}" if overlap != [3, 3] else ""
+
+            mask_inner = getattr(args, "mask_inner_dilation", 0) or 0
+            mask_outer = getattr(args, "mask_outer_dilation", 0) or 0
+            imd_tag = f"_imd{mask_inner}x{mask_outer}" if (mask_inner or mask_outer) else ""
+
+            max_w = getattr(args, "inpaint_max_width", None)
+            imw_tag = f"_imw{int(max_w)}" if max_w else ""
+        else:
+            im_tag = iof_tag = imd_tag = imw_tag = ""
+
+        stereo_w = getattr(args, "stereo_width", None)
+        sw_tag = f"_sw{int(stereo_w)}" if stereo_w else ""
+
+        sbd_tag = "_sbd" if getattr(args, "scene_detect", False) and video else ""
+        psb_tag = "_psb" if getattr(args, "preserve_screen_border", False) else ""
+
+        edge_repair_strength = getattr(args, "edge_repair_strength", 0.0) or 0.0
+        er_tag = f"_er{to_deciaml(edge_repair_strength, 100, 2)}" if edge_repair_strength > 0.0 else ""
+
+        metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
+                    f"d{to_deciaml(args.divergence, 10, 2)}{fd}{bd}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}_"
-                    f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{bitrate}")
+                    f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}{bp}_"
+                    f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
+                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{bitrate}")
     else:
         metadata = ""
 
     return basename + metadata + auto_detect_suffix + (args.video_extension if video else get_image_ext(args.format))
+
+
+def _build_iw3_comment_metadata(args, video=True):
+    """Builds the iw3_* embedded COMMENT metadata string, mirroring make_output_filename's
+    own tags (same fields, same conditions) so renaming a file never loses the settings
+    it was made with. Shared by every code path that writes a final video file
+    (process_video_full, and process_config_video -- Depth Blend's Final Render) so
+    they can never drift out of sync with each other. Returns None if there is nothing
+    to record (should not happen in practice, since core settings are unconditional)."""
+    inpaint_methods = {"forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"}
+    comment_parts = []
+
+    comment_parts.append(f"iw3_depth_model={args.depth_model}")
+    if args.resolution:
+        comment_parts.append(f"iw3_resolution={args.resolution}")
+    if args.tta:
+        comment_parts.append("iw3_tta=1")
+    if args.depth_aa:
+        comment_parts.append("iw3_depth_aa=1")
+    comment_parts.append(f"iw3_method={args.method}")
+    comment_parts.append(f"iw3_divergence={args.divergence}")
+    if getattr(args, "foreground_divergence", None) is not None:
+        comment_parts.append(f"iw3_foreground_divergence={args.foreground_divergence}")
+    if getattr(args, "background_divergence", None) is not None:
+        comment_parts.append(f"iw3_background_divergence={args.background_divergence}")
+    comment_parts.append(f"iw3_convergence={args.convergence}")
+    if args.convergence_mode != "constant":
+        comment_parts.append(f"iw3_convergence_mode={args.convergence_mode}")
+        comment_parts.append(
+            f"iw3_convergence_smoothing={getattr(args, 'convergence_smoothing', 0.9)}")
+    if isinstance(args.edge_dilation, (list, tuple)):
+        comment_parts.append(f"iw3_edge_dilation={'x'.join(str(v) for v in args.edge_dilation)}")
+    else:
+        comment_parts.append(f"iw3_edge_dilation={args.edge_dilation}")
+    comment_parts.append(f"iw3_foreground_scale={args.foreground_scale}")
+    comment_parts.append(f"iw3_foreground_pop={args.foreground_pop}")
+    if getattr(args, "background_pop", 0.0) > 0:
+        comment_parts.append(f"iw3_background_pop={args.background_pop}")
+        if getattr(args, "background_pop_coverage", 0.15) != 0.15:
+            comment_parts.append(f"iw3_background_pop_coverage={args.background_pop_coverage}")
+    comment_parts.append(f"iw3_ipd_offset={args.ipd_offset}")
+    if video:
+        if args.video_codec == "libopenh264":
+            comment_parts.append(f"iw3_bitrate={args.video_bitrate}")
+        else:
+            comment_parts.append(f"iw3_crf={args.crf}")
+
+    if args.method in inpaint_methods:
+        comment_parts.append(f"iw3_inpaint_model={args.inpaint_model or 'light_inpaint_v1'}")
+        overlap = getattr(args, "inpaint_overlap_frames", None) or [3, 3]
+        overlap = list(overlap) if isinstance(overlap, (list, tuple)) else [overlap, overlap]
+        comment_parts.append(f"iw3_inpaint_overlap_frames={overlap[0]}x{overlap[-1]}")
+        mask_inner = getattr(args, "mask_inner_dilation", 0) or 0
+        mask_outer = getattr(args, "mask_outer_dilation", 0) or 0
+        if mask_inner or mask_outer:
+            comment_parts.append(f"iw3_mask_dilation={mask_inner}x{mask_outer}")
+        max_w = getattr(args, "inpaint_max_width", None)
+        if max_w:
+            comment_parts.append(f"iw3_inpaint_max_width={int(max_w)}")
+    if getattr(args, "depth_blend", False):
+        db_model = getattr(args, "depth_blend_model", None) or "VDA_L"
+        db_strength = getattr(args, "depth_blend_strength", 1.0) or 1.0
+        db_region = getattr(args, "depth_blend_region", None) or "detail"
+        db_region_desc = db_region
+        if db_region != "detail":
+            db_percent = getattr(args, "depth_blend_region_percent", 25.0) or 25.0
+            db_region_desc = f"{db_region}{int(db_percent)}"
+        comment_parts.append(
+            f"iw3_depth_blend_primary_model={args.depth_model} "
+            f"iw3_depth_blend_model={db_model} "
+            f"iw3_depth_blend_strength={db_strength} "
+            f"iw3_depth_blend_region={db_region_desc}"
+        )
+        db_feather = int(getattr(args, "depth_blend_feather_blur", 0) or 0)
+        if db_feather > 0:
+            comment_parts.append(f"iw3_depth_blend_feather_blur={db_feather}")
+        if getattr(args, "depth_blend_bilateral", False):
+            comment_parts.append(
+                f"iw3_depth_blend_bilateral_d={int(getattr(args, 'depth_blend_bilateral_d', 12) or 12)} "
+                f"iw3_depth_blend_bilateral_sigma_color="
+                f"{getattr(args, 'depth_blend_bilateral_sigma_color', 75.0) or 75.0} "
+                f"iw3_depth_blend_bilateral_sigma_space="
+                f"{getattr(args, 'depth_blend_bilateral_sigma_space', 75.0) or 75.0}"
+            )
+        if getattr(args, "depth_blend_clahe", False):
+            comment_parts.append(
+                f"iw3_depth_blend_clahe_clip={getattr(args, 'depth_blend_clahe_clip', 2.0) or 2.0} "
+                f"iw3_depth_blend_clahe_tile={int(getattr(args, 'depth_blend_clahe_tile', 8) or 8)}"
+            )
+        if getattr(args, "depth_blend_align", False):
+            comment_parts.append("iw3_depth_blend_align=1")
+            db_align_decay = getattr(args, "depth_blend_align_decay", 0.9) or 0.9
+            if db_align_decay != 0.9:
+                comment_parts.append(f"iw3_depth_blend_align_decay={db_align_decay}")
+        db_edge_supp = getattr(args, "depth_blend_edge_suppression", 0.5) or 0.5
+        if db_edge_supp != 0.5:
+            comment_parts.append(f"iw3_depth_blend_edge_suppression={db_edge_supp}")
+    if getattr(args, "depth_refine", False):
+        comment_parts.append("iw3_depth_refine=1")
+    if getattr(args, "temporal_stabilize", False) and video:
+        ts_strength = getattr(args, "temporal_stabilize_strength", 0.7) or 0.7
+        comment_parts.append(f"iw3_temporal_stabilize_strength={ts_strength}")
+    if args.ema_normalize and video:
+        ma = "1" if getattr(args, "ema_motion_adaptive", False) else "0"
+        comment_parts.append(
+            f"iw3_ema_decay={args.ema_decay} iw3_ema_buffer={args.ema_buffer} "
+            f"iw3_ema_motion_adaptive={ma}"
+        )
+    stereo_w = getattr(args, "stereo_width", None)
+    if stereo_w:
+        comment_parts.append(f"iw3_stereo_width={int(stereo_w)}")
+    if getattr(args, "scene_detect", False) and video:
+        comment_parts.append("iw3_scene_detect=1")
+    if getattr(args, "preserve_screen_border", False):
+        comment_parts.append("iw3_preserve_screen_border=1")
+    if getattr(args, "edge_repair_strength", 0.0):
+        comment_parts.append(f"iw3_edge_repair_strength={args.edge_repair_strength}")
+    if getattr(args, "waifu2x_upscale", False):
+        # Recorded here as provenance even though the upscale itself produces a
+        # SEPARATE "<name>_w2x<ext>" file (see _run_waifu2x_upscale) rather than
+        # modifying this file -- not added to make_output_filename's tag scheme for
+        # the same reason: the derivative file's own "_w2x" suffix already marks it,
+        # and duplicating that onto the original file's name would just be confusing
+        # about which file is which.
+        w2x_method = getattr(args, "waifu2x_method", None) or "noise_scale2x"
+        w2x_noise = getattr(args, "waifu2x_noise_level", None)
+        w2x_noise = 1 if w2x_noise is None else w2x_noise
+        w2x_style = getattr(args, "waifu2x_style", None) or "photo"
+        comment_parts.append(
+            f"iw3_waifu2x_upscale_requested=1 iw3_waifu2x_method={w2x_method} "
+            f"iw3_waifu2x_noise_level={int(w2x_noise)} iw3_waifu2x_style={w2x_style}"
+        )
+
+    return " ".join(comment_parts) if comment_parts else None
+
+
+def _progress_title(basename, args):
+    """Builds the text shown on a processing progress bar: the file name, which depth
+    model is actually running right now, and -- when set (Dual-Pass Depth Blend sets this
+    once per pass) -- which numbered step of a multi-step job this is. Without this, a
+    multi-pass job like Depth Blend showed only the filename and frame count on the bar
+    itself; which pass/model was active was only ever printed as a one-line banner that
+    scrolls out of view the moment the bar starts updating in place."""
+    model_name = getattr(args, "depth_model", None)
+    step_label = (getattr(args, "state", None) or {}).get("progress_step_label")
+    if step_label and model_name:
+        return f"{basename} [{step_label}: {model_name}]"
+    elif model_name:
+        return f"{basename} [{model_name}]"
+    else:
+        return basename
 
 
 def make_video_codec_option(args, input_path=None):
@@ -813,6 +1246,16 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
     foreground_pop = getattr(args, "foreground_pop", 0.0)
     if foreground_pop > 0:
         depth = DE.apply_foreground_pop(depth, foreground_pop)
+    foreground_divergence = getattr(args, "foreground_divergence", None)
+    if foreground_divergence is not None:
+        depth = DE.apply_foreground_divergence(depth, convergence, args.divergence, foreground_divergence)
+    background_pop = getattr(args, "background_pop", 0.0)
+    if background_pop > 0:
+        background_pop_coverage = getattr(args, "background_pop_coverage", 0.15)
+        depth = DE.apply_background_pop(depth, background_pop, threshold_percentile=background_pop_coverage)
+    background_divergence = getattr(args, "background_divergence", None)
+    if background_divergence is not None:
+        depth = DE.apply_background_divergence(depth, convergence, args.divergence, background_divergence)
 
     if args.method == "NULL":
         left_eye, right_eye = im.clone(), im.clone()
@@ -893,6 +1336,11 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
             preserve_screen_border=args.preserve_screen_border,
             enable_amp=not args.disable_amp,
         )
+
+    edge_repair_strength = getattr(args, "edge_repair_strength", 0.0)
+    if edge_repair_strength > 0.0:
+        left_eye, right_eye = DE.repair_stereo_edges(
+            left_eye, right_eye, depth, strength=edge_repair_strength)
 
     if not batch:
         if left_eye is not None:
@@ -1029,7 +1477,7 @@ def process_image(x, args, depth_model, side_model, skip_autocrop=None, autocrop
                                   enable_amp=not args.disable_amp,
                                   edge_dilation=args.edge_dilation,
                                   depth_aa=args.depth_aa)
-        depth = depth_model.minmax_normalize_chw(depth)
+        depth = depth_model.minmax_normalize_chw(depth, rgb=x)
 
         if args.debug_depth:
             return debug_depth_image(depth, args)
@@ -1194,7 +1642,7 @@ def bind_single_frame_callback(depth_model, side_model, segment_pts, args):
                                   enable_amp=not args.disable_amp,
                                   edge_dilation=args.edge_dilation,
                                   depth_aa=args.depth_aa)
-        depth = depth_model.minmax_normalize_chw(depth)
+        depth = depth_model.minmax_normalize_chw(depth, rgb=x)
         depths = [depth] if depth is not None else []
         flush = frame.pts in segment_pts
         if flush:
@@ -1506,9 +1954,15 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     is_video_depth_anything = depth_model.get_name() == "VideoDepthAnything"
     is_video_depth_anything_streaming = depth_model.get_name() == "VideoDepthAnythingStreaming"
     is_inpaint_model = args.method in {"forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"}
+    if (getattr(args, "temporal_stabilize", False) and not is_video_depth_anything
+            and not (args.low_vram or args.debug_depth or is_video_depth_anything_streaming or is_inpaint_model)):
+        warnings.warn("--temporal-stabilize only takes effect on the single-frame processing path "
+                       "(used automatically for --low-vram, --debug-depth, VDA streaming models, and "
+                       "inpaint stereo methods) -- it will have no effect on this run.")
     ema_normalize = args.ema_normalize and args.max_fps >= 15
     if ema_normalize:
-        depth_model.enable_ema(decay=args.ema_decay, buffer_size=args.ema_buffer)
+        depth_model.enable_ema(decay=args.ema_decay, buffer_size=args.ema_buffer,
+                                motion_adaptive=getattr(args, "ema_motion_adaptive", False))
 
     if (
             args.compile and
@@ -1638,9 +2092,20 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                   file=sys.stderr)
         else:
             _hdr_tmp_hevc = path.join(_hdr_out_dir, "_iw3_src.hevc")
+            # Match whatever time range is ACTUALLY being converted -- without this, a
+            # full-movie run "worked" only by coincidence (its extraction naturally
+            # covered the whole file, matching a whole-file output), while any
+            # --start-time/--end-time clip extracted DV/HDR10+ metadata for the ENTIRE
+            # source but tried to inject it onto an output covering only a fraction of
+            # it, a mismatch severe enough that injection failed or was silently skipped.
+            _hdr_trim_args = []
+            if getattr(args, "start_time", None):
+                _hdr_trim_args += ["-ss", str(parse_time(args.start_time))]
+            if getattr(args, "end_time", None):
+                _hdr_trim_args += ["-to", str(parse_time(args.end_time))]
             try:
                 subprocess.run(
-                    [_hdr_ffmpeg_bin, "-y", "-i", str(input_filename),
+                    [_hdr_ffmpeg_bin, "-y", *_hdr_trim_args, "-i", str(input_filename),
                      "-c:v", "copy", "-an", "-f", "hevc", _hdr_tmp_hevc],
                     check=True, capture_output=True,
                 )
@@ -1692,6 +2157,11 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             pix_fmt = _upgrade_pix_fmt(pix_fmt, upgrade)
             pix_fmt = _clamp_pix_fmt_for_codec(pix_fmt, args.video_codec)
 
+        extra_meta = {}
+        comment = _build_iw3_comment_metadata(args)
+        if comment:
+            extra_meta["comment"] = comment
+
         return VU.VideoOutputConfig(
             fps=fps,
             container_format=args.video_format,
@@ -1700,6 +2170,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             colorspace=args.colorspace,
             options=make_video_codec_option(args, input_filename),
             container_options={"movflags": "+faststart"} if args.video_format == "mp4" else {},
+            metadata=extra_meta,
         )
 
     if is_video_depth_anything:
@@ -1717,7 +2188,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                 stop_event=args.state["stop_event"],
                 suspend_event=args.state["suspend_event"],
                 tqdm_fn=args.state["tqdm_fn"],
-                title=path.basename(input_filename),
+                title=_progress_title(path.basename(input_filename), args),
                 start_time=args.start_time,
                 end_time=args.end_time,
                 device=args.state["device"],
@@ -1740,7 +2211,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                 stop_event=args.state["stop_event"],
                 suspend_event=args.state["suspend_event"],
                 tqdm_fn=args.state["tqdm_fn"],
-                title=path.basename(input_filename),
+                title=_progress_title(path.basename(input_filename), args),
                 start_time=args.start_time,
                 end_time=args.end_time,
                 device=args.state["device"],
@@ -1778,7 +2249,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     stop_event=args.state["stop_event"],
                     suspend_event=args.state["suspend_event"],
                     tqdm_fn=args.state["tqdm_fn"],
-                    title=path.basename(input_filename),
+                    title=_progress_title(path.basename(input_filename), args),
                     start_time=args.start_time,
                     end_time=args.end_time,
                     device=args.state["device"],
@@ -1796,6 +2267,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                 _hdr_rpu_path, _hdr_h10p_path,
                 _hdr_ffmpeg_bin, _hdr_dovi_bin, _hdr_hdr10plus_bin,
                 path.dirname(path.abspath(output_filename)),
+                configured_video_codec=args.video_codec,
             )
         except Exception as e:
             print(f"--preserve-dowi: HDR metadata injection failed: {e}", file=sys.stderr)
@@ -2197,7 +2669,8 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
             if rpu_path or h10p_path:
                 try:
                     _inject_hdr_metadata(output_filename, rpu_path, h10p_path,
-                                         fb, dovi_b, h10p_b, out_dir)
+                                         fb, dovi_b, h10p_b, out_dir,
+                                         configured_video_codec=args.video_codec)
                 except Exception as e:
                     print(f"--preserve-dowi: HDR injection failed: {e}", file=sys.stderr)
                 finally:
@@ -2254,7 +2727,7 @@ def process_video_keyframes(input_filename, output_path, args, depth_model, side
             stop_event=args.state["stop_event"],
             suspend_event=args.state["suspend_event"],
             tqdm_fn=args.state["tqdm_fn"],
-            title=path.basename(input_filename),
+            title=_progress_title(path.basename(input_filename), args),
             start_time=args.start_time,
             end_time=args.end_time,
             device=args.state["device"],
@@ -2296,6 +2769,12 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
                     os.remove(tmp_file)
                 except Exception:
                     pass
+
+    # Only on a genuine, uncancelled completion -- the functions above return early on
+    # cancellation without raising, so a cancelled job would otherwise still reach here.
+    stop_event = args.state.get("stop_event") if getattr(args, "state", None) else None
+    if not (stop_event is not None and stop_event.is_set()):
+        _run_waifu2x_upscale(output_path, args)
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -2394,7 +2873,7 @@ def export_images(input_path, output_dir, args, title=None):
                                       enable_amp=not args.disable_amp,
                                       edge_dilation=edge_dilation,
                                       depth_aa=args.depth_aa)
-            depth = depth_model.minmax_normalize_chw(depth)
+            depth = depth_model.minmax_normalize_chw(depth, rgb=im)
             if args.export_disparity:
                 depth = get_mapper(args.mapper)(depth)
             if args.export_depth_fit:
@@ -2437,8 +2916,32 @@ def get_resume_seq(depth_dir, rgb_dir):
 
 # export callbacks
 
+_MOTION_ADAPTIVE_LOG_PATH = path.join(path.dirname(__file__), "..", "logs", "iw3_motion_adaptive_log.txt")
 
-def bind_export_single_frame_callback(depth_model, segment_pts, rgb_dir, depth_dir, pool, args):
+
+def _log_motion_activity(basename, entries):
+    """Answers "when was Motion-Adaptive Smoothing actually used, how much, and on
+    which part of the video" -- a real question with no other way to check, since the
+    effective decay is computed and used per-frame but otherwise never surfaced. One
+    line per segment (a scene, or the final tail of the export); frame numbers match
+    the exported PNG filenames directly."""
+    if not entries:
+        return
+    os.makedirs(path.dirname(_MOTION_ADAPTIVE_LOG_PATH), exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(_MOTION_ADAPTIVE_LOG_PATH, "a", encoding="utf-8") as f:
+        for e in entries:
+            pct_eased = 100.0 * e["eased_frames"] / e["frames"] if e["frames"] else 0.0
+            f.write(
+                f"{ts} | {basename} | frames {e['start_frame']:08d}-{e['end_frame']:08d} "
+                f"({e['frames']} frames) | base_decay={e['base_decay']:.2f} "
+                f"min_effective_decay={e['min_effective_decay']:.3f} "
+                f"avg_motion_score={e['avg_motion_score']:.3f} "
+                f"eased_on={pct_eased:.0f}% of frames\n"
+            )
+
+
+def bind_export_single_frame_callback(depth_model, segment_pts, rgb_dir, depth_dir, pool, args, basename=None):
     batch_queue = []
     pts_queue = []
     src_queue = []
@@ -2488,6 +2991,8 @@ def bind_export_single_frame_callback(depth_model, segment_pts, rgb_dir, depth_d
             edge_dilation=edge_dilation,
             depth_aa=args.depth_aa)
         depth_list = depth_model.minmax_normalize(depth_batch, reset_ema=reset_ema)
+        if args.ema_motion_adaptive:
+            _log_motion_activity(basename, depth_model.pop_motion_activity_log())
 
         pts_queue.clear()
         batch_queue.clear()
@@ -2500,7 +3005,10 @@ def bind_export_single_frame_callback(depth_model, segment_pts, rgb_dir, depth_d
             # flush
             if batch_queue:
                 _batch_infer()
-            return _postprocess(depth_model.flush_minmax_normalize())
+            result = _postprocess(depth_model.flush_minmax_normalize())
+            if args.ema_motion_adaptive:
+                _log_motion_activity(basename, depth_model.pop_motion_activity_log())
+            return result
 
         x = VU.to_tensor(frame, device=args.state["device"])
         batch_queue.append(x)
@@ -2598,7 +3106,7 @@ def bind_export_vda_frame_callback(depth_model, segment_pts, rgb_dir, depth_dir,
 
 def export_video(input_filename, output_dir, args, title=None):
     basename = path.splitext(path.basename(input_filename))[0]
-    title = title or path.basename(input_filename)
+    title = title or _progress_title(path.basename(input_filename), args)
     if args.export_disparity:
         mapper = "none"
         skip_edge_dilation = True
@@ -2681,16 +3189,34 @@ def export_video(input_filename, output_dir, args, title=None):
     if args.scene_detect_only:
         return
 
-    # TODO: AutoCrop
+    if args.autocrop is not None:
+        crop = AutoCrop.from_video_file(
+            input_filename,
+            mode=args.autocrop,
+            uncrop_enabled=False,
+            vf=args.vf,
+            hwaccel=args.hwaccel,
+            disable_software_fallback=args.disable_software_fallback,
+            device=args.state["device"],
+            batch_size=args.batch_size,
+            stop_event=args.state["stop_event"],
+            suspend_event=args.state["suspend_event"],
+            tqdm_fn=args.state["tqdm_fn"],
+            tqdm_title=f"{path.basename(input_filename)}: AutoCrop Analysis",
+        ).get_crop()
+        crop_filter = f"crop=x={crop[0]}:y={crop[1]}:w={crop[2]}:h={crop[3]}" if crop is not None else None
+        base_vf = (args.vf + f",{crop_filter}") if (crop_filter and args.vf) else (crop_filter or args.vf)
+    else:
+        base_vf = args.vf
 
     config.user_data["scene_boundary"] = ",".join([str(pts).zfill(8) for pts in sorted(list(segment_pts))])
 
-    if args.resume:
-        resume_seq = get_resume_seq(depth_dir, rgb_dir) - args.batch_size
-    else:
-        resume_seq = -1
-
-    if resume_seq > 0 and path.exists(audio_file):
+    if path.exists(audio_file):
+        # Already there -- whether from a genuine resume or because a caller (Dual-
+        # Pass Depth Blend, extracting audio as its own visible step) already pulled
+        # it out ahead of time. Re-extracting identical audio for the same input/range
+        # would only waste time, never produce a different result, so simple
+        # existence is enough here regardless of resume state.
         has_audio = True
     else:
         if args.export_depth_only:
@@ -2708,7 +3234,7 @@ def export_video(input_filename, output_dir, args, title=None):
         return
 
     # Integrate preprocess_image() logic into vf
-    video_filter = add_preprocess_vf(args.vf, args)
+    video_filter = add_preprocess_vf(base_vf, args)
 
     def config_callback(metadata):
         fps = metadata.get_fps()
@@ -2737,7 +3263,8 @@ def export_video(input_filename, output_dir, args, title=None):
     depth_model.disable_ema()
     ema_normalize = args.ema_normalize and args.max_fps >= 15
     if ema_normalize:
-        depth_model.enable_ema(decay=args.ema_decay, buffer_size=args.ema_buffer)
+        depth_model.enable_ema(decay=args.ema_decay, buffer_size=args.ema_buffer,
+                                motion_adaptive=getattr(args, "ema_motion_adaptive", False))
 
     max_workers = max(args.max_workers, 8)
     with depth_model.compile_context(enabled=args.compile), PoolExecutor(max_workers=max_workers) as pool:
@@ -2758,6 +3285,7 @@ def export_video(input_filename, output_dir, args, title=None):
                 depth_dir=depth_dir,
                 pool=pool,
                 args=args,
+                basename=basename,
             )
 
         VU.hook_frame(
@@ -2890,6 +3418,11 @@ def process_config_video(config, args, side_model):
     if side_model is not None and hasattr(side_model, "reset"):
         side_model.reset()
 
+    extra_meta = {}
+    comment = _build_iw3_comment_metadata(args)
+    if comment:
+        extra_meta["comment"] = comment
+
     video_config = VU.VideoOutputConfig(
         fps=config.fps,  # use config.fps, ignore args.max_fps
         container_format=args.video_format,
@@ -2900,6 +3433,7 @@ def process_config_video(config, args, side_model):
         container_options={"movflags": "+faststart"} if args.video_format == "mp4" else {},
         output_width=output_width,
         output_height=output_height,
+        metadata=extra_meta,
     )
     video_config.output_colorspace = config.output_colorspace
     video_config.output_color_trc = config.output_color_trc
@@ -2925,7 +3459,7 @@ def process_config_video(config, args, side_model):
             generator,
             config=video_config,
             audio_file=audio_file,
-            title=path.basename(base_dir),
+            title=_progress_title(path.basename(base_dir), args),
             total_frames=len(rgb_files),
             stop_event=args.state["stop_event"],
             suspend_event=args.state["suspend_event"],
@@ -3177,6 +3711,25 @@ def create_parser(required_true=True):
                               "use --foreground-scale instead."))
     parser.add_argument("--foreground-pop", type=float, default=0.0,
                         help="push the nearest pixels even further toward the audience (0.0=off, 0.5=medium, 1.0=strong)")
+    parser.add_argument("--foreground-divergence", type=float, default=None,
+                        help="use a separate effective Divergence value for the nearest 15%% of pixels only "
+                             "(same units/range as --divergence). unset = disabled, uses the same Divergence as "
+                             "the rest of the scene")
+    parser.add_argument("--background-pop", type=float, default=0.0,
+                        help="push the farthest pixels even further away from the audience (0.0=off, 0.5=medium, 1.0=strong)")
+    parser.add_argument("--background-pop-coverage", type=float, default=0.15,
+                        help="how much of the scene Background Pop treats as \"background\" (0.0-1.0, e.g. "
+                             "0.25 = farthest 25%%). Default 0.15 = farthest 15%%. Larger values affect more of "
+                             "the scene but move the transition line further into the midground")
+    parser.add_argument("--background-divergence", type=float, default=None,
+                        help="use a separate effective Divergence value for the farthest 15%% of pixels only "
+                             "(same units/range as --divergence). unset = disabled, uses the same Divergence as "
+                             "the rest of the scene")
+    parser.add_argument("--edge-repair-strength", type=float, default=0.0,
+                        help=("final cleanup pass on the RENDERED stereo output (after whichever stereo "
+                              "method made it), gently smoothing only a thin band right around real depth "
+                              "edges to reduce hairline fringing/ghosting residue. 0.0=off (default, zero "
+                              "cost), 1.0=strongest. Cannot affect flat regions or areas with no depth edge."))
     parser.add_argument("--foreground-scale", type=float, choices=[Range(-3.0, 3.0)], default=0,
                         help="foreground scaling level. 0 is disabled")
     parser.add_argument("--mapper-type", type=str, choices=["div", "mul", "shift"], default=None,
@@ -3227,6 +3780,12 @@ def create_parser(required_true=True):
     parser.add_argument("--ema-decay", type=float, default=0.75,
                         help="parameter for ema-normalize (0-1). large value makes it smoother")
     parser.add_argument("--ema-buffer", type=int, default=30, help="TODO")
+    parser.add_argument("--ema-motion-adaptive", action="store_true",
+                        help=("make --ema-decay automatically ease off during fast motion instead of "
+                              "using one fixed smoothing strength for the whole clip. Reduces motion "
+                              "smearing/lag on fast scenes while keeping full smoothing on calm ones. "
+                              "Never smooths MORE than --ema-decay itself, only less -- a safe layer on "
+                              "top of your existing EMA settings, not a replacement for them."))
     parser.add_argument("--scene-detect", action="store_true",
                         help=("splitting a scene using shot boundary detection. "
                               "ema and other states will be reset at the boundary of the scene"))
@@ -3238,6 +3797,88 @@ def create_parser(required_true=True):
                         help="specify cache directory for --scene-detect")
     parser.add_argument("--scene-detect-only", action="store_true",
                         help="run only --scene-detect and skip the subsequent video processing")
+
+    parser.add_argument("--scene-batch", action="store_true",
+                        help=("fully automated whole-movie pipeline: remove letterbox bars once, "
+                              "detect scene cuts once, split into per-scene clips with exact "
+                              "keyframe-accurate boundaries, convert each scene independently "
+                              "(true fresh start per scene, not a shared running state), then "
+                              "join the results back into one seamless video and reattach the "
+                              "original audio. Input must be a single video file."))
+    parser.add_argument("--scene-batch-crop", type=str, default=None,
+                        help=("explicit crop for --scene-batch, as WxH or WxH:X:Y (X/Y default to "
+                              "centered). If omitted, letterbox bars are auto-detected once from "
+                              "the whole movie."))
+    parser.add_argument("--scene-settings", type=str, default=None,
+                        help=("JSON file for --scene-batch giving per-scene setting overrides. "
+                              "A list of rules, each combining an optional position match -- either "
+                              '{"start_scene": 0, "end_scene": 40, ...} (scene-index range, end '
+                              'exclusive) or {"start_time": 0, "end_time": 600, ...} (seconds) -- '
+                              "with an optional duration match, "
+                              '{"min_duration": 2, "max_duration": 3, ...} (seconds, end exclusive), '
+                              "e.g. to give every short 2-3 second scene its own EMA settings "
+                              'regardless of where it falls in the movie. Both end with "overrides": '
+                              '{"divergence": 3.5}. Rules are applied in order; later matching rules '
+                              "override earlier ones; position and duration matches on the same rule "
+                              "must both be satisfied for it to apply."))
+    parser.add_argument("--scene-batch-auto-ema", action="store_true",
+                        help=("automatically pick EMA Decay/Buffer per scene based on that scene's own "
+                              "length, using a built-in table (one bucket per whole second, 0-15s+) "
+                              "tuned for --scene-batch's independent-scene processing (short scenes get "
+                              "a smaller Buffer so the smoothing actually finishes settling within the "
+                              "scene, instead of a Buffer sized for one long continuous shot). Applied "
+                              "before --scene-settings, so anything that file sets explicitly (EMA "
+                              "included) still wins. Which table is used depends on "
+                              "--scene-batch-auto-ema-model."))
+    parser.add_argument("--scene-batch-auto-ema-model", type=str, default="VDA_L",
+                        choices=["VDA_L", "Any_V3_Mono_01"],
+                        help=("which built-in EMA-by-duration table --scene-batch-auto-ema uses, "
+                              "matched to the Depth Model in use. VDA_L: a real video depth model with "
+                              "its own frame-to-frame memory, needs only light smoothing on top. "
+                              "Any_V3_Mono_01: a stills-only model with no frame-to-frame memory of its "
+                              "own (prone to visible 'depth breathing' without help), so this table uses "
+                              "double VDA_L's Buffer at every scene length with a correspondingly "
+                              "higher Decay to compensate."))
+    parser.add_argument("--scene-batch-variant", type=str, default=None,
+                        help=("optional name for --scene-batch. Reuses the shared, already-done work "
+                              "from a prior run of the SAME movie (Dolby Vision RPU extraction, the "
+                              "crop+keyframe pass, and the split scene clips) but writes its own "
+                              "converted scenes and final output under this name, so trying different "
+                              "settings (e.g. a different EMA table) never touches or overwrites an "
+                              "earlier attempt. Output becomes <name>_<variant>.<ext>."))
+
+    parser.add_argument("--depth-blend", action="store_true",
+                        help=("blend depth from a second model into --depth-model's output, favoring the "
+                              "second model specifically in areas with dense fine visual detail (foliage, "
+                              "hair, close-up texture) where a single-frame model like Any_V3_Mono_01 "
+                              "often struggles. Runs as three full passes over the clip -- export depth "
+                              "with the primary model, export depth with the secondary model, then blend "
+                              "and render -- fully releasing each model before the next loads, so the two "
+                              "models are never in GPU memory at the same time. Costs real extra time (~3x "
+                              "a normal pass) and real extra disk space (a full rgb+depth frame dump, "
+                              "twice) in a '<output>.depth_blend_work' folder next to your output, safe to "
+                              "delete once you're happy with the result. Requires a single video file "
+                              "input; not compatible with --scene-batch."))
+    parser.add_argument("--depth-blend-model", type=str, default="VDA_L",
+                        help="secondary depth model for --depth-blend (default: VDA_L)")
+    parser.add_argument("--depth-blend-strength", type=float, default=1.0,
+                        help=("how strongly to favor --depth-blend-model in the selected region "
+                              "(0-1). 1.0 = fully trust the secondary model there, 0.0 = ignore it "
+                              "entirely (same as not using --depth-blend)."))
+    parser.add_argument("--depth-blend-region", type=str, default="detail",
+                        choices=["detail", "foreground", "background"],
+                        help=("what decides WHERE --depth-blend-model gets blended in. 'detail' "
+                              "(default): wherever the image shows dense fine visual detail (foliage, "
+                              "hair, texture) -- the original foliage/close-up fix. 'foreground': the "
+                              "nearest --depth-blend-region-percent%% of the scene by depth, regardless "
+                              "of visual detail. 'background': the farthest --depth-blend-region-percent%% "
+                              "instead. Foreground/background use iw3's own near/far convention (higher "
+                              "depth value = nearer), the same one --foreground-pop and "
+                              "--foreground-divergence already use."))
+    parser.add_argument("--depth-blend-region-percent", type=float, default=25.0,
+                        help=("for --depth-blend-region foreground/background: what percent of the scene "
+                              "(by depth) to blend the secondary model into, e.g. 25 = nearest (or "
+                              "farthest) 25%% of the scene. Ignored for --depth-blend-region detail."))
 
     parser.add_argument("--autocrop", type=str.upper, default=None,
                         choices=["BLACK_TB", "BLACK", "FLAT_TB", "FLAT"],
@@ -3264,6 +3905,25 @@ def create_parser(required_true=True):
 
     parser.add_argument("--depth-aa", action="store_true",
                         help="apply depth antialiasing. ignored for unsupported models")
+    parser.add_argument("--depth-refine", action="store_true",
+                        help=("clean up each depth frame's own internal noise using edge-preserving "
+                              "(bilateral) smoothing, within that single frame -- a different axis from EMA "
+                              "smoothing, which works ACROSS frames over time. Cheap: no extra passes, no "
+                              "new dependencies, doesn't affect how many depth models are used."))
+    parser.add_argument("--temporal-stabilize", action="store_true",
+                        help=("approximates a video-aware model's (VDA_L) per-pixel stability for a "
+                              "single-frame model (e.g. Any_V3_Mono_01): tracks real motion via optical "
+                              "flow on the RGB image and blends each frame's depth with the PREVIOUS "
+                              "frame's depth warped to match where content actually moved to, reducing a "
+                              "specific object's depth flickering that EMA's overall-range smoothing can't "
+                              "touch. Only takes effect on the single-frame processing path (used "
+                              "automatically for --low-vram, --debug-depth, VDA streaming models, and "
+                              "inpaint stereo methods e.g. mlbw_l2_inpaint) -- has no effect on the batched "
+                              "path other models use."))
+    parser.add_argument("--temporal-stabilize-strength", type=float, default=0.7,
+                        help=("how strongly to trust the motion-warped previous frame vs the fresh "
+                              "per-frame depth (0-1) for --temporal-stabilize. Automatically tapers down "
+                              "during fast/unreliable motion regardless of this setting."))
     parser.add_argument("--max-workers", type=int, default=0, choices=[0, 1, 2, 3, 4, 8, 16],
                         help="max inference worker threads for video processing. 0 is disabled")
     parser.add_argument("--video-format", "-vf", type=str, default="mp4", choices=["mp4", "mkv", "avi"],
@@ -3326,6 +3986,15 @@ def calc_auto_warp_steps(method, divergence, synthetic_view):
 def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None):
     if depth_model is None:
         depth_model = create_depth_model(args.depth_model)
+    depth_model.enable_refine(getattr(args, "depth_refine", False))
+    if getattr(args, "temporal_stabilize", False):
+        depth_model.enable_temporal_stabilize(
+            strength=getattr(args, "temporal_stabilize_strength", 0.7) or 0.7,
+            max_shift_velocity=getattr(args, "temporal_stabilize_max_shift_velocity", None),
+            flat_region_boost=getattr(args, "temporal_stabilize_flat_region_boost", 0.0) or 0.0,
+            edge_protection=getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0)
+    else:
+        depth_model.disable_temporal_stabilize()
 
     convergence_model = None
     if args.convergence_mode == "sod_v1":
@@ -3481,6 +4150,20 @@ def iw3_main(args):
     if args.update:
         depth_model.force_update()
 
+    if getattr(args, "depth_blend", False) and not is_yaml(args.input):
+        # NOTE: depth_blend's own final render step re-enters iw3_main with a YAML
+        # config as input (its "resume from exported depth" path) and deliberately
+        # keeps args.depth_blend=True so the filename/metadata tagging above still
+        # fires -- the is_yaml() check here is what stops that from being mistaken
+        # for a fresh "start a new Depth Blend job" request and recursing.
+        if path.isdir(args.input):
+            raise ValueError("--depth-blend requires a single video file as input")
+        if args.scene_batch:
+            raise ValueError("--depth-blend cannot be combined with --scene-batch")
+        from .depth_blend import run_depth_blend
+        run_depth_blend(args, depth_model, None)
+        return args
+
     if not is_yaml(args.input):
         if not depth_model.loaded():
             depth_model.load(gpu=args.gpu, resolution=args.resolution, limit_resolution=args.limit_resolution)
@@ -3515,6 +4198,13 @@ def iw3_main(args):
     if args.find_param:
         assert is_image(args.input) and (path.isdir(args.output) or not path.exists(args.output))
         find_param(args, depth_model, side_model)
+        return args
+
+    if args.scene_batch:
+        if path.isdir(args.input) or is_yaml(args.input):
+            raise ValueError("--scene-batch requires a single video file as input")
+        from .scene_batch import run_scene_batch
+        run_scene_batch(args, depth_model, side_model)
         return args
 
     if path.isdir(args.input):

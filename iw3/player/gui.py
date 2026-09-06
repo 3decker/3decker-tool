@@ -22,6 +22,8 @@ from nunif.gui import (
     persistent_manager_unregister_all,
     persistent_manager_restore_all,
     get_default_locale,
+    set_tooltip_long_hover,
+    enable_persistent_tooltips,
 )
 from iw3.locales import LOCALES, load_language_setting
 from .server import (
@@ -45,7 +47,9 @@ os.makedirs(CONFIG_DIR, exist_ok=True)
 
 class IW3PlayerApp(wx.App):
     def OnInit(self):
+        set_tooltip_long_hover()
         main_frame = MainFrame()
+        enable_persistent_tooltips(main_frame)
         self.instance = wx.SingleInstanceChecker("iw3-player.lock", CONFIG_DIR)
         if self.instance.IsAnotherRunning():
             wx.MessageBox("Another instance is running", "Error", wx.OK | wx.ICON_ERROR)
@@ -80,6 +84,10 @@ class MainFrame(wx.Frame):
 
         self.txt_root = wx.TextCtrl(grp_root, name="txt_root")
         self.txt_root.SetValue(DEFAULT_ROOT_DIR)
+        self.txt_root.SetToolTip(
+            T("Which folder the player's media browser shows — pick the folder where your converted 3D "
+              "videos actually live, so you can browse and play them from the player's web/local "
+              "interface. Includes subfolders."))
         self.btn_browse_root = GenBitmapButton(grp_root, bitmap=load_icon("folder-open.png"))
         self.btn_browse_root.SetToolTip(T("Choose a directory"))
 
@@ -94,6 +102,13 @@ class MainFrame(wx.Frame):
         self.chk_bind_addr = wx.CheckBox(grp_network, label=T("Address"), name="chk_bind_addr")
         self.txt_bind_addr = IpAddrCtrl(grp_network, size=self.FromDIP((200, -1)), name="txt_bind_addr")
         self.chk_bind_addr.SetValue(False)
+        self.chk_bind_addr.SetToolTip(
+            T("What it's for: which network address the player's web server listens on. Unchecked "
+              "(default) binds to 127.0.0.1 (this PC only). Check this and set an address to make the "
+              "player reachable from other devices on your network (e.g. a smart TV or VR headset).\n"
+              "Con: exposing this to your network without Basic Authentication below means anyone on the "
+              "same network could browse and play your media.\n"
+              "Recommended: leave unchecked unless you specifically need another device to connect."))
         self.txt_bind_addr.SetValue("127.0.0.1")
 
         self.lbl_bind_addr_warning = wx.StaticText(grp_network, label="")
@@ -101,16 +116,25 @@ class MainFrame(wx.Frame):
         self.lbl_bind_addr_warning.Hide()
 
         self.btn_detect_ip = GenBitmapButton(grp_network, bitmap=load_icon("view-refresh.png"))
-        self.btn_detect_ip.SetToolTip(T("Detect"))
+        self.btn_detect_ip.SetToolTip(T("Detect your PC's local network IP address automatically"))
 
         self.lbl_port = wx.StaticText(grp_network, label=T("Port"))
         self.txt_port = IntCtrl(
             grp_network, size=self.FromDIP((200, -1)), allow_none=False, min=1025, max=65535, name="txt_port"
         )
         self.txt_port.SetValue(1304)
+        self.txt_port.SetToolTip(
+            T("The network port the player's web server listens on. The device connecting to the player "
+              "needs to use this same port. Recommended: leave at the default (1304) unless it conflicts "
+              "with something else already using that port on your PC."))
 
         self.sep_network1 = wx.StaticLine(grp_network, style=wx.LI_HORIZONTAL)
         self.chk_auth = wx.CheckBox(grp_network, label=T("Basic Authentication"), name="chk_auth_enable")
+        self.chk_auth.SetToolTip(
+            T("What it's for: requires a username/password before anyone can browse/play your media "
+              "through the player.\n"
+              "Recommended: on whenever Address above is set to anything other than the local-only "
+              "default (127.0.0.1)."))
 
         self.lbl_user = wx.StaticText(grp_network, label=T("Username"))
         self.txt_user = wx.TextCtrl(grp_network, name="txt_user")

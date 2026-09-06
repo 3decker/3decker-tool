@@ -4,6 +4,7 @@
 TODO
 *.swp
 *.log
+/logs
 tmp
 *.png
 *.jpg

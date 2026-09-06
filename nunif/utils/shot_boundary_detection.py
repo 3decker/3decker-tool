@@ -17,6 +17,28 @@ def _fps_config(max_fps):
     return callback
 
 
+def _merge_short_scenes(frame_pts, is_boundary, min_scene_frames):
+    """Drops boundaries that would create a scene shorter than `min_scene_frames`
+    FRAMES (not a real-world time duration -- avoids needing this function to know
+    the source's pts time_base/fps at all, since frame_pts is already one entry per
+    processed frame in order). A short scene is merged into the one before it by
+    simply removing the boundary between them; frame_pts/is_boundary must already
+    be sorted in playback order (guaranteed by the caller, which builds them from
+    sequential frame processing)."""
+    if min_scene_frames is None or min_scene_frames <= 1:
+        return is_boundary
+    kept = list(is_boundary)
+    last_boundary_index = 0
+    for i, b in enumerate(is_boundary):
+        if not b:
+            continue
+        if i - last_boundary_index < min_scene_frames:
+            kept[i] = False  # too close to the previous kept boundary -- merge
+        else:
+            last_boundary_index = i
+    return kept
+
+
 def detect_boundary(
         video_file,
         device="cuda",
@@ -30,6 +52,7 @@ def detect_boundary(
         tqdm_title=None,
         hwaccel=None,
         disable_software_fallback=False,
+        min_scene_frames=None,
 ):
     assert (window_size % padding_size == 0 and
             window_size // padding_size >= 3)  # pad1 + frames + pad2
@@ -111,7 +134,10 @@ def detect_boundary(
 
     frame_preds = torch.cat([pred for pred, pts in results], dim=0)[:frame_count[0]]
     frame_pts = torch.cat([pts for pred, pts in results], dim=0)[:frame_count[0]]
-    segment_pts = set(frame_pts[frame_preds > threshold].tolist())
+    is_boundary = (frame_preds > threshold).tolist()
+    if min_scene_frames:
+        is_boundary = _merge_short_scenes(frame_pts.tolist(), is_boundary, min_scene_frames)
+    segment_pts = set(pts for pts, b in zip(frame_pts.tolist(), is_boundary) if b)
 
     # NOTE: pts is the end point of the segment. It is not the starting point.
     return segment_pts

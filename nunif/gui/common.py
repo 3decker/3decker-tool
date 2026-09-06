@@ -256,6 +256,123 @@ def is_dark_mode():
             return False
 
 
+def set_tooltip_long_hover():
+    """By default wx auto-hides a tooltip after a few seconds (~5s on Windows) even
+    while the mouse is still sitting on the control.
+
+    NOTE: this alone does NOT reliably achieve "stays open until you move away" on
+    Windows -- the native Win32 Common Controls tooltip stores its auto-pop delay
+    internally as a 16-bit value, silently clamping anything requested above roughly
+    32767ms (~33s) regardless of what's asked for here. A first attempt at this asked
+    for 600000ms (10 minutes) and was silently capped, which is why tooltips kept
+    disappearing well before that even after this was called. Kept at the platform's
+    real safe maximum as a harmless baseline/fallback (covers wx.RadioBox per-item
+    tooltips, which enable_persistent_tooltips below cannot manage generically) --
+    but the actual fix for "stays open until the cursor leaves" is
+    enable_persistent_tooltips(), which replaces the native tooltip entirely with a
+    custom popup that has no OS-imposed timeout at all."""
+    wx.ToolTip.SetAutoPop(32767)
+
+
+class _TooltipPopup(wx.PopupWindow):
+    """A borderless popup styled to look like a native tooltip, used in place of
+    wx.ToolTip specifically because the native one cannot be kept open longer than
+    Windows' own ~33s cap (see set_tooltip_long_hover). This has NO timeout of its
+    own at all -- it is shown on mouse-enter and hidden on mouse-leave, so it
+    genuinely stays open for as long as the cursor sits on the control, no matter
+    how long that is, and disappears the instant the cursor actually moves away."""
+    def __init__(self, parent, text):
+        super().__init__(parent, flags=wx.BORDER_SIMPLE)
+        bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_INFOBK)
+        fg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_INFOTEXT)
+        panel = wx.Panel(self)
+        panel.SetBackgroundColour(bg)
+        label = wx.StaticText(panel, label=text)
+        label.SetForegroundColour(fg)
+        label.Wrap(480)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(label, 0, wx.ALL, 6)
+        panel.SetSizer(sizer)
+        panel.Fit()
+        self.SetClientSize(panel.GetSize())
+
+
+class _PersistentTooltipManager():
+    """Owns exactly one live _TooltipPopup at a time across a whole frame. A short
+    (500ms) delay before showing avoids flicker when the cursor just passes over a
+    control without pausing on it, matching normal tooltip feel -- but once shown,
+    nothing hides it except the cursor actually leaving that control (EVT_LEAVE_WINDOW),
+    so there is no analog of the native tooltip's auto-pop timeout at all here."""
+    SHOW_DELAY_MS = 500
+
+    def __init__(self):
+        self.popup = None
+        self.timer = wx.Timer()
+        self.timer.Bind(wx.EVT_TIMER, self._on_timer)
+        self.pending = None
+
+    def bind(self, widget, text):
+        widget.SetToolTip(None)  # avoid the native tooltip double-showing alongside this one
+        widget.Bind(wx.EVT_ENTER_WINDOW, lambda evt, w=widget, t=text: self._on_enter(w, t))
+        widget.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, w=widget: self._on_leave(w))
+        widget.Bind(wx.EVT_WINDOW_DESTROY, lambda evt, w=widget: self._on_leave(w))
+
+    def _on_enter(self, widget, text):
+        self.pending = (widget, text)
+        self.timer.StartOnce(self.SHOW_DELAY_MS)
+
+    def _on_timer(self, event):
+        if self.pending is None:
+            return
+        widget, text = self.pending
+        self.pending = None
+        if not widget or not widget.IsShownOnScreen():
+            return
+        self._hide()
+        self.popup = _TooltipPopup(widget, text)
+        pos = widget.ClientToScreen((0, widget.GetSize().GetHeight()))
+        self.popup.SetPosition(pos)
+        self.popup.Show()
+
+    def _on_leave(self, widget):
+        self.pending = None
+        self.timer.Stop()
+        self._hide()
+
+    def _hide(self):
+        if self.popup is not None:
+            popup, self.popup = self.popup, None
+            popup.Destroy()
+
+
+def enable_persistent_tooltips(window):
+    """Walks every control under `window` and, for each one that already has a
+    tooltip set via SetToolTip(...), switches it from the native OS tooltip (capped
+    at ~33s on Windows no matter what set_tooltip_long_hover asks for) to a custom
+    popup that stays open for exactly as long as the cursor remains on that control,
+    with no timeout at all -- only actually moving the cursor away closes it.
+
+    Call this ONCE, after every control in the window has already had its tooltip
+    text set (e.g. right after constructing MainFrame), not before -- it captures
+    each control's tooltip text at the time it's called.
+
+    Known gap: wx.RadioBox's per-item tooltips (SetItemToolTip) are drawn by the
+    native control itself with no separate wx.Window per radio item to bind to, so
+    they can't be managed generically this way and keep relying on the native
+    ~33s-capped tooltip instead."""
+    manager = _PersistentTooltipManager()
+    window._persistent_tooltip_manager = manager  # keep it alive with the frame
+
+    def _walk(w):
+        tip = w.GetToolTip()
+        if tip is not None and tip.GetTip():
+            manager.bind(w, tip.GetTip())
+        for child in w.GetChildren():
+            _walk(child)
+
+    _walk(window)
+
+
 def init_win32_dpi():
     if sys.platform == "win32":
         import ctypes

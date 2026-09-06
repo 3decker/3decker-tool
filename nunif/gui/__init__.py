@@ -17,6 +17,8 @@ from .common import (
     is_dark_mode, apply_dark_mode,
     init_win32_dpi,
     refresh_layouts,
+    set_tooltip_long_hover,
+    enable_persistent_tooltips,
 )
 from .video_encoding_box import VideoEncodingBox
 from .video_decoding_box import VideoDecodingBox
@@ -48,4 +50,6 @@ __all__ = [
     "get_default_locale",
     "init_win32_dpi",
     "refresh_layouts",
+    "set_tooltip_long_hover",
+    "enable_persistent_tooltips",
 ]

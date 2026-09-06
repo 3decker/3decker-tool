@@ -5,12 +5,14 @@ from nunif.models.data_parallel import DeviceSwitchInference
 from nunif.models.utils import compile_model
 import os
 import pickle
+import cv2
+import numpy as np
 import torch
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from torchvision.transforms import functional as TF
 from nunif.device import create_device
-from .depth_scaler import EMAMinMaxScaler
+from .depth_scaler import EMAMinMaxScaler, TemporalStabilizer
 from .hub_dir import HUB_MODEL_DIR
 
 
@@ -35,6 +37,16 @@ class BaseDepthModel(metaclass=ABCMeta):
         self.model_type = model_type
         self.scaler = self.create_depth_scaler()
         self.limit_resolution = False
+        self.refine_enabled = False
+        self.temporal_stabilizer = TemporalStabilizer()
+        # Queues up a motion-adaptive activity summary every time the EMA scaler
+        # resets (scene cut or end of export) instead of losing it the instant the
+        # scaler moves on -- pop_motion_activity_log() is how a caller with real
+        # video-position context (frame count, timestamp) turns this into a log
+        # entry the user can actually read.
+        self._motion_activity_log = []
+        self._frame_position = 0
+        self._segment_start_position = 0
 
     def create_depth_scaler(self):
         # This can be overridden
@@ -151,17 +163,19 @@ class BaseDepthModel(metaclass=ABCMeta):
     def infer(self, x, *kwargs):
         pass
 
-    def enable_ema(self, decay, buffer_size=None):
-        self.scaler.reset(decay=decay, buffer_size=buffer_size)
+    def enable_ema(self, decay, buffer_size=None, motion_adaptive=None, motion_spread=None):
+        self.scaler.reset(decay=decay, buffer_size=buffer_size,
+                           motion_adaptive=motion_adaptive, motion_spread=motion_spread)
 
     def get_ema_state(self):
         return self.scaler.decay, self.scaler.buffer_size
 
     def disable_ema(self):
-        self.scaler.reset(decay=0, buffer_size=1)
+        self.scaler.reset(decay=0, buffer_size=1, motion_adaptive=False)
 
-    def reset_ema(self, decay=None, buffer_size=None):
-        self.scaler.reset(decay=decay, buffer_size=buffer_size)
+    def reset_ema(self, decay=None, buffer_size=None, motion_adaptive=None, motion_spread=None):
+        self.scaler.reset(decay=decay, buffer_size=buffer_size,
+                           motion_adaptive=motion_adaptive, motion_spread=motion_spread)
 
     def reset_state(self):
         pass
@@ -173,11 +187,80 @@ class BaseDepthModel(metaclass=ABCMeta):
     def get_ema_buffer_size(self):
         return self.scaler.buffer_size
 
-    def minmax_normalize_chw(self, depth, return_minmax=False):
+    def enable_refine(self, enabled=True):
+        self.refine_enabled = bool(enabled)
+
+    def enable_temporal_stabilize(self, strength=0.7,
+                                   max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0):
+        self.temporal_stabilizer.reset(enabled=True, strength=strength,
+                                        max_shift_velocity=max_shift_velocity,
+                                        flat_region_boost=flat_region_boost,
+                                        edge_protection=edge_protection)
+
+    def disable_temporal_stabilize(self):
+        self.temporal_stabilizer.reset(enabled=False)
+
+    def _refine_raw_depth_chw(self, depth):
+        """Edge-preserving spatial smoothing (bilateral filter) on the raw, per-frame
+        depth map -- cleans up the speckle/noise a depth model leaves within a single
+        frame, WITHOUT blurring across real edges the way a plain blur would. This is
+        a different axis from EMA smoothing (which works across frames over time): this
+        works within one frame only, and happens before EMA sees the frame, so a
+        cleaner raw signal also means a steadier min/max range for EMA to track."""
+        arr = depth.squeeze(0).detach().float().cpu().numpy()
+        lo, hi = float(arr.min()), float(arr.max())
+        if hi - lo < 1e-6:
+            return depth
+        norm = ((arr - lo) / (hi - lo)).astype(np.float32)
+        smoothed = cv2.bilateralFilter(norm, d=5, sigmaColor=0.08, sigmaSpace=5)
+        smoothed = smoothed * (hi - lo) + lo
+        return torch.from_numpy(smoothed).unsqueeze(0).to(depth.device, dtype=depth.dtype)
+
+    def minmax_normalize_chw(self, depth, return_minmax=False, rgb=None):
+        # NOTE: an earlier version of this also ran CLAHE contrast enhancement on the
+        # normalized output. Testing with real injected noise showed it backfired --
+        # CLAHE amplifies whatever local variation it finds, noise included, and even
+        # blended in lightly it still measurably increased noise versus bilateral
+        # filtering alone. Dropped rather than shipped with a known noise-amplification
+        # risk; only the proven bilateral smoothing step remains.
+        self._frame_position += 1
+        if self.refine_enabled:
+            depth = self._refine_raw_depth_chw(depth)
+        if self.temporal_stabilizer.enabled:
+            depth = self.temporal_stabilizer.stabilize(rgb, depth)
         return self.scaler(depth, return_minmax=return_minmax)
 
     def flush_minmax_normalize(self, return_minmax=False):
-        return self.scaler.flush(return_minmax=return_minmax)
+        # Grab whatever motion-adaptive did during this segment BEFORE calling
+        # scaler.flush() -- when its own frame_queue is already empty, flush() takes
+        # an internal path that calls reset() itself, which would silently wipe these
+        # counters first if popped afterward instead.
+        activity = self.scaler.pop_activity()
+        if activity is not None:
+            self._motion_activity_log.append({
+                "start_frame": self._segment_start_position,
+                "end_frame": self._frame_position,
+                **activity,
+            })
+        self._segment_start_position = self._frame_position
+        # Refinement runs on the raw depth before it ever reaches the scaler (see
+        # minmax_normalize_chw), so leftover queued frames flushed here are already
+        # refined -- nothing extra to do at flush time.
+        result = self.scaler.flush(return_minmax=return_minmax)
+        # This is the actual scene-boundary hook in this codebase (the EMA scaler resets
+        # itself here too) -- clear the stabilizer's frame-to-frame memory so motion
+        # tracking never bleeds across an unrelated cut, without touching whether it's
+        # enabled or its configured strength.
+        self.temporal_stabilizer.reset()
+        return result
+
+    def pop_motion_activity_log(self):
+        """Returns and clears the list of per-segment motion-adaptive summaries
+        accumulated since the last call -- each entry covers one scene (or the final
+        tail of the export)."""
+        log = self._motion_activity_log
+        self._motion_activity_log = []
+        return log
 
     def minmax_normalize(self, depth, reset_ema=None):
         assert depth.ndim == 4

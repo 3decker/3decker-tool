@@ -19,6 +19,7 @@ from nunif.utils.ui import (
 from .utils import Waifu2x
 from .model_dir import MODEL_DIR
 from .download_models import main as download_main
+from .external_sr import is_external_sr_method, load_external_sr_model, ONNX_SR_METHOD_PREFIX
 
 
 IMAGE_IO_QUEUE_MAX = 16
@@ -233,13 +234,30 @@ def create_parser(required_true=True):
     else:
         default_gpu = -1
 
+    def _method_type(value):
+        # Custom validator instead of a plain `choices=[...]` list: ONNX SR method
+        # names ("onnx:<filename>") are discovered dynamically from whatever *.onnx
+        # files exist in waifu2x/pretrained_models/external_sr/onnx/ at runtime, so
+        # they can't be enumerated as a fixed choice list at parser-definition time.
+        fixed_choices = {"scale4x", "scale2x", "noise_scale4x", "noise_scale2x",
+                          "scale", "noise", "noise_scale",
+                          # External, independently pretrained models (not bundled
+                          # -- see docs/ai/AI_DECISIONS.md and
+                          # waifu2x/external_sr.py). Only usable once their weight
+                          # file has been placed in
+                          # waifu2x/pretrained_models/external_sr/.
+                          "realesrgan_x4", "realesrgan_x2", "realesrgan_general_x4",
+                          "bsrgan_x4", "bsrgan_x2"}
+        if value in fixed_choices or value.startswith(ONNX_SR_METHOD_PREFIX):
+            return value
+        raise argparse.ArgumentTypeError(
+            f"invalid method: {value!r} (expected one of {sorted(fixed_choices)}, "
+            f"or '{ONNX_SR_METHOD_PREFIX}<filename>' for a custom ONNX SR model)")
+
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--model-dir", type=str, help="model dir")
     parser.add_argument("--noise-level", "-n", type=int, default=0, choices=[0, 1, 2, 3], help="noise level")
-    parser.add_argument("--method", "-m", type=str,
-                        choices=["scale4x", "scale2x",
-                                 "noise_scale4x", "noise_scale2x",
-                                 "scale", "noise", "noise_scale"],
+    parser.add_argument("--method", "-m", type=_method_type,
                         default="noise_scale", help="method")
     parser.add_argument("--gpu", "-g", type=int, nargs="+", default=[default_gpu],
                         help="GPU device ids. -1 for CPU")
@@ -380,23 +398,32 @@ def waifu2x_main(args):
     elif args.method == "noise_scale2x":
         args.method = "noise_scale"
 
-    # download models
-    if not path.exists(MODEL_DIR):
-        download_main()
-
-    # main
-    if args.model_dir is None:
-        if args.style == "photo":
-            model_dir = DEFAULT_PHOTO_MODEL_DIR
-        elif args.style in {"scan", "art_scan"}:
-            model_dir = DEFAULT_ART_SCAN_MODEL_DIR
-        else:
-            model_dir = DEFAULT_ART_MODEL_DIR
+    if is_external_sr_method(args.method):
+        # Externally-pretrained models (RealESRGAN/BSRGAN -- see
+        # docs/ai/AI_DECISIONS.md and waifu2x/external_sr.py) are never
+        # auto-downloaded (large files, not bundled) and don't use this
+        # project's own model-dir/style scheme at all -- skip both entirely.
+        device = create_device(args.gpu)
+        ctx = load_external_sr_model(args.method, device,
+                                      model_dir=args.model_dir if args.model_dir else None)
     else:
-        model_dir = args.model_dir
+        # download models
+        if not path.exists(MODEL_DIR):
+            download_main()
 
-    ctx = Waifu2x(model_dir=model_dir, gpus=args.gpu)
-    ctx.load_model(args.method, args.noise_level)
+        # main
+        if args.model_dir is None:
+            if args.style == "photo":
+                model_dir = DEFAULT_PHOTO_MODEL_DIR
+            elif args.style in {"scan", "art_scan"}:
+                model_dir = DEFAULT_ART_SCAN_MODEL_DIR
+            else:
+                model_dir = DEFAULT_ART_MODEL_DIR
+        else:
+            model_dir = args.model_dir
+
+        ctx = Waifu2x(model_dir=model_dir, gpus=args.gpu)
+        ctx.load_model(args.method, args.noise_level)
 
     if path.isdir(args.input):
         if not is_output_dir(args.output):

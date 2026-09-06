@@ -36,10 +36,13 @@ from nunif.gui import (
     set_icon_ex,
     VideoEncodingBox, VideoDecodingBox, IOPathPanel,
     get_default_locale,
-    init_win32_dpi
+    init_win32_dpi,
+    set_tooltip_long_hover,
+    enable_persistent_tooltips,
 )
 from .locales import LOCALES
 from . import models # noqa
+from .external_sr import available_onnx_sr_methods
 
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
@@ -54,7 +57,9 @@ LAYOUT_DEBUG = False
 
 class Waifu2xApp(wx.App):
     def OnInit(self):
+        set_tooltip_long_hover()
         main_frame = MainFrame()
+        enable_persistent_tooltips(main_frame)
         self.instance = wx.SingleInstanceChecker("waifu2x-gui.lock", CONFIG_DIR)
         if self.instance.IsAnotherRunning():
             wx.MessageBox(T("Another instance is running"), T("Error"), style=wx.ICON_ERROR)
@@ -109,15 +114,31 @@ class MainFrame(wx.Frame):
 
         self.pnl_file_option = wx.Panel(self)
         self.chk_resume = wx.CheckBox(self.pnl_file_option, label=T("Resume"), name="chk_resume")
-        self.chk_resume.SetToolTip(T("Skip processing when the output file already exists"))
+        self.chk_resume.SetToolTip(
+            T("What it's for: skips a file entirely if the output it would create already exists.\n"
+              "How it helps: lets you stop a big batch job partway (or have it crash/get interrupted) and "
+              "restart later without wasting time redoing files you already finished.\n"
+              "Con: only checks whether a file with the expected NAME exists, not whether it's actually "
+              "complete or correct.\n"
+              "Recommended: on for batch folders and long jobs."))
         self.chk_resume.SetValue(True)
         self.chk_recursive = wx.CheckBox(self.pnl_file_option, label=T("Process all subfolders"),
                                          name="chk_recursive")
         self.chk_recursive.SetValue(False)
+        self.chk_recursive.SetToolTip(
+            T("What it's for: when the input is a folder, also reaches into its subfolders instead of "
+              "only converting files sitting directly inside it.\n"
+              "Con: if unrelated files live in subfolders you didn't mean to include, they get processed "
+              "too — there's no per-folder include/exclude list.\n"
+              "Recommended: on if you organize your images/videos into subfolders."))
         self.chk_exif_transpose = wx.CheckBox(self.pnl_file_option, label=T("EXIF Transpose"),
                                               name="chk_exif_transpose")
         self.chk_exif_transpose.SetValue(True)
-        self.chk_exif_transpose.SetToolTip(T("Transpose images according to EXIF Orientaion Tag"))
+        self.chk_exif_transpose.SetToolTip(
+            T("What it's for: some cameras/phones save a photo already correctly oriented for viewing but "
+              "store the actual pixel data sideways/upside-down, with a hidden tag telling viewers how to "
+              "rotate it for display. This applies that rotation before upscaling.\n"
+              "Recommended: on (default) for virtually all real photos."))
 
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.AddSpacer(4)
@@ -150,29 +171,110 @@ class MainFrame(wx.Frame):
         self.model_4x_support = [True, True, True, False, False, False]
 
         self.opt_model.SetSelection(0)
-        self.opt_model.SetItemToolTip(0, T("Anime Style Art, Cliparts"))
-        self.opt_model.SetItemToolTip(1, T("Manga, Anime Screencaps, Anime Style Art for more clear results"))
-        self.opt_model.SetItemToolTip(2, T("Photograph"))
-        self.opt_model.SetItemToolTip(3, T("Old version, Art model, fast"))
-        self.opt_model.SetItemToolTip(4, T("Old version, Art model, veryfast"))
-        self.opt_model.SetItemToolTip(5, T("Old version, Photo model, veryfast"))
+        self.opt_model.SetItemToolTip(
+            0, T("Anime Style Art, Cliparts. Current-generation model family (swin_unet) — best quality "
+                 "for hand-drawn/vector-style illustration. Recommended for most anime/illustration content."))
+        self.opt_model.SetItemToolTip(
+            1, T("Manga, Anime Screencaps, Anime Style Art for more clear results. Same current-generation "
+                 "family, tuned specifically for scanned pages/screenshots — handles scan noise/compression "
+                 "artifacts better than the plain artwork model. Recommended for manga scans and anime "
+                 "screencaps specifically, over the plain \"artwork\" option."))
+        self.opt_model.SetItemToolTip(
+            2, T("Photograph. Current-generation model family, tuned for real photographic/live-action "
+                 "content rather than illustration."))
+        self.opt_model.SetItemToolTip(
+            3, T("Old version, Art model, fast. A legacy model kept for compatibility/comparison — the "
+                 "three current-generation options above generally give better quality at a comparable or "
+                 "better speed on any modern GPU. Recommended only if you have a specific reason to match "
+                 "old output, or are on very limited/old hardware."))
+        self.opt_model.SetItemToolTip(
+            4, T("Old version, Art model, veryfast. The fastest but lowest-quality option in this whole "
+                 "list — mainly useful on very limited hardware where even the current-generation models "
+                 "are too slow."))
+        self.opt_model.SetItemToolTip(
+            5, T("Old version, Photo model, veryfast. The fastest but lowest-quality photo option — mainly "
+                 "useful on very limited hardware."))
 
         self.opt_noise_level = wx.RadioBox(
             self.grp_sr, label=T("noise_reduction"),
             choices=[T("nr_none"), T("nr_low"), T("nr_medium"), T("nr_high"), T("nr_highest")],
             name="opt_noise_level")
         self.opt_noise_level.SetSelection(1)
+        self.opt_noise_level.SetToolTip(
+            T("What it's for: cleans up JPEG/compression artifacts and grain while upscaling. Higher = "
+              "more aggressive noise removal, but also more risk of softening real fine detail along with "
+              "the noise — pick the LOWEST level that actually removes the artifacts you see, not the "
+              "highest by default.\n"
+              "Recommended: none for a clean, uncompressed source (a fresh screenshot, a lossless scan); "
+              "low/medium for typical web images or moderately compressed video; high/highest only for "
+              "visibly blocky/artifact-heavy sources."))
 
         self.opt_upscaling = wx.RadioBox(
             self.grp_sr, label=T("upscaling"),
             choices=[T("up_none"), "2x", "4x"],
             name="opt_upscaling")
         self.opt_upscaling.SetSelection(1)
+        self.opt_upscaling.SetToolTip(
+            T("What it's for: how much bigger the output image/video becomes (each dimension multiplied "
+              "by this). \"none\" runs noise reduction only, at the original size.\n"
+              "Con: a larger multiplier costs proportionally more processing time and produces a "
+              "proportionally larger file.\n"
+              "Recommended: 2x for most everyday upscaling; 4x only if you specifically need a much larger "
+              "final image and have the processing time to spare."))
+
+        # Externally-pretrained models (RealESRGAN, BSRGAN -- not this project's own
+        # cunet/upconv_7/swin_unet family, no noise-level concept, fixed scale per
+        # model). Off by default, and only usable once the corresponding weight file
+        # has actually been placed in waifu2x/pretrained_models/external_sr/ --
+        # see docs/ai/AI_DECISIONS.md. When enabled, overrides Model/Upscaling/Noise
+        # Reduction above entirely rather than combining with them.
+        self.chk_external_sr = wx.CheckBox(self.grp_sr, label=T("Use External SR Model"),
+                                           name="chk_external_sr")
+        self.chk_external_sr.SetValue(False)
+        self.chk_external_sr.SetToolTip(
+            T("What it's for: uses a separately-obtained pretrained model (RealESRGAN/BSRGAN, or a custom "
+              "ONNX model you've supplied) instead of this app's own built-in swin_unet/cunet models.\n"
+              "How it works: completely OVERRIDES Model/Upscaling/Noise Reduction above rather than "
+              "combining with them — pick the specific model in the dropdown below instead.\n"
+              "Con: only works once the model's weight file has actually been placed in "
+              "waifu2x/pretrained_models/external_sr/ (not bundled with the app — separately licensed by "
+              "their original researchers); each of these models has a fixed scale/noise-handling behavior "
+              "of its own, less flexible than the built-in models' separate scale/noise controls.\n"
+              "Recommended: off unless you specifically want one of these particular models' characteristics "
+              "(e.g. RealESRGAN's general-purpose real-world upscaling) over the built-in options."))
+        external_sr_choices = [
+            "realesrgan_x4 (Real-ESRGAN, general, 4x)",
+            "realesrgan_x2 (Real-ESRGAN, general, 2x)",
+            "realesrgan_general_x4 (Real-ESRGAN, lighter/faster, 4x)",
+            "bsrgan_x4 (BSRGAN, blind SR, 4x)",
+            "bsrgan_x2 (BSRGAN, blind SR, 2x)",
+        ]
+        # Any *.onnx file the user has dropped in
+        # waifu2x/pretrained_models/external_sr/onnx/ (e.g. a custom SPAN-style
+        # export) is auto-discovered and appended here by filename -- no code
+        # change needed to add a new one, see waifu2x/external_sr.py.
+        for onnx_method in available_onnx_sr_methods():
+            external_sr_choices.append(f"{onnx_method} (custom ONNX SR model)")
+        self.cbo_external_sr_method = wx.ComboBox(
+            self.grp_sr, style=wx.CB_READONLY, name="cbo_external_sr_method",
+            choices=external_sr_choices)
+        self.cbo_external_sr_method.SetSelection(0)
+        self.cbo_external_sr_method.Enable(False)
+        self.cbo_external_sr_method.SetToolTip(
+            T("Which external model to use (only enabled when \"Use External SR Model\" above is "
+              "checked). realesrgan_x4/x2: general-purpose real-world upscaling, good all-rounder. "
+              "realesrgan_general_x4: a lighter/faster RealESRGAN variant. bsrgan_x4/x2: an alternative "
+              "\"blind\" super-resolution model, sometimes better on heavily degraded/unknown-quality "
+              "sources. \"(custom ONNX SR model)\" entries are any compatible model you've dropped into "
+              "the onnx/ subfolder yourself. Each option only appears usable once its actual weight file "
+              "is present on disk."))
 
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(self.opt_model, 0, wx.ALL | wx.EXPAND, border=4)
         layout.Add(self.opt_upscaling, 0, wx.ALL | wx.EXPAND, border=4)
         layout.Add(self.opt_noise_level, 0, wx.ALL | wx.EXPAND, border=4)
+        layout.Add(self.chk_external_sr, 0, wx.ALL | wx.EXPAND, border=4)
+        layout.Add(self.cbo_external_sr_method, 0, wx.ALL | wx.EXPAND, border=4)
         sizer_sr = wx.StaticBoxSizer(self.grp_sr, wx.VERTICAL)
         sizer_sr.Add(layout, 1, wx.ALL | wx.EXPAND, 8)
 
@@ -190,9 +292,13 @@ class MainFrame(wx.Frame):
         self.grp_video_filter = wx.StaticBox(self.pnl_options, label=T("Video/Image Filter"))
         self.chk_start_time = wx.CheckBox(self.grp_video_filter, label=T("Start Time"),
                                           name="chk_start_time")
+        self.chk_start_time.SetToolTip(
+            T("Only process the video from this timestamp onward, instead of from the beginning. Useful "
+              "for testing settings on a specific scene, or trimming unwanted intro footage. Video only."))
         self.txt_start_time = TimeCtrl(self.grp_video_filter, value="00:00:00", fmt24hr=True,
                                        name="txt_start_time")
         self.chk_end_time = wx.CheckBox(self.grp_video_filter, label=T("End Time"), name="chk_end_time")
+        self.chk_end_time.SetToolTip(T("Stop processing at this timestamp instead of the end of the video. Video only."))
         self.txt_end_time = TimeCtrl(self.grp_video_filter, value="00:00:00", fmt24hr=True,
                                      name="txt_end_time")
 
@@ -200,9 +306,16 @@ class MainFrame(wx.Frame):
         self.cbo_deinterlace = wx.ComboBox(self.grp_video_filter, choices=["", "yadif"],
                                            style=wx.CB_READONLY, name="cbo_deinterlace")
         self.cbo_deinterlace.SetSelection(0)
+        self.cbo_deinterlace.SetToolTip(
+            T("For old interlaced video sources (combed/striped look on motion). \"yadif\" converts it to "
+              "normal progressive video before upscaling. Leave blank for modern, already-progressive "
+              "sources (most streaming/BluRay video)."))
 
         self.lbl_vf = wx.StaticText(self.grp_video_filter, label=T("-vf (src)"))
         self.txt_vf = wx.TextCtrl(self.grp_video_filter, name="txt_vf")
+        self.txt_vf.SetToolTip(
+            T("Advanced: a raw ffmpeg video filter string applied to the source before upscaling (e.g. "
+              "cropping, scaling). Leave blank unless you specifically need this."))
 
         # -- image
         self.lbl_rotate = wx.StaticText(self.grp_video_filter, label=T("Rotate"))
@@ -212,6 +325,8 @@ class MainFrame(wx.Frame):
         self.cbo_rotate.Append(T("Left 90 (counterclockwise)"), "left")
         self.cbo_rotate.Append(T("Right 90 (clockwise)"), "right")
         self.cbo_rotate.SetSelection(0)
+        self.cbo_rotate.SetToolTip(
+            T("Rotate the source before upscaling, e.g. for footage/photos shot sideways on a phone."))
 
         self.chk_grain_noise = wx.CheckBox(self.grp_video_filter,
                                            label=T("Add Noise"), name="chk_grain_noise")
@@ -219,7 +334,16 @@ class MainFrame(wx.Frame):
                                                 name="cbo_grain_noise")
         self.chk_grain_noise.SetValue(False)
         self.cbo_grain_noise.SetSelection(3)
-        self.chk_grain_noise.SetToolTip(T("For Photo or Generative AI"))
+        self.chk_grain_noise.SetToolTip(
+            T("What it's for: deliberately adds a small amount of grain/noise back into the output, using "
+              "the strength set in the box to its right (higher = more noise added).\n"
+              "How it helps: for Photo or Generative AI content specifically — a fully clean, "
+              "denoised-then-upscaled image can sometimes look artificially smooth/plastic-y, especially "
+              "on AI-generated source images; a touch of noise restores a more natural, photographic look.\n"
+              "Con: adds a small amount of extra file size/detail that isn't real information, purely "
+              "aesthetic.\n"
+              "Recommended: off for anime/illustration content; consider on for photo or AI-generated "
+              "images if the clean result looks unnaturally smooth."))
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.Add(self.chk_start_time, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -261,23 +385,48 @@ class MainFrame(wx.Frame):
 
         self.cbo_device.Append("CPU", -1)
         self.cbo_device.SetSelection(0)
+        self.cbo_device.SetToolTip(
+            T("Which GPU (or CPU) does the AI processing. \"All CUDA Device\" splits work across every "
+              "GPU you have for faster batch processing. CPU works without a GPU but is dramatically "
+              "slower — only use it if you have no compatible graphics card."))
 
         self.lbl_tile_size = wx.StaticText(self.grp_processor, label=T("Tile Size"))
         self.cbo_tile_size = wx.ComboBox(self.grp_processor,
                                          choices=["1024", "640", "400", "256", "64"],
                                          style=wx.CB_READONLY, name="cbo_tile_size")
         self.cbo_tile_size.SetSelection(3)
+        self.cbo_tile_size.SetToolTip(
+            T("What it's for: the model processes the image in square tiles of this size (pixels) rather "
+              "than all at once, to keep VRAM use manageable on large images.\n"
+              "Con of smaller tiles: more tile-boundary seams to blend, and more overhead — can be slower "
+              "overall despite using less memory per step. Con of larger tiles: more VRAM used at once, "
+              "risk of running out of memory on a large image.\n"
+              "Recommended: 256 as a safe default; raise it if you have VRAM to spare and want fewer "
+              "seams/more speed, lower it if you hit out-of-memory errors."))
         self.lbl_batch_size = wx.StaticText(self.grp_processor, label=T("Batch Size"))
         self.cbo_batch_size = wx.ComboBox(self.grp_processor,
                                           choices=["64", "32", "16", "8", "4", "2", "1"],
                                           style=wx.CB_READONLY, name="cbo_batch_size")
         self.cbo_batch_size.SetSelection(4)
+        self.cbo_batch_size.SetToolTip(
+            T("Video only. How many tiles/frames are processed together at once. Higher = faster overall "
+              "but uses more VRAM. Lower it if you run out of memory; raise it if you have VRAM to spare "
+              "and want faster processing."))
 
         self.chk_tta = wx.CheckBox(self.grp_processor, label=T("TTA"), name="chk_tta")
-        self.chk_tta.SetToolTip(T("Use flip augmentation to improve quality (veryslow)") + "\n" +
-                                T("Ignored in some models"))
+        self.chk_tta.SetToolTip(
+            T("What it's for: runs the model on both the normal AND a mirrored version of the image, then "
+              "blends the result — often a little cleaner/more accurate.\n"
+              "Con: roughly doubles processing time, and some models ignore this setting entirely (no "
+              "effect for them either way).\n"
+              "Recommended: off for large batches/long videos where the time cost adds up; worth trying "
+              "for a single important image where extra quality matters more than speed."))
         self.chk_amp = wx.CheckBox(self.grp_processor, label=T("FP16 (fast)"), name="chk_amp")
         self.chk_amp.SetValue(True)
+        self.chk_amp.SetToolTip(
+            T("Runs the AI math at lower numeric precision (FP16 instead of FP32), which is significantly "
+              "faster and uses less VRAM on modern GPUs, with no visible quality cost in virtually all "
+              "cases. Recommended: on."))
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.Add(self.lbl_device, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -333,6 +482,7 @@ class MainFrame(wx.Frame):
 
         self.opt_model.Bind(wx.EVT_RADIOBOX, self.on_selected_index_changed_opt_model)
         self.opt_upscaling.Bind(wx.EVT_RADIOBOX, self.on_selected_index_changed_opt_upscaling)
+        self.chk_external_sr.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_external_sr)
 
         self.btn_start.Bind(wx.EVT_BUTTON, self.on_click_btn_start)
         self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_cancel)
@@ -370,6 +520,7 @@ class MainFrame(wx.Frame):
         self.update_start_button_state()
         self.update_upscaling_state()
         self.update_noise_level_state()
+        self.update_external_sr_state()
         self.update_input_option_state()
         self.grp_video.update_controls()
 
@@ -427,6 +578,19 @@ class MainFrame(wx.Frame):
 
     def on_selected_index_changed_opt_upscaling(self, event):
         self.update_noise_level_state()
+
+    def on_changed_chk_external_sr(self, event):
+        self.update_external_sr_state()
+
+    def update_external_sr_state(self):
+        enabled = self.chk_external_sr.GetValue()
+        self.cbo_external_sr_method.Enable(enabled)
+        # External models have their own fixed scale, no noise-level concept, and
+        # no art/photo/scan style variants -- these controls simply don't apply
+        # while an external model is selected.
+        self.opt_model.Enable(not enabled)
+        self.opt_upscaling.Enable(not enabled)
+        self.opt_noise_level.Enable(not enabled)
 
     def resolve_output_path(self, input_path, output_path):
         if is_output_dir(output_path):
@@ -504,29 +668,40 @@ class MainFrame(wx.Frame):
         else:
             gpus = [device]
 
-        noise_level = int(self.opt_noise_level.GetSelection()) - 1
-        scale = 2 ** (int(self.opt_upscaling.GetSelection()))
-        assert noise_level in {-1, 0, 1, 2, 3}
-        assert scale in {1, 2, 4}
-        if scale == 1:
-            method = "noise"
+        if self.chk_external_sr.GetValue():
+            # Externally-pretrained model (RealESRGAN/BSRGAN) -- fixed scale per
+            # model, no noise-level concept, no model_dir/style scheme of its own
+            # (external_sr.py resolves its own weight-file location). See
+            # docs/ai/AI_DECISIONS.md.
+            method = self.cbo_external_sr_method.GetValue().split(" ")[0]
+            model_dir = None
+            noise_level = 0  # unused for this path, but must satisfy the parser's choices
+            tta = self.chk_tta.GetValue()
         else:
-            if noise_level >= 0:
-                method = f"noise_scale{scale}x"
+            noise_level = int(self.opt_noise_level.GetSelection()) - 1
+            scale = 2 ** (int(self.opt_upscaling.GetSelection()))
+            assert noise_level in {-1, 0, 1, 2, 3}
+            assert scale in {1, 2, 4}
+            if scale == 1:
+                method = "noise"
             else:
-                method = f"scale{scale}x"
+                if noise_level >= 0:
+                    method = f"noise_scale{scale}x"
+                else:
+                    method = f"scale{scale}x"
+            model_dir = self.model_dirs[self.opt_model.GetSelection()]
+            tta = self.chk_tta.GetValue() and self.model_tta_support[self.opt_model.GetSelection()]
 
         input_path = self.pnl_file.input_path
         resume = (path.isdir(input_path) or is_text(input_path)) and self.chk_resume.GetValue()
         recursive = path.isdir(input_path) and self.chk_recursive.GetValue()
         start_time = self.txt_start_time.GetValue() if self.chk_start_time.GetValue() else None
         end_time = self.txt_end_time.GetValue() if self.chk_end_time.GetValue() else None
-        tta = self.chk_tta.GetValue() and self.model_tta_support[self.opt_model.GetSelection()]
 
         parser.set_defaults(
             input=input_path,
             output=self.pnl_file.output_path,
-            model_dir=self.model_dirs[self.opt_model.GetSelection()],
+            model_dir=model_dir,
             noise_level=noise_level,
             method=method,
             yes=True,  # TODO: remove this

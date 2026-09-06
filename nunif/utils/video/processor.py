@@ -249,6 +249,8 @@ def _process_video(
     configure_video_codec(config)
 
     output_container = av.open(output_path_tmp, mode="w", options=config.container_options)
+    if config.metadata:
+        output_container.metadata.update(config.metadata)
     output_fps = config.output_fps or config.fps
     input_reformat_options, output_reformatter = setup_color_transform(sw_format, config, device=device)
     config.pix_fmt = output_reformatter.dst_pix_fmt

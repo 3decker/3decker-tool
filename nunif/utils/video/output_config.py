@@ -42,12 +42,14 @@ class VideoOutputConfig:
         output_color_primaries: ColorPrimaries | int | None = None,
         output_color_trc: ColorTrc | int | None = None,
         source_color_range: ColorRange | int | None = None,
+        metadata: Dict[str, str] | None = None,
     ):
         self.pix_fmt = pix_fmt
         self.fps = fps
         self.output_fps = output_fps
         self.options = options
         self.container_options = container_options
+        self.metadata = metadata or {}
         self.output_width = output_width
         self.output_height = output_height
         self.colorspace = colorspace if colorspace is not None else "auto"

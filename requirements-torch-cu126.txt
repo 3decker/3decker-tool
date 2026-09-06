@@ -1,5 +1,12 @@
 --extra-index-url https://download.pytorch.org/whl/cu126
 
+# waifu2x: optional ONNX super-resolution model support (loading external SR
+# models, e.g. SPAN-style exports, dropped into a folder -- see
+# waifu2x/external_sr.py and docs/ai/AI_DECISIONS.md). CUDA-specific package,
+# only meaningful alongside a CUDA torch build like this file's own -- imported
+# lazily in code, so its absence doesn't break anything for users without it.
+onnxruntime-gpu
+
 # Linux
 torch==2.12.0+cu126; sys_platform == "linux"
 torchvision==0.27.0+cu126; sys_platform == "linux"

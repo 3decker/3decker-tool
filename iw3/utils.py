@@ -140,6 +140,57 @@ def _run_waifu2x_upscale(output_path, args):
     return upscaled_path
 
 
+def _run_rife_interpolation(output_path, args):
+    """Optionally invokes RIFE (iw3.rife_cli, a thin wrapper around the
+    Practical-RIFE model -- see docs/ai/AI_DECISIONS.md ADR-029) as a subprocess
+    against a just-finished iw3 output, when the user explicitly opted in (GUI:
+    "Interpolate frames with RIFE after conversion" / --rife-interpolate).
+    Follows the exact same pattern as _run_waifu2x_upscale() above: a genuinely
+    separate subprocess (sys.executable -m iw3.rife_cli) launched only AFTER the
+    conversion's own output file is fully written, so RIFE's model never competes
+    for GPU memory with iw3's depth/stereo models in this same process, and a
+    separate '<name>_rife<ext>' output file so a RIFE failure can never be
+    mistaken for the conversion itself having failed -- the original output is
+    always left untouched either way.
+
+    RIFE interpolates the FINAL PACKED stereo frame (both eyes already combined),
+    not each eye separately -- see rife_cli.py's module docstring for why, and
+    the accepted packed-eye-seam tradeoff this implies.
+
+    Mutually exclusive with --preserve-dowi (enforced earlier, in
+    set_state_args() -- there is no way to assign correct DV/HDR10+ metadata to
+    RIFE's synthetic in-between frames), so this function does not need to
+    re-check that here.
+
+    Returns the interpolated file's path on success, or None (having already
+    logged why) on failure -- verifies the output file actually exists rather
+    than trusting the subprocess's exit code alone (see the HDR extraction
+    silent-failure lesson in docs/ai/AI_KNOWN_ISSUES.md)."""
+    if not getattr(args, "rife_interpolate", False):
+        return None
+    rife_model = getattr(args, "rife_model", None) or "rife_425"
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+
+    base, ext = path.splitext(str(output_path))
+    interpolated_path = f"{base}_rife{ext}"
+    cmd = [sys.executable, "-m", "iw3.rife_cli",
+           "-i", str(output_path), "-o", interpolated_path,
+           "--rife-model", rife_model]
+
+    print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace").strip()
+        print(f"[iw3] RIFE interpolation failed: {msg[:300]}", file=sys.stderr)
+        return None
+    if not path.exists(interpolated_path):
+        print("[iw3] RIFE interpolation exited 0 but produced no output file", file=sys.stderr)
+        return None
+    print(f"[iw3] RIFE interpolation done: {interpolated_path}", file=sys.stderr)
+    return interpolated_path
+
+
 def _extract_dovi_rpu(input_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_hevc):
     subprocess.run(
         [ffmpeg_bin, "-y", "-i", str(input_path), "-c:v", "copy", "-an", "-f", "hevc", str(tmp_hevc)],
@@ -934,12 +985,20 @@ def make_output_filename(input_filename, args, video=False):
         edge_repair_strength = getattr(args, "edge_repair_strength", 0.0) or 0.0
         er_tag = f"_er{to_deciaml(edge_repair_strength, 100, 2)}" if edge_repair_strength > 0.0 else ""
 
+        if getattr(args, "rife_interpolate", False):
+            rife_model_val = getattr(args, "rife_model", None) or "rife_425"
+            rife_tag = "_rife"
+            if rife_model_val != "rife_425":
+                rife_tag += rife_model_val[len("rife_"):] if rife_model_val.startswith("rife_") else rife_model_val
+        else:
+            rife_tag = ""
+
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}{fd}{bd}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}{bp}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
-                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{bitrate}")
+                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{rife_tag}{bitrate}")
     else:
         metadata = ""
 
@@ -1075,6 +1134,9 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append("iw3_preserve_screen_border=1")
     if getattr(args, "edge_repair_strength", 0.0):
         comment_parts.append(f"iw3_edge_repair_strength={args.edge_repair_strength}")
+    if getattr(args, "rife_interpolate", False):
+        rife_model_val = getattr(args, "rife_model", None) or "rife_425"
+        comment_parts.append(f"iw3_rife_interpolate=1 iw3_rife_model={rife_model_val}")
     if getattr(args, "waifu2x_upscale", False):
         # Recorded here as provenance even though the upscale itself produces a
         # SEPARATE "<name>_w2x<ext>" file (see _run_waifu2x_upscale) rather than
@@ -2803,6 +2865,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     stop_event = args.state.get("stop_event") if getattr(args, "state", None) else None
     if not (stop_event is not None and stop_event.is_set()):
         _run_waifu2x_upscale(output_path, args)
+        _run_rife_interpolation(output_path, args)
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -3758,6 +3821,18 @@ def create_parser(required_true=True):
                               "method made it), gently smoothing only a thin band right around real depth "
                               "edges to reduce hairline fringing/ghosting residue. 0.0=off (default, zero "
                               "cost), 1.0=strongest. Cannot affect flat regions or areas with no depth edge."))
+    parser.add_argument("--rife-interpolate", action="store_true",
+                        help=("after conversion finishes, run the finished PACKED stereo output (both eyes "
+                              "already combined, e.g. Half-SBS) through RIFE frame interpolation as a "
+                              "separate post-processing step, doubling the effective frame rate. Written to "
+                              "a separate '<name>_rife<ext>' file -- the original conversion output is never "
+                              "modified. Cannot be combined with --preserve-dowi (no correct DV/HDR10+ "
+                              "metadata can be assigned to RIFE's synthetic in-between frames)."))
+    parser.add_argument("--rife-model", type=str, default="rife_425",
+                        choices=["rife_425", "rife_425_lite"],
+                        help=("which RIFE model tier to use for --rife-interpolate. rife_425 (default) is "
+                              "the recommended full-quality model; rife_425_lite is a lower-compute-cost "
+                              "variant. Weights are downloaded on first use if not already present."))
     parser.add_argument("--foreground-scale", type=float, choices=[Range(-3.0, 3.0)], default=0,
                         help="foreground scaling level. 0 is disabled")
     parser.add_argument("--mapper-type", type=str, choices=["div", "mul", "shift"], default=None,
@@ -4050,6 +4125,13 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         raise ValueError("--export-depth-only must be specified together with --export or --export-disparity")
     if args.export_depth_fit and not args.export:
         raise ValueError("--export-depth-fit must be specified together with --export or --export-disparity")
+
+    if getattr(args, "rife_interpolate", False) and getattr(args, "preserve_dowi", False):
+        raise ValueError(
+            "--rife-interpolate and --preserve-dowi cannot be used together: RIFE inserts "
+            "synthetic in-between frames that have no correct Dolby Vision/HDR10+ per-frame "
+            "metadata to assign, so there is currently no way to preserve DV/HDR10+ through "
+            "frame interpolation. Disable one of the two options and try again.")
 
     if depth_model.get_name() == "VideoDepthAnything":
         if not args.ema_normalize:

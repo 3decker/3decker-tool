@@ -1760,12 +1760,51 @@ class MainFrame(wx.Frame):
         self.chk_waifu2x_upscale.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_waifu2x_upscale)
         self.update_waifu2x_upscale()
 
+        self.chk_rife_interpolate = wx.CheckBox(self.grp_postprocess,
+                                                label=T("Interpolate frames with RIFE after conversion"),
+                                                name="chk_rife_interpolate")
+        self.chk_rife_interpolate.SetValue(False)
+        self.chk_rife_interpolate.SetToolTip(
+            T("What it's for (single video and Dual-Pass Depth Blend jobs only): once this job's finished "
+              "output is fully written, runs it through RIFE (a separate AI frame-interpolation model) as "
+              "one extra step, generating a new in-between frame for every pair of real frames -- doubling "
+              "the effective frame rate for smoother-looking motion.\n"
+              "How it's safe: saved to a separate '_rife' file -- the original conversion output is always "
+              "left untouched, even if the interpolation step itself fails.\n"
+              "Con: real extra processing time after the main conversion already finished; RIFE "
+              "interpolates the FINAL PACKED stereo frame (both eyes already combined) as one image, so it "
+              "will see the seam between the two packed eyes -- it wasn't trained on that, though in "
+              "practice it moves both eyes together so this doesn't cause left/right desync.\n"
+              "Cannot be combined with Preserve Dolby Vision: there's no way to assign correct DV/HDR10+ "
+              "metadata to RIFE's synthetic in-between frames.\n"
+              "Recommended: on if your source is naturally low frame rate (e.g. 24fps film) and you want "
+              "smoother motion for VR viewing; off if you're already happy with the source's frame rate or "
+              "you need Dolby Vision preserved."))
+        self.cbo_rife_model = wx.ComboBox(self.grp_postprocess,
+                                          choices=["rife_425", "rife_425_lite"],
+                                          name="cbo_rife_model")
+        self.cbo_rife_model.SetEditable(False)
+        self.cbo_rife_model.SetSelection(0)
+        self.cbo_rife_model.SetToolTip(
+            T("Which RIFE model quality tier to use.\n"
+              "rife_425: the recommended full model -- better motion accuracy, especially on complex/fast "
+              "motion, at a higher compute cost.\n"
+              "rife_425_lite: a lower-compute-cost variant of the same generation, trades a little accuracy "
+              "for speed.\n"
+              "Weights are downloaded automatically the first time you use a given tier (not bundled with "
+              "the app).\n"
+              "Recommended: rife_425 unless interpolation time is a real bottleneck for you."))
+        self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
+        self.update_rife_interpolate()
+
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
         layout.Add(self.chk_waifu2x_upscale, (0, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_waifu2x_method, (1, 0), flag=wx.EXPAND)
         layout.Add(self.cbo_waifu2x_noise_level, (1, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_waifu2x_style, (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_rife_interpolate, (2, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rife_model, (3, 0), flag=wx.EXPAND)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -2398,6 +2437,13 @@ class MainFrame(wx.Frame):
     def on_changed_chk_waifu2x_upscale(self, event):
         self.update_waifu2x_upscale()
 
+    def update_rife_interpolate(self):
+        enabled = self.chk_rife_interpolate.GetValue()
+        self.cbo_rife_model.Enable(enabled)
+
+    def on_changed_chk_rife_interpolate(self, event):
+        self.update_rife_interpolate()
+
     def update_temporal_stabilize(self):
         if self.chk_temporal_stabilize.IsChecked():
             self.cbo_temporal_stabilize_strength.Enable()
@@ -2784,6 +2830,8 @@ class MainFrame(wx.Frame):
             waifu2x_method=self.cbo_waifu2x_method.GetValue(),
             waifu2x_noise_level=int(self.cbo_waifu2x_noise_level.GetValue()),
             waifu2x_style=self.cbo_waifu2x_style.GetValue(),
+            rife_interpolate=self.chk_rife_interpolate.GetValue(),
+            rife_model=self.cbo_rife_model.GetValue(),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
 
@@ -2858,7 +2906,22 @@ class MainFrame(wx.Frame):
         return args
 
     def on_click_btn_start(self, event):
-        args = self.parse_args()
+        if self.chk_rife_interpolate.GetValue() and self.chk_preserve_dowi.GetValue():
+            # Same check as set_state_args()'s CLI-side ValueError (see
+            # docs/ai/AI_DECISIONS.md ADR-029) -- checked here too, before even
+            # building args, so the user gets a clear message immediately instead
+            # of an uncaught exception from deep inside parse_args()/set_state_args().
+            wx.MessageBox(
+                T("RIFE Frame Interpolation and Preserve Dolby Vision cannot be used together: "
+                  "there is no way to assign correct DV/HDR10+ metadata to RIFE's synthetic "
+                  "in-between frames. Disable one of the two before starting."),
+                f"{T('Error')}: ValueError", wx.OK | wx.ICON_ERROR)
+            return
+        try:
+            args = self.parse_args()
+        except ValueError as e:
+            wx.MessageBox(str(e), f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
         if args is None:
             return
         if not self.confirm_overwrite(args):

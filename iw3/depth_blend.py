@@ -1227,8 +1227,9 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
                       f"a resumed run, or usable for a manual recovery.", file=sys.stderr)
 
     if not cancelled():
-        from .utils import _run_waifu2x_upscale
+        from .utils import _run_rife_interpolation, _run_waifu2x_upscale
         _run_waifu2x_upscale(output_path, args)
+        _run_rife_interpolation(output_path, args)
 
     print(f"[depth-blend] done. Working files (full rgb/depth dumps from both passes) are still in:\n"
           f"  {work_dir}\n"

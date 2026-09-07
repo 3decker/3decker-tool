@@ -846,11 +846,23 @@ def make_output_filename(input_filename, args, video=False):
             bd = ""
         if getattr(args, "depth_refine", False):
             drefine = "_dr"
+            dr_strength = getattr(args, "depth_refine_strength", 1.0) or 1.0
+            if dr_strength != 1.0:
+                drefine += f"{to_deciaml(dr_strength, 100, 2)}"
         else:
             drefine = ""
         if getattr(args, "temporal_stabilize", False) and video:
             ts_strength = getattr(args, "temporal_stabilize_strength", 0.7) or 0.7
             tstab = f"_ts{to_deciaml(ts_strength, 100, 2)}"
+            ts_max_shift = getattr(args, "temporal_stabilize_max_shift_velocity", None)
+            if ts_max_shift is not None:
+                tstab += f"ms{to_deciaml(ts_max_shift, 100, 2)}"
+            ts_flat_boost = getattr(args, "temporal_stabilize_flat_region_boost", 0.0) or 0.0
+            if ts_flat_boost != 0.0:
+                tstab += f"fb{to_deciaml(ts_flat_boost, 100, 2)}"
+            ts_edge_protect = getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0
+            if ts_edge_protect != 0.0:
+                tstab += f"ep{to_deciaml(ts_edge_protect, 100, 2)}"
         else:
             tstab = ""
         if getattr(args, "depth_blend", False):
@@ -887,6 +899,8 @@ def make_output_filename(input_filename, args, video=False):
             db_edge_supp = getattr(args, "depth_blend_edge_suppression", 0.5) or 0.5
             if db_edge_supp != 0.5:
                 dblend += f"es{to_deciaml(db_edge_supp, 100, 2)}"
+            if getattr(args, "depth_blend_edge_hard_cutoff", False):
+                dblend += "hc"
         else:
             dblend = ""
 
@@ -1027,11 +1041,25 @@ def _build_iw3_comment_metadata(args, video=True):
         db_edge_supp = getattr(args, "depth_blend_edge_suppression", 0.5) or 0.5
         if db_edge_supp != 0.5:
             comment_parts.append(f"iw3_depth_blend_edge_suppression={db_edge_supp}")
+        if getattr(args, "depth_blend_edge_hard_cutoff", False):
+            comment_parts.append("iw3_depth_blend_edge_hard_cutoff=1")
     if getattr(args, "depth_refine", False):
         comment_parts.append("iw3_depth_refine=1")
+        dr_strength = getattr(args, "depth_refine_strength", 1.0) or 1.0
+        if dr_strength != 1.0:
+            comment_parts.append(f"iw3_depth_refine_strength={dr_strength}")
     if getattr(args, "temporal_stabilize", False) and video:
         ts_strength = getattr(args, "temporal_stabilize_strength", 0.7) or 0.7
         comment_parts.append(f"iw3_temporal_stabilize_strength={ts_strength}")
+        ts_max_shift = getattr(args, "temporal_stabilize_max_shift_velocity", None)
+        if ts_max_shift is not None:
+            comment_parts.append(f"iw3_temporal_stabilize_max_shift_velocity={ts_max_shift}")
+        ts_flat_boost = getattr(args, "temporal_stabilize_flat_region_boost", 0.0) or 0.0
+        if ts_flat_boost != 0.0:
+            comment_parts.append(f"iw3_temporal_stabilize_flat_region_boost={ts_flat_boost}")
+        ts_edge_protect = getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0
+        if ts_edge_protect != 0.0:
+            comment_parts.append(f"iw3_temporal_stabilize_edge_protection={ts_edge_protect}")
     if args.ema_normalize and video:
         ma = "1" if getattr(args, "ema_motion_adaptive", False) else "0"
         comment_parts.append(
@@ -3910,6 +3938,10 @@ def create_parser(required_true=True):
                               "(bilateral) smoothing, within that single frame -- a different axis from EMA "
                               "smoothing, which works ACROSS frames over time. Cheap: no extra passes, no "
                               "new dependencies, doesn't affect how many depth models are used."))
+    parser.add_argument("--depth-refine-strength", type=float, default=1.0,
+                        help=("how strong the --depth-refine bilateral cleanup is. 1.0 (default) matches "
+                              "this feature's original fixed behavior exactly; higher pushes the smoothing "
+                              "further, lower pulls back. Has no effect unless --depth-refine is also set."))
     parser.add_argument("--temporal-stabilize", action="store_true",
                         help=("approximates a video-aware model's (VDA_L) per-pixel stability for a "
                               "single-frame model (e.g. Any_V3_Mono_01): tracks real motion via optical "
@@ -3986,7 +4018,8 @@ def calc_auto_warp_steps(method, divergence, synthetic_view):
 def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None):
     if depth_model is None:
         depth_model = create_depth_model(args.depth_model)
-    depth_model.enable_refine(getattr(args, "depth_refine", False))
+    depth_model.enable_refine(getattr(args, "depth_refine", False),
+                               strength=getattr(args, "depth_refine_strength", 1.0) or 1.0)
     if getattr(args, "temporal_stabilize", False):
         depth_model.enable_temporal_stabilize(
             strength=getattr(args, "temporal_stabilize_strength", 0.7) or 0.7,

@@ -200,6 +200,7 @@ def _blend_fingerprint(args):
         "depth_blend_align": bool(getattr(args, "depth_blend_align", False)),
         "depth_blend_align_decay": float(getattr(args, "depth_blend_align_decay", 0.9) or 0.9),
         "depth_blend_edge_suppression": float(getattr(args, "depth_blend_edge_suppression", 0.5) or 0.5),
+        "depth_blend_edge_hard_cutoff": bool(getattr(args, "depth_blend_edge_hard_cutoff", False)),
     }
 
 
@@ -291,7 +292,7 @@ def _detail_mask(rgb_uint8):
     return ((lap - lo) / (hi - lo)).astype(np.float32)
 
 
-def _depth_edge_mask(depth_a_u16, suppression_strength=0.5):
+def _depth_edge_mask(depth_a_u16, suppression_strength=0.5, hard_cutoff=False, hard_cutoff_threshold=0.5):
     """0-1 map of how strong/confident a depth DISCONTINUITY the primary model already
     has at each pixel -- a real silhouette boundary it has already resolved on its own.
 
@@ -319,7 +320,22 @@ def _depth_edge_mask(depth_a_u16, suppression_strength=0.5):
     knowing what 4/97th's downside was. Exposed as a real GUI/CLI setting (not just a
     hardcoded constant) specifically so it can be tuned per-user/per-footage instead
     of guessed at again. Pure flat-depth foliage (no edge at all) is unaffected by
-    this parameter at any value."""
+    this parameter at any value.
+
+    `hard_cutoff` (default False): the band this produces is normally a smooth 0-1
+    RAMP -- suppression fades in gradually as you approach a real edge, rather than
+    switching on abruptly. Real footage testing found this smooth fade still lets a
+    thin sliver of the secondary model's disagreeing edge position leak through in
+    the partially-suppressed transition zone, on some objects. `hard_cutoff` turns
+    the same ramp into a binary step instead: everywhere the ramp would read at or
+    above `hard_cutoff_threshold` becomes fully suppressed (1.0), everywhere below
+    becomes fully open (0.0) -- same underlying band WIDTH (still governed by
+    `suppression_strength`), just a sharp edge to it instead of a gradual one. This
+    should shrink (not necessarily eliminate) silhouette misalignment between two
+    independently-trained depth models -- see ADR-026: no established technique
+    exists to fully eliminate this, since it's a genuine shape/contour disagreement
+    between two models with no shared ground truth to register against, not a
+    value-blend problem this mask can fully solve."""
     suppression_strength = float(min(max(suppression_strength, 0.0), 1.0))
     sigma = 2.0 + 2.0 * suppression_strength
     percentile = 99.0 - 2.0 * suppression_strength
@@ -335,7 +351,10 @@ def _depth_edge_mask(depth_a_u16, suppression_strength=0.5):
     hi = float(np.percentile(grad_mag, percentile))
     if hi < 1e-6:
         return np.zeros_like(grad_mag, dtype=np.float32)
-    return np.clip(grad_mag / hi, 0.0, 1.0).astype(np.float32)
+    mask = np.clip(grad_mag / hi, 0.0, 1.0).astype(np.float32)
+    if hard_cutoff:
+        mask = (mask >= float(hard_cutoff_threshold)).astype(np.float32)
+    return mask
 
 
 def _region_mask(depth_a_u16, region, percent):
@@ -398,7 +417,8 @@ def blend_depth_frame(depth_a_u16, depth_b_u16, rgb_uint8, strength=1.0,
                        region="detail", region_percent=25.0, feather_blur=0,
                        bilateral=False, bilateral_d=12, bilateral_sigma_color=75.0,
                        bilateral_sigma_space=75.0, clahe=False, clahe_clip=2.0,
-                       clahe_tile=8, edge_suppression=0.5, return_weight_stats=False):
+                       clahe_tile=8, edge_suppression=0.5, edge_hard_cutoff=False,
+                       return_weight_stats=False):
     """Combine two already-normalized (0-0xffff) depth frames for the same image.
     depth_a is trusted by default (the crisper/primary model); depth_b is blended in
     more strongly according to `region`:
@@ -437,6 +457,13 @@ def blend_depth_frame(depth_a_u16, depth_b_u16, rgb_uint8, strength=1.0,
     near an edge too). Lower = looser (more detail blending everywhere including
     close to edges, more risk of a soft/doubled edge on a real silhouette).
 
+    edge_hard_cutoff (default False): only affects region="detail" mode. Changes
+    edge_suppression's band from a smooth fade to a hard on/off step -- see
+    _depth_edge_mask's own docstring for the full reasoning. A cheap thing to try
+    when edge_suppression alone doesn't fully clear up silhouette misalignment,
+    though it can only shrink, not eliminate, a genuine shape disagreement between
+    two independently-trained depth models.
+
     Returns a uint16 array, same shape as depth_a_u16. With return_weight_stats=True,
     returns (blended, mean_weight, active_fraction) instead -- mean_weight is the
     average blend weight across the whole frame, active_fraction is the fraction of
@@ -453,7 +480,8 @@ def blend_depth_frame(depth_a_u16, depth_b_u16, rgb_uint8, strength=1.0,
 
     if region == "detail":
         detail = _detail_mask(rgb_uint8)
-        depth_edge = _depth_edge_mask(depth_a_u16, suppression_strength=edge_suppression)
+        depth_edge = _depth_edge_mask(depth_a_u16, suppression_strength=edge_suppression,
+                                       hard_cutoff=edge_hard_cutoff)
         # Suppress wherever the primary model already has a confident depth edge of
         # its own -- see _depth_edge_mask. Multiplying (not subtracting) means a
         # region with BOTH real RGB detail AND a strong depth edge (a leaf right at a
@@ -891,6 +919,7 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
         clahe_tile = int(getattr(args, "depth_blend_clahe_tile", 8) or 8)
         align = bool(getattr(args, "depth_blend_align", False))
         edge_suppression = float(getattr(args, "depth_blend_edge_suppression", 0.5) or 0.5)
+        edge_hard_cutoff = bool(getattr(args, "depth_blend_edge_hard_cutoff", False))
 
         align_params = None
         if align:
@@ -983,7 +1012,7 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
                 bilateral=bilateral, bilateral_d=bilateral_d,
                 bilateral_sigma_color=bilateral_sigma_color, bilateral_sigma_space=bilateral_sigma_space,
                 clahe=clahe, clahe_clip=clahe_clip, clahe_tile=clahe_tile,
-                edge_suppression=edge_suppression,
+                edge_suppression=edge_suppression, edge_hard_cutoff=edge_hard_cutoff,
                 return_weight_stats=True)
             frame_weights[fname] = (mean_weight, active_fraction)
             # Write to a temp name and atomically rename into place: if the process

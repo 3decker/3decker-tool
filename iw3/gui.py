@@ -560,10 +560,26 @@ class MainFrame(wx.Frame):
                                             name="chk_depth_refine")
         self.chk_depth_refine.SetValue(False)
         self.chk_depth_refine.SetToolTip(
-            T("Cleans up noise WITHIN each depth frame using edge-preserving smoothing (won't blur across "
-              "real edges the way a plain blur would). Different from Flicker Reduction, which smooths "
-              "ACROSS frames over time — this works on a single frame at a time. Cheap: no extra passes, "
-              "no extra models. Recommended: safe to leave on for most content."))
+            T("What it's for: cleans up noise WITHIN each depth frame using edge-preserving smoothing "
+              "(won't blur across real edges the way a plain blur would). Different from Flicker "
+              "Reduction, which smooths ACROSS frames over time — this works on a single frame at a time. "
+              "Cheap: no extra passes, no extra models.\n"
+              "Side note some users notice: cleaner depth boundaries here can make the finished 3D effect "
+              "FEEL a bit stronger/more solid even though the actual depth range doesn't change — noisy or "
+              "fuzzy depth edges read as less convincing 3D than clean ones at the same strength.\n"
+              "Recommended: on, safe to leave on for most content. Use the Strength box to its right to "
+              "control how much."))
+
+        self.cbo_depth_refine_strength = EditableComboBox(
+            self.grp_stereo, choices=["1.5", "1.25", "1.0", "0.75", "0.5", "0.25"],
+            name="cbo_depth_refine_strength")
+        self.cbo_depth_refine_strength.SetSelection(2)
+        self.cbo_depth_refine_strength.SetToolTip(
+            T("How strong Depth Detail Refinement's cleanup is. 1.0 = the original fixed strength this "
+              "feature always used. Higher = more smoothing reach (cleaner depth boundaries, but risks "
+              "softening genuinely fine depth detail if pushed too far); lower = gentler, closer to doing "
+              "nothing. Recommended: 1.0 as a safe starting point; try 1.25-1.5 if you want a bit more of "
+              "the \"cleaner/more solid 3D\" effect this setting gives."))
 
         self.chk_temporal_stabilize = wx.CheckBox(self.grp_stereo, label=T("Object Stability (experimental)"),
                                                   name="chk_temporal_stabilize")
@@ -805,6 +821,22 @@ class MainFrame(wx.Frame):
               "narrower protection, more detail blending everywhere but more risk of soft edges. Default "
               "0.5 is a middle ground between two previously-tested extremes."))
 
+        self.chk_depth_blend_edge_hard_cutoff = wx.CheckBox(
+            self.grp_depth_blend, label=T("Hard Edge Cutoff"), name="chk_depth_blend_edge_hard_cutoff")
+        self.chk_depth_blend_edge_hard_cutoff.SetValue(False)
+        self.chk_depth_blend_edge_hard_cutoff.SetToolTip(
+            T("What it's for: only matters together with Edge Suppression above ('detail' region only). "
+              "Edge Suppression normally fades in smoothly as you approach a real silhouette -- this "
+              "switches that smooth fade into a hard on/off step instead (same protected band width, "
+              "sharper edge to it). A cheap thing to try if Edge Suppression alone still leaves a soft/"
+              "misaligned-looking border on some objects.\n"
+              "Con: cannot fully eliminate a genuine shape disagreement between two independently-trained "
+              "depth models -- there's no established technique to fully correct that (verified via "
+              "research, not assumed), only shrink its visible impact further than the smooth fade does "
+              "alone.\n"
+              "Recommended: off by default; try on only after Edge Suppression is already near 1.0 and "
+              "still isn't enough."))
+
         layout_depth_blend = wx.GridBagSizer(vgap=5, hgap=4)
         layout_depth_blend.SetEmptyCellSize((0, 0))
         j = 0
@@ -826,6 +858,7 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.cbo_depth_blend_align_decay, (j, 2), flag=wx.EXPAND)
         layout_depth_blend.Add(self.lbl_depth_blend_edge_suppression, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_edge_suppression, (j, 1), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.chk_depth_blend_edge_hard_cutoff, (j, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         sizer_depth_blend = wx.StaticBoxSizer(self.grp_depth_blend, wx.VERTICAL)
         sizer_depth_blend.Add(layout_depth_blend, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -1181,7 +1214,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_edge_dilation, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_edge_dilation_y, (i, 2), flag=wx.EXPAND)
         layout.Add(self.chk_depth_aa, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.chk_depth_refine, (i := i + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_depth_refine, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_depth_refine_strength, (i, 1), flag=wx.EXPAND)
         layout.Add(self.chk_temporal_stabilize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_temporal_stabilize_strength, (i, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_temporal_stabilize_max_shift, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -1880,6 +1914,7 @@ class MainFrame(wx.Frame):
         self.chk_depth_blend_bilateral.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend_bilateral)
         self.chk_depth_blend_clahe.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend_clahe)
         self.chk_depth_blend_align.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend_align)
+        self.chk_depth_refine.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_refine)
 
         self.cbo_stereo_format.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_stereo_format)
 
@@ -1937,6 +1972,7 @@ class MainFrame(wx.Frame):
         self.update_inpaint_options()
         self.update_ema_normalize()
         self.update_depth_blend()
+        self.update_depth_refine()
         self.update_temporal_stabilize()
         self.update_convergence_mode()
         self.update_scene_segment()
@@ -2024,6 +2060,7 @@ class MainFrame(wx.Frame):
             self.cbo_depth_blend_clahe_clip,
             self.cbo_depth_blend_clahe_tile,
             self.cbo_depth_blend_align_decay,
+            self.cbo_depth_refine_strength,
             self.cbo_depth_blend_edge_suppression,
             self.cbo_temporal_stabilize_strength,
             self.cbo_temporal_stabilize_max_shift,
@@ -2299,6 +2336,7 @@ class MainFrame(wx.Frame):
             self.cbo_depth_blend_region.Enable()
             self.cbo_depth_blend_region_percent.Enable(self.cbo_depth_blend_region.GetValue() != "detail")
             self.cbo_depth_blend_edge_suppression.Enable(self.cbo_depth_blend_region.GetValue() == "detail")
+            self.chk_depth_blend_edge_hard_cutoff.Enable(self.cbo_depth_blend_region.GetValue() == "detail")
             self.cbo_depth_blend_feather_blur.Enable()
             self.chk_depth_blend_bilateral.Enable()
             self.chk_depth_blend_clahe.Enable()
@@ -2309,6 +2347,7 @@ class MainFrame(wx.Frame):
             self.cbo_depth_blend_region.Disable()
             self.cbo_depth_blend_region_percent.Disable()
             self.cbo_depth_blend_edge_suppression.Disable()
+            self.chk_depth_blend_edge_hard_cutoff.Disable()
             self.cbo_depth_blend_feather_blur.Disable()
             self.chk_depth_blend_bilateral.Disable()
             self.chk_depth_blend_clahe.Disable()
@@ -2331,6 +2370,12 @@ class MainFrame(wx.Frame):
     def update_depth_blend_align(self):
         enabled = self.chk_depth_blend.IsChecked() and self.chk_depth_blend_align.IsChecked()
         self.cbo_depth_blend_align_decay.Enable(enabled)
+
+    def update_depth_refine(self):
+        self.cbo_depth_refine_strength.Enable(self.chk_depth_refine.IsChecked())
+
+    def on_changed_chk_depth_refine(self, event):
+        self.update_depth_refine()
 
     def on_changed_chk_depth_blend(self, event):
         self.update_depth_blend()
@@ -2666,6 +2711,7 @@ class MainFrame(wx.Frame):
                 depth_blend_align=self.chk_depth_blend_align.GetValue(),
                 depth_blend_align_decay=float(self.cbo_depth_blend_align_decay.GetValue()),
                 depth_blend_edge_suppression=float(self.cbo_depth_blend_edge_suppression.GetValue()),
+                depth_blend_edge_hard_cutoff=self.chk_depth_blend_edge_hard_cutoff.GetValue(),
             )
         else:
             depth_blend_options = {}
@@ -2725,6 +2771,7 @@ class MainFrame(wx.Frame):
             debug_depth=debug_depth,
             **ema_options,
             depth_refine=self.chk_depth_refine.GetValue(),
+            depth_refine_strength=float(self.cbo_depth_refine_strength.GetValue()),
             temporal_stabilize=self.chk_temporal_stabilize.GetValue(),
             temporal_stabilize_strength=float(self.cbo_temporal_stabilize_strength.GetValue()),
             temporal_stabilize_max_shift_velocity=(

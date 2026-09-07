@@ -38,6 +38,7 @@ class BaseDepthModel(metaclass=ABCMeta):
         self.scaler = self.create_depth_scaler()
         self.limit_resolution = False
         self.refine_enabled = False
+        self.refine_strength = 1.0
         self.temporal_stabilizer = TemporalStabilizer()
         # Queues up a motion-adaptive activity summary every time the EMA scaler
         # resets (scene cut or end of export) instead of losing it the instant the
@@ -187,8 +188,9 @@ class BaseDepthModel(metaclass=ABCMeta):
     def get_ema_buffer_size(self):
         return self.scaler.buffer_size
 
-    def enable_refine(self, enabled=True):
+    def enable_refine(self, enabled=True, strength=1.0):
         self.refine_enabled = bool(enabled)
+        self.refine_strength = float(strength) if strength is not None else 1.0
 
     def enable_temporal_stabilize(self, strength=0.7,
                                    max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0):
@@ -200,19 +202,33 @@ class BaseDepthModel(metaclass=ABCMeta):
     def disable_temporal_stabilize(self):
         self.temporal_stabilizer.reset(enabled=False)
 
-    def _refine_raw_depth_chw(self, depth):
+    def _refine_raw_depth_chw(self, depth, strength=1.0):
         """Edge-preserving spatial smoothing (bilateral filter) on the raw, per-frame
         depth map -- cleans up the speckle/noise a depth model leaves within a single
         frame, WITHOUT blurring across real edges the way a plain blur would. This is
         a different axis from EMA smoothing (which works across frames over time): this
         works within one frame only, and happens before EMA sees the frame, so a
-        cleaner raw signal also means a steadier min/max range for EMA to track."""
+        cleaner raw signal also means a steadier min/max range for EMA to track.
+
+        `strength` (default 1.0) scales the bilateral filter's sigmaColor/sigmaSpace
+        proportionally -- 1.0 reproduces the exact original fixed values
+        (sigmaColor=0.08, sigmaSpace=5) byte-for-byte, so nothing changes for anyone
+        who doesn't touch this. Higher pushes the same edge-preserving cleanup
+        further (more smoothing reach before an edge is treated as "real" and left
+        alone); lower pulls back toward doing less. `d` (the pixel neighborhood
+        diameter) is deliberately left fixed at 5 regardless of strength -- scaling
+        it too would change the filter's basic reach/cost, not just how aggressively
+        it smooths, which isn't what this knob is for. strength<=0 skips the filter
+        entirely (same as being disabled) rather than passing a degenerate sigma of
+        0 to OpenCV."""
+        if strength is None or strength <= 0:
+            return depth
         arr = depth.squeeze(0).detach().float().cpu().numpy()
         lo, hi = float(arr.min()), float(arr.max())
         if hi - lo < 1e-6:
             return depth
         norm = ((arr - lo) / (hi - lo)).astype(np.float32)
-        smoothed = cv2.bilateralFilter(norm, d=5, sigmaColor=0.08, sigmaSpace=5)
+        smoothed = cv2.bilateralFilter(norm, d=5, sigmaColor=0.08 * strength, sigmaSpace=5 * strength)
         smoothed = smoothed * (hi - lo) + lo
         return torch.from_numpy(smoothed).unsqueeze(0).to(depth.device, dtype=depth.dtype)
 
@@ -225,7 +241,7 @@ class BaseDepthModel(metaclass=ABCMeta):
         # risk; only the proven bilateral smoothing step remains.
         self._frame_position += 1
         if self.refine_enabled:
-            depth = self._refine_raw_depth_chw(depth)
+            depth = self._refine_raw_depth_chw(depth, strength=self.refine_strength)
         if self.temporal_stabilizer.enabled:
             depth = self.temporal_stabilizer.stabilize(rgb, depth)
         return self.scaler(depth, return_minmax=return_minmax)

@@ -3934,6 +3934,16 @@ def create_parser(required_true=True):
                         help="Rotate 90 degrees to the right(clockwise)")
     parser.add_argument("--low-vram", action="store_true",
                         help="disable batch processing for low memory GPU")
+    parser.add_argument("--pause-frees-vram", action="store_true",
+                        help=("when Suspend/Resume is used (GUI only), also move every loaded model "
+                              "(depth model, stereo/side model, SOD_v1 auto-convergence model) off the "
+                              "GPU and release the freed VRAM back to the OS while paused, then reload "
+                              "them on Resume. Off by default: pausing keeps models resident on the GPU "
+                              "exactly as before, for an instant Resume. Turning this on frees VRAM while "
+                              "paused (so other GPU work can run) at the cost of a few seconds of extra "
+                              "reload time on Resume. Has no effect with multi-GPU (--gpu with more than "
+                              "one id): those models are already replicated across every configured "
+                              "device and are left resident."))
     parser.add_argument("--keyframe", action="store_true",
                         help="process only keyframe as image")
     parser.add_argument("--keyframe-interval", type=float, default=4.0,
@@ -4255,6 +4265,92 @@ def calc_auto_warp_steps(method, divergence, synthetic_view):
     return None
 
 
+def _release_pause_vram(args):
+    """--pause-frees-vram (ADR-038): moves every loaded model this run actually put
+    on the GPU to CPU and empties the CUDA caching allocator, so VRAM is genuinely
+    released back to the OS while paused. Reads args.state lazily (called from
+    inside _PauseVramSuspendEvent.wait(), long after set_state_args() built the
+    initial state dict, and after iw3_main() has since added "side_model" to it),
+    so it always sees whichever model is currently the live one -- including
+    Dual-Pass Depth Blend's own primary/secondary swap of args.state["depth_model"],
+    which this never fights with: only one is ever resident at a time either way."""
+    state = args.state
+    depth_model = state.get("depth_model")
+    if depth_model is not None and depth_model.loaded():
+        depth_model.move_to("cpu")
+    side_model = state.get("side_model")
+    if side_model is not None and not isinstance(side_model, DeviceSwitchInference) and hasattr(side_model, "to"):
+        side_model.to("cpu")
+    convergence_model = state.get("convergence_model")
+    if convergence_model is not None and getattr(convergence_model, "model", None) is not None:
+        convergence_model.model = convergence_model.model.to("cpu")
+    gc_collect()
+
+
+def _reload_pause_vram(args):
+    """The Resume half of _release_pause_vram() -- moves everything back to its
+    real device (args.state["device"], the single-GPU device this run was
+    configured with; multi-GPU models were skipped on release and need no
+    reload) before processing continues."""
+    state = args.state
+    device = state.get("device")
+    depth_model = state.get("depth_model")
+    if depth_model is not None and depth_model.loaded():
+        depth_model.move_to(depth_model.device)
+    side_model = state.get("side_model")
+    if side_model is not None and not isinstance(side_model, DeviceSwitchInference) and hasattr(side_model, "to"):
+        side_model.to(device)
+    convergence_model = state.get("convergence_model")
+    if convergence_model is not None and getattr(convergence_model, "model", None) is not None:
+        convergence_model.model = convergence_model.model.to(convergence_model.device)
+
+
+class _PauseVramSuspendEvent():
+    """Wraps a real threading.Event so every existing call site that already does
+    `suspend_event.wait()` across this codebase (iw3/utils.py, depth_blend.py,
+    scene_batch.py, nunif/utils/video/processor.py) gets real VRAM release for
+    free while paused, without any of those call sites changing. Delegates
+    is_set()/set()/clear() straight to the real event, so the GUI's Suspend/
+    Resume button (which only ever calls those three) and Cancel/close handling
+    are completely unaffected. Only ever constructed by set_state_args() when
+    args.pause_frees_vram is True (ADR-038) -- when the setting is off, the plain
+    threading.Event is stored exactly as before.
+
+    _released tracks whether THIS wrapper has already moved things to CPU for the
+    pause currently in progress, guarded by a lock so multiple threads calling
+    wait() during the same pause (e.g. the image-save pool and a scene-boundary
+    scan) release/reload exactly once, not once per caller."""
+
+    def __init__(self, event, args):
+        self._event = event
+        self._args = args
+        self._lock = threading.Lock()
+        self._released = False
+
+    def is_set(self):
+        return self._event.is_set()
+
+    def set(self):
+        self._event.set()
+
+    def clear(self):
+        self._event.clear()
+
+    def wait(self, timeout=None):
+        if not self._event.is_set():
+            with self._lock:
+                if not self._released and not self._event.is_set():
+                    self._released = True
+                    _release_pause_vram(self._args)
+        result = self._event.wait(timeout)
+        if self._event.is_set():
+            with self._lock:
+                if self._released:
+                    self._released = False
+                    _reload_pause_vram(self._args)
+        return result
+
+
 def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None):
     if depth_model is None:
         depth_model = create_depth_model(args.depth_model)
@@ -4330,6 +4426,13 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         warnings.warn("--zoed-height is deprecated. Use --resolution instead")
     if args.remove_bg:
         warnings.warn("--remove-bg is deleted")
+
+    if suspend_event is not None and getattr(args, "pause_frees_vram", False):
+        # ADR-038: opt-in only -- wraps the real Event so every existing
+        # `suspend_event.wait()` call site gets VRAM release for free while
+        # paused. When the setting is off, the plain threading.Event is stored
+        # below exactly as before this feature existed.
+        suspend_event = _PauseVramSuspendEvent(suspend_event, args)
 
     args.state = {
         "stop_event": stop_event,
@@ -4474,6 +4577,11 @@ def iw3_main(args):
             and args.method not in {"forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"}
     ):
         side_model = DeviceSwitchInference(side_model, device_ids=args.gpu)
+
+    # ADR-038 (--pause-frees-vram): side_model is otherwise only ever a local
+    # variable threaded through the call chain by hand -- stash it in args.state
+    # so a pause anywhere downstream can find and move it, same as depth_model.
+    args.state["side_model"] = side_model
 
     if args.find_param:
         assert is_image(args.input) and (path.isdir(args.output) or not path.exists(args.output))

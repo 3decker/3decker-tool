@@ -307,6 +307,27 @@ class EMAMinMaxScaler():
         assert self.minmax_buffer is not None and self.minmax_buffer.is_filled()
         return self.minmax_buffer.get_minmax()
 
+    def to(self, device):
+        """Moves every GPU-resident piece of this scaler's state (queued frames still
+        waiting on the buffer to fill, the running EMA min/max, and the minmax ring
+        buffer itself) to `device`, in place. Used by iw3's opt-in "free GPU memory
+        while paused" feature (--pause-frees-vram / ADR-038) -- the scaler holds real
+        per-frame depth tensors in `frame_queue` (up to `buffer_size`, e.g. 30 for the
+        WindowEMAScaler preset) plus a small tensor in `minmax_buffer`, both left on
+        whatever device the depth model ran on unless moved explicitly here. Anything
+        still None (nothing queued/computed yet) is left alone."""
+        if torch.is_tensor(self.min_value):
+            self.min_value = self.min_value.to(device)
+        if torch.is_tensor(self.max_value):
+            self.max_value = self.max_value.to(device)
+        if self.minmax_buffer is not None:
+            self.minmax_buffer.data = self.minmax_buffer.data.to(device)
+        if self.frame_queue:
+            self.frame_queue = [frame.to(device) for frame in self.frame_queue]
+        if torch.is_tensor(self._prev_motion_frame):
+            self._prev_motion_frame = self._prev_motion_frame.to(device)
+        return self
+
     def __call__(self, frame, return_minmax=False):
         return self.update(frame, return_minmax=return_minmax)
 

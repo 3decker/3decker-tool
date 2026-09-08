@@ -150,6 +150,23 @@ class BaseDepthModel(metaclass=ABCMeta):
     def get_model(self):
         return self.model
 
+    def move_to(self, device):
+        """Moves the loaded model's weights (and its compiled backup, if
+        torch.compile is active) plus the EMA scaler's GPU-resident state to
+        `device`, without changing self.device -- the model's real target device,
+        set once by load() and used to move incoming frames back to it during
+        normal inference. A model wrapped in DeviceSwitchInference (multi-GPU:
+        --gpu with more than one id) is left in place -- it already replicates
+        itself across every configured device at construction time, so there is
+        no single device to move it to and back from. Used by iw3's opt-in
+        "free GPU memory while paused" feature (--pause-frees-vram / ADR-038)."""
+        if self.model is not None and not isinstance(self.model, DeviceSwitchInference):
+            self.model = self.model.to(device)
+            if self.model_backup is not None:
+                self.model_backup = self.model_backup.to(device)
+        self.scaler.to(device)
+        return self
+
     def compile(self):
         if self.model_backup is None and not isinstance(self.model, DeviceSwitchInference):
             self.model_backup = self.model

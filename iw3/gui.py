@@ -1816,6 +1816,28 @@ class MainFrame(wx.Frame):
               "extra setup (see this project's torch_compile docs) to actually take effect."))
         self.chk_compile.SetValue(False)
 
+        self.chk_pause_frees_vram = wx.CheckBox(self.grp_processor, label=T("Free GPU memory while paused"),
+                                                name="chk_pause_frees_vram")
+        self.chk_pause_frees_vram.SetToolTip(
+            T("What: when you click Suspend, also move every loaded model (depth model, stereo/side "
+              "model, and the SOD_v1 auto-convergence model, if used) off the GPU and actually release "
+              "that VRAM back to Windows, instead of just pausing while everything stays loaded. Resume "
+              "moves them all back before continuing.\n"
+              "Why it helps: normally, pausing here does NOT free any VRAM -- every model just sits "
+              "loaded and idle the whole time you're paused, so nothing else can use that memory. This "
+              "lets you actually hand the GPU to something else (another program, a second conversion) "
+              "while paused.\n"
+              "Pros: real VRAM freed while paused; Resume still produces a correct, uninterrupted output.\n"
+              "Cons: Resume is no longer instant -- reloading the models back onto the GPU takes a few "
+              "seconds (longer if torch.compile is on, since it may recompile). No effect with multi-GPU "
+              "(\"All CUDA Device\") -- those models are already spread across every GPU and are left "
+              "as-is.\n"
+              "Values: off (default) = today's behavior, models stay resident, Resume is instant. On = "
+              "frees VRAM while paused, Resume takes a few seconds.\n"
+              "Recommended: off, unless you specifically need the GPU free for something else during a "
+              "long pause."))
+        self.chk_pause_frees_vram.SetValue(False)
+
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
         k = -1
@@ -1834,6 +1856,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_fp16, (k, 2), flag=wx.EXPAND)
         layout.Add(self.chk_cuda_stream, (k, 3), flag=wx.EXPAND)
         layout.Add(self.chk_compile, (k := k + 1, 0), flag=wx.EXPAND)
+        layout.Add(self.chk_pause_frees_vram, (k, 1), (0, 3), flag=wx.EXPAND)
 
         sizer_processor = wx.StaticBoxSizer(self.grp_processor, wx.VERTICAL)
         sizer_processor.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -3541,6 +3564,7 @@ class MainFrame(wx.Frame):
             tta=self.chk_tta.GetValue(),
             disable_amp=not self.chk_fp16.GetValue(),
             low_vram=self.chk_low_vram.GetValue(),
+            pause_frees_vram=self.chk_pause_frees_vram.GetValue(),
             cuda_stream=self.chk_cuda_stream.GetValue(),
             compile=self.chk_compile.IsEnabled() and self.chk_compile.IsChecked(),
 
@@ -3651,11 +3675,20 @@ class MainFrame(wx.Frame):
         if self.suspend_event.is_set():
             self.suspend_event.clear()
             self.btn_suspend.SetLabel(T("Resume"))
+            if self.chk_pause_frees_vram.GetValue():
+                # ADR-038: the actual model move happens asynchronously on the
+                # processing thread the next time it reaches suspend_event.wait() --
+                # nothing else overwrites the status bar while genuinely paused (no
+                # frames are being processed), so this stays visible for the whole
+                # pause instead of just flashing by.
+                self.SetStatusText(T("Pausing (freeing GPU memory)..."))
         else:
             self.start_time = time()
             self.suspend_pos = self.prg_tqdm.GetValue()
             self.suspend_event.set()
             self.btn_suspend.SetLabel(T("Suspend"))
+            if self.chk_pause_frees_vram.GetValue():
+                self.SetStatusText(T("Resuming (reloading models)..."))
 
     def on_tqdm(self, event):
         type, value, desc = event.GetValue()

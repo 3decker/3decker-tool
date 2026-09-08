@@ -124,10 +124,14 @@ def _softmax_weight(depth, temperature):
 # two colliding sources already yields exp(0.05 * 50) =~ 12x weight ratio -- close
 # to the old hard z-buffer cutoff for genuinely different surfaces -- while true
 # sub-pixel collisions on the same surface (gaps of ~0.01 or less) still blend
-# smoothly instead of flip-flopping between hard winners. Not yet exposed as a
-# tunable: this project's convention (see ADR-022/025/027) is to promote a
-# hardcoded constant to a real setting only after real-footage testing shows it
-# needs tuning, not speculatively.
+# smoothly instead of flip-flopping between hard winners. Originally hardcoded
+# (ADR-030) per this project's convention (see ADR-022/025/027) of only promoting
+# a constant to a real setting after real-footage testing shows it needs tuning --
+# the user has since asked for it to be tunable ahead of that testing (ADR-042), so
+# this now serves only as the DEFAULT value for the real `splat_blend_temperature`
+# parameter threaded through `_softmax_weight`/`depth_order_bilinear_forward_warp`/
+# `apply_divergence_forward_warp` below -- nothing changes for a caller that doesn't
+# pass a different value.
 SPLAT_BLEND_TEMPERATURE = 50.0
 
 
@@ -216,7 +220,8 @@ def gen_mask2(mask):
 def depth_order_bilinear_forward_warp(c, depth, divergence, convergence, fill=True,
                                       synthetic_view="both",
                                       return_mask=False, inconsistent_shift=False,
-                                      width_base=True, splat_blend=False):
+                                      width_base=True, splat_blend=False,
+                                      splat_blend_temperature=SPLAT_BLEND_TEMPERATURE):
     src_image = c
     assert synthetic_view in {"both", "right", "left"}
     if c.shape[2] != depth.shape[2] or c.shape[3] != depth.shape[3]:
@@ -245,7 +250,7 @@ def depth_order_bilinear_forward_warp(c, depth, divergence, convergence, fill=Tr
     x_index = torch.arange(0, W, device=c.device).view(1, 1, W).expand(B, H, W)
     src_index = to_flat_index(B, W, H, x_index)
     index_order = torch.argsort(depth.view(-1), dim=0)
-    depth_weight = _softmax_weight(depth, SPLAT_BLEND_TEMPERATURE) if splat_blend else None
+    depth_weight = _softmax_weight(depth, splat_blend_temperature) if splat_blend else None
 
     c = torch.cat([c, x_index.view(B, 1, H, W).to(c.dtype)], dim=1)  # warp width index together
 
@@ -327,7 +332,8 @@ def depth_order_bilinear_forward_warp(c, depth, divergence, convergence, fill=Tr
 def apply_divergence_forward_warp(c, depth, divergence, convergence, method=None,
                                   synthetic_view="both",
                                   return_mask=False, inconsistent_shift=False,
-                                  width_base=True):
+                                  width_base=True,
+                                  splat_blend_temperature=SPLAT_BLEND_TEMPERATURE):
     fill = method in {"forward_fill", "forward_splat_fill"}
     splat_blend = (method == "forward_splat_fill")
     with torch.inference_mode():
@@ -335,7 +341,8 @@ def apply_divergence_forward_warp(c, depth, divergence, convergence, method=None
                                                  fill=fill, synthetic_view=synthetic_view,
                                                  return_mask=return_mask,
                                                  inconsistent_shift=inconsistent_shift,
-                                                 width_base=width_base, splat_blend=splat_blend)
+                                                 width_base=width_base, splat_blend=splat_blend,
+                                                 splat_blend_temperature=splat_blend_temperature)
 
 
 def nonwarp_mask(c, depth, divergence, convergence, view="right"):
@@ -511,6 +518,44 @@ def _test_splat_blend():
     assert not torch.allclose(splat_px, hard_px, atol=1e-3), "splat_blend produced a hard overwrite, not a blend"
     assert 0.0 < splat_px[2].item() < 1.0, "farther source should contribute nonzero but not dominate"
     assert splat_px[0] > splat_px[2], "nearer (higher-depth) source should dominate the blend"
+
+    # 3) splat_blend_temperature (ADR-042): default (omitted) must match explicitly
+    #    passing SPLAT_BLEND_TEMPERATURE, byte-for-byte -- promoting this to a real
+    #    parameter must not change anyone's existing output. A lower temperature must
+    #    genuinely soften the same manufactured collision toward an even 50/50 blend
+    #    (weaker "nearer wins" weighting), and a higher temperature must genuinely
+    #    sharpen it back toward the hard-overwrite winner.
+    left_splat_default_temp, _ = apply_divergence_forward_warp(
+        c2.clone(), depth2.clone(), d, cv, method="forward_splat_fill", synthetic_view="both",
+        width_base=True, splat_blend_temperature=SPLAT_BLEND_TEMPERATURE)
+    assert torch.equal(left_splat, left_splat_default_temp), \
+        "omitting splat_blend_temperature must match passing the default explicitly"
+
+    left_splat_low_temp, _ = apply_divergence_forward_warp(
+        c2.clone(), depth2.clone(), d, cv, method="forward_splat_fill", synthetic_view="both",
+        width_base=True, splat_blend_temperature=1.0)
+    # Kept well under float32's ~exp(88) overflow ceiling at this test's depth values
+    # (max depth 0.9 here -> exp(0.9 * 85) =~ 1.9e33, safely finite) -- an even higher
+    # temperature would overflow to inf/nan and produce an undefined destination
+    # pixel instead of a genuinely sharper blend, which is not what this assertion
+    # means to exercise.
+    left_splat_high_temp, _ = apply_divergence_forward_warp(
+        c2.clone(), depth2.clone(), d, cv, method="forward_splat_fill", synthetic_view="both",
+        width_base=True, splat_blend_temperature=85.0)
+    low_px = left_splat_low_temp[0, :, 0, dest]
+    high_px = left_splat_high_temp[0, :, 0, dest]
+    assert not torch.allclose(low_px, splat_px, atol=1e-3), \
+        "a different temperature must genuinely change the blend result"
+    assert not torch.allclose(high_px, splat_px, atol=1e-3), \
+        "a different temperature must genuinely change the blend result"
+    # lower temperature -> weaker "nearer wins" weighting -> closer to an even 50/50
+    # blend (near-channel share closer to 0.5) than the default temperature=50 case.
+    assert abs(low_px[0].item() - 0.5) < abs(splat_px[0].item() - 0.5), \
+        "lower temperature should blend more evenly toward 50/50"
+    # higher temperature -> stronger "nearer wins" weighting -> closer to the hard
+    # z-buffer winner than the default temperature=50 case.
+    assert (high_px - hard_px).abs().sum().item() < (splat_px - hard_px).abs().sum().item(), \
+        "higher temperature should sharpen back toward the hard-overwrite winner"
 
     print("_test_splat_blend: PASS")
 

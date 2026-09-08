@@ -74,6 +74,12 @@ from .inpaint_utils import INPAINT_MODELS
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
 VIDEO_EXTENSIONS = extension_list_to_wildcard(KNOWN_VIDEO_EXTENSIONS)
 YAML_EXTENSIONS = extension_list_to_wildcard((".yml", ".yaml"))
+# Common dub/audio-track delivery formats mkvmerge/ffmpeg already read directly --
+# see iw3/audio_mux_cli.py's own docstring (ADR-042). No project-wide
+# KNOWN_AUDIO_EXTENSIONS constant exists yet (unlike KNOWN_VIDEO_EXTENSIONS), so this
+# is a small local list just for the Add Audio Track file picker below.
+AUDIO_EXTENSIONS = extension_list_to_wildcard(
+    (".aac", ".ac3", ".dts", ".flac", ".mp3", ".opus", ".ogg", ".wav", ".m4a", ".mka"))
 CONFIG_DIR = ensure_home_dir("iw3", path.join(path.dirname(__file__), "..", "tmp"))
 CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui.cfg")
 LANG_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-lang.cfg")
@@ -81,11 +87,14 @@ PRESET_DIR = path.join(CONFIG_DIR, "presets")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(PRESET_DIR, exist_ok=True)
 
-# GUI Layout preference (ADR-037): Tabbed (default, ADR-036's wx.Notebook) vs Single
-# Page (every category StaticBox visible at once, restart required to switch -- see
-# on_text_changed_cbo_layout). Persisted the same way as the Language setting above:
-# a dedicated plain-text file, read once before any control is constructed, since the
-# choice decides which parent widget the category StaticBoxes get built into.
+# GUI Layout preference (ADR-037, live-switching added by ADR-045): Tabbed (default,
+# ADR-036's wx.Notebook) vs Single Page (every category StaticBox visible at once).
+# Switching the dropdown (on_text_changed_cbo_layout) applies immediately in the
+# running window via MainFrame.switch_layout_mode() -- no restart needed. Persisted
+# the same way as the Language setting above: a dedicated plain-text file, read once
+# before any control is constructed, since the INITIAL choice still decides which
+# parent widget the category panels are built into at startup (switch_layout_mode
+# handles moving them to the other container afterward).
 LAYOUT_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-layout.cfg")
 LAYOUT_MODE_TABS = "tabs"
 LAYOUT_MODE_SINGLE_PAGE = "single_page"
@@ -104,6 +113,45 @@ def _load_layout_mode(config_path):
 def _save_layout_mode(config_path, mode):
     with open(config_path, mode="w", encoding="utf-8") as f:
         f.write(mode)
+
+
+# UI Zoom preference: scales the whole app's text/control size up or down, on top of
+# (never instead of) init_win32_dpi()'s existing system-level DPI awareness -- that
+# handles Windows' own display scaling; this is a separate, user-controlled layer.
+# wx has no built-in "CSS zoom" for a whole window -- the practical mechanism here is
+# rescaling the base font applied to the frame (nearly every control below sizes
+# itself relative to its own font) and re-laying-out, see MainFrame.apply_zoom_level().
+# Persisted the same way as Layout (ADR-037/038): a dedicated plain-text file, applied
+# live in the running window -- see docs/ai/AI_DECISIONS.md.
+ZOOM_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-zoom.cfg")
+ZOOM_LEVELS = (80, 90, 100, 110, 125, 150, 175, 200)
+DEFAULT_ZOOM_LEVEL = 100
+BASE_NORMAL_FONT_PT = 10
+BASE_WARNING_FONT_PT = 8
+
+
+def _load_zoom_level(config_path):
+    if path.exists(config_path):
+        with open(config_path, encoding="utf-8") as f:
+            value = f.read().strip()
+        try:
+            level = int(value)
+        except ValueError:
+            level = None
+        if level in ZOOM_LEVELS:
+            return level
+    return DEFAULT_ZOOM_LEVEL
+
+
+def _save_zoom_level(config_path, level):
+    with open(config_path, mode="w", encoding="utf-8") as f:
+        f.write(str(level))
+
+
+def _zoom_font_point(base_pt, zoom_level):
+    # Floored at 6pt so an extreme/foreign zoom value can never collapse text to
+    # something unreadable or a 0/negative wx.Font point size.
+    return max(6, round(base_pt * zoom_level / 100))
 
 
 LAYOUT_DEBUG = False
@@ -163,14 +211,19 @@ class MainFrame(wx.Frame):
         self.depth_model_height = None
         self.depth_model_limit_resolution = None
         self.layout_mode = _load_layout_mode(LAYOUT_CONFIG_PATH)
+        self.zoom_level = _load_zoom_level(ZOOM_CONFIG_PATH)
         self.initialize_component()
         if is_dark_mode():
             apply_dark_mode(self)
         self.apply_accent_theme()
 
+    def _scaled_font(self, base_pt):
+        return wx.Font(_zoom_font_point(base_pt, self.zoom_level),
+                       family=wx.FONTFAMILY_MODERN, style=wx.FONTSTYLE_NORMAL, weight=wx.FONTWEIGHT_NORMAL)
+
     def initialize_component(self):
-        NORMAL_FONT = wx.Font(10, family=wx.FONTFAMILY_MODERN, style=wx.FONTSTYLE_NORMAL, weight=wx.FONTWEIGHT_NORMAL)
-        WARNING_FONT = wx.Font(8, family=wx.FONTFAMILY_MODERN, style=wx.FONTSTYLE_NORMAL, weight=wx.FONTWEIGHT_NORMAL)
+        NORMAL_FONT = self._scaled_font(BASE_NORMAL_FONT_PT)
+        WARNING_FONT = self._scaled_font(BASE_WARNING_FONT_PT)
         WARNING_COLOR = (0xcc, 0x33, 0x33)
 
         self.SetFont(NORMAL_FONT)
@@ -299,21 +352,22 @@ class MainFrame(wx.Frame):
         # and AI_DECISIONS.md for why (frequently-needed controls that shouldn't require
         # a tab switch to reach).
         #
-        # ADR-037: which WIDGET parents these 7 category panels depends on the user's
-        # Layout preference (self.layout_mode, loaded before this method runs) -- Tabbed
-        # parents them to a wx.Notebook page each (ADR-036's original design); Single
-        # Page parents them directly to one scrollable panel so every category is
-        # visible at once. Everything below this branch (every StaticBox/sizer built
-        # inside each category, and each category panel's own SetSizer() call) is
-        # identical either way; only the final composition step (see
-        # _compose_options_layout_tabbed / _compose_options_layout_single_page near the
-        # end of this method) differs.
-        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
-            self.pnl_single = scrolledpanel.ScrolledPanel(self.pnl_options)
-            tabs_parent = self.pnl_single
-        else:
-            self.nb_options = wx.Notebook(self.pnl_options)
-            tabs_parent = self.nb_options
+        # ADR-037/ADR-045: which WIDGET parents these 7 category panels depends on the
+        # user's Layout preference (self.layout_mode, loaded before this method runs) --
+        # Tabbed parents them to a wx.Notebook page each (ADR-036's original design);
+        # Single Page parents them directly to one scrollable panel so every category is
+        # visible at once. Both container widgets are always constructed (ADR-045: live
+        # switching needs somewhere to Reparent() a category panel TO before it's ever
+        # been the active layout), but only the one matching self.layout_mode is
+        # populated/shown at startup -- see switch_layout_mode() for how the other one
+        # gets composed later, on demand, when the user switches. Everything below this
+        # branch (every StaticBox/sizer built inside each category, and each category
+        # panel's own SetSizer() call) is identical either way; only the final
+        # composition step (see _compose_options_layout_tabbed /
+        # _compose_options_layout_single_page near the end of this method) differs.
+        self.nb_options = wx.Notebook(self.pnl_options)
+        self.pnl_single = scrolledpanel.ScrolledPanel(self.pnl_options)
+        tabs_parent = self.pnl_single if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE else self.nb_options
         self.tab_stereo = wx.Panel(tabs_parent)
         self.tab_depth_blend = wx.Panel(tabs_parent)
         self.tab_video_filter = wx.Panel(tabs_parent)
@@ -460,6 +514,23 @@ class MainFrame(wx.Frame):
               "ground when mlbw is too slow but forward_fill's quality isn't good enough.\n"
               "Recommended: mlbw_l2_inpaint or forward_inpaint for the best quality on a real GPU; "
               "row_flow_v3_sym or mlbw_l2s if you need more speed or have limited VRAM."))
+
+        self.lbl_splat_blend_temperature = wx.StaticText(
+            self.grp_stereo, label=T("Splat Blend Temperature"))
+        self.cbo_splat_blend_temperature = EditableComboBox(
+            self.grp_stereo, choices=["10.0", "25.0", "50.0", "75.0", "85.0"],
+            name="cbo_splat_blend_temperature")
+        self.cbo_splat_blend_temperature.SetSelection(2)
+        self.cbo_splat_blend_temperature.SetToolTip(
+            T("What it's for: only matters for Method forward_splat_fill -- how sharply that method's "
+              "depth-weighted blend decides which of two colliding pixels wins.\n"
+              "Values: higher = sharper cutoff, closer to forward_fill's old hard-overwrite behavior "
+              "(whichever pixel is nearer the camera wins almost completely); lower = smoother, more "
+              "even blending between the two competing pixels.\n"
+              "Con: brand new, and not yet tuned against real footage -- unlike most other numeric "
+              "settings in this app, there isn't yet a body of real-world testing behind these numbers.\n"
+              "Recommended: start at the default (50.0) and only adjust it if forward_splat_fill's "
+              "results look wrong to you at that default."))
 
         self.lbl_inpaint_model = wx.StaticText(self.grp_stereo, label=T("Inpainting Model"))
         self.cbo_inpaint_model = wx.ComboBox(self.grp_stereo,
@@ -1286,6 +1357,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_synthetic_view, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_method, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_method, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_splat_blend_temperature, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_splat_blend_temperature, (i, 1), (1, 2), flag=wx.EXPAND)
 
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -2157,10 +2230,9 @@ class MainFrame(wx.Frame):
         self.cbo_subsearch_language.SetToolTip(
             T("What it's for: the subtitle language to search for, as an ISO 639-1 two-letter code "
               "(e.g. en, ja, fr, de) -- confirmed by a real live search against OpenSubtitles' API "
-              "that its 'languages' search parameter needs the two-letter form; this is DIFFERENT "
-              "from Add Subtitle Track's Language field below, which stores an ISO 639-2 three-"
-              "letter code (e.g. eng) as MKV track metadata -- a separate, unrelated code space, so "
-              "the two fields are deliberately not the same convention.\n"
+              "that its 'languages' search parameter needs the two-letter form. Add Subtitle Track's "
+              "Language field below uses this SAME two-letter format (ADR-042) -- the same code "
+              "typed here is always correct there too.\n"
               "Values: pick from the dropdown, or type any other ISO 639-1 code OpenSubtitles "
               "supports -- this list only covers the most common languages, it isn't exhaustive.\n"
               "Recommended: match the language you want the subtitle text to actually be in; "
@@ -2311,14 +2383,19 @@ class MainFrame(wx.Frame):
               "the format."))
 
         self.lbl_submux_language = wx.StaticText(self.grp_submux, label=T("Language"))
-        self.txt_submux_language = wx.TextCtrl(self.grp_submux, value="eng", name="txt_submux_language")
+        self.txt_submux_language = wx.TextCtrl(self.grp_submux, value="en", name="txt_submux_language")
         self.txt_submux_language.SetToolTip(
-            T("What it's for: the ISO 639-2 language code stored as metadata on the new subtitle "
-              "track (e.g. eng, jpn, fre, ger, spa) -- shown by players in their subtitle track "
-              "menu.\n"
+            T("What it's for: the language stored as metadata on the new subtitle track (e.g. en, "
+              "ja, fr, de, es), shown by players in their subtitle track menu -- as an ISO 639-1 "
+              "two-letter code, the SAME format as Search Subtitles' Language field above (ADR-042 "
+              "standardized both fields onto this one format so typing the same code into both is "
+              "always correct). Converted internally to the three-letter code mkvmerge actually "
+              "needs (e.g. en -> eng, ja -> jpn, fr -> fre) by subtitle_mux_cli.py right before the "
+              "mkvmerge call -- an unrecognized code is passed through unchanged rather than "
+              "erroring out.\n"
               "Con: purely metadata -- does not translate or verify the actual subtitle content's "
               "language.\n"
-              "Recommended: match the SRT file's actual language; default 'eng' if unsure."))
+              "Recommended: match the SRT file's actual language; default 'en' if unsure."))
 
         self.lbl_submux_track_name = wx.StaticText(self.grp_submux, label=T("Track Name"))
         self.txt_submux_track_name = wx.TextCtrl(self.grp_submux, name="txt_submux_track_name")
@@ -2377,6 +2454,167 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_submux_log, (h, 0), (0, 3), flag=wx.EXPAND)
         sizer_submux = wx.StaticBoxSizer(self.grp_submux, wx.VERTICAL)
         sizer_submux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+
+        # --- standalone utility: add an audio track / dub (ADR-042) ---
+        # NOT part of the main conversion pipeline -- takes an already-converted 3D
+        # (SBS/TB) MKV and a separate audio file (e.g. a different-language dub) and
+        # muxes it in as a plain NEW audio track, preserving every existing track
+        # (video, existing audio, subtitles) untouched -- mirrors Add Subtitle
+        # Track's shape above closely (see iw3/audio_mux_cli.py's own module
+        # docstring / ADR-042). Optional Source Start/End Time trims (and shifts to
+        # start at 0) the audio file itself via ffmpeg before muxing, for the case
+        # where the audio source covers more content than the video (e.g. a
+        # full-movie dub being added to a short test clip). Launches python -m
+        # iw3.audio_mux_cli as its own subprocess, same out-of-process convention as
+        # RIFE/HDR reinjection/Add Subtitle Track.
+        self.grp_audiomux = wx.StaticBox(
+            self.tab_tools, label=T("Add Audio Track (Standalone Tool)"))
+
+        self.lbl_audiomux_input = wx.StaticText(self.grp_audiomux, label=T("Converted 3D Video (.mkv)"))
+        self.txt_audiomux_input = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_input")
+        self.txt_audiomux_input.SetToolTip(
+            T("What it's for: the already-converted 3D video to add an audio track to. Must be "
+              "an .mkv file -- this tool does not convert containers, so an .mp4 output must "
+              "first be remuxed to .mkv by some other tool.\n"
+              "Con: read-only -- never modified. A new file is always written to Output File "
+              "below.\n"
+              "Recommended: the direct iw3 output file."))
+        self.btn_audiomux_input = wx.Button(self.grp_audiomux, label=T("..."))
+
+        self.lbl_audiomux_audio = wx.StaticText(self.grp_audiomux, label=T("Audio File (dub)"))
+        self.txt_audiomux_audio = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_audio")
+        self.txt_audiomux_audio.SetToolTip(
+            T("What it's for: the audio file to add as a new track -- e.g. a different-language "
+              "dub. Common formats mkvmerge/ffmpeg already read directly work here: AAC, AC3, "
+              "DTS, FLAC, MP3, Opus, WAV, and more -- no manual format conversion needed.\n"
+              "Con: read-only -- never modified. If it covers more content than the video (e.g. "
+              "a full-movie dub for a short clip), use Source Start/End Time below to trim it "
+              "automatically rather than pre-cutting it by hand.\n"
+              "Recommended: match the audio's actual length/content to the video above as "
+              "closely as you can -- Source Start/End Time handles the rest."))
+        self.btn_audiomux_audio = wx.Button(self.grp_audiomux, label=T("..."))
+
+        self.lbl_audiomux_output = wx.StaticText(self.grp_audiomux, label=T("Output File"))
+        self.txt_audiomux_output = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_output")
+        self.txt_audiomux_output.SetToolTip(
+            T("Where to write the new file with the audio track added. Auto-filled with "
+              "'<converted file name>_dubbed.mkv' in the same folder once you pick the "
+              "converted video above -- change it if you want it saved somewhere else.\n"
+              "How it's safe: this tool never overwrites the input video or the audio file, "
+              "only ever writes here."))
+        self.btn_audiomux_output = wx.Button(self.grp_audiomux, label=T("..."))
+
+        self.lbl_audiomux_language = wx.StaticText(self.grp_audiomux, label=T("Language"))
+        self.cbo_audiomux_language = wx.ComboBox(
+            self.grp_audiomux, value="en", name="cbo_audiomux_language",
+            choices=["en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko",
+                     "zh", "nl", "sv", "no", "da", "pl", "tr", "ar", "hi"])
+        self.cbo_audiomux_language.SetToolTip(
+            T("What it's for: the language of the new audio track, as an ISO 639-1 two-letter "
+              "code (e.g. en, es, fr, ja) -- converted internally to the three-letter code "
+              "mkvmerge stores as track metadata (e.g. en -> eng). Purely metadata -- does not "
+              "translate or verify the actual audio content's language.\n"
+              "Values: pick from the dropdown, or type any other ISO 639-1 code -- this list "
+              "only covers the most common languages, it isn't exhaustive; an unrecognized code "
+              "is passed straight through to mkvmerge.\n"
+              "Recommended: match the audio file's actual language; default 'en' if unsure."))
+
+        self.lbl_audiomux_track_name = wx.StaticText(self.grp_audiomux, label=T("Track Name"))
+        self.txt_audiomux_track_name = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_track_name")
+        self.txt_audiomux_track_name.SetToolTip(
+            T("What it's for: an optional display name for the new audio track (shown in "
+              "player track menus, e.g. 'Spanish Dub'). Leave blank to default to the audio "
+              "file's own name."))
+
+        self.chk_audiomux_default = wx.CheckBox(self.grp_audiomux, label=T("Set as default track"),
+                                                 name="chk_audiomux_default")
+        self.chk_audiomux_default.SetValue(False)
+        self.chk_audiomux_default.SetToolTip(
+            T("What it's for: marks the new audio track as the one a player selects "
+              "automatically, instead of just adding it as a selectable alternate.\n"
+              "Con: any existing audio track's own default flag in the input video is left "
+              "exactly as it already was -- if it was ALSO marked default, some players may then "
+              "see two default audio tracks and pick whichever one they encounter first, rather "
+              "than reliably preferring this new one.\n"
+              "Recommended: off (default) -- usually you're adding an alternate-language track, "
+              "not replacing the primary audio. Turn on only when you specifically want this new "
+              "track to play automatically."))
+
+        self.chk_audiomux_start_time = wx.CheckBox(self.grp_audiomux, label=T("Source Start"),
+                                                    name="chk_audiomux_start_time")
+        self.chk_audiomux_start_time.SetToolTip(
+            T("What it's for: trims Audio File to start at this point, for when the audio "
+              "source covers more content than the video above (e.g. a full-movie dub being "
+              "added to a short test clip). The trimmed audio is also automatically shifted to "
+              "start at t=0 so it lines up with the video's first frame -- you do not need to "
+              "cut or shift the audio by hand. Leave unchecked to use the whole audio file "
+              "as-is.\n"
+              "Con: there is no auto-detection of this -- you must know and enter the exact "
+              "range within the audio file that matches the video above."))
+        self.txt_audiomux_start_time = TimeCtrl(self.grp_audiomux, value="00:00:00", fmt24hr=True,
+                                                 name="txt_audiomux_start_time")
+        self.chk_audiomux_end_time = wx.CheckBox(self.grp_audiomux, label=T("Source End"),
+                                                  name="chk_audiomux_end_time")
+        self.chk_audiomux_end_time.SetToolTip(
+            T("Same idea as Source Start, but for where the trimmed audio should end. Leave "
+              "unchecked to use the end of the audio file."))
+        self.txt_audiomux_end_time = TimeCtrl(self.grp_audiomux, value="00:00:00", fmt24hr=True,
+                                               name="txt_audiomux_end_time")
+
+        self.btn_audiomux_run = wx.Button(self.grp_audiomux, label=T("Run"))
+        self.btn_audiomux_run.SetToolTip(
+            T("What it's for: runs the mux as a separate background process (python -m "
+              "iw3.audio_mux_cli) -- this app's own GPU/model state is never touched, and "
+              "neither input file is ever modified.\n"
+              "How it's safe: every existing track (video, existing audio, subtitles) is "
+              "copied into the output completely unchanged -- only the new audio track is "
+              "added.\n"
+              "Con: if Source Start/End Time is set, trimming re-runs ffmpeg first, which can "
+              "take a little longer than an untrimmed run.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded "
+              "rather than refused."))
+
+        self.txt_audiomux_log = wx.TextCtrl(self.grp_audiomux, style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                             size=self.FromDIP((-1, 60)), name="txt_audiomux_log")
+        self.txt_audiomux_log.SetToolTip(
+            T("Shows this tool's own output verbatim, including the exact ffmpeg trim "
+              "command(s) when Source Start/End Time is used, and the exact refusal reason "
+              "if anything fails -- not just a generic pass/fail toast."))
+
+        self.btn_audiomux_input.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_input)
+        self.btn_audiomux_audio.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_audio)
+        self.btn_audiomux_output.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_output)
+        self.btn_audiomux_run.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_run)
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_audiomux_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiomux_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_audiomux_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_audiomux_audio, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiomux_audio, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_audiomux_audio, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_audiomux_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiomux_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_audiomux_output, (h, 3), flag=wx.EXPAND)
+        # Language/Track Name/Default share one compact row, and Source Start/End
+        # Time + Run share another -- same compact-row convention as HDR
+        # Reinjection/Add Subtitle Track above, this column has limited spare
+        # vertical room.
+        layout.Add(self.lbl_audiomux_language, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_audiomux_language, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_audiomux_default, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_audiomux_track_name, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiomux_track_name, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.chk_audiomux_start_time, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiomux_start_time, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_audiomux_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiomux_end_time, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_audiomux_run, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_audiomux_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        sizer_audiomux = wx.StaticBoxSizer(self.grp_audiomux, wx.VERTICAL)
+        sizer_audiomux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: retroactive MKV StereoMode tagging (ADR-033) ---
         # NOT part of the main conversion pipeline -- takes an already-converted iw3
@@ -2500,6 +2738,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_hdr_reinject, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_subsearch, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_submux, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_audiomux, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
@@ -2563,9 +2802,11 @@ class MainFrame(wx.Frame):
                 lang_selection = i
         self.cbo_language.SetSelection(lang_selection)
 
-        # GUI layout preference (ADR-037): Tabbed vs. Single Page. Persisted like
-        # Language, in its own file, applied on next launch -- see
-        # on_text_changed_cbo_layout and docs/ai/AI_DECISIONS.md.
+        # GUI layout preference (ADR-037, live-switching ADR-045): Tabbed vs. Single
+        # Page. Persisted like Language, in its own file (so the INITIAL layout is
+        # known before any control is built), but unlike Language, changing it applies
+        # immediately in the running window -- see on_text_changed_cbo_layout,
+        # switch_layout_mode, and docs/ai/AI_DECISIONS.md.
         self.sep_layout = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
         self.lbl_layout = wx.StaticText(self.pnl_preset, label=T("Layout"))
         self.cbo_layout = wx.ComboBox(self.pnl_preset, name="cbo_layout")
@@ -2583,8 +2824,30 @@ class MainFrame(wx.Frame):
               "hides other categories until you click their tab.\n"
               "Recommended: Tabbed for a smaller, less cluttered window; Single Page if you'd rather "
               "see every setting at once and don't mind scrolling.\n"
-              "Note: takes effect after restarting 3DECKER — changing it just saves the preference for "
-              "next launch."))
+              "Note: switches instantly -- no restart needed."))
+
+        # UI Zoom: scales the whole app's text/control size up or down, independent of
+        # Windows' own system display scaling (init_win32_dpi(), untouched by this).
+        # Persisted like Layout, in its own file, and -- like Layout (ADR-038) --
+        # applies immediately in the running window, see on_text_changed_cbo_zoom,
+        # apply_zoom_level, and docs/ai/AI_DECISIONS.md.
+        self.sep_zoom = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
+        self.lbl_zoom = wx.StaticText(self.pnl_preset, label=T("Zoom"))
+        self.cbo_zoom = wx.ComboBox(self.pnl_preset, name="cbo_zoom")
+        self.cbo_zoom.SetEditable(False)
+        for pct in ZOOM_LEVELS:
+            self.cbo_zoom.Append(f"{pct}%", pct)
+        self.cbo_zoom.SetSelection(ZOOM_LEVELS.index(self.zoom_level))
+        self.cbo_zoom.SetToolTip(
+            T("What it's for: scales the whole app's text and control size up or down -- for "
+              "readability on a high-DPI display, or just personal preference. Separate from "
+              "Windows' own system display scaling, which this app already handles on its own.\n"
+              "Values: 80% (smallest) to 200% (largest); 100% is the original/default size.\n"
+              "Con: at the largest sizes some tabs may need more scrolling to see every setting; "
+              "Single Page layout scrolls to fit automatically, Tabbed may need a taller window.\n"
+              "Recommended: leave at 100% unless text is hard to read; 125%-150% is a reasonable "
+              "middle ground on a high-resolution display.\n"
+              "Note: applies immediately -- no restart needed."))
 
         # check for updates (read-only fetch + compare only -- never pulls/merges/
         # resets anything; see docs/ai/AI_DECISIONS.md ADR-035)
@@ -2633,6 +2896,12 @@ class MainFrame(wx.Frame):
         layout.AddSpacer(4)
         layout.Add(self.lbl_layout, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
         layout.Add(self.cbo_layout, flag=wx.ALL, border=2)
+
+        layout.AddSpacer(2)
+        layout.Add(self.sep_zoom, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
+        layout.AddSpacer(4)
+        layout.Add(self.lbl_zoom, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
+        layout.Add(self.cbo_zoom, flag=wx.ALL, border=2)
 
         layout.AddSpacer(2)
         layout.Add(self.sep_update, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
@@ -2708,6 +2977,7 @@ class MainFrame(wx.Frame):
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
         self.cbo_language.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_language)
         self.cbo_layout.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_layout)
+        self.cbo_zoom.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_zoom)
         self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_updates)
 
         self.btn_autocrop_test.Bind(wx.EVT_BUTTON, self.on_click_btn_autocrop_test)
@@ -2744,11 +3014,14 @@ class MainFrame(wx.Frame):
         self.update_controls(probe_compile=False)
 
     def _compose_options_layout_tabbed(self):
-        """ADR-036/ADR-037 -- Tabbed layout: the 7 category panels each become one
-        wx.Notebook page. This is exactly ADR-036's original composition step,
-        unchanged, just extracted into its own method so ADR-037 can pick between it
-        and _compose_options_layout_single_page() based on the user's saved Layout
-        preference."""
+        """ADR-036/ADR-037/ADR-045 -- Tabbed layout: the 7 category panels each become
+        one wx.Notebook page. This is exactly ADR-036's original composition step,
+        unchanged, just extracted into its own method so it can be picked between it
+        and _compose_options_layout_single_page() both at startup (ADR-037, based on
+        the user's saved Layout preference) and live, on every switch back to Tabbed
+        (ADR-045, via switch_layout_mode() -- the 7 panels are Reparent()-ed onto
+        self.nb_options before this runs, so AddPage() below always sees a page window
+        that is already a real child of the notebook, exactly as at startup)."""
         self.nb_options.AddPage(self.tab_stereo, T("Stereo Generation"))
         self.nb_options.AddPage(self.tab_depth_blend, T("Dual-Pass Depth Blend"))
         self.nb_options.AddPage(self.tab_video_filter, T("Video Filter"))
@@ -2766,20 +3039,28 @@ class MainFrame(wx.Frame):
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(self.nb_options, 1, wx.EXPAND)
         self.pnl_options.SetSizer(layout)
+        # ADR-045: both containers always exist (see initialize_component) -- only the
+        # one actually composed here should be visible/managed by pnl_options's sizer.
+        self.nb_options.Show()
+        self.pnl_single.Hide()
 
     def _compose_options_layout_single_page(self):
-        """ADR-037 -- Single Page layout: the same 7 category panels (each already
-        built with its own StaticBoxSizer(s), identical to the tabbed path) placed
-        directly onto one scrollable page instead of behind tab clicks, arranged in
-        the same 4-column grid template this file used PRE-ADR-036 (the "earlier
-        pass" that added spacing/dividers/indentation within each StaticBox group) --
-        see docs/ai/AI_DECISIONS.md ADR-037 for why this specific arrangement was
-        reused rather than invented fresh: column 0 is Stereo Generation (the most
+        """ADR-037/ADR-045 -- Single Page layout: the same 7 category panels (each
+        already built with its own StaticBoxSizer(s), identical to the tabbed path)
+        placed directly onto one scrollable page instead of behind tab clicks,
+        arranged in the same 4-column grid template this file used PRE-ADR-036 (the
+        "earlier pass" that added spacing/dividers/indentation within each StaticBox
+        group) -- see docs/ai/AI_DECISIONS.md ADR-037 for why this specific arrangement
+        was reused rather than invented fresh: column 0 is Stereo Generation (the most
         used, tallest group); column 1 stacks Video Decoding/Video Encoding; column 2
         stacks Video Filter/Processor; column 3 stacks Dual-Pass Depth Blend/
         Standalone Tools -- the exact same column pairing this file used before the
         tabs conversion, just with Processor+Post-Processing and the three standalone
-        tools already pre-combined into single panels per ADR-036."""
+        tools already pre-combined into single panels per ADR-036. Called both at
+        startup and live, on every switch back to Single Page (ADR-045, via
+        switch_layout_mode() -- which Reparent()s the 7 panels onto self.pnl_single
+        before this runs, and always builds a brand-new GridBagSizer here rather than
+        reusing a stale one from a previous switch)."""
         content = wx.GridBagSizer(vgap=0, hgap=0)
         content.SetEmptyCellSize((0, 0))
         content.Add(self.tab_stereo, pos=(0, 0), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
@@ -2792,10 +3073,127 @@ class MainFrame(wx.Frame):
         self.pnl_single.SetSizer(content)
         self.pnl_single.SetAutoLayout(1)
         self.pnl_single.SetupScrolling(scroll_x=True, scroll_y=True)
+        # A ScrolledPanel's own GetBestSize() is deliberately tiny regardless of its
+        # content (that's what lets a window shrink below its content and scroll) --
+        # so nunif/gui/common.py:refresh_layouts's recursive InvalidateBestSize+Fit
+        # pass (run both at startup by IW3App.OnInit and on every live switch by
+        # switch_layout_mode, ADR-045) collapses the whole frame down to a few dozen
+        # pixels tall unless pnl_single is given an explicit min size to fall back on.
+        # CalcMin() is this GridBagSizer's own real computed minimum (not a hardcoded
+        # guess), so the window opens at a size that shows one full column without
+        # scrolling, while a user who shrinks it manually still gets real scrollbars.
+        self.pnl_single.SetMinSize(content.CalcMin())
 
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(self.pnl_single, 1, wx.EXPAND)
         self.pnl_options.SetSizer(layout)
+        # ADR-045: both containers always exist (see initialize_component) -- only the
+        # one actually composed here should be visible/managed by pnl_options's sizer.
+        self.pnl_single.Show()
+        self.nb_options.Hide()
+
+    def switch_layout_mode(self, new_mode):
+        """ADR-045 -- live layout switching: move the 7 category panels between
+        self.nb_options (Tabbed) and self.pnl_single (Single Page) in the already-
+        running window, instead of only applying the Layout preference on next launch
+        (ADR-037's original, more cautious choice). Verified safe on this project's
+        actual wx version (4.3.1 phoenix / wxWidgets 3.3.3) with an isolated harness
+        before being wired in here -- see docs/ai/AI_DECISIONS.md ADR-045: a plain
+        wx.Panel.Reparent() cleanly preserves a panel's children, their Bind()s, and
+        cross-control Enable/Disable relationships (e.g. Object Stability's
+        sub-settings), because only the 7 *category* panels ever move -- every
+        wx.StaticBox/control inside them keeps the SAME parent (its category panel)
+        throughout, so none of them are ever reparented themselves.
+
+        No-ops if new_mode already matches self.layout_mode (defensive -- the combo
+        box shouldn't fire EVT_TEXT without an actual change, but this keeps a
+        double-fire from tearing down and rebuilding the active layout for nothing).
+        """
+        if new_mode == self.layout_mode:
+            return
+
+        tabs = (self.tab_stereo, self.tab_depth_blend, self.tab_video_filter,
+                self.tab_video_dec, self.tab_video_enc, self.tab_processor, self.tab_tools)
+
+        # Detach every category panel from whichever container currently holds it,
+        # WITHOUT destroying the panel or any of its children (RemovePage/Detach, never
+        # DeletePage/Clear(delete_windows=True)).
+        if self.layout_mode == LAYOUT_MODE_TABS:
+            while self.nb_options.GetPageCount():
+                self.nb_options.RemovePage(0)
+        else:
+            single_page_sizer = self.pnl_single.GetSizer()
+            for tab in tabs:
+                single_page_sizer.Detach(tab)
+
+        new_parent = self.nb_options if new_mode == LAYOUT_MODE_TABS else self.pnl_single
+        for tab in tabs:
+            tab.Reparent(new_parent)
+            # A wx.Notebook auto-Hide()s every page except the currently selected one,
+            # and RemovePage() does not undo that -- so a panel that was an inactive
+            # tab keeps carrying a Hidden state after being detached/reparented. Sizers
+            # (GridBagSizer here) exclude Hidden windows from CalcMin(), which silently
+            # collapsed the whole Single Page layout to near-zero size before this Show()
+            # was added. Force every panel visible here; _compose_options_layout_tabbed's
+            # own SetSelection(0) still correctly re-hides the non-active pages for the
+            # Tabbed case afterward, exactly as it already does at construction time.
+            tab.Show()
+
+        self.layout_mode = new_mode
+        if new_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self._compose_options_layout_single_page()
+        else:
+            self._compose_options_layout_tabbed()
+
+        # Re-theme (ADR-037's apply_accent_theme already picks the right container by
+        # self.layout_mode) and recompute sizes exactly the way IW3App.OnInit already
+        # does once at startup (nunif/gui/common.py:refresh_layouts) -- a Notebook and
+        # a ScrolledPanel size/scroll completely differently, and this is the
+        # established recursive InvalidateBestSize+Layout+Fit pass this codebase
+        # already trusts to get that right, rather than a smaller ad hoc subset of it.
+        self.apply_accent_theme()
+        refresh_layouts(self)
+
+    def apply_zoom_level(self, zoom_level):
+        """Live UI Zoom: rescales the whole app's base font and re-lays-out every
+        control, on top of (not instead of) init_win32_dpi()'s system-level DPI
+        awareness. wx controls only inherit their parent's font at CONSTRUCTION time,
+        not dynamically -- self.SetFont() in initialize_component() is why a fresh
+        launch already opens at the persisted zoom level for free (every child is
+        built AFTER that call), but an already-built running window needs every
+        existing descendant's font set explicitly to actually rescale live. See
+        docs/ai/AI_DECISIONS.md.
+        """
+        self.zoom_level = zoom_level
+        normal_font = self._scaled_font(BASE_NORMAL_FONT_PT)
+        warning_font = self._scaled_font(BASE_WARNING_FONT_PT)
+
+        self.SetFont(normal_font)
+        self._set_font_recursive(self, normal_font)
+        self.lbl_divergence_warning.SetFont(warning_font)
+
+        # Re-derive the bold StaticBox headers / Start-Cancel button fonts from the
+        # new base size (apply_accent_theme reads self.grp_stereo.GetFont() live, it
+        # never caches the old font) and recompute every container's best size the
+        # same way switch_layout_mode() already does after moving panels around.
+        self.apply_accent_theme()
+
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            # Same reasoning as _compose_options_layout_single_page(): a ScrolledPanel's
+            # own GetBestSize() is deliberately tiny regardless of its content, so its
+            # explicit MinSize (pinned when the page was last composed) must be
+            # recomputed here too -- otherwise it stays at whatever size the OLD, smaller
+            # font needed, and a zoom-in only becomes reachable by scrolling instead of
+            # the window growing to actually show it, unlike a fresh Single Page
+            # composition at the same zoom level would.
+            self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+
+        refresh_layouts(self)
+
+    def _set_font_recursive(self, window, font):
+        window.SetFont(font)
+        for child in window.GetChildren():
+            self._set_font_recursive(child, font)
 
     def apply_accent_theme(self):
         """3DECKER visual pass: a real, considered color palette using only what
@@ -2864,6 +3262,7 @@ class MainFrame(wx.Frame):
 
         self.update_divergence_warning()
         self.update_preserve_screen_border()
+        self.update_splat_blend_temperature()
         self.update_pad_mode()
         self.update_compile(probe=probe_compile)
 
@@ -3131,10 +3530,14 @@ class MainFrame(wx.Frame):
         else:
             self.chk_preserve_screen_border.Disable()
 
+    def update_splat_blend_temperature(self):
+        self.cbo_splat_blend_temperature.Enable(self.cbo_method.GetValue() == "forward_splat_fill")
+
     def on_selected_index_changed_cbo_method(self, event):
         self.update_divergence_warning()
         self.update_preserve_screen_border()
         self.update_inpaint_options()
+        self.update_splat_blend_temperature()
 
     def on_selected_index_changed_cbo_stereo_format(self, event):
         self.update_input_option_state()
@@ -3630,6 +4033,7 @@ class MainFrame(wx.Frame):
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
             synthetic_view=self.cbo_synthetic_view.GetValue(),
             method=self.cbo_method.GetValue(),
+            splat_blend_temperature=float(self.cbo_splat_blend_temperature.GetValue()),
             preserve_screen_border=preserve_screen_border,
             depth_model=depth_model_type,
             foreground_scale=float(self.cbo_foreground_scale.GetValue()),
@@ -3962,7 +4366,8 @@ class MainFrame(wx.Frame):
 
     def load_preset(self, name=None, exclude_names=set()):
         exclude_names.add("cbo_language")  # ignore language
-        exclude_names.add("cbo_layout")  # ignore GUI layout preference (own file + restart, ADR-037)
+        exclude_names.add("cbo_layout")  # ignore GUI layout preference (own file, live-applied, ADR-037/038)
+        exclude_names.add("cbo_zoom")  # ignore UI Zoom preference (own file, live-applied, see docs/ai/AI_DECISIONS.md)
         if not name:
             restore_path = True
             name = ""
@@ -4023,12 +4428,18 @@ class MainFrame(wx.Frame):
             dlg.ShowModal()
 
     def on_text_changed_cbo_layout(self, event):
+        # ADR-045: applies immediately via switch_layout_mode() -- no restart-required
+        # dialog anymore (compare on_text_changed_cbo_language above, which still needs
+        # one because the Language preference genuinely can't be applied live).
         mode = self.cbo_layout.GetClientData(self.cbo_layout.GetSelection())
         _save_layout_mode(LAYOUT_CONFIG_PATH, mode)
-        with wx.MessageDialog(None,
-                              message=T("The layout setting will be applied after restarting"),
-                              style=wx.OK) as dlg:
-            dlg.ShowModal()
+        self.switch_layout_mode(mode)
+
+    def on_text_changed_cbo_zoom(self, event):
+        # Applies immediately, like Layout (ADR-038) -- see apply_zoom_level().
+        zoom_level = self.cbo_zoom.GetClientData(self.cbo_zoom.GetSelection())
+        _save_zoom_level(ZOOM_CONFIG_PATH, zoom_level)
+        self.apply_zoom_level(zoom_level)
 
     def on_click_divergence_warning(self, event):
         self.lbl_divergence_warning.Hide()
@@ -5094,6 +5505,115 @@ class MainFrame(wx.Frame):
         self.SetStatusText(T("Adding subtitle track..."))
         startWorker(self.on_exit_submux_worker, self.run_submux, wargs=(cmd,))
 
+    # --- Add Audio Track (standalone tool, see ADR-042) ---
+
+    def on_click_btn_audiomux_input(self, event):
+        with wx.FileDialog(self, message=T("Select Converted 3D Video (.mkv)"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_audiomux_input.GetValue():
+                dlg.SetPath(self.txt_audiomux_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                input_path = dlg.GetPath()
+                self.txt_audiomux_input.SetValue(input_path)
+                if not self.txt_audiomux_output.GetValue():
+                    base = path.splitext(input_path)[0]
+                    self.txt_audiomux_output.SetValue(f"{base}_dubbed.mkv")
+
+    def on_click_btn_audiomux_audio(self, event):
+        with wx.FileDialog(self, message=T("Select Audio File (dub)"),
+                           wildcard=AUDIO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_audiomux_audio.GetValue():
+                dlg.SetPath(self.txt_audiomux_audio.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_audiomux_audio.SetValue(dlg.GetPath())
+
+    def on_click_btn_audiomux_output(self, event):
+        with wx.FileDialog(self, message=T("Save Dubbed Output As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_audiomux_output.GetValue():
+                dlg.SetPath(self.txt_audiomux_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_audiomux_output.SetValue(dlg.GetPath())
+
+    def run_audiomux(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread.
+        # This tool needs no GPU at all (ffmpeg trim + mkvmerge subprocess
+        # orchestration), kept out-of-process anyway for the same convention as
+        # RIFE/HDR reinjection/Add Subtitle Track. Captures combined stdout+stderr
+        # since audio_mux_cli prints its resolved language, the ffmpeg trim
+        # command(s) (when used), the mkvmerge command line, and any refusal reason
+        # to stderr.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def on_exit_audiomux_worker(self, result):
+        self.btn_audiomux_run.Enable()
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_audiomux_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_audiomux_log.SetValue(output)
+        self.txt_audiomux_log.ShowPosition(self.txt_audiomux_log.GetLastPosition())
+        if returncode == 0:
+            self.SetStatusText(T("Audio track added successfully"))
+        else:
+            self.SetStatusText(T("Adding audio track failed -- see the log below"))
+            wx.MessageBox(T("Adding the audio track failed or refused -- see the log box for the "
+                             "exact reason."),
+                          T("Add Audio Track"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_audiomux_run(self, event):
+        input_path = self.txt_audiomux_input.GetValue().strip()
+        audio_path = self.txt_audiomux_audio.GetValue().strip()
+        output_path = self.txt_audiomux_output.GetValue().strip()
+
+        if not input_path or not path.exists(input_path):
+            wx.MessageBox(T("Select a valid Converted 3D Video file first."),
+                          T("Add Audio Track"), wx.OK | wx.ICON_WARNING)
+            return
+        if not audio_path or not path.exists(audio_path):
+            wx.MessageBox(T("Select a valid Audio File first."),
+                          T("Add Audio Track"), wx.OK | wx.ICON_WARNING)
+            return
+        if not output_path:
+            wx.MessageBox(T("Set an Output File path first."),
+                          T("Add Audio Track"), wx.OK | wx.ICON_WARNING)
+            return
+        if path.abspath(output_path) == path.abspath(input_path):
+            wx.MessageBox(T("Output File must be different from the input video."),
+                          T("Add Audio Track"), wx.OK | wx.ICON_WARNING)
+            return
+
+        cmd = [sys.executable, "-m", "iw3.audio_mux_cli",
+               "--input", input_path, "--audio", audio_path, "--output", output_path]
+        language = self.cbo_audiomux_language.GetValue().strip()
+        if language:
+            cmd += ["--language", language]
+        track_name = self.txt_audiomux_track_name.GetValue().strip()
+        if track_name:
+            cmd += ["--track-name", track_name]
+        if self.chk_audiomux_default.GetValue():
+            cmd += ["--default"]
+        if self.chk_audiomux_start_time.GetValue():
+            cmd += ["--source-start-time", self.txt_audiomux_start_time.GetValue()]
+        if self.chk_audiomux_end_time.GetValue():
+            cmd += ["--source-end-time", self.txt_audiomux_end_time.GetValue()]
+
+        self.txt_audiomux_log.SetValue(T("Running...\n"))
+        self.btn_audiomux_run.Disable()
+        self.SetStatusText(T("Adding audio track..."))
+        startWorker(self.on_exit_audiomux_worker, self.run_audiomux, wargs=(cmd,))
+
     def on_click_btn_stereotag_input(self, event):
         with wx.FileDialog(self, message=T("Select Converted 3D Video (.mkv)"),
                            wildcard=VIDEO_EXTENSIONS,
@@ -5274,9 +5794,211 @@ def _self_test_layout_modes():
     print("_self_test_layout_modes: PASS")
 
 
+def _self_test_layout_mode_live_switch():
+    """Regression test for ADR-045 (live Layout switching, no restart): starting from
+    a real MainFrame in either mode, MainFrame.switch_layout_mode() must move all 7
+    category panels to the other container and back, repeatedly, in the same running
+    window, without losing or duplicating any control, and without breaking a
+    cross-control Enable/Disable relationship that lives inside one of those panels
+    (Object Stability's sub-settings, chk_temporal_stabilize -> its 4 dependent
+    combos). Also guards against a real collapse bug found and fixed while building
+    this: wx.Notebook leaves every non-selected page Hidden even after RemovePage(),
+    which silently zeroed out GridBagSizer.CalcMin() for the Single Page layout (a
+    sizer excludes Hidden windows from its min-size calculation) and collapsed the
+    whole window to a couple dozen pixels tall -- switch_layout_mode() now forces
+    each panel Show() after reparenting, so every panel must be visible and pnl_single
+    must report a real (non near-zero) computed minimum after switching to Single
+    Page. No GPU or real movie file needed."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    try:
+        gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+        frame = gui_mod.MainFrame()
+        tabs = (frame.tab_stereo, frame.tab_depth_blend, frame.tab_video_filter,
+                frame.tab_video_dec, frame.tab_video_enc, frame.tab_processor, frame.tab_tools)
+
+        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS
+        assert frame.nb_options.GetPageCount() == 7
+
+        for i in range(3):
+            frame.switch_layout_mode(gui_mod.LAYOUT_MODE_SINGLE_PAGE)
+            assert frame.layout_mode == gui_mod.LAYOUT_MODE_SINGLE_PAGE
+            assert frame.nb_options.GetPageCount() == 0, f"round {i}: notebook still has pages after switching away"
+            for tab in tabs:
+                assert tab.GetParent() is frame.pnl_single, f"round {i}: {tab} not reparented to pnl_single"
+                assert tab.IsShown(), f"round {i}: {tab} still Hidden after switching to Single Page " \
+                    "(wx.Notebook leaves inactive pages Hidden -- collapses the whole window, see docstring)"
+            # A collapsed pnl_single (the original bug) reports a near-zero computed
+            # min size here -- assert a real one instead of just "not None".
+            min_w, min_h = frame.pnl_single.GetSizer().CalcMin()
+            assert min_w > 100 and min_h > 100, \
+                f"round {i}: pnl_single collapsed after switching to Single Page (CalcMin={(min_w, min_h)})"
+            # every control below a moved category panel must still be reachable and
+            # wired to the SAME parent StaticBox it always had (only the 7 category
+            # panels themselves ever move -- see switch_layout_mode's docstring).
+            assert frame.grp_stereo.GetParent() is frame.tab_stereo
+            assert frame.chk_rife_interpolate.GetParent() is frame.grp_postprocess
+
+            # Object Stability's Enable/Disable dependency must still work correctly
+            # on the reparented panel.
+            frame.chk_temporal_stabilize.SetValue(True)
+            frame.update_temporal_stabilize()
+            assert frame.cbo_temporal_stabilize_strength.IsEnabled(), f"round {i}: sub-setting did not enable"
+            frame.chk_temporal_stabilize.SetValue(False)
+            frame.update_temporal_stabilize()
+            assert not frame.cbo_temporal_stabilize_strength.IsEnabled(), f"round {i}: sub-setting did not disable"
+
+            frame.switch_layout_mode(gui_mod.LAYOUT_MODE_TABS)
+            assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS
+            assert frame.nb_options.GetPageCount() == 7, f"round {i}: notebook page count wrong after switching back"
+            assert frame.pnl_single.GetSizer().GetItemCount() == 0, \
+                f"round {i}: single-page sizer still has items after switching away"
+            assert frame.tab_stereo.IsShown(), \
+                f"round {i}: the selected (first) tab must be visible back in Tabbed mode"
+            for tab in tabs:
+                assert tab.GetParent() is frame.nb_options, f"round {i}: {tab} not reparented back to nb_options"
+            assert frame.grp_stereo.GetParent() is frame.tab_stereo
+            assert frame.chk_rife_interpolate.GetParent() is frame.grp_postprocess
+
+        # A no-op switch (same mode) must not raise or disturb the current composition.
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_TABS)
+        assert frame.nb_options.GetPageCount() == 7
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_layout_mode_live_switch: PASS")
+
+
+def _self_test_zoom_level_persistence():
+    """Regression test for UI Zoom's persisted preference: round-trips through the
+    real save/load helpers using a scratch file so the user's actual
+    iw3-gui-zoom.cfg is never touched, and separately checks the font-point scaling
+    math used by MainFrame.apply_zoom_level()/_scaled_font(). No GPU, no wx.App, no
+    real movie file needed."""
+    import iw3.gui as gui_mod
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory() as tmp_dir:
+        cfg = path.join(tmp_dir, "iw3-gui-zoom.cfg")
+
+        # No file yet -> default.
+        assert gui_mod._load_zoom_level(cfg) == gui_mod.DEFAULT_ZOOM_LEVEL
+
+        for level in gui_mod.ZOOM_LEVELS:
+            gui_mod._save_zoom_level(cfg, level)
+            assert gui_mod._load_zoom_level(cfg) == level
+
+        # A corrupted/foreign value on disk must not crash -- falls back to default.
+        with open(cfg, mode="w", encoding="utf-8") as f:
+            f.write("not-a-number")
+        assert gui_mod._load_zoom_level(cfg) == gui_mod.DEFAULT_ZOOM_LEVEL
+
+        with open(cfg, mode="w", encoding="utf-8") as f:
+            f.write("999")  # a real int, but not one of the offered ZOOM_LEVELS
+        assert gui_mod._load_zoom_level(cfg) == gui_mod.DEFAULT_ZOOM_LEVEL
+
+    # Font-point scaling math: 100% must reproduce the original hardcoded sizes
+    # exactly (10pt / 8pt), and scaling must move monotonically with zoom level.
+    assert gui_mod._zoom_font_point(gui_mod.BASE_NORMAL_FONT_PT, 100) == 10
+    assert gui_mod._zoom_font_point(gui_mod.BASE_WARNING_FONT_PT, 100) == 8
+    assert gui_mod._zoom_font_point(gui_mod.BASE_NORMAL_FONT_PT, 200) == 20
+    assert gui_mod._zoom_font_point(gui_mod.BASE_NORMAL_FONT_PT, 80) == 8
+    assert gui_mod._zoom_font_point(gui_mod.BASE_NORMAL_FONT_PT, 50) == 6, \
+        "font point size must never collapse below the 6pt floor even at extreme zoom"
+
+    print("_self_test_zoom_level_persistence: PASS")
+
+
+def _self_test_zoom_startup_restore():
+    """Regression test for a real bug caught during manual verification: MainFrame
+    already restores general app settings at startup via load_preset() (registers
+    every named control with wx.lib.agw.persist and restores from CONFIG_PATH), and
+    that generic restore ran AFTER cbo_zoom's own SetSelection(self.zoom_level) during
+    construction, silently resetting the combo back to whatever (usually 100%) was
+    last saved into the general iw3-gui.cfg -- even though frame.zoom_level and every
+    control's actual font were still correctly the persisted UI Zoom value. Fixed by
+    adding "cbo_zoom" to load_preset()'s hardcoded exclude_names, the same way
+    "cbo_language"/"cbo_layout" already are. This monkeypatches _load_zoom_level so
+    the real iw3-gui-zoom.cfg is never touched, and constructs a real MainFrame (the
+    bug only reproduces through the real startup path, not the save/load helpers in
+    isolation). No GPU or real movie file needed."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_zoom_level
+    app = wx.App()
+    frame = None
+    try:
+        gui_mod._load_zoom_level = lambda config_path: 150
+        frame = gui_mod.MainFrame()
+        assert frame.zoom_level == 150
+        assert frame.cbo_divergence.GetFont().GetPointSize() == gui_mod._zoom_font_point(
+            gui_mod.BASE_NORMAL_FONT_PT, 150)
+        selected = frame.cbo_zoom.GetClientData(frame.cbo_zoom.GetSelection())
+        assert selected == 150, \
+            f"cbo_zoom combo shows {selected}% after startup, not the persisted 150% -- " \
+            "load_preset()'s generic settings restore clobbered it"
+    finally:
+        gui_mod._load_zoom_level = orig_load
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_zoom_startup_restore: PASS")
+
+
+def _self_test_zoom_live_rescale():
+    """Regression test for UI Zoom applying live (no restart) in a real running
+    window, mirroring _self_test_layout_mode_live_switch's approach for Layout
+    (ADR-038): drives MainFrame.apply_zoom_level() across the full offered range,
+    repeatedly, in the same window, and checks a representative control's actual
+    font point size changed each time and the window still lays out without error.
+    No GPU or real movie file needed."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.zoom_level == gui_mod.DEFAULT_ZOOM_LEVEL
+        assert frame.cbo_divergence.GetFont().GetPointSize() == gui_mod.BASE_NORMAL_FONT_PT
+
+        for level in gui_mod.ZOOM_LEVELS:
+            frame.apply_zoom_level(level)
+            assert frame.zoom_level == level
+            expected_pt = gui_mod._zoom_font_point(gui_mod.BASE_NORMAL_FONT_PT, level)
+            assert frame.cbo_divergence.GetFont().GetPointSize() == expected_pt, \
+                f"level {level}: a live control's font did not rescale"
+            assert frame.lbl_divergence_warning.GetFont().GetPointSize() == \
+                gui_mod._zoom_font_point(gui_mod.BASE_WARNING_FONT_PT, level), \
+                f"level {level}: the warning-font control did not rescale"
+            # Accent theme's bold StaticBox headers must track the new size too, not
+            # be left stuck at whatever size they were first bolded at.
+            assert frame.grp_stereo.GetFont().GetPointSize() == expected_pt
+
+        # Repeated switching back to 100% must be idempotent/stable.
+        frame.apply_zoom_level(100)
+        assert frame.cbo_divergence.GetFont().GetPointSize() == gui_mod.BASE_NORMAL_FONT_PT
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_zoom_live_rescale: PASS")
+
+
 def _run_self_tests():
     _self_test_no_eager_cuda_context()
     _self_test_layout_modes()
+    _self_test_layout_mode_live_switch()
+    _self_test_zoom_level_persistence()
+    _self_test_zoom_startup_restore()
+    _self_test_zoom_live_rescale()
     print("All iw3.gui self-tests PASSED")
 
 

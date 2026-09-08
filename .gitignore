@@ -42,6 +42,7 @@ tmp
 /windows_package/nunif
 /iw3/pretrained_models/hub
 /iw3/pretrained_models/rembg
+/iw3/pretrained_models/rife
 /iw3/inpaint_models.yml
 
 /iw3/player/public/lib

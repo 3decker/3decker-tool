@@ -85,6 +85,48 @@ _SORTED_SUFFIXES = sorted(_SUFFIX_TO_FORMAT.keys(), key=len, reverse=True)
 _VALID_FORMATS = ("auto",) + tuple(dict.fromkeys(_SUFFIX_TO_FORMAT.values()))
 
 
+# ISO 639-1 (2-letter) -> ISO 639-2/B (3-letter, "bibliographic" form -- e.g. "ger"/
+# "fre"/"chi", not the alternative "terminological" deu/fra/zho) lookup, needed ONLY
+# here at the exact point --language is handed to mkvmerge, which expects the 3-letter
+# form for MKV track metadata. See docs/ai/AI_DECISIONS.md ADR-042: this whole tool's
+# user-facing --language input was standardized on ISO 639-1 (the same 2-letter format
+# subtitle_search_cli.py's own --language already uses, and what iw3/gui.py's Search
+# Subtitles/Add Subtitle Track fields both now share) so a user never has to remember
+# which of two different code spaces a given "Language" field wants.
+# No stdlib or already-installed dependency ships a maintained ISO 639-1<->639-2 table
+# (checked: stdlib has none; pysubs2, this tool's only subtitle-format dependency,
+# ships no language table either) -- adding a new pip dependency just for this lookup
+# was judged not worth it, so this is a hand-written table. It deliberately covers
+# only commonly-used languages, not the full ISO 639 set (see AI_DECISIONS.md for the
+# full reasoning) -- _iso639_1_to_2() below falls back to passing an unlisted code
+# through unchanged (lowercased) rather than erroring out, so an unusual-but-valid
+# code still reaches mkvmerge instead of being rejected here.
+_ISO_639_1_TO_2 = {
+    "en": "eng", "es": "spa", "fr": "fre", "de": "ger", "it": "ita", "pt": "por",
+    "ja": "jpn", "zh": "chi", "ko": "kor", "ru": "rus", "ar": "ara", "hi": "hin",
+    "nl": "dut", "sv": "swe", "no": "nor", "da": "dan", "pl": "pol", "tr": "tur",
+    "fi": "fin", "el": "gre", "he": "heb", "th": "tha", "vi": "vie", "id": "ind",
+    "ms": "may", "cs": "cze", "hu": "hun", "ro": "rum", "uk": "ukr", "bg": "bul",
+    "hr": "hrv", "sk": "slo", "sl": "slv", "sr": "srp", "lt": "lit", "lv": "lav",
+    "et": "est", "fa": "per", "ur": "urd", "bn": "ben", "ta": "tam", "te": "tel",
+    "ml": "mal", "mr": "mar", "gu": "guj", "pa": "pan", "sw": "swa", "af": "afr",
+    "is": "ice", "ga": "gle", "cy": "wel", "ca": "cat", "eu": "baq", "gl": "glg",
+    "sq": "alb", "hy": "arm", "ka": "geo", "az": "aze", "kk": "kaz", "uz": "uzb",
+    "mn": "mon", "km": "khm", "lo": "lao", "my": "bur", "ne": "nep", "si": "sin",
+    "am": "amh", "zu": "zul", "xh": "xho", "yo": "yor", "ig": "ibo", "ha": "hau",
+}
+
+
+def _iso639_1_to_2(code):
+    """Converts an ISO 639-1 (2-letter) language code to its ISO 639-2/B (3-letter)
+    equivalent for mkvmerge's --language argument. Falls back to the input, lowercased/
+    stripped, if it isn't in _ISO_639_1_TO_2 -- covers both an already-3-letter code
+    (e.g. someone still typing the old "eng") and any valid-but-uncommon ISO 639-1 code
+    this table doesn't happen to list, so this never hard-errors on an unusual input."""
+    normalized = str(code).strip().lower()
+    return _ISO_639_1_TO_2.get(normalized, normalized)
+
+
 def _format_cmd(cmd):
     return " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd)
 
@@ -107,9 +149,13 @@ def create_parser():
     parser.add_argument("--output", "-o", type=str, required=True,
                          help="Path to write the new file to. Must be a different path from "
                               "--input -- this tool never overwrites the input.")
-    parser.add_argument("--language", type=str, default="eng",
-                         help="ISO 639-2 language code for the new subtitle track (e.g. eng, "
-                              "jpn, fre). Purely metadata -- does not affect muxing.")
+    parser.add_argument("--language", type=str, default="en",
+                         help="ISO 639-1 (2-letter) language code for the new subtitle track (e.g. "
+                              "en, ja, fr, de, es) -- the same format subtitle_search_cli.py's own "
+                              "--language expects (ADR-042). Converted internally to the ISO 639-2 "
+                              "(3-letter) code mkvmerge actually needs for MKV track metadata (e.g. "
+                              "en -> eng); an unrecognized code is passed through unchanged rather "
+                              "than erroring out. Purely metadata -- does not affect muxing.")
     parser.add_argument("--track-name", type=str, default=None,
                          help="Display name for the new subtitle track, shown in player track "
                               "menus. Default: the SRT file's own name (without extension).")
@@ -230,9 +276,10 @@ def run(args):
     # "copy every track from this file, unmodified" behavior -- this is what preserves the
     # original video/audio/existing-subtitle tracks untouched. Verified against real
     # mkvmerge behavior in this tool's own smoke test (see docs/ai/AI_DECISIONS.md ADR-032).
+    mkvmerge_language = _iso639_1_to_2(args.language)
     cmd = [
         mkvmerge_bin, "-o", tmp_output,
-        "--language", f"0:{args.language}",
+        "--language", f"0:{mkvmerge_language}",
         "--track-name", f"0:{track_name}",
         srt_path,
         input_path,
@@ -298,6 +345,31 @@ def _self_test_format_detection():
     print("_self_test_format_detection: PASS")
 
 
+def _self_test_iso639_lookup():
+    """Synthetic test of the ISO 639-1 -> ISO 639-2/B lookup table (ADR-042) -- no
+    network/mkvmerge needed. Covers the common-language cases the task explicitly
+    called out, plus the fallback behavior for a code not in the table."""
+    common_cases = {
+        "en": "eng", "es": "spa", "fr": "fre", "de": "ger", "it": "ita", "pt": "por",
+        "ja": "jpn", "zh": "chi", "ko": "kor", "ru": "rus",
+    }
+    for code, expected in common_cases.items():
+        assert _iso639_1_to_2(code) == expected, f"{code}: expected {expected}, got {_iso639_1_to_2(code)}"
+
+    # case-insensitive / whitespace-tolerant
+    assert _iso639_1_to_2("EN") == "eng"
+    assert _iso639_1_to_2(" ja ") == "jpn"
+
+    # Fallback: a code not in the table is passed through unchanged (lowercased),
+    # never raises -- covers both an already-3-letter code (pre-ADR-042 habit) and a
+    # genuinely valid-but-uncommon ISO 639-1 code this table doesn't list.
+    assert _iso639_1_to_2("eng") == "eng"
+    assert _iso639_1_to_2("xx") == "xx"
+    assert _iso639_1_to_2("XX") == "xx"
+
+    print("_self_test_iso639_lookup: PASS")
+
+
 def _self_test_srt_validation():
     """Synthetic valid/malformed SRT test using pysubs2 -- no real movie footage needed."""
     import tempfile
@@ -345,7 +417,7 @@ def _self_test_run_gating():
 
         def _args(**overrides):
             base = dict(input=mkv_input, srt=srt_path, output=output_path,
-                        language="eng", track_name=None, format="auto")
+                        language="en", track_name=None, format="auto")
             base.update(overrides)
             return argparse.Namespace(**base)
 
@@ -383,6 +455,7 @@ def _self_test_run_gating():
 
 def _run_self_tests():
     _self_test_format_detection()
+    _self_test_iso639_lookup()
     _self_test_srt_validation()
     _self_test_run_gating()
     print("All subtitle_mux_cli self-tests PASSED")

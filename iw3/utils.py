@@ -31,7 +31,7 @@ from nunif.device import create_device, device_is_cuda, mps_is_available, xpu_is
 from nunif.models.data_parallel import DeviceSwitchInference
 from . import export_config
 from .dilation import dilate_edge, edge_dilation_is_enabled
-from .forward_warp import apply_divergence_forward_warp
+from .forward_warp import apply_divergence_forward_warp, SPLAT_BLEND_TEMPERATURE
 from .anaglyph import apply_anaglyph_redcyan
 from .mapper import get_mapper, resolve_mapper_name, MAPPER_ALL
 from .depth_model_factory import create_depth_model
@@ -1343,6 +1343,16 @@ def make_output_filename(input_filename, args, video=False):
         else:
             im_tag = iof_tag = imd_tag = imw_tag = ""
 
+        # Splat blend temperature only means anything for forward_splat_fill, and only
+        # worth naming when it differs from that method's original fixed behavior --
+        # same "only shown when non-default" convention as everything else here.
+        if args.method == "forward_splat_fill":
+            splat_temp = getattr(args, "splat_blend_temperature", SPLAT_BLEND_TEMPERATURE)
+            splat_temp = SPLAT_BLEND_TEMPERATURE if splat_temp is None else splat_temp
+            spt_tag = f"_spt{to_deciaml(splat_temp, 10)}" if splat_temp != SPLAT_BLEND_TEMPERATURE else ""
+        else:
+            spt_tag = ""
+
         stereo_w = getattr(args, "stereo_width", None)
         sw_tag = f"_sw{int(stereo_w)}" if stereo_w else ""
 
@@ -1378,7 +1388,7 @@ def make_output_filename(input_filename, args, video=False):
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}{bp}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
-                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{rife_tag}{smtag}{bitrate}")
+                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{rife_tag}{smtag}{bitrate}")
     else:
         metadata = ""
 
@@ -1442,6 +1452,11 @@ def _build_iw3_comment_metadata(args, video=True):
         max_w = getattr(args, "inpaint_max_width", None)
         if max_w:
             comment_parts.append(f"iw3_inpaint_max_width={int(max_w)}")
+    if args.method == "forward_splat_fill":
+        splat_temp = getattr(args, "splat_blend_temperature", SPLAT_BLEND_TEMPERATURE)
+        splat_temp = SPLAT_BLEND_TEMPERATURE if splat_temp is None else splat_temp
+        if splat_temp != SPLAT_BLEND_TEMPERATURE:
+            comment_parts.append(f"iw3_splat_blend_temperature={splat_temp}")
     if getattr(args, "depth_blend", False):
         db_model = getattr(args, "depth_blend_model", None) or "VDA_L"
         db_strength = getattr(args, "depth_blend_strength", 1.0) or 1.0
@@ -1758,7 +1773,8 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
         left_eye, right_eye = apply_divergence_forward_warp(
             im, depth,
             args.divergence, convergence=convergence,
-            method=args.method, synthetic_view=args.synthetic_view, width_base=False)
+            method=args.method, synthetic_view=args.synthetic_view, width_base=False,
+            splat_blend_temperature=getattr(args, "splat_blend_temperature", SPLAT_BLEND_TEMPERATURE) or SPLAT_BLEND_TEMPERATURE)
     elif args.method in {"forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"}:
         left_eyes = []
         right_eyes = []
@@ -4102,6 +4118,15 @@ def create_parser(required_true=True):
                                  "row_flow_v2",
                                  "NULL"],
                         help="left-right divergence method")
+    parser.add_argument("--splat-blend-temperature", type=float, default=SPLAT_BLEND_TEMPERATURE,
+                        help=("only used by --method forward_splat_fill: how sharply that method's "
+                              "depth-weighted collision blend favors the nearer of two colliding source "
+                              "pixels. Higher = sharper cutoff, closer to forward_fill's old hard-overwrite "
+                              "behavior (whichever pixel is nearer wins almost completely); lower = "
+                              "smoother/more even blending between competing pixels. Default (50.0) matches "
+                              "this method's original fixed behavior exactly. New setting, not yet tuned "
+                              "against real footage -- start at the default and only adjust it if "
+                              "forward_splat_fill's results look wrong at that default."))
     parser.add_argument("--synthetic-view", type=str, default="both", choices=["both", "right", "left"],
                         help=("the side that generates synthetic view."
                               "when `right`, the left view will be the original input image/frame"

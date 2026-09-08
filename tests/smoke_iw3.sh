@@ -59,6 +59,12 @@ python -m iw3.cli -y -i ${TEST_VIDEO} -o ${OUTPUT_DIR} --depth-model Any_S --key
 # invocation needed) -- mirrors iw3.reinject_hdr_cli's --self-test convention.
 python -m iw3.subtitle_mux_cli --self-test
 
+# audio mux / dub track (standalone post-processing tool, see docs/ai/AI_DECISIONS.md
+# ADR-044). Embedded self-test only (mocked ffmpeg trim + language-table lookups, no
+# GPU, no real ffmpeg/mkvmerge invocation needed) -- same convention as the subtitle
+# mux self-test above, which this module imports its ISO 639-1 language table from.
+python -m iw3.audio_mux_cli --self-test
+
 # GUI startup must not grab a CUDA context / probe torch.compile before Start is
 # clicked (see docs/ai/AI_DECISIONS.md ADR-033). Embedded self-test only (mocked
 # pyav_init_cuda_primary_context/check_compile_support, no GPU needed).

@@ -14,6 +14,7 @@ import wx
 from wx.lib.delayedresult import startWorker
 import wx.lib.agw.persist as persist
 import wx.lib.stattext as stattext
+import wx.lib.scrolledpanel as scrolledpanel
 import torch
 from .utils import (
     create_parser, set_state_args, iw3_main,
@@ -79,6 +80,30 @@ PRESET_DIR = path.join(CONFIG_DIR, "presets")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(PRESET_DIR, exist_ok=True)
 
+# GUI Layout preference (ADR-037): Tabbed (default, ADR-036's wx.Notebook) vs Single
+# Page (every category StaticBox visible at once, restart required to switch -- see
+# on_text_changed_cbo_layout). Persisted the same way as the Language setting above:
+# a dedicated plain-text file, read once before any control is constructed, since the
+# choice decides which parent widget the category StaticBoxes get built into.
+LAYOUT_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-layout.cfg")
+LAYOUT_MODE_TABS = "tabs"
+LAYOUT_MODE_SINGLE_PAGE = "single_page"
+LAYOUT_MODE_CHOICES = (LAYOUT_MODE_TABS, LAYOUT_MODE_SINGLE_PAGE)
+
+
+def _load_layout_mode(config_path):
+    if path.exists(config_path):
+        with open(config_path, encoding="utf-8") as f:
+            value = f.read().strip()
+        if value in LAYOUT_MODE_CHOICES:
+            return value
+    return LAYOUT_MODE_TABS
+
+
+def _save_layout_mode(config_path, mode):
+    with open(config_path, mode="w", encoding="utf-8") as f:
+        f.write(mode)
+
 
 LAYOUT_DEBUG = False
 
@@ -136,6 +161,7 @@ class MainFrame(wx.Frame):
         self.depth_model_device_id = None
         self.depth_model_height = None
         self.depth_model_limit_resolution = None
+        self.layout_mode = _load_layout_mode(LAYOUT_CONFIG_PATH)
         self.initialize_component()
         if is_dark_mode():
             apply_dark_mode(self)
@@ -261,24 +287,39 @@ class MainFrame(wx.Frame):
         if LAYOUT_DEBUG:
             self.pnl_options.SetBackgroundColour("#cfc")
 
-        # Category tabs (ADR-036): the 110+ controls below are grouped into a
-        # wx.Notebook so a user can find any setting quickly instead of scanning one
-        # giant wall of controls. Every wx.StaticBox/VideoDecodingBox/VideoEncodingBox
-        # below is parented to one of these tab panels instead of self.pnl_options
-        # directly -- this only changes WHERE each group is drawn, never a control's
-        # name, binding, or behavior. pnl_file_option (File & Batch checkboxes) and
-        # pnl_preset (Quick Presets/Language/etc.) intentionally stay outside the
-        # notebook, as persistent strips above it -- see docs/3DECKER_Method.md and
-        # AI_DECISIONS.md for why (frequently-needed controls that shouldn't require
+        # Category groups (ADR-036, extended by ADR-037): the 110+ controls below are
+        # grouped into 7 categories so a user can find any setting quickly instead of
+        # scanning one giant wall of controls. Every wx.StaticBox/VideoDecodingBox/
+        # VideoEncodingBox below is parented to one of these 7 category panels instead
+        # of self.pnl_options directly -- this only changes WHERE each group is drawn,
+        # never a control's name, binding, or behavior. pnl_file_option (File & Batch
+        # checkboxes) and pnl_preset (Quick Presets/Language/etc.) intentionally stay
+        # outside this area, as persistent strips above it -- see docs/3DECKER_Method.md
+        # and AI_DECISIONS.md for why (frequently-needed controls that shouldn't require
         # a tab switch to reach).
-        self.nb_options = wx.Notebook(self.pnl_options)
-        self.tab_stereo = wx.Panel(self.nb_options)
-        self.tab_depth_blend = wx.Panel(self.nb_options)
-        self.tab_video_filter = wx.Panel(self.nb_options)
-        self.tab_video_dec = wx.Panel(self.nb_options)
-        self.tab_video_enc = wx.Panel(self.nb_options)
-        self.tab_processor = wx.Panel(self.nb_options)
-        self.tab_tools = wx.Panel(self.nb_options)
+        #
+        # ADR-037: which WIDGET parents these 7 category panels depends on the user's
+        # Layout preference (self.layout_mode, loaded before this method runs) -- Tabbed
+        # parents them to a wx.Notebook page each (ADR-036's original design); Single
+        # Page parents them directly to one scrollable panel so every category is
+        # visible at once. Everything below this branch (every StaticBox/sizer built
+        # inside each category, and each category panel's own SetSizer() call) is
+        # identical either way; only the final composition step (see
+        # _compose_options_layout_tabbed / _compose_options_layout_single_page near the
+        # end of this method) differs.
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self.pnl_single = scrolledpanel.ScrolledPanel(self.pnl_options)
+            tabs_parent = self.pnl_single
+        else:
+            self.nb_options = wx.Notebook(self.pnl_options)
+            tabs_parent = self.nb_options
+        self.tab_stereo = wx.Panel(tabs_parent)
+        self.tab_depth_blend = wx.Panel(tabs_parent)
+        self.tab_video_filter = wx.Panel(tabs_parent)
+        self.tab_video_dec = wx.Panel(tabs_parent)
+        self.tab_video_enc = wx.Panel(tabs_parent)
+        self.tab_processor = wx.Panel(tabs_parent)
+        self.tab_tools = wx.Panel(tabs_parent)
 
         # stereo generation settings
         # divergence, convergence, method, depth_model, mapper
@@ -2234,12 +2275,13 @@ class MainFrame(wx.Frame):
         sizer_stereotag = wx.StaticBoxSizer(self.grp_stereotag, wx.VERTICAL)
         sizer_stereotag.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
-        # Each category below is its own Notebook tab (ADR-036) instead of one big
-        # 4-column grid -- every sizer_* here was already fully built above (unchanged),
-        # this only changes how they're composed onto pages. Processor+Post-Processing
-        # and the three standalone tools (HDR Reinject/Add Subtitle/Stereo Mode Tag)
-        # are combined into single tabs since each is small on its own, matching how
-        # they were already visually stacked together before this change.
+        # Each category below is its own panel (a Notebook tab, or a Single Page
+        # section -- see ADR-037) instead of one big 4-column grid -- every sizer_*
+        # here was already fully built above (unchanged), this only changes how
+        # they're composed onto their category panel. Processor+Post-Processing and
+        # the three standalone tools (HDR Reinject/Add Subtitle/Stereo Mode Tag) are
+        # combined into single categories since each is small on its own, matching
+        # how they were already visually stacked together before ADR-036.
         tab_layout = wx.BoxSizer(wx.VERTICAL)
         tab_layout.Add(sizer_stereo, 1, wx.ALL | wx.EXPAND, 4)
         self.tab_stereo.SetSizer(tab_layout)
@@ -2271,23 +2313,14 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
-        self.nb_options.AddPage(self.tab_stereo, T("Stereo Generation"))
-        self.nb_options.AddPage(self.tab_depth_blend, T("Dual-Pass Depth Blend"))
-        self.nb_options.AddPage(self.tab_video_filter, T("Video Filter"))
-        self.nb_options.AddPage(self.tab_video_dec, T("Video Decoding"))
-        self.nb_options.AddPage(self.tab_video_enc, T("Video Encoding"))
-        self.nb_options.AddPage(self.tab_processor, T("Processor"))
-        self.nb_options.AddPage(self.tab_tools, T("Standalone Tools"))
-        # Force a deterministic starting tab -- without this, wx sometimes lands on
-        # whichever page happens to contain the last control touched by a SetSelection()
-        # call made deep inside a sub-panel's own __init__ (e.g. VideoEncodingBox's
-        # cbo_video_format) instead of the first page, which looked like a random tab
-        # on launch.
-        self.nb_options.SetSelection(0)
-
-        layout = wx.BoxSizer(wx.VERTICAL)
-        layout.Add(self.nb_options, 1, wx.EXPAND)
-        self.pnl_options.SetSizer(layout)
+        # ADR-037: the 7 category panels built above are already fully self-contained
+        # (each owns its own StaticBoxSizer(s) via the SetSizer() calls above) -- the
+        # only thing left is composing them onto the visible pnl_options area, which is
+        # the one part that differs between Tabbed and Single Page.
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self._compose_options_layout_single_page()
+        else:
+            self._compose_options_layout_tabbed()
 
         # preset panel
         self.pnl_preset = wx.Panel(self)
@@ -2340,6 +2373,29 @@ class MainFrame(wx.Frame):
                 lang_selection = i
         self.cbo_language.SetSelection(lang_selection)
 
+        # GUI layout preference (ADR-037): Tabbed vs. Single Page. Persisted like
+        # Language, in its own file, applied on next launch -- see
+        # on_text_changed_cbo_layout and docs/ai/AI_DECISIONS.md.
+        self.sep_layout = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
+        self.lbl_layout = wx.StaticText(self.pnl_preset, label=T("Layout"))
+        self.cbo_layout = wx.ComboBox(self.pnl_preset, name="cbo_layout")
+        self.cbo_layout.SetEditable(False)
+        self.cbo_layout.Append(T("Tabbed"), LAYOUT_MODE_TABS)
+        self.cbo_layout.Append(T("Single Page"), LAYOUT_MODE_SINGLE_PAGE)
+        self.cbo_layout.SetSelection(0 if self.layout_mode == LAYOUT_MODE_TABS else 1)
+        self.cbo_layout.SetToolTip(
+            T("What it's for: choose how the 100+ conversion settings below are organized.\n"
+              "Values: Tabbed (default) — groups settings into 7 category tabs (Stereo Generation, "
+              "Dual-Pass Depth Blend, Video Filter, Video Decoding, Video Encoding, Processor, "
+              "Standalone Tools) so you only see one category at a time. Single Page — shows all 7 "
+              "category groups at once on one scrollable page, so nothing is hidden behind a tab click.\n"
+              "Con: Single Page needs more scrolling/screen space to see everything at once; Tabbed "
+              "hides other categories until you click their tab.\n"
+              "Recommended: Tabbed for a smaller, less cluttered window; Single Page if you'd rather "
+              "see every setting at once and don't mind scrolling.\n"
+              "Note: takes effect after restarting 3DECKER — changing it just saves the preference for "
+              "next launch."))
+
         # check for updates (read-only fetch + compare only -- never pulls/merges/
         # resets anything; see docs/ai/AI_DECISIONS.md ADR-035)
         self.sep_update = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
@@ -2381,6 +2437,12 @@ class MainFrame(wx.Frame):
         layout.AddSpacer(4)
         layout.Add(self.lbl_language, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
         layout.Add(self.cbo_language, flag=wx.ALL, border=2)
+
+        layout.AddSpacer(2)
+        layout.Add(self.sep_layout, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
+        layout.AddSpacer(4)
+        layout.Add(self.lbl_layout, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
+        layout.Add(self.cbo_layout, flag=wx.ALL, border=2)
 
         layout.AddSpacer(2)
         layout.Add(self.sep_update, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
@@ -2455,6 +2517,7 @@ class MainFrame(wx.Frame):
         self.btn_compare_presets.Bind(wx.EVT_BUTTON, self.on_click_btn_compare_presets)
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
         self.cbo_language.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_language)
+        self.cbo_layout.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_layout)
         self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_updates)
 
         self.btn_autocrop_test.Bind(wx.EVT_BUTTON, self.on_click_btn_autocrop_test)
@@ -2490,6 +2553,60 @@ class MainFrame(wx.Frame):
         # anything. The checkbox/device handlers still probe on real interaction.
         self.update_controls(probe_compile=False)
 
+    def _compose_options_layout_tabbed(self):
+        """ADR-036/ADR-037 -- Tabbed layout: the 7 category panels each become one
+        wx.Notebook page. This is exactly ADR-036's original composition step,
+        unchanged, just extracted into its own method so ADR-037 can pick between it
+        and _compose_options_layout_single_page() based on the user's saved Layout
+        preference."""
+        self.nb_options.AddPage(self.tab_stereo, T("Stereo Generation"))
+        self.nb_options.AddPage(self.tab_depth_blend, T("Dual-Pass Depth Blend"))
+        self.nb_options.AddPage(self.tab_video_filter, T("Video Filter"))
+        self.nb_options.AddPage(self.tab_video_dec, T("Video Decoding"))
+        self.nb_options.AddPage(self.tab_video_enc, T("Video Encoding"))
+        self.nb_options.AddPage(self.tab_processor, T("Processor"))
+        self.nb_options.AddPage(self.tab_tools, T("Standalone Tools"))
+        # Force a deterministic starting tab -- without this, wx sometimes lands on
+        # whichever page happens to contain the last control touched by a SetSelection()
+        # call made deep inside a sub-panel's own __init__ (e.g. VideoEncodingBox's
+        # cbo_video_format) instead of the first page, which looked like a random tab
+        # on launch.
+        self.nb_options.SetSelection(0)
+
+        layout = wx.BoxSizer(wx.VERTICAL)
+        layout.Add(self.nb_options, 1, wx.EXPAND)
+        self.pnl_options.SetSizer(layout)
+
+    def _compose_options_layout_single_page(self):
+        """ADR-037 -- Single Page layout: the same 7 category panels (each already
+        built with its own StaticBoxSizer(s), identical to the tabbed path) placed
+        directly onto one scrollable page instead of behind tab clicks, arranged in
+        the same 4-column grid template this file used PRE-ADR-036 (the "earlier
+        pass" that added spacing/dividers/indentation within each StaticBox group) --
+        see docs/ai/AI_DECISIONS.md ADR-037 for why this specific arrangement was
+        reused rather than invented fresh: column 0 is Stereo Generation (the most
+        used, tallest group); column 1 stacks Video Decoding/Video Encoding; column 2
+        stacks Video Filter/Processor; column 3 stacks Dual-Pass Depth Blend/
+        Standalone Tools -- the exact same column pairing this file used before the
+        tabs conversion, just with Processor+Post-Processing and the three standalone
+        tools already pre-combined into single panels per ADR-036."""
+        content = wx.GridBagSizer(vgap=0, hgap=0)
+        content.SetEmptyCellSize((0, 0))
+        content.Add(self.tab_stereo, pos=(0, 0), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_video_dec, pos=(0, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_video_enc, pos=(1, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_video_filter, pos=(0, 2), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_processor, pos=(1, 2), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_depth_blend, pos=(0, 3), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_tools, pos=(1, 3), flag=wx.ALL | wx.EXPAND, border=4)
+        self.pnl_single.SetSizer(content)
+        self.pnl_single.SetAutoLayout(1)
+        self.pnl_single.SetupScrolling(scroll_x=True, scroll_y=True)
+
+        layout = wx.BoxSizer(wx.VERTICAL)
+        layout.Add(self.pnl_single, 1, wx.EXPAND)
+        self.pnl_options.SetSizer(layout)
+
     def apply_accent_theme(self):
         """3DECKER visual pass: a real, considered color palette using only what
         wxPython natively supports (SetForegroundColour/SetBackgroundColour/SetFont) --
@@ -2512,8 +2629,12 @@ class MainFrame(wx.Frame):
             box.SetForegroundColour(accent)
             box.SetFont(box_font)
 
+        # ADR-037: the container that wraps the 7 category panels differs by Layout
+        # preference (wx.Notebook vs. a scrollable single-page panel) -- theme
+        # whichever one is actually in use instead of assuming the Notebook.
+        options_container = self.nb_options if self.layout_mode == LAYOUT_MODE_TABS else self.pnl_single
         for panel in (
-            self, self.pnl_options, self.nb_options,
+            self, self.pnl_options, options_container,
             self.tab_stereo, self.tab_depth_blend, self.tab_video_filter,
             self.tab_video_dec, self.tab_video_enc, self.tab_processor, self.tab_tools,
             self.pnl_file_option, self.pnl_preset, self.pnl_process,
@@ -3639,6 +3760,7 @@ class MainFrame(wx.Frame):
 
     def load_preset(self, name=None, exclude_names=set()):
         exclude_names.add("cbo_language")  # ignore language
+        exclude_names.add("cbo_layout")  # ignore GUI layout preference (own file + restart, ADR-037)
         if not name:
             restore_path = True
             name = ""
@@ -3695,6 +3817,14 @@ class MainFrame(wx.Frame):
         save_language_setting(LANG_CONFIG_PATH, lang)
         with wx.MessageDialog(None,
                               message=T("The language setting will be applied after restarting"),
+                              style=wx.OK) as dlg:
+            dlg.ShowModal()
+
+    def on_text_changed_cbo_layout(self, event):
+        mode = self.cbo_layout.GetClientData(self.cbo_layout.GetSelection())
+        _save_layout_mode(LAYOUT_CONFIG_PATH, mode)
+        with wx.MessageDialog(None,
+                              message=T("The layout setting will be applied after restarting"),
                               style=wx.OK) as dlg:
             dlg.ShowModal()
 
@@ -4085,7 +4215,7 @@ class MainFrame(wx.Frame):
         persistent_manager_register_all(manager, self)
         for control in self.get_editable_comboboxes():
             persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
-        persistent_manager_restore_all(manager, {"cbo_language"})
+        persistent_manager_restore_all(manager, {"cbo_language", "cbo_layout"})
         persistent_manager_unregister_all(manager)
         self.update_controls()
         if path.exists(snapshot_path):
@@ -4702,8 +4832,63 @@ def _self_test_no_eager_cuda_context():
     print("_self_test_no_eager_cuda_context: PASS")
 
 
+def _self_test_layout_modes():
+    """Regression test for the GUI Layout preference (Tabbed vs Single Page, ADR-037):
+    every control must be constructed exactly once (never duplicated/rebuilt) and
+    correctly reachable in BOTH modes -- only the container that composes the shared
+    StaticBoxSizers should differ. No GPU or real movie file needed:
+    _load_layout_mode is monkeypatched to force each mode without touching the real
+    persisted iw3-gui-layout.cfg file."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    try:
+        for mode in (gui_mod.LAYOUT_MODE_TABS, gui_mod.LAYOUT_MODE_SINGLE_PAGE):
+            gui_mod._load_layout_mode = lambda config_path, _mode=mode: _mode
+            frame = None
+            try:
+                frame = gui_mod.MainFrame()
+                assert frame.layout_mode == mode
+
+                # Every category panel must exist and actually be composed (have a
+                # sizer) regardless of mode -- construction of the shared sizer_*
+                # groups inside each one is identical either way.
+                for tab in (frame.tab_stereo, frame.tab_depth_blend, frame.tab_video_filter,
+                            frame.tab_video_dec, frame.tab_video_enc, frame.tab_processor,
+                            frame.tab_tools):
+                    assert tab.GetSizer() is not None
+
+                if mode == gui_mod.LAYOUT_MODE_TABS:
+                    assert frame.nb_options.GetPageCount() == 7
+                else:
+                    assert frame.pnl_single.GetSizer() is not None
+                    assert frame.tab_stereo.GetParent() is frame.pnl_single
+                    assert frame.tab_tools.GetParent() is frame.pnl_single
+
+                # A representative control from each of a few categories, including
+                # one added well after the original tabs/grid split (RIFE), must exist
+                # and stay wired to its real parent StaticBox in both modes.
+                assert frame.chk_rife_interpolate.GetParent() is frame.grp_postprocess
+                assert frame.grp_stereo.GetParent() is frame.tab_stereo
+                assert frame.grp_stereotag.GetParent() is frame.tab_tools
+
+                # The Layout combo itself must reflect the active mode and never be
+                # restored from a preset/snapshot (own file + restart, like Language).
+                assert frame.cbo_layout.GetClientData(frame.cbo_layout.GetSelection()) == mode
+            finally:
+                gui_mod._load_layout_mode = orig_load
+                if frame is not None:
+                    frame.Destroy()
+    finally:
+        app.Destroy()
+
+    print("_self_test_layout_modes: PASS")
+
+
 def _run_self_tests():
     _self_test_no_eager_cuda_context()
+    _self_test_layout_modes()
     print("All iw3.gui self-tests PASSED")
 
 

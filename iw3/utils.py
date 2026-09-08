@@ -253,6 +253,134 @@ def _find_mkvmerge():
     return None
 
 
+def _find_mkvpropedit():
+    """Same resolution strategy as _find_mkvmerge() -- mkvpropedit ships alongside
+    mkvmerge in the same bundled MKVToolNix folder (verified present at
+    <root>/mkvtoolnix/mkvpropedit.exe)."""
+    import shutil
+    found = shutil.which("mkvpropedit") or shutil.which("mkvpropedit.exe")
+    if found:
+        return found
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    for candidate in (
+        path.join(here, "mkvtoolnix", "mkvpropedit.exe"),
+        path.join(here, "mkvpropedit.exe"),
+    ):
+        if path.exists(candidate):
+            return candidate
+    for prog_dir in (r"C:\Program Files\MKVToolNix", r"C:\Program Files (x86)\MKVToolNix"):
+        candidate = path.join(prog_dir, "mkvpropedit.exe")
+        if path.exists(candidate):
+            return candidate
+    return None
+
+
+# Matroska StereoMode values actually used here (see matroska.org/technical/elements.html,
+# "StereoMode" under video track elements). "first" means which eye's view occupies the
+# first (left, or top for top-bottom) half of the packed frame -- confirmed against the
+# real spec text, not assumed. Only the 3 values iw3 can ever correctly produce are
+# defined; the other 12 spec values (checkboard/row/column interleaved, anaglyph, laced)
+# do not correspond to anything iw3 outputs and are intentionally not used.
+STEREO_MODE_SBS_LEFT_FIRST = 1    # side by side, left eye's view in the left half
+STEREO_MODE_TB_LEFT_FIRST = 3     # top - bottom, left eye's view on top
+STEREO_MODE_SBS_RIGHT_FIRST = 11  # side by side, right eye's view in the left half
+
+
+def _resolve_stereo_mode_value(args):
+    """Maps iw3's resolved output stereo format to the Matroska StereoMode value that
+    correctly describes how iw3 actually packs the two eye views into the frame, or
+    None if the format is not a two-eye stereo pair StereoMode can describe at all.
+
+    Eye placement verified directly from postprocess_image()'s actual frame-assembly
+    code above (tensors are CHW -- dim=1 is height, dim=2 is width):
+      - Normal SBS (half_sbs / the default Full SBS / vr180 "VR90"): the final `else`
+        branch does `torch.cat([left_eye, right_eye], dim=2)` -> left eye occupies the
+        LEFT half.
+      - Cross Eyed: `torch.cat([right_eye, left_eye], dim=2)` (explicitly commented
+        "# Reverse SideBySide" in that code) -> right eye occupies the LEFT half.
+      - TB (full or half): `torch.cat([left_eye, right_eye], dim=1)` -> left eye
+        occupies the TOP half.
+
+    RGB-D / Half RGB-D store a depth channel, not a second eye view -- never a real
+    stereo pair. Anaglyph is already a single merged image correct on any player
+    without tagging. Debug Depth is not a real stereo output. All four always return
+    None here; callers must skip tagging entirely rather than pick a nearest value.
+    """
+    if getattr(args, "rgbd", False) or getattr(args, "half_rgbd", False):
+        return None
+    if getattr(args, "anaglyph", None):
+        return None
+    if getattr(args, "debug_depth", False):
+        return None
+    if getattr(args, "cross_eyed", False):
+        return STEREO_MODE_SBS_RIGHT_FIRST
+    if getattr(args, "tb", False) or getattr(args, "half_tb", False):
+        return STEREO_MODE_TB_LEFT_FIRST
+    # half_sbs, vr180 ("VR90" in the GUI), and the unflagged default (Full SBS) all pack
+    # via the same dim=2 cat in postprocess_image's final `else` branch.
+    return STEREO_MODE_SBS_LEFT_FIRST
+
+
+def _apply_stereo_mode_tag(output_path, args, mkvpropedit_bin=None):
+    """Tags an already-produced MKV's video track with the Matroska StereoMode
+    property (see _resolve_stereo_mode_value's docstring for the verified eye-order
+    mapping) via mkvpropedit, so 3D-aware players/TVs (VLC, Kodi, compatible smart
+    TVs) auto-detect the packing/eye-order and switch into 3D display automatically,
+    instead of the viewer having to tell their player it's 3D by hand. An in-place
+    edit of the container's metadata only -- mkvpropedit never re-encodes or re-muxes
+    the actual audio/video streams, so this is fast even on a large finished file.
+
+    A no-op (returns False, no side effects) when: the setting isn't enabled, the
+    output isn't an .mkv (StereoMode is a Matroska-only property), the resolved
+    format has no valid StereoMode value (RGB-D/Half RGB-D/Anaglyph/Debug Depth --
+    see _resolve_stereo_mode_value), the file doesn't exist, or mkvpropedit isn't
+    found (printed clearly rather than silently skipped in that specific case, since
+    it means the feature was requested but genuinely cannot run).
+
+    Follows CS-SUBPROCESS-001: subprocess.run with a list of args (never shell=True),
+    wrapped in try/except so a failure here is printed and never mistaken for the
+    conversion job itself having failed -- the file that was already successfully
+    produced is left exactly as it was if tagging fails.
+    """
+    if not getattr(args, "stereo_mode_tag", False):
+        return False
+    if not output_path or path.splitext(str(output_path))[1].lower() != ".mkv":
+        return False
+    if not path.exists(output_path):
+        return False
+    stereo_value = _resolve_stereo_mode_value(args)
+    if stereo_value is None:
+        print("[iw3] --stereo-mode-tag has no effect on this Stereo Format -- RGB-D, Half "
+              "RGB-D, Anaglyph, and Debug Depth are not a two-eye stereo pair Matroska's "
+              "StereoMode can describe, so tagging is skipped.", file=sys.stderr)
+        return False
+    mkvpropedit_bin = mkvpropedit_bin or _find_mkvpropedit()
+    if not mkvpropedit_bin:
+        print("[iw3] --stereo-mode-tag was requested but mkvpropedit was not found -- "
+              "skipping MKV StereoMode tagging.", file=sys.stderr)
+        return False
+    try:
+        subprocess.run(
+            [mkvpropedit_bin, str(output_path), "--edit", "track:v1",
+             "--set", f"stereo-mode={stereo_value}"],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"[iw3] StereoMode tagging failed: {e.stderr.decode(errors='replace').strip()}",
+              file=sys.stderr)
+        return False
+    print(f"[iw3] Tagged {path.basename(str(output_path))} as MKV StereoMode {stereo_value}.",
+          file=sys.stderr)
+    if getattr(args, "vr180", False):
+        print("[iw3] Note: StereoMode only tells a player the eye packing/order -- it does "
+              "NOT carry spherical/180-degree projection metadata, so this tag alone will "
+              "not make a generic 3D-aware player or TV display VR90 output correctly as VR "
+              "(see docs/ai/AI_DECISIONS.md ADR-033). VR headset apps still rely on the "
+              "existing '_180x180_LR' filename convention to recognize this as VR180 "
+              "content.", file=sys.stderr)
+    return True
+
+
 def _find_hdr10plus_tool():
     import shutil
     found = shutil.which("hdr10plus_tool") or shutil.which("hdr10plus_tool.exe")
@@ -993,12 +1121,25 @@ def make_output_filename(input_filename, args, video=False):
         else:
             rife_tag = ""
 
+        # Only shown when the tag will actually be MEANINGFUL to apply: the setting is on,
+        # this is a real video going to an .mkv container, and the resolved format is one
+        # StereoMode can describe (see _resolve_stereo_mode_value) -- e.g. never appears for
+        # RGB-D/Half RGB-D/Anaglyph/Debug Depth even if the flag is set, and never for a
+        # non-mkv container. Mirrors every other tag's "only when non-default/non-no-op"
+        # convention (depth_refine/rife_interpolate above).
+        if (getattr(args, "stereo_mode_tag", False) and video
+                and getattr(args, "video_extension", None) == ".mkv"
+                and _resolve_stereo_mode_value(args) is not None):
+            smtag = "_smtag"
+        else:
+            smtag = ""
+
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}{fd}{bd}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}{bp}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
-                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{rife_tag}{bitrate}")
+                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{rife_tag}{smtag}{bitrate}")
     else:
         metadata = ""
 
@@ -1137,6 +1278,10 @@ def _build_iw3_comment_metadata(args, video=True):
     if getattr(args, "rife_interpolate", False):
         rife_model_val = getattr(args, "rife_model", None) or "rife_425"
         comment_parts.append(f"iw3_rife_interpolate=1 iw3_rife_model={rife_model_val}")
+    if (getattr(args, "stereo_mode_tag", False) and video
+            and getattr(args, "video_extension", None) == ".mkv"
+            and _resolve_stereo_mode_value(args) is not None):
+        comment_parts.append(f"iw3_stereo_mode_tag={_resolve_stereo_mode_value(args)}")
     if getattr(args, "waifu2x_upscale", False):
         # Recorded here as provenance even though the upscale itself produces a
         # SEPARATE "<name>_w2x<ext>" file (see _run_waifu2x_upscale) rather than
@@ -2368,6 +2513,11 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                 except Exception:
                     pass
 
+    # MKV StereoMode tagging (opt-in, final touch-up after everything else, including
+    # any HDR reinjection above, has already finished) -- see ADR-033 / _apply_stereo_mode_tag.
+    if path.exists(output_filename):
+        _apply_stereo_mode_tag(output_filename, args)
+
 
 def _probe_video_duration(path_str):
     """
@@ -2550,6 +2700,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
         seg_args.resume = False
         seg_args.auto_resume = False
         seg_args.preserve_dowi = False  # DV/HDR10+ handled once at the end, over the whole range
+        seg_args.stereo_mode_tag = False  # StereoMode tagging handled once at the end too
 
         process_video_full(input_filename, seg_file, seg_args, depth_model, side_model)
 
@@ -2769,6 +2920,11 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
                             os.remove(f)
                         except Exception:
                             pass
+
+    # MKV StereoMode tagging on the final concatenated output -- once here, over the
+    # whole range, same reasoning as the HDR block above (see ADR-033).
+    if path.exists(output_filename):
+        _apply_stereo_mode_tag(output_filename, args)
 
 
 def process_video_keyframes(input_filename, output_path, args, depth_model, side_model):
@@ -4058,6 +4214,15 @@ def create_parser(required_true=True):
                         help="video colorspace")
     parser.add_argument("--preserve-dowi", action="store_true",
                         help="preserve Dolby Vision RPU metadata in HEVC output (requires dovi_tool)")
+    parser.add_argument("--stereo-mode-tag", action="store_true",
+                        help="tag the finished .mkv's video track with the Matroska StereoMode "
+                             "property (via mkvpropedit) so 3D-aware players/TVs (VLC, Kodi, "
+                             "compatible smart TVs) auto-detect the 3D packing/eye-order instead of "
+                             "the viewer having to select it manually. Only applies to .mkv output "
+                             "and only to genuine two-eye stereo layouts (SBS/TB/Cross Eyed/VR90) -- "
+                             "RGB-D, Half RGB-D, and Anaglyph are skipped with a printed note (no "
+                             "correct or useful StereoMode value exists for them). See "
+                             "docs/ai/AI_DECISIONS.md ADR-033.")
     parser.add_argument("--hdr-to-sdr", action="store_true",
                         help="tone-map a PQ/HLG HDR source down to SDR (10-bit retained) before conversion")
     parser.add_argument("--auto-resume", action="store_true",

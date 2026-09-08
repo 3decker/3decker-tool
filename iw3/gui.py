@@ -125,6 +125,7 @@ class MainFrame(wx.Frame):
         self.processing = False
         self.start_time = 0
         self.input_type = None
+        self.cuda_context_initialized = False
         self.stop_event = threading.Event()
         self.suspend_event = threading.Event()
         self.suspend_pos = 0
@@ -1155,6 +1156,32 @@ class MainFrame(wx.Frame):
         self.lbl_anaglyph_method.Hide()
         self.cbo_anaglyph_method.Hide()
 
+        self.chk_stereo_mode_tag = wx.CheckBox(self.grp_stereo, label=T("Tag MKV as 3D (StereoMode)"),
+                                               name="chk_stereo_mode_tag")
+        self.chk_stereo_mode_tag.SetValue(False)
+        self.chk_stereo_mode_tag.SetToolTip(
+            T("What it's for: writes the standard Matroska \"StereoMode\" property into the finished "
+              ".mkv's video track, describing the 3D layout (side-by-side/top-bottom) and which eye "
+              "comes first.\n"
+              "How it helps: 3D-aware players and TVs (VLC, Kodi, some smart TVs) read this and "
+              "automatically switch into the correct 3D display mode — without it, the viewer has to "
+              "tell their player \"this is 3D, side-by-side, left eye first\" manually every time.\n"
+              "Only applies to: .mkv output, and only Full/Half SBS, Full/Half TB, Cross Eyed, and "
+              "VR90 — these are real two-eye pairs Matroska's StereoMode can describe. RGB-D, Half "
+              "RGB-D, and Anaglyph are skipped automatically (not a two-eye pair, or already viewable "
+              "on any player without tagging) — you'll see a note printed, not a silent no-op.\n"
+              "Con: none for a normal 3D TV/player — this is a pure metadata edit, no re-encoding. A "
+              "player that ignores StereoMode entirely just displays the file exactly as it would "
+              "have anyway.\n"
+              "Note for VR90: this only tells a player the eye order, not that the video is a 180° "
+              "spherical projection — VR headset apps still rely on the existing \"_180x180_LR\" "
+              "filename tag to recognize that, so turning this on for VR90 output is harmless but not "
+              "a substitute for that filename convention.\n"
+              "Recommended: on if your output goes to a 3D TV, a 3D-aware player like VLC/Kodi, or "
+              "you just don't want to manually configure 3D mode every time. Off (default) if you're "
+              "not sure your player supports it, or your workflow already re-muxes/renames the file "
+              "afterward in a way that could lose this tag anyway."))
+
         self.chk_export_depth_only = wx.CheckBox(self.grp_stereo, label=T("Depth Only"), name="chk_export_depth_only")
         self.chk_export_depth_only.SetValue(False)
         self.chk_export_depth_only.SetToolTip(
@@ -1276,6 +1303,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_stereo_format, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_anaglyph_method, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_anaglyph_method, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_stereo_mode_tag, (i := i + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_export_depth_only, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_export_depth_fit, (i, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
 
@@ -2099,6 +2127,92 @@ class MainFrame(wx.Frame):
         sizer_submux = wx.StaticBoxSizer(self.grp_submux, wx.VERTICAL)
         sizer_submux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone utility: retroactive MKV StereoMode tagging (ADR-033) ---
+        # NOT part of the main conversion pipeline -- takes an already-converted iw3
+        # .mkv output that was made before "Tag MKV as 3D (StereoMode)" existed (or
+        # with it off) and tags it retroactively. Unlike HDR Reinjection/Add Subtitle
+        # Track above, this edits the input file IN PLACE via mkvpropedit -- that tool
+        # only rewrites container metadata, never re-encodes/re-muxes the streams, so
+        # there is no separate output file to pick (see stereo_mode_tag_cli.py's
+        # module docstring / ADR-033). Launches python -m iw3.stereo_mode_tag_cli as
+        # its own subprocess, same out-of-process convention as the other standalone
+        # tools in this column.
+        self.grp_stereotag = wx.StaticBox(
+            self.pnl_options, label=T("Retroactively Tag MKV as 3D (Standalone Tool)"))
+
+        self.lbl_stereotag_input = wx.StaticText(self.grp_stereotag, label=T("Converted 3D Video (.mkv)"))
+        self.txt_stereotag_input = wx.TextCtrl(self.grp_stereotag, name="txt_stereotag_input")
+        self.txt_stereotag_input.SetToolTip(
+            T("What it's for: the already-converted 3D video to tag. Must be an .mkv file -- "
+              "StereoMode is a Matroska-only property.\n"
+              "Con: this file IS edited in place (unlike the other standalone tools above, which "
+              "always write a separate new file) -- mkvpropedit only rewrites container metadata, "
+              "never re-encodes or re-muxes the actual video/audio, so there is nothing to gain "
+              "from a full copy first. Use Backup below if you still want a safety copy.\n"
+              "Recommended: the direct iw3 output file, with its normal SBS/TB filename tag intact "
+              "(e.g. '..._LR.mkv') so Format below can auto-detect."))
+        self.btn_stereotag_input = wx.Button(self.grp_stereotag, label=T("..."))
+
+        self.lbl_stereotag_format = wx.StaticText(self.grp_stereotag, label=T("Format"))
+        self.cbo_stereotag_format = wx.ComboBox(
+            self.grp_stereotag, name="cbo_stereotag_format",
+            choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb",
+                     "cross_eyed", "vr90", "rgbd", "half_rgbd", "anaglyph"])
+        self.cbo_stereotag_format.SetEditable(False)
+        self.cbo_stereotag_format.SetSelection(0)
+        self.cbo_stereotag_format.SetToolTip(
+            T("What it's for: the stereo/output layout of the video above. 'auto' (default) detects "
+              "this from its filename using the same tags iw3 itself writes (e.g. '_LR', '_TB', "
+              "'_LRF_Full_SBS', '_TBF_fulltb', '_RLF_cross', '_180x180_LR').\n"
+              "Con: rgbd/half_rgbd/anaglyph are listed here so detection can name them, but tagging "
+              "always refuses for those three (not a two-eye stereo pair, or already correct without "
+              "tagging) -- see the log box below for the exact reason if that happens.\n"
+              "Recommended: leave on 'auto' unless the tool's log below reports it couldn't detect "
+              "the format."))
+
+        self.chk_stereotag_backup = wx.CheckBox(self.grp_stereotag, label=T("Backup before editing"),
+                                                name="chk_stereotag_backup")
+        self.chk_stereotag_backup.SetValue(False)
+        self.chk_stereotag_backup.SetToolTip(
+            T("What it's for: copies the input file to '<name>.mkv.bak' before tagging, as an extra "
+              "safety net.\n"
+              "Con: uses extra disk space equal to the whole input file, and takes time to copy on a "
+              "large file.\n"
+              "Recommended: off (default) is fine for most people -- mkvpropedit's edit only touches "
+              "metadata, never the actual video/audio. Turn on if you'd rather have a copy just in "
+              "case."))
+
+        self.btn_stereotag_run = wx.Button(self.grp_stereotag, label=T("Run"))
+        self.btn_stereotag_run.SetToolTip(
+            T("What it's for: runs the tagging as a separate background process (python -m "
+              "iw3.stereo_mode_tag_cli) -- this app's own GPU/model state is never touched.\n"
+              "Con: edits the input file above in place -- see that field's own note.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded "
+              "rather than refused."))
+
+        self.txt_stereotag_log = wx.TextCtrl(self.grp_stereotag, style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                             size=self.FromDIP((-1, 60)), name="txt_stereotag_log")
+        self.txt_stereotag_log.SetToolTip(
+            T("Shows this tool's own output verbatim, including the exact refusal reason if Format "
+              "detection fails or the resolved format isn't taggable -- not just a generic pass/fail."))
+
+        self.btn_stereotag_input.Bind(wx.EVT_BUTTON, self.on_click_btn_stereotag_input)
+        self.btn_stereotag_run.Bind(wx.EVT_BUTTON, self.on_click_btn_stereotag_run)
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_stereotag_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_stereotag_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_stereotag_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_stereotag_format, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_stereotag_format, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_stereotag_backup, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.btn_stereotag_run, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_stereotag_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        sizer_stereotag = wx.StaticBoxSizer(self.grp_stereotag, wx.VERTICAL)
+        sizer_stereotag.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+
         sizer_video = wx.BoxSizer(wx.VERTICAL)
         sizer_video.Add(self.grp_video_dec.sizer, 0, wx.ALL | wx.EXPAND, border=4)
         sizer_video.Add(self.grp_video.sizer, 1, wx.ALL | wx.EXPAND, border=4)
@@ -2121,6 +2235,7 @@ class MainFrame(wx.Frame):
         sizer_depth_blend_col.Add(sizer_depth_blend, 0, wx.EXPAND)
         sizer_depth_blend_col.Add(sizer_hdr_reinject, 0, wx.EXPAND | wx.TOP, border=4)
         sizer_depth_blend_col.Add(sizer_submux, 0, wx.EXPAND | wx.TOP, border=4)
+        sizer_depth_blend_col.Add(sizer_stereotag, 0, wx.EXPAND | wx.TOP, border=4)
         layout.Add(sizer_depth_blend_col, pos=(0, 3), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
         self.pnl_options.SetSizer(layout)
 
@@ -3107,6 +3222,7 @@ class MainFrame(wx.Frame):
             rgbd=rgbd,
             half_rgbd=half_rgbd,
             anaglyph=anaglyph,
+            stereo_mode_tag=self.chk_stereo_mode_tag.GetValue(),
 
             export=export,
             export_disparity=export_disparity,
@@ -3204,6 +3320,15 @@ class MainFrame(wx.Frame):
                 depth_model=self.depth_model)
         return args
 
+    def ensure_cuda_context(self):
+        # Deferred from module import time (see docs/ai/AI_DECISIONS.md) so that just
+        # opening the GUI window does not grab a CUDA context / VRAM. Only called right
+        # before real CUDA/video work begins (Start, Quick Preview), matching how the
+        # CLI entry point (iw3/__main__.py) times this call relative to its own run.
+        if not self.cuda_context_initialized:
+            pyav_init_cuda_primary_context()
+            self.cuda_context_initialized = True
+
     def on_click_btn_start(self, event):
         if self.chk_rife_interpolate.GetValue() and self.chk_preserve_dowi.GetValue():
             # Same check as set_state_args()'s CLI-side ValueError (see
@@ -3242,6 +3367,7 @@ class MainFrame(wx.Frame):
             # Need to download the model
             self.SetStatusText(f"Downloading {args.depth_model}...")
 
+        self.ensure_cuda_context()
         startWorker(self.on_exit_worker, iw3_main, wargs=(args,))
         self.processing = True
 
@@ -3651,6 +3777,7 @@ class MainFrame(wx.Frame):
             self.suspend_event.set()
             self.prg_tqdm.SetValue(0)
             self.SetStatusText("...")
+            self.ensure_cuda_context()
             startWorker(_on_exit, _run)
             self.processing = True
 
@@ -3746,6 +3873,7 @@ class MainFrame(wx.Frame):
         try:
             with wx.BusyCursor():
                 wx.Yield()
+                self.ensure_cuda_context()
                 preview_args = iw3_main(preview_args)
                 self.depth_model = preview_args.state["depth_model"]
                 self.depth_model_type = preview_args.depth_model
@@ -4060,6 +4188,7 @@ class MainFrame(wx.Frame):
         self.prg_tqdm.SetValue(0)
         self.SetStatusText(T("Rendering preset comparison..."))
 
+        self.ensure_cuda_context()
         startWorker(self.on_exit_compare_worker,
                    self.run_preset_comparison,
                    wargs=(args_list, selected, output_path, is_video_input))
@@ -4285,6 +4414,66 @@ class MainFrame(wx.Frame):
         self.SetStatusText(T("Adding subtitle track..."))
         startWorker(self.on_exit_submux_worker, self.run_submux, wargs=(cmd,))
 
+    def on_click_btn_stereotag_input(self, event):
+        with wx.FileDialog(self, message=T("Select Converted 3D Video (.mkv)"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_stereotag_input.GetValue():
+                dlg.SetPath(self.txt_stereotag_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_stereotag_input.SetValue(dlg.GetPath())
+
+    def run_stereotag(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread.
+        # This tool needs no GPU at all (pure mkvpropedit subprocess orchestration),
+        # kept out-of-process anyway for the same convention as the other standalone
+        # tools in this column. Captures combined stdout+stderr since
+        # stereo_mode_tag_cli prints its resolved format and any refusal reason to
+        # stderr.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def on_exit_stereotag_worker(self, result):
+        self.btn_stereotag_run.Enable()
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_stereotag_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_stereotag_log.SetValue(output)
+        self.txt_stereotag_log.ShowPosition(self.txt_stereotag_log.GetLastPosition())
+        if returncode == 0:
+            self.SetStatusText(T("MKV tagged as 3D successfully"))
+        else:
+            self.SetStatusText(T("Tagging MKV as 3D failed -- see the log below"))
+            wx.MessageBox(T("Tagging the MKV as 3D failed or refused -- see the log box for the "
+                             "exact reason."),
+                          T("Retroactively Tag MKV as 3D"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_stereotag_run(self, event):
+        input_path = self.txt_stereotag_input.GetValue().strip()
+
+        if not input_path or not path.exists(input_path):
+            wx.MessageBox(T("Select a valid Converted 3D Video file first."),
+                          T("Retroactively Tag MKV as 3D"), wx.OK | wx.ICON_WARNING)
+            return
+
+        cmd = [sys.executable, "-m", "iw3.stereo_mode_tag_cli",
+               "--input", input_path, "--format", self.cbo_stereotag_format.GetValue()]
+        if self.chk_stereotag_backup.GetValue():
+            cmd += ["--backup"]
+
+        self.txt_stereotag_log.SetValue(T("Running...\n"))
+        self.btn_stereotag_run.Disable()
+        self.SetStatusText(T("Tagging MKV as 3D..."))
+        startWorker(self.on_exit_stereotag_worker, self.run_stereotag, wargs=(cmd,))
+
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))
 LOCALE_DICT = LOCALES.get(get_default_locale(), {})
@@ -4316,6 +4505,12 @@ def main():
 
 
 if __name__ == "__main__":
-    pyav_init_cuda_primary_context()
+    # NOTE: pyav_init_cuda_primary_context() is intentionally NOT called here.
+    # Calling it unconditionally at import/launch time grabbed a full CUDA context
+    # (~600MB VRAM, confirmed by measurement) the instant the window opened, even if
+    # the user never clicks Start -- risking OOM-killing an already-running GPU process
+    # sharing the same card. It is deferred to MainFrame.ensure_cuda_context(), called
+    # right before each real CUDA/video-decode operation (Start, Quick Preview, Compare
+    # Presets, AutoCrop Test) -- see docs/ai/AI_DECISIONS.md.
     init_win32_dpi()
     main()

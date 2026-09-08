@@ -1965,6 +1965,133 @@ class MainFrame(wx.Frame):
         sizer_hdr_reinject = wx.StaticBoxSizer(self.grp_hdr_reinject, wx.VERTICAL)
         sizer_hdr_reinject.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone utility: add an SRT subtitle track (ADR-032) ---
+        # NOT part of the main conversion pipeline -- takes an already-converted 3D
+        # (SBS/TB) MKV and an SRT file and muxes the SRT in as a plain soft-subtitle
+        # track, preserving every existing track untouched. Deliberately does NOT
+        # bake stereo-duplicated/positioned cues into the file -- iw3-player already
+        # does client-side per-eye subtitle rendering from a plain track, so a
+        # pre-baked stereo track would double-render there (see subtitle_mux_cli.py's
+        # module docstring / ADR-032). Launches python -m iw3.subtitle_mux_cli as its
+        # own subprocess, same out-of-process convention as RIFE/HDR reinjection.
+        self.grp_submux = wx.StaticBox(
+            self.pnl_options, label=T("Add Subtitle Track (Standalone Tool)"))
+
+        self.lbl_submux_input = wx.StaticText(self.grp_submux, label=T("Converted 3D Video (.mkv)"))
+        self.txt_submux_input = wx.TextCtrl(self.grp_submux, name="txt_submux_input")
+        self.txt_submux_input.SetToolTip(
+            T("What it's for: the already-converted 3D video to add a subtitle track to. Must be "
+              "an .mkv file -- this tool does not convert containers, so an .mp4 output must first "
+              "be remuxed to .mkv by some other tool.\n"
+              "Con: read-only -- never modified. A new file is always written to Output File below.\n"
+              "Recommended: the direct iw3 output file, with its normal SBS/TB filename tag intact "
+              "(e.g. '..._LR.mkv') so Format below can auto-detect."))
+        self.btn_submux_input = wx.Button(self.grp_submux, label=T("..."))
+
+        self.lbl_submux_srt = wx.StaticText(self.grp_submux, label=T("Subtitle File (.srt)"))
+        self.txt_submux_srt = wx.TextCtrl(self.grp_submux, name="txt_submux_srt")
+        self.txt_submux_srt.SetToolTip(
+            T("What it's for: the SRT subtitle file to add as a new track. Validated with pysubs2 "
+              "before muxing, so a malformed SRT is caught here with a clear error rather than an "
+              "opaque mkvmerge failure.\n"
+              "Con: one SRT per run -- no multi-language batch support. Run this tool again for "
+              "each additional language.\n"
+              "Recommended: a plain, ordinary SRT -- no special stereo formatting needed or wanted "
+              "(iw3-player already renders subtitles in 3D itself, per-eye, at playback time)."))
+        self.btn_submux_srt = wx.Button(self.grp_submux, label=T("..."))
+
+        self.lbl_submux_output = wx.StaticText(self.grp_submux, label=T("Output File"))
+        self.txt_submux_output = wx.TextCtrl(self.grp_submux, name="txt_submux_output")
+        self.txt_submux_output.SetToolTip(
+            T("Where to write the new file with the subtitle track added. Auto-filled with "
+              "'<converted file name>_subbed.mkv' in the same folder once you pick the converted "
+              "video above -- change it if you want it saved somewhere else.\n"
+              "How it's safe: this tool never overwrites the input video, only ever writes here."))
+        self.btn_submux_output = wx.Button(self.grp_submux, label=T("..."))
+
+        self.lbl_submux_format = wx.StaticText(self.grp_submux, label=T("Format"))
+        self.cbo_submux_format = wx.ComboBox(self.grp_submux, name="cbo_submux_format",
+                                              choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb"])
+        self.cbo_submux_format.SetEditable(False)
+        self.cbo_submux_format.SetSelection(0)
+        self.cbo_submux_format.SetToolTip(
+            T("What it's for: the stereo layout of the converted video above -- 'auto' (default) "
+              "detects this from its filename using the same tags iw3 itself writes (e.g. '_LR', "
+              "'_TB', '_LRF_Full_SBS', '_TBF_fulltb').\n"
+              "Con: if the filename doesn't carry one of those tags (e.g. it was renamed), auto "
+              "detection is inconclusive and the tool refuses rather than guessing -- pick the "
+              "correct layout here explicitly in that case.\n"
+              "Recommended: leave on 'auto' unless the tool's log below reports it couldn't detect "
+              "the format."))
+
+        self.lbl_submux_language = wx.StaticText(self.grp_submux, label=T("Language"))
+        self.txt_submux_language = wx.TextCtrl(self.grp_submux, value="eng", name="txt_submux_language")
+        self.txt_submux_language.SetToolTip(
+            T("What it's for: the ISO 639-2 language code stored as metadata on the new subtitle "
+              "track (e.g. eng, jpn, fre, ger, spa) -- shown by players in their subtitle track "
+              "menu.\n"
+              "Con: purely metadata -- does not translate or verify the actual subtitle content's "
+              "language.\n"
+              "Recommended: match the SRT file's actual language; default 'eng' if unsure."))
+
+        self.lbl_submux_track_name = wx.StaticText(self.grp_submux, label=T("Track Name"))
+        self.txt_submux_track_name = wx.TextCtrl(self.grp_submux, name="txt_submux_track_name")
+        self.txt_submux_track_name.SetToolTip(
+            T("What it's for: an optional display name for the new subtitle track (shown in "
+              "player track menus, e.g. 'English (Forced)'). Leave blank to default to the SRT "
+              "file's own name."))
+
+        self.btn_submux_run = wx.Button(self.grp_submux, label=T("Run"))
+        self.btn_submux_run.SetToolTip(
+            T("What it's for: runs the mux as a separate background process (python -m "
+              "iw3.subtitle_mux_cli) -- this app's own GPU/model state is never touched, and the "
+              "input video is never modified.\n"
+              "How it's safe: every existing track (video, audio, existing subtitles) is copied "
+              "into the output completely unchanged -- only the new subtitle track is added.\n"
+              "Con: if Format can't be auto-detected from the input filename, this refuses "
+              "immediately with that exact message shown in the log box below, rather than "
+              "guessing SBS vs TB.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded "
+              "rather than refused."))
+
+        self.txt_submux_log = wx.TextCtrl(self.grp_submux, style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                           size=self.FromDIP((-1, 60)), name="txt_submux_log")
+        self.txt_submux_log.SetToolTip(
+            T("Shows this tool's own output verbatim, including the exact hard-refusal message "
+              "if Format detection fails or the SRT file fails validation -- not just a generic "
+              "pass/fail toast."))
+
+        self.btn_submux_input.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_input)
+        self.btn_submux_srt.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_srt)
+        self.btn_submux_output.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_output)
+        self.btn_submux_run.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_run)
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_submux_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_submux_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_submux_srt, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_srt, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_submux_srt, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_submux_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_submux_output, (h, 3), flag=wx.EXPAND)
+        # Format/Language/Track Name share one compact row -- this section lives
+        # stacked below HDR Reinjection in the same column (see that section's own
+        # note about spare vertical room in the Dual-Pass Depth Blend column).
+        layout.Add(self.lbl_submux_format, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_submux_format, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_submux_language, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_language, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_submux_track_name, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_track_name, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_submux_run, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_submux_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        sizer_submux = wx.StaticBoxSizer(self.grp_submux, wx.VERTICAL)
+        sizer_submux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+
         sizer_video = wx.BoxSizer(wx.VERTICAL)
         sizer_video.Add(self.grp_video_dec.sizer, 0, wx.ALL | wx.EXPAND, border=4)
         sizer_video.Add(self.grp_video.sizer, 1, wx.ALL | wx.EXPAND, border=4)
@@ -1986,6 +2113,7 @@ class MainFrame(wx.Frame):
         sizer_depth_blend_col = wx.BoxSizer(wx.VERTICAL)
         sizer_depth_blend_col.Add(sizer_depth_blend, 0, wx.EXPAND)
         sizer_depth_blend_col.Add(sizer_hdr_reinject, 0, wx.EXPAND | wx.TOP, border=4)
+        sizer_depth_blend_col.Add(sizer_submux, 0, wx.EXPAND | wx.TOP, border=4)
         layout.Add(sizer_depth_blend_col, pos=(0, 3), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
         self.pnl_options.SetSizer(layout)
 
@@ -4047,6 +4175,108 @@ class MainFrame(wx.Frame):
         self.btn_reinject_run.Disable()
         self.SetStatusText(T("Running HDR reinjection..."))
         startWorker(self.on_exit_reinject_worker, self.run_reinject_hdr, wargs=(cmd,))
+
+    # --- Add Subtitle Track (standalone tool, see ADR-032) ---
+
+    def on_click_btn_submux_input(self, event):
+        with wx.FileDialog(self, message=T("Select Converted 3D Video (.mkv)"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_submux_input.GetValue():
+                dlg.SetPath(self.txt_submux_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                input_path = dlg.GetPath()
+                self.txt_submux_input.SetValue(input_path)
+                if not self.txt_submux_output.GetValue():
+                    base = path.splitext(input_path)[0]
+                    self.txt_submux_output.SetValue(f"{base}_subbed.mkv")
+
+    def on_click_btn_submux_srt(self, event):
+        with wx.FileDialog(self, message=T("Select Subtitle File (.srt)"),
+                           wildcard="SubRip Subtitle files (*.srt)|*.srt|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_submux_srt.GetValue():
+                dlg.SetPath(self.txt_submux_srt.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_submux_srt.SetValue(dlg.GetPath())
+
+    def on_click_btn_submux_output(self, event):
+        with wx.FileDialog(self, message=T("Save Subtitled Output As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_submux_output.GetValue():
+                dlg.SetPath(self.txt_submux_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_submux_output.SetValue(dlg.GetPath())
+
+    def run_submux(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread.
+        # This tool needs no GPU at all (pure mkvmerge subprocess orchestration), kept
+        # out-of-process anyway for the same convention as RIFE/HDR reinjection.
+        # Captures combined stdout+stderr since subtitle_mux_cli prints its resolved
+        # format, the mkvmerge command line, and any refusal reason to stderr.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def on_exit_submux_worker(self, result):
+        self.btn_submux_run.Enable()
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_submux_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_submux_log.SetValue(output)
+        self.txt_submux_log.ShowPosition(self.txt_submux_log.GetLastPosition())
+        if returncode == 0:
+            self.SetStatusText(T("Subtitle track added successfully"))
+        else:
+            self.SetStatusText(T("Adding subtitle track failed -- see the log below"))
+            wx.MessageBox(T("Adding the subtitle track failed or refused -- see the log box for the "
+                             "exact reason."),
+                          T("Add Subtitle Track"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_submux_run(self, event):
+        input_path = self.txt_submux_input.GetValue().strip()
+        srt_path = self.txt_submux_srt.GetValue().strip()
+        output_path = self.txt_submux_output.GetValue().strip()
+
+        if not input_path or not path.exists(input_path):
+            wx.MessageBox(T("Select a valid Converted 3D Video file first."),
+                          T("Add Subtitle Track"), wx.OK | wx.ICON_WARNING)
+            return
+        if not srt_path or not path.exists(srt_path):
+            wx.MessageBox(T("Select a valid Subtitle File first."),
+                          T("Add Subtitle Track"), wx.OK | wx.ICON_WARNING)
+            return
+        if not output_path:
+            wx.MessageBox(T("Set an Output File path first."),
+                          T("Add Subtitle Track"), wx.OK | wx.ICON_WARNING)
+            return
+        if path.abspath(output_path) == path.abspath(input_path):
+            wx.MessageBox(T("Output File must be different from the input video."),
+                          T("Add Subtitle Track"), wx.OK | wx.ICON_WARNING)
+            return
+
+        cmd = [sys.executable, "-m", "iw3.subtitle_mux_cli",
+               "--input", input_path, "--srt", srt_path, "--output", output_path,
+               "--format", self.cbo_submux_format.GetValue()]
+        language = self.txt_submux_language.GetValue().strip()
+        if language:
+            cmd += ["--language", language]
+        track_name = self.txt_submux_track_name.GetValue().strip()
+        if track_name:
+            cmd += ["--track-name", track_name]
+
+        self.txt_submux_log.SetValue(T("Running...\n"))
+        self.btn_submux_run.Disable()
+        self.SetStatusText(T("Adding subtitle track..."))
+        startWorker(self.on_exit_submux_worker, self.run_submux, wargs=(cmd,))
 
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))

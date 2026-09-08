@@ -53,3 +53,8 @@ python -m iw3.cli -y -i ${TEST_VIDEO} -o ${OUTPUT_DIR} --depth-model Any_S --vf 
 
 # keyframe
 python -m iw3.cli -y -i ${TEST_VIDEO} -o ${OUTPUT_DIR} --depth-model Any_S --keyframe
+
+# subtitle mux (standalone post-processing tool, see docs/ai/AI_DECISIONS.md ADR-032)
+# Embedded self-test only (synthetic filenames/SRT content, no GPU, no real mkvmerge
+# invocation needed) -- mirrors iw3.reinject_hdr_cli's --self-test convention.
+python -m iw3.subtitle_mux_cli --self-test

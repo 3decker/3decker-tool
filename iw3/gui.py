@@ -2412,9 +2412,13 @@ class MainFrame(wx.Frame):
         self.btn_suspend.Disable()
 
         self.load_preset()
-        self.update_controls()
+        # probe_compile=False: skip the real torch.compile() GPU probe during
+        # passive window construction -- a persisted "compile: on" setting from a
+        # previous session must not grab a CUDA context before the user does
+        # anything. The checkbox/device handlers still probe on real interaction.
+        self.update_controls(probe_compile=False)
 
-    def update_controls(self):
+    def update_controls(self, probe_compile=True):
         self.update_start_button_state()
         self.update_input_option_state()
         self.update_anaglyph_state()
@@ -2434,7 +2438,7 @@ class MainFrame(wx.Frame):
         self.update_divergence_warning()
         self.update_preserve_screen_border()
         self.update_pad_mode()
-        self.update_compile()
+        self.update_compile(probe=probe_compile)
 
     def get_depth_models(self):
         depth_models = [
@@ -3633,13 +3637,20 @@ class MainFrame(wx.Frame):
     def on_selected_index_changed_cbo_device(self, event):
         self.update_compile()
 
-    def update_compile(self, *args, **kwargs):
+    def update_compile(self, *args, probe=True, **kwargs):
         device_id = int(self.cbo_device.GetClientData(self.cbo_device.GetSelection()))
         if device_id == -2:
             # currently "All CUDA" does not support compile
             self.chk_compile.SetValue(False)
-        else:
-            # check compiler support
+        elif probe:
+            # check_compile_support() actually builds and torch.compile()s a real
+            # model on this device -- genuine CUDA context + VRAM work, not a cheap
+            # query. Only run it in response to the user directly touching the
+            # Device selector or the torch.compile checkbox (see the two explicit
+            # Bind()s to this method); never during passive startup control-sync
+            # (probe=False from update_controls()'s initial call), or a restored
+            # "compile: on" setting from a previous session would silently grab a
+            # CUDA context the instant the window opens. See docs/ai/AI_DECISIONS.md.
             if self.chk_compile.IsChecked():
                 device = create_device(device_id)
                 if not check_compile_support(device):
@@ -4483,10 +4494,76 @@ def T(s):
     return LOCALE_DICT.get(s, s)
 
 
+def _self_test_no_eager_cuda_context():
+    """Synthetic/mocked test: opening the GUI window (constructing MainFrame) must not
+    grab a CUDA context (pyav_init_cuda_primary_context) or probe torch.compile support
+    (check_compile_support -- itself a real torch.compile() on a GPU tensor, not a cheap
+    query) before the user actually starts a real conversion -- see docs/ai/AI_DECISIONS.md.
+    No GPU or real movie file needed: both heavy calls are monkeypatched with
+    call-counting stubs, following this project's established --self-test convention
+    (see iw3/subtitle_mux_cli.py)."""
+    import iw3.gui as gui_mod
+
+    pyav_calls = []
+    compile_calls = []
+
+    def _fake_pyav_init():
+        pyav_calls.append(1)
+
+    def _fake_check_compile_support(device):
+        compile_calls.append(device)
+        return True
+
+    orig_pyav = gui_mod.pyav_init_cuda_primary_context
+    orig_compile = gui_mod.check_compile_support
+    gui_mod.pyav_init_cuda_primary_context = _fake_pyav_init
+    gui_mod.check_compile_support = _fake_check_compile_support
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = gui_mod.MainFrame()
+        assert not pyav_calls, \
+            "pyav_init_cuda_primary_context ran during passive window construction"
+        assert not compile_calls, \
+            "check_compile_support ran during passive window construction"
+
+        # Real CUDA/video work (Start, Quick Preview, ...) must still init the context,
+        # exactly once even if triggered more than once in the same session.
+        frame.ensure_cuda_context()
+        assert len(pyav_calls) == 1
+        frame.ensure_cuda_context()
+        assert len(pyav_calls) == 1, "ensure_cuda_context re-initialized an already-established context"
+
+        # Direct user interaction with the compile checkbox/device selector must still
+        # probe compile support (probe=True is the default for those two Bind()s).
+        frame.chk_compile.SetValue(True)
+        frame.update_compile(probe=True)
+        assert len(compile_calls) == 1, "explicit probe=True did not validate torch.compile support"
+    finally:
+        gui_mod.pyav_init_cuda_primary_context = orig_pyav
+        gui_mod.check_compile_support = orig_compile
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_no_eager_cuda_context: PASS")
+
+
+def _run_self_tests():
+    _self_test_no_eager_cuda_context()
+    print("All iw3.gui self-tests PASSED")
+
+
 def main():
     import argparse
     import sys
     global LOCALE_DICT
+
+    if "--self-test" in sys.argv[1:]:
+        _run_self_tests()
+        return
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--lang", type=str, choices=LOCAL_LIST, help="translation")

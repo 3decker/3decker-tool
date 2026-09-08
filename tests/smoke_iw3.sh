@@ -58,3 +58,8 @@ python -m iw3.cli -y -i ${TEST_VIDEO} -o ${OUTPUT_DIR} --depth-model Any_S --key
 # Embedded self-test only (synthetic filenames/SRT content, no GPU, no real mkvmerge
 # invocation needed) -- mirrors iw3.reinject_hdr_cli's --self-test convention.
 python -m iw3.subtitle_mux_cli --self-test
+
+# GUI startup must not grab a CUDA context / probe torch.compile before Start is
+# clicked (see docs/ai/AI_DECISIONS.md ADR-033). Embedded self-test only (mocked
+# pyav_init_cuda_primary_context/check_compile_support, no GPU needed).
+python -m iw3.gui --self-test

@@ -2010,17 +2010,24 @@ class MainFrame(wx.Frame):
         self.btn_submux_output = wx.Button(self.grp_submux, label=T("..."))
 
         self.lbl_submux_format = wx.StaticText(self.grp_submux, label=T("Format"))
-        self.cbo_submux_format = wx.ComboBox(self.grp_submux, name="cbo_submux_format",
-                                              choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb"])
+        self.cbo_submux_format = wx.ComboBox(
+            self.grp_submux, name="cbo_submux_format",
+            choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb",
+                     "cross_eyed", "vr90", "rgbd", "half_rgbd", "anaglyph"])
         self.cbo_submux_format.SetEditable(False)
         self.cbo_submux_format.SetSelection(0)
         self.cbo_submux_format.SetToolTip(
-            T("What it's for: the stereo layout of the converted video above -- 'auto' (default) "
-              "detects this from its filename using the same tags iw3 itself writes (e.g. '_LR', "
-              "'_TB', '_LRF_Full_SBS', '_TBF_fulltb').\n"
+            T("What it's for: the stereo/output layout of the converted video above -- covers every "
+              "watchable Stereo Format iw3 can produce (Export/Export disparity/Debug Depth aren't "
+              "listed here since those are data-export formats, not something you'd add subtitles "
+              "to). 'auto' (default) detects this from its filename using the same tags iw3 itself "
+              "writes (e.g. '_LR', '_TB', '_LRF_Full_SBS', '_TBF_fulltb', '_RLF_cross', "
+              "'_180x180_LR', '_RGBD', '_HRGBD', '_redcyan').\n"
               "Con: if the filename doesn't carry one of those tags (e.g. it was renamed), auto "
               "detection is inconclusive and the tool refuses rather than guessing -- pick the "
-              "correct layout here explicitly in that case.\n"
+              "correct layout here explicitly in that case. This value doesn't change how the "
+              "subtitle is added either way (a plain track works the same regardless of layout) -- "
+              "it's just a safety check so the tool never guesses wrong silently.\n"
               "Recommended: leave on 'auto' unless the tool's log below reports it couldn't detect "
               "the format."))
 

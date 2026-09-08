@@ -25,21 +25,28 @@ Scope (deliberately narrow, see docs/ai/AI_DECISIONS.md ADR-032):
   conversion is attempted.
 - Soft subtitle track only. No burned-in/hardcoded subtitle mode.
 - One SRT per run. No multi-language/multi-file support.
-- --format must resolve to a concrete SBS/TB value before proceeding. In --format auto
-  (the default), filename-tag detection is attempted using the exact same suffix
-  tags iw3.utils.make_output_filename() writes (FULL_SBS_SUFFIX/HALF_SBS_SUFFIX/
-  FULL_TB_SUFFIX/HALF_TB_SUFFIX) -- the same tags iw3/player/stereo_detector.py's
-  detect_stereo_format() parses back out of a filename. If detection is inconclusive,
-  this tool HARD-REFUSES and asks the user to pass --format explicitly, rather than
-  guessing.
+- --format must resolve to a concrete value before proceeding, covering every iw3
+  Stereo Format that's an actual watchable video layout: half_sbs, full_sbs, half_tb,
+  full_tb, cross_eyed, vr90, rgbd, half_rgbd, anaglyph (Export/Export-disparity/
+  Debug-Depth are intentionally excluded -- those are data-export formats, not
+  something anyone adds a subtitle track to). In --format auto (the default),
+  filename-tag detection is attempted using the exact same suffix tags
+  iw3.utils.make_output_filename() writes (FULL_SBS_SUFFIX/HALF_SBS_SUFFIX/
+  FULL_TB_SUFFIX/HALF_TB_SUFFIX/CROSS_EYED_SUFFIX/VR180_SUFFIX/RGBD_SUFFIX/
+  HALF_RGBD_SUFFIX/ANAGLYPH_SUFFIX) -- the same tags iw3/player/stereo_detector.py's
+  detect_stereo_format() parses back out of a filename. Since the mux itself doesn't
+  care which of these layouts the video actually is (see above), the format value is
+  purely a safety/informational resolution step, not something that changes behavior.
+  If detection is inconclusive, this tool HARD-REFUSES and asks the user to pass
+  --format explicitly, rather than guessing.
 
 Note on iw3.player: this module deliberately does NOT import anything from iw3.player
 to reuse its filename-tag matching, even though iw3/player/stereo_detector.py has a
-similar (larger) TAG_MAP -- iw3/player has no __init__.py and its modules (e.g.
+similar TAG_MAP -- iw3/player has no __init__.py and its modules (e.g.
 media_library.py) import fastapi directly, which is an unnecessary heavy dependency
-for a lightweight muxing CLI. Instead this module duplicates the small amount of
-matching logic needed against iw3.utils's own four canonical suffix constants, which
-are already the source of truth iw3 itself writes into output filenames.
+for a lightweight muxing CLI. Instead this module duplicates the matching logic
+needed against iw3.utils's own canonical suffix constants, which are already the
+source of truth iw3 itself writes into output filenames.
 """
 import argparse
 import os
@@ -48,22 +55,34 @@ import subprocess
 import sys
 from os import path
 
-from .utils import _find_mkvmerge, FULL_SBS_SUFFIX, HALF_SBS_SUFFIX, FULL_TB_SUFFIX, HALF_TB_SUFFIX
+from .utils import (
+    _find_mkvmerge, FULL_SBS_SUFFIX, HALF_SBS_SUFFIX, FULL_TB_SUFFIX, HALF_TB_SUFFIX,
+    CROSS_EYED_SUFFIX, RGBD_SUFFIX, HALF_RGBD_SUFFIX, VR180_SUFFIX, ANAGLYPH_SUFFIX,
+)
 
 
 # Maps each iw3.utils canonical filename suffix tag to the --format value a user would
 # pass for that same layout. Checked longest-tag-first (see _detect_format_from_filename)
 # so e.g. FULL_SBS_SUFFIX ("_LRF_Full_SBS") is matched before HALF_SBS_SUFFIX ("_LR"),
-# which is a substring of it.
+# which is a substring of it. Covers every iw3 Stereo Format that's an actual watchable
+# video layout -- deliberately excludes Export/Export disparity/Debug Depth, which are
+# data-export/debug formats, not something anyone adds subtitles to for viewing.
+# ANAGLYPH_SUFFIX has a per-color-recipe suffix appended after it at render time (e.g.
+# "_redcyan_dubois2") -- a plain "in name" substring check still matches those fine.
 _SUFFIX_TO_FORMAT = {
     FULL_SBS_SUFFIX: "full_sbs",
     HALF_SBS_SUFFIX: "half_sbs",
     FULL_TB_SUFFIX: "full_tb",
     HALF_TB_SUFFIX: "half_tb",
+    CROSS_EYED_SUFFIX: "cross_eyed",
+    VR180_SUFFIX: "vr90",
+    RGBD_SUFFIX: "rgbd",
+    HALF_RGBD_SUFFIX: "half_rgbd",
+    ANAGLYPH_SUFFIX: "anaglyph",
 }
 _SORTED_SUFFIXES = sorted(_SUFFIX_TO_FORMAT.keys(), key=len, reverse=True)
 
-_VALID_FORMATS = ("auto", "half_sbs", "full_sbs", "half_tb", "full_tb")
+_VALID_FORMATS = ("auto",) + tuple(dict.fromkeys(_SUFFIX_TO_FORMAT.values()))
 
 
 def _format_cmd(cmd):
@@ -95,23 +114,30 @@ def create_parser():
                          help="Display name for the new subtitle track, shown in player track "
                               "menus. Default: the SRT file's own name (without extension).")
     parser.add_argument("--format", type=str, default="auto", choices=list(_VALID_FORMATS),
-                         help="Stereo layout of --input: half_sbs, full_sbs, half_tb, or full_tb. "
+                         help="Stereo/output layout of --input -- any of iw3's own watchable Stereo "
+                              "Format outputs: half_sbs, full_sbs, half_tb, full_tb, cross_eyed, "
+                              "vr90, rgbd, half_rgbd, anaglyph. (Export/Export-disparity/Debug-Depth "
+                              "outputs are intentionally not covered here -- those are data-export "
+                              "formats, not something you'd add a subtitle track to.) "
                               "'auto' (default) tries to detect this from --input's filename using "
                               "the same suffix tags iw3 itself writes (e.g. '_LR', '_TB', "
-                              "'_LRF_Full_SBS', '_TBF_fulltb'). If detection is inconclusive, this "
+                              "'_LRF_Full_SBS', '_TBF_fulltb', '_RLF_cross', '_180x180_LR', '_RGBD', "
+                              "'_HRGBD', '_redcyan'). If detection is inconclusive, this "
                               "tool refuses and asks you to pass this explicitly -- it never "
                               "guesses. (Note: this value is not currently used to alter the mux "
-                              "itself -- a plain soft-subtitle track is geometry-agnostic -- but "
-                              "resolving it to a concrete value up front is a required safety "
-                              "check per this tool's design.)")
+                              "itself -- a plain soft-subtitle track is geometry-agnostic regardless "
+                              "of which of these layouts the video uses -- but resolving it to a "
+                              "concrete value up front is a required safety check per this tool's "
+                              "design.)")
     return parser
 
 
 def _detect_format_from_filename(filename):
-    """Returns one of 'half_sbs'/'full_sbs'/'half_tb'/'full_tb' if a known iw3 filename
+    """Returns one of the values in _SUFFIX_TO_FORMAT if a known iw3 filename
     suffix tag is found (case-insensitive, longest tag checked first so e.g. the full-SBS
-    tag isn't masked by the half-SBS tag that is a substring of it), or None if
-    inconclusive."""
+    tag isn't masked by the half-SBS tag that is a substring of it, and VR90's own tag --
+    which itself ends in the half-SBS tag -- is matched first for the same reason), or None
+    if inconclusive."""
     name = path.basename(str(filename)).lower()
     for suffix in _SORTED_SUFFIXES:
         if suffix.lower() in name:

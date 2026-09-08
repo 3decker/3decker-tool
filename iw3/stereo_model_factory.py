@@ -136,7 +136,7 @@ def create_stereo_model(
                 device_id=device_id,
                 use_weak_convergence_model=use_weak_convergence_model,
             )
-        elif method in {"forward", "forward_fill", "backward", "grid_sample", "NULL"}:
+        elif method in {"forward", "forward_fill", "forward_splat_fill", "backward", "grid_sample", "NULL"}:
             return None
         elif method in {"forward_inpaint"}:
             return ForwardInpaint(

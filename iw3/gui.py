@@ -362,7 +362,7 @@ class MainFrame(wx.Frame):
                                       choices=["mlbw_l2", "mlbw_l4", "mlbw_l2s",
                                                "mlbw_l2_inpaint",
                                                "row_flow_v3", "row_flow_v3_sym", "row_flow_v2",
-                                               "forward_fill", "forward_inpaint",
+                                               "forward_fill", "forward_splat_fill", "forward_inpaint",
                                                "monobw", "monobw_inpaint",
                                                ],
                                       name="cbo_method")
@@ -387,6 +387,11 @@ class MainFrame(wx.Frame):
               "it — real extra time cost, but noticeably cleaner edges around foreground objects.\n"
               "forward_fill: a simple, non-AI method — just warps pixels forward and fills gaps with a "
               "basic algorithm, no learned model involved. Fastest, but the roughest edges.\n"
+              "forward_splat_fill: same non-AI forward-warp family as forward_fill, but where two pixels "
+              "land on the same spot, it smoothly blends them (nearer one weighted more) instead of the "
+              "nearer one fully overwriting the other — softer, less jagged edges than forward_fill, still "
+              "no AI model/extra GPU cost involved. New and not yet extensively tested on real footage — "
+              "try it if forward_fill's edges look too rough for your taste.\n"
               "monobw: a simpler, lighter backward-warp method than the mlbw family — a faster middle "
               "ground when mlbw is too slow but forward_fill's quality isn't good enough.\n"
               "Recommended: mlbw_l2_inpaint or forward_inpaint for the best quality on a real GPU; "
@@ -845,6 +850,10 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.cbo_depth_blend_strength, (j, 2), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_region, (j := j + 1, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_region_percent, (j, 2), flag=wx.EXPAND)
+
+        layout_depth_blend.Add((0, 6), (j := j + 1, 0))
+        layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.lbl_depth_blend_feather_blur, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_feather_blur, (j, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.chk_depth_blend_bilateral, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -854,8 +863,16 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.chk_depth_blend_clahe, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_clahe_clip, (j, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_clahe_tile, (j, 2), flag=wx.EXPAND)
+
+        layout_depth_blend.Add((0, 6), (j := j + 1, 0))
+        layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.chk_depth_blend_align, (j := j + 1, 0), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_align_decay, (j, 2), flag=wx.EXPAND)
+
+        layout_depth_blend.Add((0, 6), (j := j + 1, 0))
+        layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.lbl_depth_blend_edge_suppression, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_edge_suppression, (j, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.chk_depth_blend_edge_hard_cutoff, (j, 2), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -1218,11 +1235,11 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_depth_refine_strength, (i, 1), flag=wx.EXPAND)
         layout.Add(self.chk_temporal_stabilize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_temporal_stabilize_strength, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_temporal_stabilize_max_shift, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_temporal_stabilize_max_shift, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_temporal_stabilize_max_shift, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_temporal_stabilize_flat_boost, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_temporal_stabilize_flat_boost, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_temporal_stabilize_flat_boost, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_temporal_stabilize_edge_protect, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_temporal_stabilize_edge_protect, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_temporal_stabilize_edge_protect, (i, 1), flag=wx.EXPAND)
 
         layout.Add((0, 8), (i := i + 1, 0))
@@ -1568,46 +1585,62 @@ class MainFrame(wx.Frame):
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
-        layout.Add(self.chk_start_time, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_start_time, (0, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_end_time, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_end_time, (1, 1), (0, 2), flag=wx.EXPAND)
+        i = -1
+        layout.Add(self.chk_start_time, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_start_time, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_end_time, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_end_time, (i, 1), (0, 2), flag=wx.EXPAND)
 
-        layout.Add(self.lbl_deinterlace, (2, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_deinterlace, (2, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_vf, (3, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_vf, (3, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_rotate, (4, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_rotate, (4, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_autocrop, (5, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_autocrop, (5, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.btn_autocrop_test, (6, 1), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_autocrop_test, (6, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_pad, (7, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_pad_mode, (7, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_pad, (7, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_max_output_size, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_max_output_size, (8, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_keep_aspect_ratio, (9, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_preserve_dowi, (10, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_hdr_to_sdr, (11, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_auto_resume, (12, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_upgrade_pix_fmt, (13, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_upgrade_pix_fmt, (13, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_denoise, (14, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_preview, (15, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_scene_batch, (16, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_scene_batch_crop, (17, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_scene_batch_crop, (17, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_scene_settings, (18, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_scene_settings, (18, 1), flag=wx.EXPAND)
-        layout.Add(self.btn_scene_settings, (18, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_scene_batch_auto_ema, (19, 1), (0, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_scene_batch_auto_ema_model, (19, 2), (0, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_scene_batch_variant, (20, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_scene_batch_variant, (20, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_vr_optimized_merge, (21, 1), (0, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_vr_merge_fps, (21, 2), (0, 1), flag=wx.EXPAND)
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_video_filter), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
+        layout.Add(self.lbl_deinterlace, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_deinterlace, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_vf, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_vf, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_rotate, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rotate, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_autocrop, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_autocrop, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_autocrop_test, (i := i + 1, 1), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_autocrop_test, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_pad, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_pad_mode, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.cbo_pad, (i, 2), flag=wx.EXPAND)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_video_filter), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
+        layout.Add(self.lbl_max_output_size, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_max_output_size, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_keep_aspect_ratio, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_preserve_dowi, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_hdr_to_sdr, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_video_filter), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
+        layout.Add(self.chk_auto_resume, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_upgrade_pix_fmt, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upgrade_pix_fmt, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_denoise, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_preview, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
+
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_video_filter), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
+        layout.Add(self.chk_scene_batch, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_scene_batch_crop, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.txt_scene_batch_crop, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_scene_settings, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.txt_scene_settings, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.btn_scene_settings, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_scene_batch_auto_ema, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
+        layout.Add(self.cbo_scene_batch_auto_ema_model, (i, 2), (0, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_scene_batch_variant, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.txt_scene_batch_variant, (i, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_vr_optimized_merge, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
+        layout.Add(self.cbo_vr_merge_fps, (i, 2), (0, 1), flag=wx.EXPAND)
 
         sizer_video_filter = wx.StaticBoxSizer(self.grp_video_filter, wx.VERTICAL)
         sizer_video_filter.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -1695,17 +1728,22 @@ class MainFrame(wx.Frame):
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
-        layout.Add(self.lbl_device, (0, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_device, (0, 1), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.lbl_batch_size, (1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_batch_size, (1, 1), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.lbl_max_workers, (2, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_max_workers, (2, 1), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.chk_low_vram, (3, 0), flag=wx.EXPAND)
-        layout.Add(self.chk_tta, (3, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_fp16, (3, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_cuda_stream, (3, 3), flag=wx.EXPAND)
-        layout.Add(self.chk_compile, (4, 0), flag=wx.EXPAND)
+        k = -1
+        layout.Add(self.lbl_device, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_device, (k, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_batch_size, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_batch_size, (k, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_max_workers, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_max_workers, (k, 1), (0, 3), flag=wx.EXPAND)
+
+        layout.Add((0, 6), (k := k + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_processor), (k := k + 1, 0), (0, 4), flag=wx.EXPAND)
+        layout.Add((0, 4), (k := k + 1, 0))
+        layout.Add(self.chk_low_vram, (k := k + 1, 0), flag=wx.EXPAND)
+        layout.Add(self.chk_tta, (k, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_fp16, (k, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_cuda_stream, (k, 3), flag=wx.EXPAND)
+        layout.Add(self.chk_compile, (k := k + 1, 0), flag=wx.EXPAND)
 
         sizer_processor = wx.StaticBoxSizer(self.grp_processor, wx.VERTICAL)
         sizer_processor.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -1799,14 +1837,133 @@ class MainFrame(wx.Frame):
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
-        layout.Add(self.chk_waifu2x_upscale, (0, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_waifu2x_method, (1, 0), flag=wx.EXPAND)
-        layout.Add(self.cbo_waifu2x_noise_level, (1, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_waifu2x_style, (1, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_rife_interpolate, (2, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_rife_model, (3, 0), flag=wx.EXPAND)
+        j = -1
+        layout.Add(self.chk_waifu2x_upscale, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_waifu2x_method, (j := j + 1, 0), flag=wx.EXPAND | wx.LEFT, border=14)
+        layout.Add(self.cbo_waifu2x_noise_level, (j, 1), flag=wx.EXPAND)
+        layout.Add(self.cbo_waifu2x_style, (j, 2), flag=wx.EXPAND)
+
+        layout.Add((0, 6), (j := j + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 4), (j := j + 1, 0))
+        layout.Add(self.chk_rife_interpolate, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rife_model, (j := j + 1, 0), flag=wx.EXPAND | wx.LEFT, border=14)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+
+        # --- standalone utility: retroactive DV/HDR RPU reinjection (ADR-031) ---
+        # NOT part of the main conversion pipeline -- a separate tool that takes an
+        # ORIGINAL source file (real Dolby Vision/HDR10+ metadata) and an
+        # ALREADY-CONVERTED 3D output (currently SDR) and injects the source's HDR
+        # grading into a NEW copy of the output, without re-running depth/stereo
+        # conversion. Launches python -m iw3.reinject_hdr_cli as its own subprocess --
+        # needs no GPU, but kept out-of-process the same way RIFE/waifu2x
+        # post-processing is (see docs/ai/CODING_STANDARDS.md CS-SUBPROCESS-001).
+        self.grp_hdr_reinject = wx.StaticBox(
+            self.pnl_options, label=T("Retroactive HDR/DV Reinjection (Standalone Tool)"))
+
+        self.lbl_reinject_source = wx.StaticText(self.grp_hdr_reinject, label=T("Original Source File (DV/HDR)"))
+        self.txt_reinject_source = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_source")
+        self.txt_reinject_source.SetToolTip(
+            T("What it's for: the ORIGINAL video file that still has real Dolby Vision / HDR10+ metadata "
+              "-- the same file iw3 converted FROM when it made the already-converted 3D output below, "
+              "before that conversion's HDR grading was ever discarded.\n"
+              "Con: a re-encode of your original file may no longer carry the real DV/HDR10+ metadata at "
+              "all -- point this at your actual master/source file.\n"
+              "Recommended: the exact same file (or an identical remux of it) you originally fed into "
+              "iw3 for this conversion."))
+        self.btn_reinject_source = wx.Button(self.grp_hdr_reinject, label=T("..."))
+
+        self.lbl_reinject_converted = wx.StaticText(self.grp_hdr_reinject, label=T("Already-Converted 3D File"))
+        self.txt_reinject_converted = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_converted")
+        self.txt_reinject_converted.SetToolTip(
+            T("What it's for: the iw3 3D output you already made from the source above -- currently SDR "
+              "because Preserve Dolby Vision wasn't enabled for that conversion. Read-only: this tool "
+              "never modifies this file, it only copies from it.\n"
+              "Con: cannot be output that was already run through RIFE frame interpolation -- RIFE changes "
+              "the frame count, so it can never line back up with the source's original timing (this tool "
+              "will detect and refuse that case).\n"
+              "Recommended: the direct, unmodified iw3 output file -- not a re-encode or upscale of it."))
+        self.btn_reinject_converted = wx.Button(self.grp_hdr_reinject, label=T("..."))
+
+        self.lbl_reinject_output = wx.StaticText(self.grp_hdr_reinject, label=T("Output File"))
+        self.txt_reinject_output = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_output")
+        self.txt_reinject_output.SetToolTip(
+            T("Where to write the new HDR-reinjected copy. Auto-filled with '<converted file "
+              "name>_hdr_reinjected<ext>' in the same folder once you pick the converted file above -- "
+              "change it if you want it saved somewhere else.\n"
+              "How it's safe: this tool never overwrites the source or converted file, only ever writes "
+              "here."))
+        self.btn_reinject_output = wx.Button(self.grp_hdr_reinject, label=T("..."))
+
+        self.chk_reinject_start_time = wx.CheckBox(self.grp_hdr_reinject, label=T("Start"),
+                                                    name="chk_reinject_start_time")
+        self.chk_reinject_start_time.SetToolTip(
+            T("What it's for: which point in the ORIGINAL SOURCE file the converted file's first frame "
+              "actually starts at -- only needed when the converted file covers just part of the source "
+              "(e.g. a clip, not the whole movie). Leave unchecked to use the whole source.\n"
+              "Con: there is no auto-detection of this -- you must know and enter the exact range that "
+              "was actually converted. If it's wrong, the tool refuses to proceed (an exact decoded "
+              "frame-count check) rather than silently producing misaligned HDR metadata.\n"
+              "Recommended: the exact --start-time you used for the original iw3 conversion, if any."))
+        self.txt_reinject_start_time = TimeCtrl(self.grp_hdr_reinject, value="00:00:00", fmt24hr=True,
+                                                 name="txt_reinject_start_time")
+        self.chk_reinject_end_time = wx.CheckBox(self.grp_hdr_reinject, label=T("End"),
+                                                  name="chk_reinject_end_time")
+        self.chk_reinject_end_time.SetToolTip(
+            T("Same idea as Start Time, but for where the converted file's last frame ends within the "
+              "original source. Leave unchecked to use the end of the source."))
+        self.txt_reinject_end_time = TimeCtrl(self.grp_hdr_reinject, value="00:00:00", fmt24hr=True,
+                                               name="txt_reinject_end_time")
+
+        self.btn_reinject_run = wx.Button(self.grp_hdr_reinject, label=T("Run"))
+        self.btn_reinject_run.SetToolTip(
+            T("What it's for: runs the reinjection as a separate background process (python -m "
+              "iw3.reinject_hdr_cli) -- this app's own GPU/model state is never touched, and neither "
+              "input file above is ever modified.\n"
+              "How it's safe: before touching anything, it first checks that the source (trimmed to "
+              "Start/End Time) and the converted file decode to the EXACT same number of frames -- if "
+              "they don't match, it refuses and prints both frame counts to the log box below instead of "
+              "producing a mismatched result.\n"
+              "Con: that frame-count check decodes the full clip, so it can take a while on a long video.\n"
+              "Recommended: run once per conversion you want retroactively HDR-corrected; always check "
+              "the log box below afterward to confirm it actually succeeded rather than refused."))
+
+        self.txt_reinject_log = wx.TextCtrl(self.grp_hdr_reinject, style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                             size=self.FromDIP((-1, 60)), name="txt_reinject_log")
+        self.txt_reinject_log.SetToolTip(
+            T("Shows this tool's own output: pre-flight frame-count/duration numbers, and the exact "
+              "reason if it refuses to proceed (e.g. a frame-count mismatch or detected RIFE "
+              "interpolation) -- not just a generic pass/fail."))
+
+        self.btn_reinject_source.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_source)
+        self.btn_reinject_converted.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_converted)
+        self.btn_reinject_output.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_output)
+        self.btn_reinject_run.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_run)
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_reinject_source, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_source, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_reinject_source, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_reinject_converted, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_converted, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_reinject_converted, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_reinject_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_reinject_output, (h, 3), flag=wx.EXPAND)
+        # Start/End Time + Run share one compact row rather than each taking a row of
+        # their own -- this whole section lives in the Dual-Pass Depth Blend column,
+        # which has limited spare vertical room.
+        layout.Add(self.chk_reinject_start_time, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_start_time, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_reinject_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_end_time, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_reinject_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        sizer_hdr_reinject = wx.StaticBoxSizer(self.grp_hdr_reinject, wx.VERTICAL)
+        sizer_hdr_reinject.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
         sizer_video = wx.BoxSizer(wx.VERTICAL)
         sizer_video.Add(self.grp_video_dec.sizer, 0, wx.ALL | wx.EXPAND, border=4)
@@ -1822,7 +1979,14 @@ class MainFrame(wx.Frame):
 
         layout.Add(sizer_video_filter, pos=(0, 2), flag=wx.ALL | wx.EXPAND, border=4)
         layout.Add(sizer_processor_col, pos=(1, 2), flag=wx.ALL | wx.EXPAND, border=4)
-        layout.Add(sizer_depth_blend, pos=(0, 3), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        # Stacked below Dual-Pass Depth Blend in the same column rather than as a new
+        # full-width row -- that column has real spare vertical space (Depth Blend's own
+        # controls don't fill it), so this reuses it instead of growing the whole
+        # window's required height (see ADR-031's GUI-fit note).
+        sizer_depth_blend_col = wx.BoxSizer(wx.VERTICAL)
+        sizer_depth_blend_col.Add(sizer_depth_blend, 0, wx.EXPAND)
+        sizer_depth_blend_col.Add(sizer_hdr_reinject, 0, wx.EXPAND | wx.TOP, border=4)
+        layout.Add(sizer_depth_blend_col, pos=(0, 3), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
         self.pnl_options.SetSizer(layout)
 
         # preset panel
@@ -3783,6 +3947,106 @@ class MainFrame(wx.Frame):
                 dlg.SetPath(self.txt_scene_settings.GetValue())
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_scene_settings.SetValue(dlg.GetPath())
+
+    # --- Retroactive HDR/DV Reinjection (standalone tool, see ADR-031) ---
+
+    def on_click_btn_reinject_source(self, event):
+        with wx.FileDialog(self, message=T("Select Original Source File (DV/HDR)"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_reinject_source.GetValue():
+                dlg.SetPath(self.txt_reinject_source.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_reinject_source.SetValue(dlg.GetPath())
+
+    def on_click_btn_reinject_converted(self, event):
+        with wx.FileDialog(self, message=T("Select Already-Converted 3D File"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_reinject_converted.GetValue():
+                dlg.SetPath(self.txt_reinject_converted.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                converted_path = dlg.GetPath()
+                self.txt_reinject_converted.SetValue(converted_path)
+                if not self.txt_reinject_output.GetValue():
+                    base, ext = path.splitext(converted_path)
+                    self.txt_reinject_output.SetValue(f"{base}_hdr_reinjected{ext}")
+
+    def on_click_btn_reinject_output(self, event):
+        with wx.FileDialog(self, message=T("Save HDR-Reinjected Output As"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_reinject_output.GetValue():
+                dlg.SetPath(self.txt_reinject_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_reinject_output.SetValue(dlg.GetPath())
+
+    def run_reinject_hdr(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread,
+        # and this tool needs no GPU at all (pure ffmpeg/dovi_tool/hdr10plus_tool
+        # subprocess orchestration), unlike RIFE/waifu2x post-processing which is kept
+        # out-of-process specifically to avoid sharing GPU memory. Captures combined
+        # stdout+stderr since reinject_hdr_cli prints all of its pre-flight
+        # frame-count/duration numbers and refusal reasons to stderr.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def on_exit_reinject_worker(self, result):
+        self.btn_reinject_run.Enable()
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_reinject_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_reinject_log.SetValue(output)
+        self.txt_reinject_log.ShowPosition(self.txt_reinject_log.GetLastPosition())
+        if returncode == 0:
+            self.SetStatusText(T("HDR reinjection finished successfully"))
+        else:
+            self.SetStatusText(T("HDR reinjection failed -- see the log below"))
+            wx.MessageBox(T("HDR reinjection failed or refused -- see the log box for the exact reason."),
+                          T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_reinject_run(self, event):
+        source = self.txt_reinject_source.GetValue().strip()
+        converted = self.txt_reinject_converted.GetValue().strip()
+        output = self.txt_reinject_output.GetValue().strip()
+
+        if not source or not path.exists(source):
+            wx.MessageBox(T("Select a valid Original Source File first."),
+                          T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+            return
+        if not converted or not path.exists(converted):
+            wx.MessageBox(T("Select a valid Already-Converted 3D File first."),
+                          T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+            return
+        if not output:
+            wx.MessageBox(T("Set an Output File path first."),
+                          T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+            return
+        if path.abspath(output) in (path.abspath(source), path.abspath(converted)):
+            wx.MessageBox(T("Output File must be different from both the source and the converted file."),
+                          T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+            return
+
+        cmd = [sys.executable, "-m", "iw3.reinject_hdr_cli",
+               "--source", source, "--converted", converted, "--output", output]
+        if self.chk_reinject_start_time.GetValue():
+            cmd += ["--start-time", self.txt_reinject_start_time.GetValue()]
+        if self.chk_reinject_end_time.GetValue():
+            cmd += ["--end-time", self.txt_reinject_end_time.GetValue()]
+
+        self.txt_reinject_log.SetValue(
+            T("Running -- this decodes the full clip to verify frame counts, so it may take a while...\n"))
+        self.btn_reinject_run.Disable()
+        self.SetStatusText(T("Running HDR reinjection..."))
+        startWorker(self.on_exit_reinject_worker, self.run_reinject_hdr, wargs=(cmd,))
 
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))

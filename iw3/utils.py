@@ -1367,7 +1367,7 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
             synthetic_view=args.synthetic_view,
             preserve_screen_border=args.preserve_screen_border,
         )
-    elif args.method in {"forward", "forward_fill"}:
+    elif args.method in {"forward", "forward_fill", "forward_splat_fill"}:
         left_eye, right_eye = apply_divergence_forward_warp(
             im, depth,
             args.divergence, convergence=convergence,
@@ -1784,7 +1784,7 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
                     if args.rgbd or args.half_rgbd:
                         left_eyes, right_eyes = apply_rgbd(x_srcs, depths, mapper=args.mapper)
                     else:
-                        if args.method in {"forward_fill", "forward"}:
+                        if args.method in {"forward_fill", "forward", "forward_splat_fill"}:
                             # lock all threads (sbs_lock -> ticket_lock -> depth_lock order)
                             with enqueue_ticket_lock, dequeue_ticket_lock, depth_lock:
                                 left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts)
@@ -3693,7 +3693,7 @@ def create_parser(required_true=True):
     parser.add_argument("--method", type=str, default="row_flow",
                         choices=["grid_sample", "backward",
                                  "monobw", "monobw_inpaint",
-                                 "forward", "forward_fill", "forward_inpaint",
+                                 "forward", "forward_fill", "forward_splat_fill", "forward_inpaint",
                                  "mlbw_l2", "mlbw_l4", "mlbw_l2s", "mlbw_l4s",
                                  "mask_mlbw_l2", "mlbw_l2_inpaint",
                                  "row_flow", "row_flow_sym",

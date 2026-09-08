@@ -367,14 +367,43 @@ class MainFrame(wx.Frame):
         # _compose_options_layout_single_page near the end of this method) differs.
         self.nb_options = wx.Notebook(self.pnl_options)
         self.pnl_single = scrolledpanel.ScrolledPanel(self.pnl_options)
-        tabs_parent = self.pnl_single if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE else self.nb_options
-        self.tab_stereo = wx.Panel(tabs_parent)
-        self.tab_depth_blend = wx.Panel(tabs_parent)
-        self.tab_video_filter = wx.Panel(tabs_parent)
-        self.tab_video_dec = wx.Panel(tabs_parent)
-        self.tab_video_enc = wx.Panel(tabs_parent)
-        self.tab_processor = wx.Panel(tabs_parent)
-        self.tab_tools = wx.Panel(tabs_parent)
+        # ADR-048: Tabbed mode's Notebook pages had no scrolling of their own -- a tab
+        # taller than the visible area simply cut off its bottom controls. Fixed with a
+        # dedicated ScrolledPanel WRAPPER per Notebook page (self.tab_wrap_*), each
+        # holding one (unchanged) category panel as its only child, rather than making
+        # the category panels themselves ScrolledPanel -- the latter would nest a
+        # ScrolledPanel inside pnl_single's own ScrolledPanel in Single Page mode
+        # (verified by an isolated probe to be worth avoiding; see ADR-048). Always
+        # constructed, parented to self.nb_options, mirroring ADR-045's "both
+        # containers always exist" pattern so switch_layout_mode() always has a wrapper
+        # ready to Reparent() a category panel onto even before Tabbed has ever been
+        # the active layout.
+        self.tab_wrap_stereo = scrolledpanel.ScrolledPanel(self.nb_options)
+        self.tab_wrap_depth_blend = scrolledpanel.ScrolledPanel(self.nb_options)
+        self.tab_wrap_video_filter = scrolledpanel.ScrolledPanel(self.nb_options)
+        self.tab_wrap_video_dec = scrolledpanel.ScrolledPanel(self.nb_options)
+        self.tab_wrap_video_enc = scrolledpanel.ScrolledPanel(self.nb_options)
+        self.tab_wrap_processor = scrolledpanel.ScrolledPanel(self.nb_options)
+        self.tab_wrap_tools = scrolledpanel.ScrolledPanel(self.nb_options)
+        # The 7 category panels themselves stay plain wx.Panel, unchanged -- only WHICH
+        # widget parents them (a per-tab wrapper vs. pnl_single directly) depends on
+        # the initial Layout preference, same as before ADR-048.
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self.tab_stereo = wx.Panel(self.pnl_single)
+            self.tab_depth_blend = wx.Panel(self.pnl_single)
+            self.tab_video_filter = wx.Panel(self.pnl_single)
+            self.tab_video_dec = wx.Panel(self.pnl_single)
+            self.tab_video_enc = wx.Panel(self.pnl_single)
+            self.tab_processor = wx.Panel(self.pnl_single)
+            self.tab_tools = wx.Panel(self.pnl_single)
+        else:
+            self.tab_stereo = wx.Panel(self.tab_wrap_stereo)
+            self.tab_depth_blend = wx.Panel(self.tab_wrap_depth_blend)
+            self.tab_video_filter = wx.Panel(self.tab_wrap_video_filter)
+            self.tab_video_dec = wx.Panel(self.tab_wrap_video_dec)
+            self.tab_video_enc = wx.Panel(self.tab_wrap_video_enc)
+            self.tab_processor = wx.Panel(self.tab_wrap_processor)
+            self.tab_tools = wx.Panel(self.tab_wrap_tools)
 
         # stereo generation settings
         # divergence, convergence, method, depth_model, mapper
@@ -3014,21 +3043,40 @@ class MainFrame(wx.Frame):
         self.update_controls(probe_compile=False)
 
     def _compose_options_layout_tabbed(self):
-        """ADR-036/ADR-037/ADR-045 -- Tabbed layout: the 7 category panels each become
-        one wx.Notebook page. This is exactly ADR-036's original composition step,
-        unchanged, just extracted into its own method so it can be picked between it
-        and _compose_options_layout_single_page() both at startup (ADR-037, based on
-        the user's saved Layout preference) and live, on every switch back to Tabbed
-        (ADR-045, via switch_layout_mode() -- the 7 panels are Reparent()-ed onto
-        self.nb_options before this runs, so AddPage() below always sees a page window
-        that is already a real child of the notebook, exactly as at startup)."""
-        self.nb_options.AddPage(self.tab_stereo, T("Stereo Generation"))
-        self.nb_options.AddPage(self.tab_depth_blend, T("Dual-Pass Depth Blend"))
-        self.nb_options.AddPage(self.tab_video_filter, T("Video Filter"))
-        self.nb_options.AddPage(self.tab_video_dec, T("Video Decoding"))
-        self.nb_options.AddPage(self.tab_video_enc, T("Video Encoding"))
-        self.nb_options.AddPage(self.tab_processor, T("Processor"))
-        self.nb_options.AddPage(self.tab_tools, T("Standalone Tools"))
+        """ADR-036/ADR-037/ADR-045/ADR-048 -- Tabbed layout: each category panel is
+        wrapped in its own ScrolledPanel (self.tab_wrap_*) and that WRAPPER becomes the
+        wx.Notebook page, not the category panel directly -- see ADR-048 for why a
+        separate wrapper was used instead of making the category panels themselves
+        ScrolledPanel (would nest a ScrolledPanel inside pnl_single's own ScrolledPanel
+        in Single Page mode). Reused both at startup (ADR-037, based on the user's
+        saved Layout preference) and live, on every switch back to Tabbed (ADR-045, via
+        switch_layout_mode() -- the 7 category panels are Reparent()-ed onto their
+        wrapper before this runs, so wiring each wrapper's sizer below always sees a
+        tab that is already a real child of it, exactly as at startup)."""
+        wrap_pages = (
+            (self.tab_wrap_stereo, self.tab_stereo, T("Stereo Generation")),
+            (self.tab_wrap_depth_blend, self.tab_depth_blend, T("Dual-Pass Depth Blend")),
+            (self.tab_wrap_video_filter, self.tab_video_filter, T("Video Filter")),
+            (self.tab_wrap_video_dec, self.tab_video_dec, T("Video Decoding")),
+            (self.tab_wrap_video_enc, self.tab_video_enc, T("Video Encoding")),
+            (self.tab_wrap_processor, self.tab_processor, T("Processor")),
+            (self.tab_wrap_tools, self.tab_tools, T("Standalone Tools")),
+        )
+        for wrap, tab, label in wrap_pages:
+            wrap_sizer = wx.BoxSizer(wx.VERTICAL)
+            wrap_sizer.Add(tab, 1, wx.EXPAND)
+            wrap.SetSizer(wrap_sizer)
+            wrap.SetAutoLayout(1)
+            wrap.SetupScrolling(scroll_x=False, scroll_y=True)
+            # Same reasoning as pnl_single's own explicit MinSize (ADR-045): a
+            # ScrolledPanel's own GetBestSize() is deliberately tiny regardless of its
+            # content, so without this every tab would collapse to near-zero height in
+            # the Notebook. Verified by isolated probe (ADR-048) that pinning this does
+            # NOT defeat scrolling -- the wrapper still reports a real scrollable
+            # virtual size when its parent Notebook forces it shorter than this pinned
+            # minimum.
+            wrap.SetMinSize(wrap_sizer.CalcMin())
+            self.nb_options.AddPage(wrap, label)
         # Force a deterministic starting tab -- without this, wx sometimes lands on
         # whichever page happens to contain the last control touched by a SetSelection()
         # call made deep inside a sub-panel's own __init__ (e.g. VideoEncodingBox's
@@ -3093,17 +3141,21 @@ class MainFrame(wx.Frame):
         self.nb_options.Hide()
 
     def switch_layout_mode(self, new_mode):
-        """ADR-045 -- live layout switching: move the 7 category panels between
-        self.nb_options (Tabbed) and self.pnl_single (Single Page) in the already-
-        running window, instead of only applying the Layout preference on next launch
-        (ADR-037's original, more cautious choice). Verified safe on this project's
-        actual wx version (4.3.1 phoenix / wxWidgets 3.3.3) with an isolated harness
-        before being wired in here -- see docs/ai/AI_DECISIONS.md ADR-045: a plain
+        """ADR-045, wrapper handling added by ADR-048 -- live layout switching: move
+        the 7 category panels between their ScrolledPanel wrappers (self.tab_wrap_*,
+        Tabbed) and self.pnl_single (Single Page) in the already-running window,
+        instead of only applying the Layout preference on next launch (ADR-037's
+        original, more cautious choice). Verified safe on this project's actual wx
+        version (4.3.1 phoenix / wxWidgets 3.3.3) with an isolated harness before being
+        wired in here -- see docs/ai/AI_DECISIONS.md ADR-045: a plain
         wx.Panel.Reparent() cleanly preserves a panel's children, their Bind()s, and
         cross-control Enable/Disable relationships (e.g. Object Stability's
         sub-settings), because only the 7 *category* panels ever move -- every
         wx.StaticBox/control inside them keeps the SAME parent (its category panel)
-        throughout, so none of them are ever reparented themselves.
+        throughout, so none of them are ever reparented themselves. ADR-048 only
+        changes WHERE a category panel lands in Tabbed mode (its own wrapper instead of
+        self.nb_options directly) -- the wrappers themselves never move, only the 7
+        category panels do, same as before.
 
         No-ops if new_mode already matches self.layout_mode (defensive -- the combo
         box shouldn't fire EVT_TEXT without an actual change, but this keeps a
@@ -3114,6 +3166,9 @@ class MainFrame(wx.Frame):
 
         tabs = (self.tab_stereo, self.tab_depth_blend, self.tab_video_filter,
                 self.tab_video_dec, self.tab_video_enc, self.tab_processor, self.tab_tools)
+        wraps = (self.tab_wrap_stereo, self.tab_wrap_depth_blend, self.tab_wrap_video_filter,
+                 self.tab_wrap_video_dec, self.tab_wrap_video_enc, self.tab_wrap_processor,
+                 self.tab_wrap_tools)
 
         # Detach every category panel from whichever container currently holds it,
         # WITHOUT destroying the panel or any of its children (RemovePage/Detach, never
@@ -3121,13 +3176,20 @@ class MainFrame(wx.Frame):
         if self.layout_mode == LAYOUT_MODE_TABS:
             while self.nb_options.GetPageCount():
                 self.nb_options.RemovePage(0)
+            # RemovePage() only detaches each wrapper from the Notebook -- the category
+            # panel is still a child of its wrapper's own sizer and must be detached
+            # from THAT too before it can be reparented elsewhere.
+            for wrap, tab in zip(wraps, tabs):
+                wrap_sizer = wrap.GetSizer()
+                if wrap_sizer is not None:
+                    wrap_sizer.Detach(tab)
         else:
             single_page_sizer = self.pnl_single.GetSizer()
             for tab in tabs:
                 single_page_sizer.Detach(tab)
 
-        new_parent = self.nb_options if new_mode == LAYOUT_MODE_TABS else self.pnl_single
-        for tab in tabs:
+        new_parents = wraps if new_mode == LAYOUT_MODE_TABS else (self.pnl_single,) * len(tabs)
+        for tab, new_parent in zip(tabs, new_parents):
             tab.Reparent(new_parent)
             # A wx.Notebook auto-Hide()s every page except the currently selected one,
             # and RemovePage() does not undo that -- so a panel that was an inactive
@@ -3187,6 +3249,18 @@ class MainFrame(wx.Frame):
             # the window growing to actually show it, unlike a fresh Single Page
             # composition at the same zoom level would.
             self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+        else:
+            # ADR-048: Tabbed mode's Notebook pages are now ScrolledPanel wrappers with
+            # their own pinned MinSize (same reason as pnl_single above), so they need
+            # the exact same live-zoom recompute -- otherwise a zoom-in would leave a
+            # wrapper's pinned MinSize stale from the old, smaller font and require
+            # scrolling to reach content that should now show/expand instead.
+            for wrap in (self.tab_wrap_stereo, self.tab_wrap_depth_blend, self.tab_wrap_video_filter,
+                         self.tab_wrap_video_dec, self.tab_wrap_video_enc, self.tab_wrap_processor,
+                         self.tab_wrap_tools):
+                wrap_sizer = wrap.GetSizer()
+                if wrap_sizer is not None:
+                    wrap.SetMinSize(wrap_sizer.CalcMin())
 
         refresh_layouts(self)
 
@@ -3225,6 +3299,12 @@ class MainFrame(wx.Frame):
             self, self.pnl_options, options_container,
             self.tab_stereo, self.tab_depth_blend, self.tab_video_filter,
             self.tab_video_dec, self.tab_video_enc, self.tab_processor, self.tab_tools,
+            # ADR-048: the per-tab ScrolledPanel wrappers (Tabbed mode only) sit between
+            # the Notebook and each category panel -- theme them too so no default-
+            # colored ring shows around a tab's content, especially in dark mode.
+            self.tab_wrap_stereo, self.tab_wrap_depth_blend, self.tab_wrap_video_filter,
+            self.tab_wrap_video_dec, self.tab_wrap_video_enc, self.tab_wrap_processor,
+            self.tab_wrap_tools,
             self.pnl_file_option, self.pnl_preset, self.pnl_process,
             self.pnl_file.panel,
         ):
@@ -5769,6 +5849,12 @@ def _self_test_layout_modes():
 
                 if mode == gui_mod.LAYOUT_MODE_TABS:
                     assert frame.nb_options.GetPageCount() == 7
+                    # ADR-048: each Notebook page is a ScrolledPanel wrapper holding
+                    # the category panel, not the category panel directly.
+                    assert frame.tab_stereo.GetParent() is frame.tab_wrap_stereo
+                    assert frame.tab_tools.GetParent() is frame.tab_wrap_tools
+                    assert frame.tab_wrap_stereo.GetParent() is frame.nb_options
+                    assert frame.tab_wrap_tools.GetParent() is frame.nb_options
                 else:
                     assert frame.pnl_single.GetSizer() is not None
                     assert frame.tab_stereo.GetParent() is frame.pnl_single
@@ -5819,6 +5905,9 @@ def _self_test_layout_mode_live_switch():
         frame = gui_mod.MainFrame()
         tabs = (frame.tab_stereo, frame.tab_depth_blend, frame.tab_video_filter,
                 frame.tab_video_dec, frame.tab_video_enc, frame.tab_processor, frame.tab_tools)
+        wraps = (frame.tab_wrap_stereo, frame.tab_wrap_depth_blend, frame.tab_wrap_video_filter,
+                 frame.tab_wrap_video_dec, frame.tab_wrap_video_enc, frame.tab_wrap_processor,
+                 frame.tab_wrap_tools)
 
         assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS
         assert frame.nb_options.GetPageCount() == 7
@@ -5858,8 +5947,12 @@ def _self_test_layout_mode_live_switch():
                 f"round {i}: single-page sizer still has items after switching away"
             assert frame.tab_stereo.IsShown(), \
                 f"round {i}: the selected (first) tab must be visible back in Tabbed mode"
-            for tab in tabs:
-                assert tab.GetParent() is frame.nb_options, f"round {i}: {tab} not reparented back to nb_options"
+            # ADR-048: a category panel's parent in Tabbed mode is now its own
+            # ScrolledPanel wrapper, and that wrapper (not the category panel) is the
+            # actual Notebook page.
+            for tab, wrap in zip(tabs, wraps):
+                assert tab.GetParent() is wrap, f"round {i}: {tab} not reparented back to its wrapper {wrap}"
+                assert wrap.GetParent() is frame.nb_options, f"round {i}: wrapper {wrap} not a child of nb_options"
             assert frame.grp_stereo.GetParent() is frame.tab_stereo
             assert frame.chk_rife_interpolate.GetParent() is frame.grp_postprocess
 
@@ -5873,6 +5966,69 @@ def _self_test_layout_mode_live_switch():
         app.Destroy()
 
     print("_self_test_layout_mode_live_switch: PASS")
+
+
+def _self_test_tabbed_scrolling():
+    """Regression test for ADR-048 (Tabbed mode's Notebook pages must scroll when a
+    tab's content is taller than the visible area -- previously they simply cut off
+    bottom controls with no way to reach them). A full interactive scroll-and-see is
+    verified manually via screenshots (see docs/ai/AI_DECISIONS.md ADR-048); this
+    self-test checks the parts that don't need a human eye: every Notebook page is
+    really a ScrolledPanel wrapper (not a plain wx.Panel) with scrolling actually
+    configured, and that its virtual size genuinely exceeds a forced small client size
+    for the tallest real tab (Standalone Tools), so a scrollbar/mousewheel would
+    actually be needed and able to reach the bottom. No GPU or real movie file needed."""
+    import iw3.gui as gui_mod
+    import wx.lib.scrolledpanel as scrolledpanel
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    try:
+        gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+        frame = gui_mod.MainFrame()
+        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS
+
+        wraps = (frame.tab_wrap_stereo, frame.tab_wrap_depth_blend, frame.tab_wrap_video_filter,
+                 frame.tab_wrap_video_dec, frame.tab_wrap_video_enc, frame.tab_wrap_processor,
+                 frame.tab_wrap_tools)
+        for wrap in wraps:
+            assert isinstance(wrap, scrolledpanel.ScrolledPanel), \
+                f"{wrap} is not a ScrolledPanel -- Tabbed mode page would not scroll"
+            # SetupScrolling(scroll_y=True) sets a non-zero vertical scroll rate;
+            # (0, 0) means scrolling was never actually configured on this window.
+            assert wrap.GetScrollPixelsPerUnit()[1] > 0, \
+                f"{wrap} has no vertical scroll rate configured"
+
+        # The category panels themselves must stay plain wx.Panel -- only the wrapper
+        # scrolls, avoiding a ScrolledPanel nested inside another ScrolledPanel (see
+        # ADR-048 for why that nesting was avoided for Single Page).
+        for tab in (frame.tab_stereo, frame.tab_depth_blend, frame.tab_video_filter,
+                    frame.tab_video_dec, frame.tab_video_enc, frame.tab_processor, frame.tab_tools):
+            assert not isinstance(tab, scrolledpanel.ScrolledPanel), \
+                f"{tab} unexpectedly became a ScrolledPanel -- would nest under pnl_single in Single Page mode"
+
+        # Standalone Tools is the tallest tab (HDR Reinjection, Add Subtitle Track, Add
+        # Audio Track, Stereo Mode Tagging, Search Subtitles all stacked) -- force its
+        # wrapper to a small client size, as a real too-small window would, and confirm
+        # the reported virtual size still reflects the real (taller) content instead of
+        # collapsing to the forced client size.
+        wrap = frame.tab_wrap_tools
+        real_content_h = wrap.GetSizer().CalcMin()[1]
+        wrap.SetSize((400, 120))
+        wrap.Layout()
+        virtual_h = wrap.GetVirtualSize()[1]
+        assert virtual_h >= real_content_h, \
+            f"tab_wrap_tools virtual size ({virtual_h}) lost real content height ({real_content_h})"
+        assert virtual_h > 120, \
+            "tab_wrap_tools virtual size did not exceed the forced small client size -- would not scroll"
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_tabbed_scrolling: PASS")
 
 
 def _self_test_zoom_level_persistence():
@@ -5996,6 +6152,7 @@ def _run_self_tests():
     _self_test_no_eager_cuda_context()
     _self_test_layout_modes()
     _self_test_layout_mode_live_switch()
+    _self_test_tabbed_scrolling()
     _self_test_zoom_level_persistence()
     _self_test_zoom_startup_restore()
     _self_test_zoom_live_rescale()

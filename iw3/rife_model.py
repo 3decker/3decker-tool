@@ -2,7 +2,8 @@
 interpolation support -- see docs/ai/AI_DECISIONS.md ADR-029 for the license
 verification (repo code AND pretrained weight downloads are both MIT, confirmed
 directly against the upstream LICENSE file and README on 2026-09-07) and the
-overall design rationale.
+overall design rationale, and ADR-029's amendment note for the model/ package
+bug fixed here (2026-09-08).
 
 Weights are NOT bundled with this app -- fetched on demand into RIFE_MODEL_DIR
 the first time a tier is actually used, mirroring waifu2x's external_sr.py
@@ -21,7 +22,22 @@ version-matched RIFE_HDv3.Model class from the fetched directory at inference
 time -- the same "load model code from a fetched location instead of
 reimplementing it in this repo" approach already used for the ZoeDepth/
 Depth-Anything hub models (see iw3/base_depth_model.py's force_update_hub ->
-torch.hub.load)."""
+torch.hub.load).
+
+RIFE_HDv3.py/IFNet_HDv3.py also import a SECOND, separate package: `model`
+(`from model.warplayer import warp`, `from model.loss import *`). Verified
+directly against the live upstream repo on 2026-09-08: unlike train_log/'s
+per-version *.py files, `model/` (warplayer.py, loss.py, pytorch_msssim/) is
+checked into the Practical-RIFE git repository itself and is NOT included in
+the per-tier Google Drive weight archive -- the official README's own setup
+instructions ("Download a model from the model list and put *.py and
+flownet.pkl on train_log/") only ever populate train_log/, assuming the user
+already has a full clone of the repo (with its pre-existing model/ directory)
+alongside it. Since this project fetches train_log/ standalone with no
+accompanying repo clone, `model/` is fetched separately here (from the repo's
+zip archive) and placed as a sibling of train_log/ so `from model.warplayer
+import warp` resolves as a top-level import -- see
+_RifeModelPackageDownloader/_ensure_rife_model_package below."""
 import importlib
 import os
 import shutil
@@ -56,6 +72,12 @@ RIFE_TIERS = {
 }
 DEFAULT_RIFE_MODEL = "rife_425"
 
+# The shared `model/` package (warplayer.py, loss.py, pytorch_msssim/) that
+# RIFE_HDv3.py/IFNet_HDv3.py import -- see module docstring. Unlike the
+# per-tier weights, this is identical across tiers/versions and lives in the
+# main Practical-RIFE git repository itself, not in a release/Drive archive.
+RIFE_REPO_ARCHIVE_URL = "https://github.com/hzwer/Practical-RIFE/archive/refs/heads/main.zip"
+
 
 def _drive_url(file_id):
     return f"https://drive.google.com/uc?export=download&id={file_id}"
@@ -84,6 +106,10 @@ def rife_model_available(tier):
         f.lower().endswith(".pkl") for f in os.listdir(train_log_dir))
 
 
+def _model_package_available(tier):
+    return path.isfile(path.join(get_rife_dir(tier), "model", "warplayer.py"))
+
+
 class _RifeModelDownloader(ArchiveDownloader):
     def __init__(self, tier, **kwargs):
         spec = RIFE_TIERS[tier]
@@ -99,6 +125,58 @@ class _RifeModelDownloader(ArchiveDownloader):
         if path.exists(dst):
             shutil.rmtree(dst)
         shutil.copytree(found, dst)
+
+
+def _find_model_package_dir(root):
+    """Search for the checked-into-the-repo `model/` directory (identified by
+    containing warplayer.py) inside an extracted Practical-RIFE repo archive --
+    same search-by-content approach as _find_train_log_dir, robust to the
+    archive's top-level folder name (e.g. 'Practical-RIFE-main/model')."""
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if path.basename(dirpath) == "model" and "warplayer.py" in filenames:
+            return dirpath
+    return None
+
+
+class _RifeModelPackageDownloader(ArchiveDownloader):
+    """Fetches the shared `model/` package from the main Practical-RIFE repo
+    (see module docstring) and places it as a sibling of a tier's train_log/ so
+    RIFE_HDv3.py's `from model.warplayer import warp` resolves as a top-level
+    import."""
+    def __init__(self, tier, **kwargs):
+        super().__init__(RIFE_REPO_ARCHIVE_URL, name="RIFE model package", format="zip", **kwargs)
+        self.tier = tier
+
+    def handle(self, src):
+        found = _find_model_package_dir(src)
+        if found is None:
+            raise RuntimeError("downloaded Practical-RIFE repo archive did not contain a model/warplayer.py file")
+        dst = path.join(get_rife_dir(self.tier), "model")
+        os.makedirs(path.dirname(dst), exist_ok=True)
+        if path.exists(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(found, dst)
+
+
+def _ensure_rife_model_package(tier, show_progress=True):
+    """Ensures tier's model/ package (see module docstring) is present,
+    independent of whether train_log/ was already downloaded by an older
+    version of this app that predates this fix."""
+    if _model_package_available(tier):
+        return
+    logger.debug(f"RIFE: downloading model package for {tier}")
+    downloader = _RifeModelPackageDownloader(tier)
+    try:
+        downloader.run(show_progress=show_progress)
+    except Exception as e:
+        raise RuntimeError(
+            f"RIFE {tier}: automatic download of the 'model' package (from the official "
+            f"Practical-RIFE GitHub repo) failed ({type(e).__name__}: {e}). Download "
+            f"{RIFE_REPO_ARCHIVE_URL} manually and place its 'model' folder (containing "
+            f"warplayer.py) into: {path.join(get_rife_dir(tier), 'model')}"
+        ) from e
+    if not _model_package_available(tier):
+        raise RuntimeError(f"RIFE {tier}: model package download completed but warplayer.py was not found afterward")
 
 
 def download_rife_model(tier, show_progress=True):
@@ -131,6 +209,7 @@ def download_rife_model(tier, show_progress=True):
 def ensure_rife_model(tier, show_progress=True):
     if not rife_model_available(tier):
         download_rife_model(tier, show_progress=show_progress)
+    _ensure_rife_model_package(tier, show_progress=show_progress)
     return path.join(get_rife_dir(tier), "train_log")
 
 

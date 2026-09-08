@@ -74,3 +74,9 @@ python -m iw3.gui --self-test
 # docs/ai/AI_DECISIONS.md ADR-035). Embedded self-test only (mocked subprocess.run,
 # no network/real repo needed).
 python -m iw3.update_check --self-test
+
+# RIFE frame interpolation (see docs/ai/AI_DECISIONS.md ADR-029 and its
+# amendment note). Embedded self-test only (synthetic fixture archives standing
+# in for the real Google Drive / GitHub downloads, no network/GPU needed) --
+# covers the real "model/ package missing" bug found on first real use.
+python -m iw3.rife_cli --self-test

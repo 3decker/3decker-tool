@@ -63,3 +63,8 @@ python -m iw3.subtitle_mux_cli --self-test
 # clicked (see docs/ai/AI_DECISIONS.md ADR-033). Embedded self-test only (mocked
 # pyav_init_cuda_primary_context/check_compile_support, no GPU needed).
 python -m iw3.gui --self-test
+
+# Check for Updates: read-only git fetch + compare, never pull/merge/reset (see
+# docs/ai/AI_DECISIONS.md ADR-035). Embedded self-test only (mocked subprocess.run,
+# no network/real repo needed).
+python -m iw3.update_check --self-test

@@ -20,6 +20,7 @@ from .utils import (
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
     _get_ffmpeg_bin, _find_mkvmerge,
 )
+from . import update_check
 from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available, create_device
 from nunif.models.utils import check_compile_support
@@ -118,7 +119,7 @@ class MainFrame(wx.Frame):
         super(MainFrame, self).__init__(
             None,
             name="iw3-gui",
-            title=T("iw3-gui") + branch_tag + python_version_tag,
+            title=T("3DECKER — iw3") + branch_tag + python_version_tag,
             size=(1000, 840),
             style=(wx.DEFAULT_FRAME_STYLE & ~wx.MAXIMIZE_BOX)
         )
@@ -138,6 +139,7 @@ class MainFrame(wx.Frame):
         self.initialize_component()
         if is_dark_mode():
             apply_dark_mode(self)
+        self.apply_accent_theme()
 
     def initialize_component(self):
         NORMAL_FONT = wx.Font(10, family=wx.FONTFAMILY_MODERN, style=wx.FONTSTYLE_NORMAL, weight=wx.FONTWEIGHT_NORMAL)
@@ -259,10 +261,29 @@ class MainFrame(wx.Frame):
         if LAYOUT_DEBUG:
             self.pnl_options.SetBackgroundColour("#cfc")
 
+        # Category tabs (ADR-036): the 110+ controls below are grouped into a
+        # wx.Notebook so a user can find any setting quickly instead of scanning one
+        # giant wall of controls. Every wx.StaticBox/VideoDecodingBox/VideoEncodingBox
+        # below is parented to one of these tab panels instead of self.pnl_options
+        # directly -- this only changes WHERE each group is drawn, never a control's
+        # name, binding, or behavior. pnl_file_option (File & Batch checkboxes) and
+        # pnl_preset (Quick Presets/Language/etc.) intentionally stay outside the
+        # notebook, as persistent strips above it -- see docs/3DECKER_Method.md and
+        # AI_DECISIONS.md for why (frequently-needed controls that shouldn't require
+        # a tab switch to reach).
+        self.nb_options = wx.Notebook(self.pnl_options)
+        self.tab_stereo = wx.Panel(self.nb_options)
+        self.tab_depth_blend = wx.Panel(self.nb_options)
+        self.tab_video_filter = wx.Panel(self.nb_options)
+        self.tab_video_dec = wx.Panel(self.nb_options)
+        self.tab_video_enc = wx.Panel(self.nb_options)
+        self.tab_processor = wx.Panel(self.nb_options)
+        self.tab_tools = wx.Panel(self.nb_options)
+
         # stereo generation settings
         # divergence, convergence, method, depth_model, mapper
 
-        self.grp_stereo = wx.StaticBox(self.pnl_options, label=T("Stereo Generation"))
+        self.grp_stereo = wx.StaticBox(self.tab_stereo, label=T("Stereo Generation"))
 
         self.lbl_divergence = wx.StaticText(self.grp_stereo, label=T("3D Strength"))
         self.cbo_divergence = EditableComboBox(self.grp_stereo, choices=["5.0", "4.0", "3.0", "2.5", "2.0", "1.0"],
@@ -641,7 +662,7 @@ class MainFrame(wx.Frame):
               "(an object's silhouette), so Object Stability's flicker reduction doesn't smear or lag "
               "behind a moving object's outline. 0 = no reduction (original behavior)."))
 
-        self.grp_depth_blend = wx.StaticBox(self.pnl_options, label=T("Dual-Pass Depth Blend"))
+        self.grp_depth_blend = wx.StaticBox(self.tab_depth_blend, label=T("Dual-Pass Depth Blend"))
         self.chk_depth_blend = wx.CheckBox(self.grp_depth_blend, label=T("Dual-Pass Depth Blend"),
                                            name="chk_depth_blend")
         self.chk_depth_blend.SetValue(False)
@@ -1312,17 +1333,17 @@ class MainFrame(wx.Frame):
 
         # video decoding
         # hwaccel
-        self.grp_video_dec = VideoDecodingBox(self.pnl_options, translate_function=T)
+        self.grp_video_dec = VideoDecodingBox(self.tab_video_dec, translate_function=T)
 
         # video encoding
         # sbs/vr180, padding
         # max-fps, crf, preset, tune
-        self.grp_video = VideoEncodingBox(self.pnl_options, translate_function=T,
+        self.grp_video = VideoEncodingBox(self.tab_video_enc, translate_function=T,
                                           has_nvenc=has_nvenc(), has_qsv=has_qsv())
 
         # input video filter
         # deinterlace, rotate, vf
-        self.grp_video_filter = wx.StaticBox(self.pnl_options, label=T("Video Filter"))
+        self.grp_video_filter = wx.StaticBox(self.tab_video_filter, label=T("Video Filter"))
         self.chk_start_time = wx.CheckBox(self.grp_video_filter, label=T("Start Time"),
                                           name="chk_start_time")
         self.chk_start_time.SetToolTip(
@@ -1675,7 +1696,7 @@ class MainFrame(wx.Frame):
 
         # processor settings
         # device, batch-size, TTA, Low VRAM, fp16
-        self.grp_processor = wx.StaticBox(self.pnl_options, label=T("Processor"))
+        self.grp_processor = wx.StaticBox(self.tab_processor, label=T("Processor"))
         self.lbl_device = wx.StaticText(self.grp_processor, label=T("Device"))
         self.cbo_device = wx.ComboBox(self.grp_processor, size=self.FromDIP((200, -1)), name="cbo_device")
         self.cbo_device.SetEditable(False)
@@ -1776,7 +1797,7 @@ class MainFrame(wx.Frame):
         sizer_processor = wx.StaticBoxSizer(self.grp_processor, wx.VERTICAL)
         sizer_processor.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
-        self.grp_postprocess = wx.StaticBox(self.pnl_options, label=T("Post-Processing"))
+        self.grp_postprocess = wx.StaticBox(self.tab_processor, label=T("Post-Processing"))
         self.chk_waifu2x_upscale = wx.CheckBox(self.grp_postprocess,
                                                label=T("Upscale with waifu2x after conversion"),
                                                name="chk_waifu2x_upscale")
@@ -1888,7 +1909,7 @@ class MainFrame(wx.Frame):
         # needs no GPU, but kept out-of-process the same way RIFE/waifu2x
         # post-processing is (see docs/ai/CODING_STANDARDS.md CS-SUBPROCESS-001).
         self.grp_hdr_reinject = wx.StaticBox(
-            self.pnl_options, label=T("Retroactive HDR/DV Reinjection (Standalone Tool)"))
+            self.tab_tools, label=T("Retroactive HDR/DV Reinjection (Standalone Tool)"))
 
         self.lbl_reinject_source = wx.StaticText(self.grp_hdr_reinject, label=T("Original Source File (DV/HDR)"))
         self.txt_reinject_source = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_source")
@@ -2003,7 +2024,7 @@ class MainFrame(wx.Frame):
         # module docstring / ADR-032). Launches python -m iw3.subtitle_mux_cli as its
         # own subprocess, same out-of-process convention as RIFE/HDR reinjection.
         self.grp_submux = wx.StaticBox(
-            self.pnl_options, label=T("Add Subtitle Track (Standalone Tool)"))
+            self.tab_tools, label=T("Add Subtitle Track (Standalone Tool)"))
 
         self.lbl_submux_input = wx.StaticText(self.grp_submux, label=T("Converted 3D Video (.mkv)"))
         self.txt_submux_input = wx.TextCtrl(self.grp_submux, name="txt_submux_input")
@@ -2138,7 +2159,7 @@ class MainFrame(wx.Frame):
         # its own subprocess, same out-of-process convention as the other standalone
         # tools in this column.
         self.grp_stereotag = wx.StaticBox(
-            self.pnl_options, label=T("Retroactively Tag MKV as 3D (Standalone Tool)"))
+            self.tab_tools, label=T("Retroactively Tag MKV as 3D (Standalone Tool)"))
 
         self.lbl_stereotag_input = wx.StaticText(self.grp_stereotag, label=T("Converted 3D Video (.mkv)"))
         self.txt_stereotag_input = wx.TextCtrl(self.grp_stereotag, name="txt_stereotag_input")
@@ -2213,30 +2234,59 @@ class MainFrame(wx.Frame):
         sizer_stereotag = wx.StaticBoxSizer(self.grp_stereotag, wx.VERTICAL)
         sizer_stereotag.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
-        sizer_video = wx.BoxSizer(wx.VERTICAL)
-        sizer_video.Add(self.grp_video_dec.sizer, 0, wx.ALL | wx.EXPAND, border=4)
-        sizer_video.Add(self.grp_video.sizer, 1, wx.ALL | wx.EXPAND, border=4)
+        # Each category below is its own Notebook tab (ADR-036) instead of one big
+        # 4-column grid -- every sizer_* here was already fully built above (unchanged),
+        # this only changes how they're composed onto pages. Processor+Post-Processing
+        # and the three standalone tools (HDR Reinject/Add Subtitle/Stereo Mode Tag)
+        # are combined into single tabs since each is small on its own, matching how
+        # they were already visually stacked together before this change.
+        tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(sizer_stereo, 1, wx.ALL | wx.EXPAND, 4)
+        self.tab_stereo.SetSizer(tab_layout)
 
-        layout = wx.GridBagSizer(vgap=0, hgap=0)
-        layout.SetEmptyCellSize((0, 0))
-        layout.Add(sizer_stereo, pos=(0, 0), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
-        layout.Add(sizer_video, pos=(0, 1), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=0)
-        sizer_processor_col = wx.BoxSizer(wx.VERTICAL)
-        sizer_processor_col.Add(sizer_processor, 0, wx.EXPAND)
-        sizer_processor_col.Add(sizer_postprocess, 0, wx.EXPAND)
+        tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(sizer_depth_blend, 1, wx.ALL | wx.EXPAND, 4)
+        self.tab_depth_blend.SetSizer(tab_layout)
 
-        layout.Add(sizer_video_filter, pos=(0, 2), flag=wx.ALL | wx.EXPAND, border=4)
-        layout.Add(sizer_processor_col, pos=(1, 2), flag=wx.ALL | wx.EXPAND, border=4)
-        # Stacked below Dual-Pass Depth Blend in the same column rather than as a new
-        # full-width row -- that column has real spare vertical space (Depth Blend's own
-        # controls don't fill it), so this reuses it instead of growing the whole
-        # window's required height (see ADR-031's GUI-fit note).
-        sizer_depth_blend_col = wx.BoxSizer(wx.VERTICAL)
-        sizer_depth_blend_col.Add(sizer_depth_blend, 0, wx.EXPAND)
-        sizer_depth_blend_col.Add(sizer_hdr_reinject, 0, wx.EXPAND | wx.TOP, border=4)
-        sizer_depth_blend_col.Add(sizer_submux, 0, wx.EXPAND | wx.TOP, border=4)
-        sizer_depth_blend_col.Add(sizer_stereotag, 0, wx.EXPAND | wx.TOP, border=4)
-        layout.Add(sizer_depth_blend_col, pos=(0, 3), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(sizer_video_filter, 1, wx.ALL | wx.EXPAND, 4)
+        self.tab_video_filter.SetSizer(tab_layout)
+
+        tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(self.grp_video_dec.sizer, 1, wx.ALL | wx.EXPAND, 4)
+        self.tab_video_dec.SetSizer(tab_layout)
+
+        tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(self.grp_video.sizer, 1, wx.ALL | wx.EXPAND, 4)
+        self.tab_video_enc.SetSizer(tab_layout)
+
+        tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(sizer_processor, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_postprocess, 0, wx.ALL | wx.EXPAND, 4)
+        self.tab_processor.SetSizer(tab_layout)
+
+        tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(sizer_hdr_reinject, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_submux, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
+        self.tab_tools.SetSizer(tab_layout)
+
+        self.nb_options.AddPage(self.tab_stereo, T("Stereo Generation"))
+        self.nb_options.AddPage(self.tab_depth_blend, T("Dual-Pass Depth Blend"))
+        self.nb_options.AddPage(self.tab_video_filter, T("Video Filter"))
+        self.nb_options.AddPage(self.tab_video_dec, T("Video Decoding"))
+        self.nb_options.AddPage(self.tab_video_enc, T("Video Encoding"))
+        self.nb_options.AddPage(self.tab_processor, T("Processor"))
+        self.nb_options.AddPage(self.tab_tools, T("Standalone Tools"))
+        # Force a deterministic starting tab -- without this, wx sometimes lands on
+        # whichever page happens to contain the last control touched by a SetSelection()
+        # call made deep inside a sub-panel's own __init__ (e.g. VideoEncodingBox's
+        # cbo_video_format) instead of the first page, which looked like a random tab
+        # on launch.
+        self.nb_options.SetSelection(0)
+
+        layout = wx.BoxSizer(wx.VERTICAL)
+        layout.Add(self.nb_options, 1, wx.EXPAND)
         self.pnl_options.SetSizer(layout)
 
         # preset panel
@@ -2290,6 +2340,22 @@ class MainFrame(wx.Frame):
                 lang_selection = i
         self.cbo_language.SetSelection(lang_selection)
 
+        # check for updates (read-only fetch + compare only -- never pulls/merges/
+        # resets anything; see docs/ai/AI_DECISIONS.md ADR-035)
+        self.sep_update = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
+        self.btn_check_updates = wx.Button(self.pnl_preset, label=T("Check for Updates"))
+        self.btn_check_updates.SetToolTip(
+            T("What it's for: checks whether the original upstream nunif project "
+              "(github.com/nagadomi/nunif) has new commits that aren't in this fork yet, and shows you "
+              "what they are.\n"
+              "How it helps: lets you see what's changed upstream without any risk to your setup or "
+              "this session's own customizations (RIFE, Z-Splat, HDR reinjection, subtitle muxing, "
+              "StereoMode tagging, etc.).\n"
+              "Con: read-only -- runs 'git fetch' plus a comparison only. It NEVER runs pull/merge/reset, "
+              "so nothing is ever applied automatically; this button cannot update anything by itself, "
+              "and upstream commits could conflict with this fork's own customizations if applied later.\n"
+              "Recommended: safe to click any time -- it only reads and reports, never changes anything."))
+
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.lbl_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
         layout.Add(self.cbo_app_preset, flag=wx.ALL, border=2)
@@ -2315,6 +2381,11 @@ class MainFrame(wx.Frame):
         layout.AddSpacer(4)
         layout.Add(self.lbl_language, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
         layout.Add(self.cbo_language, flag=wx.ALL, border=2)
+
+        layout.AddSpacer(2)
+        layout.Add(self.sep_update, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
+        layout.AddSpacer(4)
+        layout.Add(self.btn_check_updates, flag=wx.ALL, border=2)
         layout.AddSpacer(8)
         self.pnl_preset.SetSizer(layout)
 
@@ -2384,6 +2455,7 @@ class MainFrame(wx.Frame):
         self.btn_compare_presets.Bind(wx.EVT_BUTTON, self.on_click_btn_compare_presets)
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
         self.cbo_language.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_language)
+        self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_updates)
 
         self.btn_autocrop_test.Bind(wx.EVT_BUTTON, self.on_click_btn_autocrop_test)
         self.btn_scene_settings.Bind(wx.EVT_BUTTON, self.on_click_btn_scene_settings)
@@ -2417,6 +2489,50 @@ class MainFrame(wx.Frame):
         # previous session must not grab a CUDA context before the user does
         # anything. The checkbox/device handlers still probe on real interaction.
         self.update_controls(probe_compile=False)
+
+    def apply_accent_theme(self):
+        """3DECKER visual pass: a real, considered color palette using only what
+        wxPython natively supports (SetForegroundColour/SetBackgroundColour/SetFont) --
+        no new GUI toolkit, no control renamed/rebound/retooltipped. Runs after
+        apply_dark_mode() (nunif/gui/common.py) so it always applies last instead of
+        being clobbered by that function's blanket recursive fg/bg reset, and picks
+        light vs. dark palette values itself so the accent stays legible either way.
+        """
+        dark = is_dark_mode()
+        accent = wx.Colour(0x6f, 0xb2, 0xf7) if dark else wx.Colour(0x1f, 0x5f, 0xc9)
+        panel_bg = wx.Colour(0x2c, 0x30, 0x38) if dark else wx.Colour(0xf3, 0xf5, 0xf9)
+
+        box_font = self.grp_stereo.GetFont().Bold()
+        for box in (
+            self.grp_stereo, self.grp_depth_blend, self.grp_video_filter,
+            self.grp_processor, self.grp_postprocess,
+            self.grp_hdr_reinject, self.grp_submux, self.grp_stereotag,
+            self.grp_video_dec.grp_video_dec, self.grp_video.grp_video,
+        ):
+            box.SetForegroundColour(accent)
+            box.SetFont(box_font)
+
+        for panel in (
+            self, self.pnl_options, self.nb_options,
+            self.tab_stereo, self.tab_depth_blend, self.tab_video_filter,
+            self.tab_video_dec, self.tab_video_enc, self.tab_processor, self.tab_tools,
+            self.pnl_file_option, self.pnl_preset, self.pnl_process,
+            self.pnl_file.panel,
+        ):
+            panel.SetBackgroundColour(panel_bg)
+
+        # Primary/danger accents on the two most consequential process-panel actions
+        # only -- Start (goes) and Cancel (stops) -- everything else stays neutral so
+        # these two remain visually distinct, not just "the whole toolbar is colorful."
+        for btn, color in (
+            (self.btn_start, wx.Colour(0x21, 0x8a, 0x4c)),
+            (self.btn_cancel, wx.Colour(0xcc, 0x33, 0x33)),
+        ):
+            btn.SetForegroundColour(wx.Colour(0xff, 0xff, 0xff))
+            btn.SetBackgroundColour(color)
+            btn.SetFont(btn.GetFont().Bold())
+
+        self.Refresh()
 
     def update_controls(self, probe_compile=True):
         self.update_start_button_state()
@@ -3729,6 +3845,41 @@ class MainFrame(wx.Frame):
             wx.TheClipboard.Close()
         else:
             wx.MessageBox(T("Failed to open Clipbaord"), T("Error"), wx.OK | wx.ICON_ERROR)
+
+    # --- Check for Updates (read-only fetch + compare only, see docs/ai/AI_DECISIONS.md) ---
+
+    def run_check_updates(self):
+        # Runs on a background thread via startWorker -- this hits the network
+        # (git fetch) and must never freeze the GUI thread while waiting on it.
+        return update_check.check_for_updates()
+
+    def on_exit_check_updates_worker(self, result):
+        self.btn_check_updates.Enable()
+        try:
+            check_result = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        message = update_check.format_result_message(check_result)
+        if check_result["status"] == "error":
+            self.SetStatusText(T("Check for Updates failed"))
+            wx.MessageBox(message, T("Check for Updates"), wx.OK | wx.ICON_ERROR)
+        elif check_result["status"] == "up_to_date":
+            self.SetStatusText(T("Already up to date"))
+            wx.MessageBox(message, T("Check for Updates"), wx.OK | wx.ICON_INFORMATION)
+        else:
+            self.SetStatusText(T("Updates are available upstream"))
+            wx.MessageBox(message, T("Check for Updates"), wx.OK | wx.ICON_INFORMATION)
+
+    def on_click_btn_check_updates(self, event):
+        self.btn_check_updates.Disable()
+        self.SetStatusText(T("Checking for updates..."))
+        startWorker(self.on_exit_check_updates_worker, self.run_check_updates)
 
     def test_autocrop(self):
         self.txt_autocrop_test.SetValue("")

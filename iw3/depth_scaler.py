@@ -1,10 +1,86 @@
-import torch
+﻿import torch
 import numpy as np
 import cv2
 import torch.nn.functional as F
 
 
 _UNSET = object()
+
+
+def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
+                                  strength, max_shift_velocity, flat_region_boost, edge_protection):
+    """Core motion-warped blend shared by TemporalStabilizer (single-channel depth,
+    (H,W) arrays) and RGBTemporalStabilizer (3-channel RGB, (H,W,3) arrays) below --
+    extracted verbatim from TemporalStabilizer.stabilize()'s body so depth's existing,
+    already-tested behavior is byte-for-byte unchanged (this is a pure code move, not
+    a rewrite). Works on plain numpy arrays only -- no torch/tensor concerns -- so it
+    stays a single, genuinely shared implementation of "warp the previous frame's
+    value to where its content actually moved to via optical flow computed on gray,
+    then confidence-blend it with the fresh value" for either value shape, rather than
+    two near-identical copies.
+
+    gray/prev_gray are the (H,W) uint8 grayscale frames optical flow is computed from
+    (always derived from RGB, per TemporalStabilizer's own class docstring -- optical
+    flow on the value itself, e.g. raw depth, is too noisy to track motion reliably).
+    cv2.remap and elementwise blending both work unchanged on either a 2D (H,W) or a
+    3D (H,W,C) value_np -- only the flat/edge-structure Sobel gradient (2D-only) needs
+    an explicit luminance-collapse step when value_np carries multiple channels.
+
+    Returns the blended (H,W) or (H,W,3) float32 array -- caller keeps prev_gray/
+    prev_value bookkeeping (this function is stateless)."""
+    h, w = gray.shape
+    flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None,
+                                         0.5, 3, 15, 3, 5, 1.2, 0)
+    grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
+    map_x = grid_x + flow[..., 0]
+    map_y = grid_y + flow[..., 1]
+    warped_prev_value = cv2.remap(prev_value, map_x, map_y,
+                                   interpolation=cv2.INTER_LINEAR,
+                                   borderMode=cv2.BORDER_REPLICATE)
+
+    # Large flow = fast/unreliable motion -- taper trust in the warp back toward
+    # the fresh per-frame value rather than assume the warp is still accurate.
+    flow_mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+    distrust = np.clip(flow_mag / 15.0, 0.0, 1.0)
+    local_alpha = strength * (1.0 - distrust)
+
+    if flat_region_boost > 0.0 or edge_protection > 0.0:
+        # Both read the CURRENT frame's own value structure: a Sobel gradient
+        # magnitude is a direct, cheap proxy for "how much real detail/edge is
+        # here" -- near zero in a flat/featureless region, large at a genuine
+        # edge/silhouette. Normalized against this frame's own 95th-percentile
+        # gradient rather than a fixed constant, since raw gradient scale varies
+        # by source (same normalization approach as _depth_edge_mask in
+        # depth_blend.py, independently reimplemented here for this otherwise-
+        # unrelated module).
+        value_gray = value_np if value_np.ndim == 2 else cv2.cvtColor(
+            np.clip(value_np, 0, 255).astype(np.uint8) if value_np.dtype != np.uint8 else value_np,
+            cv2.COLOR_RGB2GRAY
+        ).astype(np.float32)
+        grad_x = cv2.Sobel(value_gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(value_gray, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(grad_x ** 2 + grad_y ** 2)
+        ref = float(np.percentile(grad_mag, 95.0))
+        edge_strength = np.clip(grad_mag / ref, 0.0, 1.0) if ref > 1e-6 else np.zeros_like(grad_mag)
+        flatness = 1.0 - edge_strength
+
+        if flat_region_boost > 0.0:
+            local_alpha = np.clip(local_alpha + flat_region_boost * flatness, 0.0, 1.0)
+        if edge_protection > 0.0:
+            local_alpha = np.clip(local_alpha - edge_protection * edge_strength, 0.0, 1.0)
+
+    blend_alpha = local_alpha if value_np.ndim == 2 else local_alpha[..., None]
+    stabilized = (blend_alpha * warped_prev_value + (1.0 - blend_alpha) * value_np).astype(np.float32)
+
+    if max_shift_velocity is not None:
+        # Hard cap on how much the OUTPUT can move from the previous OUTPUT frame
+        # to frame, regardless of what the flow-confidence blend above produced --
+        # catches occasional large jumps that blend alone doesn't fully suppress
+        # (e.g. a brief bad optical-flow estimate).
+        delta = np.clip(stabilized - prev_value, -max_shift_velocity, max_shift_velocity)
+        stabilized = (prev_value + delta).astype(np.float32)
+
+    return stabilized
 
 
 class TemporalStabilizer:
@@ -97,55 +173,89 @@ class TemporalStabilizer:
             self.prev_depth = depth_np
             return depth_chw
 
-        flow = cv2.calcOpticalFlowFarneback(self.prev_gray, gray, None,
-                                             0.5, 3, 15, 3, 5, 1.2, 0)
-        grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
-        map_x = grid_x + flow[..., 0]
-        map_y = grid_y + flow[..., 1]
-        warped_prev_depth = cv2.remap(self.prev_depth, map_x, map_y,
-                                       interpolation=cv2.INTER_LINEAR,
-                                       borderMode=cv2.BORDER_REPLICATE)
-
-        # Large flow = fast/unreliable motion -- taper trust in the warp back toward
-        # the fresh per-frame depth rather than assume the warp is still accurate.
-        flow_mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
-        distrust = np.clip(flow_mag / 15.0, 0.0, 1.0)
-        local_alpha = self.strength * (1.0 - distrust)
-
-        if self.flat_region_boost > 0.0 or self.edge_protection > 0.0:
-            # Both read the CURRENT frame's own depth structure: a Sobel gradient
-            # magnitude is a direct, cheap proxy for "how much real depth detail is
-            # here" -- near zero in a flat/featureless region (a wall, sky), large
-            # at a genuine depth edge/silhouette. Normalized against this frame's
-            # own 95th-percentile gradient rather than a fixed constant, since raw
-            # gradient scale varies by depth model/scene (same normalization
-            # approach as _depth_edge_mask in depth_blend.py, independently
-            # reimplemented here for this otherwise-unrelated module).
-            grad_x = cv2.Sobel(depth_np, cv2.CV_32F, 1, 0, ksize=3)
-            grad_y = cv2.Sobel(depth_np, cv2.CV_32F, 0, 1, ksize=3)
-            grad_mag = np.sqrt(grad_x ** 2 + grad_y ** 2)
-            ref = float(np.percentile(grad_mag, 95.0))
-            edge_strength = np.clip(grad_mag / ref, 0.0, 1.0) if ref > 1e-6 else np.zeros_like(grad_mag)
-            flatness = 1.0 - edge_strength
-
-            if self.flat_region_boost > 0.0:
-                local_alpha = np.clip(local_alpha + self.flat_region_boost * flatness, 0.0, 1.0)
-            if self.edge_protection > 0.0:
-                local_alpha = np.clip(local_alpha - self.edge_protection * edge_strength, 0.0, 1.0)
-
-        stabilized = (local_alpha * warped_prev_depth + (1.0 - local_alpha) * depth_np).astype(np.float32)
-
-        if self.max_shift_velocity is not None:
-            # Hard cap on how much the OUTPUT can move from the previous OUTPUT
-            # frame to frame, regardless of what the flow-confidence blend above
-            # produced -- catches occasional large jumps that blend alone doesn't
-            # fully suppress (e.g. a brief bad optical-flow estimate).
-            delta = np.clip(stabilized - self.prev_depth, -self.max_shift_velocity, self.max_shift_velocity)
-            stabilized = (self.prev_depth + delta).astype(np.float32)
+        stabilized = _optical_flow_temporal_blend(
+            depth_np, gray, self.prev_gray, self.prev_depth,
+            self.strength, self.max_shift_velocity, self.flat_region_boost, self.edge_protection,
+        )
 
         self.prev_gray = gray
         self.prev_depth = stabilized
         return torch.from_numpy(stabilized).unsqueeze(0).to(depth_chw.device, dtype=depth_chw.dtype)
+
+
+class RGBTemporalStabilizer:
+    """Applies TemporalStabilizer's exact motion-warped-blend technique (shared via
+    _optical_flow_temporal_blend above -- not a copy-paste) to a sequence of RGB
+    video frames instead of depth maps, to reduce frame-to-frame flicker in an
+    UPSCALED stereo video (see docs/ai/AI_DECISIONS.md ADR-040). Built for iw3's
+    stereo-aware waifu2x upscale post-processing step
+    (waifu2x_upscale_stereo_cli.py), which has nothing else to smooth flicker with:
+    unlike depth stabilization, RGB upscaling has no separate lower-resolution
+    "value" signal to blend -- the RGB frame IS both the optical-flow source and
+    the thing being stabilized. This is exactly the simplification the task that
+    added this class anticipated: "run the same algorithm but blend RGB pixel
+    values instead of depth values."
+
+    Kept as a distinct class from TemporalStabilizer (rather than one class with a
+    mode flag) because their public call shapes genuinely differ -- stabilize()
+    here takes a single frame (flow source == value), TemporalStabilizer.stabilize()
+    takes two (a separate, often lower-resolution depth value against a full-res
+    RGB flow source) -- forcing one signature to cover both would need dummy
+    arguments on one side or the other for no real benefit; the actual per-pixel
+    math they share now lives in exactly one place regardless."""
+
+    def __init__(self, enabled=False, strength=0.5,
+                 max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0):
+        self.enabled = enabled
+        self.strength = strength
+        self.max_shift_velocity = max_shift_velocity
+        self.flat_region_boost = float(flat_region_boost)
+        self.edge_protection = float(edge_protection)
+        self.prev_gray = None
+        self.prev_rgb = None
+
+    def reset(self, enabled=None, strength=None,
+              max_shift_velocity=_UNSET, flat_region_boost=None, edge_protection=None):
+        if enabled is not None:
+            self.enabled = bool(enabled)
+        if strength is not None:
+            self.strength = float(strength)
+        if max_shift_velocity is not _UNSET:
+            self.max_shift_velocity = max_shift_velocity
+        if flat_region_boost is not None:
+            self.flat_region_boost = float(flat_region_boost)
+        if edge_protection is not None:
+            self.edge_protection = float(edge_protection)
+        self.prev_gray = None
+        self.prev_rgb = None
+
+    def stabilize(self, rgb_chw):
+        """rgb_chw: (3, H, W) float tensor in [0, 1] (the convention nunif.utils.video's
+        VU.to_tensor already produces). Returns a tensor of the same shape/device/dtype,
+        motion-warp-blended with the previous frame's own stabilized RGB. First frame of
+        a sequence (or a resolution change, e.g. a new eye video) is returned unchanged --
+        nothing to stabilize against yet, same behavior as TemporalStabilizer."""
+        if not self.enabled or rgb_chw is None:
+            return rgb_chw
+
+        rgb_np = (rgb_chw.detach().float().clamp(0, 1) * 255.0).to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+        gray = cv2.cvtColor(rgb_np, cv2.COLOR_RGB2GRAY)
+        value_np = rgb_np.astype(np.float32)
+
+        if self.prev_gray is None or self.prev_gray.shape != gray.shape:
+            self.prev_gray = gray
+            self.prev_rgb = value_np
+            return rgb_chw
+
+        stabilized = _optical_flow_temporal_blend(
+            value_np, gray, self.prev_gray, self.prev_rgb,
+            self.strength, self.max_shift_velocity, self.flat_region_boost, self.edge_protection,
+        )
+
+        self.prev_gray = gray
+        self.prev_rgb = stabilized
+        out = torch.from_numpy(np.clip(stabilized, 0.0, 255.0) / 255.0).permute(2, 0, 1)
+        return out.to(rgb_chw.device, dtype=rgb_chw.dtype)
 
 
 def minmax_normalize(frame, min_value, max_value):

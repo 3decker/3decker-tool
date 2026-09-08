@@ -288,7 +288,7 @@ def _parse_search_results(payload):
     return results
 
 
-def search(api_key, moviehash=None, imdb_id=None, query=None, languages="eng",
+def search(api_key, moviehash=None, imdb_id=None, query=None, languages="en",
            order_by=None, jwt_token=None, base_url=API_BASE_URL, timeout=30):
     """Returns (results, error_message_or_None). results is a plain list of
     JSON-serializable dicts (see _RESULT_FIELDS + file_id/subtitle_id/uploader_name),
@@ -405,8 +405,11 @@ def create_parser():
                          help="IMDb ID to search by (e.g. tt0111161 or 111161). Optional.")
     parser.add_argument("--title", type=str, default=None,
                          help="Movie/show title to search by (fallback text query). Optional.")
-    parser.add_argument("--language", type=str, default="eng",
-                         help="ISO 639 language code to search for (e.g. eng, jpn, fre).")
+    parser.add_argument("--language", type=str, default="en",
+                         help="ISO 639-1 (2-letter) language code to search for (e.g. en, ja, fr) -- "
+                              "confirmed via live testing that OpenSubtitles' REST API silently "
+                              "returns zero results for a 3-letter ISO 639-2 code like 'eng', with "
+                              "no error, so this must be the 2-letter form.")
     parser.add_argument("--order-by", type=str, default="download_count",
                          help="OpenSubtitles result ordering field (e.g. download_count, "
                               "ratings, upload_date).")
@@ -647,7 +650,7 @@ def _self_test_search_parsing():
         return FakeResponse(json.dumps(fake_payload).encode("utf-8"))
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        results, error = search("real-api-key", moviehash="abc123", languages="eng",
+        results, error = search("real-api-key", moviehash="abc123", languages="en",
                                  order_by="download_count", jwt_token="fake-jwt")
     assert error is None, error
     assert len(results) == 2

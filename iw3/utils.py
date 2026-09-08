@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import traceback
 import os
 import subprocess
@@ -90,6 +90,46 @@ def _get_ffmpeg_bin():
     return shutil.which("ffmpeg") or "ffmpeg"
 
 
+# Selectable "Target Resolution" values for the stereo-aware waifu2x upscale path
+# (ADR-040) -- the FINAL PACKED (both eyes) frame width the user wants to land on.
+# "auto" (default, off) means: don't compute a target at all, keep today's plain
+# whole-frame _run_waifu2x_upscale behavior (fixed 2x/4x per the Method combo).
+WAIFU2X_TARGET_PACKED_WIDTH = {"4k": 3840, "8k": 7680}
+
+
+def _invoke_waifu2x_cli(input_path, output_path, method, noise_level, style, nunif_dir, log_prefix="[iw3]"):
+    """The actual waifu2x.cli subprocess invocation, factored out of
+    _run_waifu2x_upscale() so it is the single place this call is ever built --
+    both the plain whole-frame upscale path (_run_waifu2x_upscale) and the
+    per-eye stereo-aware path (waifu2x_upscale_stereo_cli.py, ADR-040) call this
+    same function, so they can never drift apart on how waifu2x itself is
+    invoked. Uses sys.executable (the same bundled Python already running this
+    process) with -m, so there's no separate interpreter path to discover the
+    way ffmpeg/dovi_tool need -- only the working directory needs to be pointed
+    at the nunif/ package root explicitly, since a subprocess does not inherit
+    this process's in-memory sys.path.
+
+    Returns True on verified success (subprocess exit 0 AND the output file
+    actually exists), False otherwise -- logs why in both failure cases itself.
+    Verifies the output file actually exists rather than trusting the
+    subprocess's exit code alone (see the HDR extraction silent-failure lesson
+    in docs/ai/AI_KNOWN_ISSUES.md)."""
+    cmd = [sys.executable, "-m", "waifu2x.cli",
+           "-i", str(input_path), "-o", str(output_path),
+           "-m", method, "-n", str(int(noise_level)),
+           "--style", style, "-y"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace").strip()
+        print(f"{log_prefix} waifu2x upscale failed: {msg[:300]}", file=sys.stderr)
+        return False
+    if not path.exists(output_path):
+        print(f"{log_prefix} waifu2x upscale exited 0 but produced no output file", file=sys.stderr)
+        return False
+    return True
+
+
 def _run_waifu2x_upscale(output_path, args):
     """Optionally invokes waifu2x's own CLI as a subprocess against a just-finished
     iw3 output, when the user explicitly opted in (GUI: "Upscale with waifu2x after
@@ -97,18 +137,17 @@ def _run_waifu2x_upscale(output_path, args):
     than an in-process import+call so waifu2x's own model loading never competes for
     the same GPU memory iw3's depth/stereo models were just using in this same
     process -- matches this project's existing convention of treating heavyweight
-    tools as subprocesses (see CODING_STANDARDS.md CS-SUBPROCESS-001). Uses
-    sys.executable (the same bundled Python already running this process) with -m,
-    so there's no separate interpreter path to discover the way ffmpeg/dovi_tool
-    need -- only the working directory needs to be pointed at the nunif/ package
-    root explicitly, since a subprocess does not inherit this process's in-memory
-    sys.path.
+    tools as subprocesses (see CODING_STANDARDS.md CS-SUBPROCESS-001).
 
     Returns the upscaled file's path on success, or None (having already logged why)
     on failure -- a failure here must never be mistaken for the conversion itself
-    having failed, since output_path is untouched either way. Verifies the output
-    file actually exists rather than trusting the subprocess's exit code alone (see
-    the HDR extraction silent-failure lesson in docs/ai/AI_KNOWN_ISSUES.md)."""
+    having failed, since output_path is untouched either way.
+
+    This is the plain whole-frame path -- see _run_waifu2x_upscale_stereo (ADR-040)
+    for the per-eye split/upscale/smooth path used instead when the output is a
+    packed two-eye stereo video AND a Target Resolution (4K/8K) is selected
+    (_should_use_stereo_upscale decides which one runs; this function is otherwise
+    completely unchanged from before that feature existed)."""
     if not getattr(args, "waifu2x_upscale", False):
         return None
     method = getattr(args, "waifu2x_method", None) or "noise_scale2x"
@@ -120,21 +159,10 @@ def _run_waifu2x_upscale(output_path, args):
 
     base, ext = path.splitext(str(output_path))
     upscaled_path = f"{base}_w2x{ext}"
-    cmd = [sys.executable, "-m", "waifu2x.cli",
-           "-i", str(output_path), "-o", upscaled_path,
-           "-m", method, "-n", str(int(noise_level)),
-           "--style", style, "-y"]
 
     print(f"[iw3] Upscaling finished output with waifu2x ({method}, noise={noise_level}, "
           f"style={style})...", file=sys.stderr)
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
-    except subprocess.CalledProcessError as e:
-        msg = e.stderr.decode(errors="replace").strip()
-        print(f"[iw3] waifu2x upscale failed: {msg[:300]}", file=sys.stderr)
-        return None
-    if not path.exists(upscaled_path):
-        print("[iw3] waifu2x upscale exited 0 but produced no output file", file=sys.stderr)
+    if not _invoke_waifu2x_cli(output_path, upscaled_path, method, noise_level, style, nunif_dir):
         return None
     print(f"[iw3] waifu2x upscale done: {upscaled_path}", file=sys.stderr)
     return upscaled_path
@@ -319,6 +347,217 @@ def _resolve_stereo_mode_value(args):
     # half_sbs, vr180 ("VR90" in the GUI), and the unflagged default (Full SBS) all pack
     # via the same dim=2 cat in postprocess_image's final `else` branch.
     return STEREO_MODE_SBS_LEFT_FIRST
+
+
+def _resolve_stereo_split_axis(args):
+    """Maps the same resolved StereoMode value _resolve_stereo_mode_value already
+    computes from args to which physical axis the two eyes are packed along, for
+    the stereo-aware waifu2x upscale path (ADR-040): "sbs" (vertical seam -- both
+    SBS StereoMode values map here, since a pure geometric split doesn't care
+    which eye's VIEW occupies which half, only where the seam is -- see
+    split_stereo_frame), "tb" (horizontal seam), or None when the resolved format
+    isn't a two-eye pair at all (RGB-D, Half RGB-D, Anaglyph, Debug Depth -- same
+    exclusions _resolve_stereo_mode_value already applies, for the same reason).
+
+    Deliberately reuses _resolve_stereo_mode_value (real args from the actual run
+    that produced the file) rather than the filename-suffix-tag detection pattern
+    used by the STANDALONE retroactive tools (subtitle_mux_cli.py/
+    stereo_mode_tag_cli.py) -- those tools duplicate suffix parsing because they
+    run later, without the original args, against an arbitrary file. This call
+    site is different: it always runs immediately after the SAME run's own args
+    produced output_path (see _run_waifu2x_upscale_stereo's callers), so reusing
+    the already-shared, already-correct resolver is strictly more reliable than
+    re-deriving the same answer by guessing a filename suffix back apart."""
+    value = _resolve_stereo_mode_value(args)
+    if value in (STEREO_MODE_SBS_LEFT_FIRST, STEREO_MODE_SBS_RIGHT_FIRST):
+        return "sbs"
+    if value == STEREO_MODE_TB_LEFT_FIRST:
+        return "tb"
+    return None
+
+
+def split_stereo_frame(frame, axis):
+    """Splits a packed two-eye frame (any array with H,W as its first two axes --
+    HWC or plain HxW, dtype-agnostic) into its two physical halves along the
+    packing axis: "sbs" (vertical seam -> left half, right half) or "tb"
+    (horizontal seam -> top half, bottom half). Pure slicing -- no eye-identity
+    semantics (which eye's VIEW occupies which half, e.g. reversed for
+    Cross-Eyed, is resolved separately by _resolve_stereo_split_axis's caller and
+    is irrelevant to a pure geometric split/rejoin). An odd packed dimension
+    gives the remainder pixel to the second half, so join_stereo_frame always
+    reconstructs the exact original frame with no pixel loss."""
+    if axis == "sbs":
+        mid = frame.shape[1] // 2
+        return frame[:, :mid, ...], frame[:, mid:, ...]
+    elif axis == "tb":
+        mid = frame.shape[0] // 2
+        return frame[:mid, ...], frame[mid:, ...]
+    raise ValueError(f"unknown stereo split axis: {axis!r}")
+
+
+def join_stereo_frame(a, b, axis):
+    """Inverse of split_stereo_frame -- concatenates the two eye halves back along
+    the same axis. Round-trips split_stereo_frame pixel-for-pixel when neither
+    half was resized in between (see the regression test in
+    waifu2x_upscale_stereo_cli.py's --self-test)."""
+    if axis == "sbs":
+        return np.concatenate([a, b], axis=1)
+    elif axis == "tb":
+        return np.concatenate([a, b], axis=0)
+    raise ValueError(f"unknown stereo split axis: {axis!r}")
+
+
+def compute_stereo_upscale_plan(src_packed_w, src_packed_h, axis, target_packed_w):
+    """Works out the concrete per-eye upscale plan needed to bring a packed
+    two-eye source video up to a target FINAL PACKED width (e.g. 7680 for 8K),
+    computed from the source's own real packed resolution -- never assumes a
+    fixed 2x/4x always lands exactly on the requested target (ADR-040).
+
+    target_packed_h is derived by preserving the SOURCE's own packed aspect
+    ratio (not hardcoded to 16:9), so a non-16:9 source still lands on a
+    correctly-proportioned final packed frame instead of a wrong fixed height.
+    A useful consequence of always preserving the source's own aspect ratio
+    this way: the needed per-eye scale factor always comes out UNIFORM (same
+    on width and height, up to integer rounding) regardless of source aspect
+    ratio or squeeze (Half-SBS/TB vs Full-SBS/TB) -- there is never a real case
+    where width and height need genuinely different scale factors, so no
+    aspect-distorting anisotropic upscale is ever required.
+
+    scale_tier is the smaller of waifu2x's two available upscale factors (2x or
+    4x -- the only tiers any bundled/external SR method here actually offers,
+    see waifu2x/ui_utils.py's _method_type fixed_choices) that brings the
+    upscaled eye to AT LEAST the target eye resolution in both dimensions; the
+    caller (waifu2x_upscale_stereo_cli.py) resizes down to the exact target
+    after upscaling, since a real SR model's fixed multiplier will essentially
+    never land on an exact requested pixel count by itself."""
+    if src_packed_w <= 0 or src_packed_h <= 0:
+        raise ValueError(f"invalid source packed resolution: {src_packed_w}x{src_packed_h}")
+    if axis not in ("sbs", "tb"):
+        raise ValueError(f"unknown stereo split axis: {axis!r}")
+    if target_packed_w <= 0:
+        raise ValueError(f"invalid target packed width: {target_packed_w}")
+
+    target_packed_h = round(target_packed_w * src_packed_h / src_packed_w)
+    if axis == "sbs":
+        src_eye_w, src_eye_h = src_packed_w // 2, src_packed_h
+        target_eye_w, target_eye_h = target_packed_w // 2, target_packed_h
+    else:  # tb
+        src_eye_w, src_eye_h = src_packed_w, src_packed_h // 2
+        target_eye_w, target_eye_h = target_packed_w, target_packed_h // 2
+
+    needed_scale = max(target_eye_w / src_eye_w, target_eye_h / src_eye_h)
+    scale_tier = 2 if needed_scale <= 2.0 else 4
+
+    return {
+        "target_packed_w": target_packed_w,
+        "target_packed_h": target_packed_h,
+        "src_eye_w": src_eye_w,
+        "src_eye_h": src_eye_h,
+        "target_eye_w": target_eye_w,
+        "target_eye_h": target_eye_h,
+        "needed_scale": needed_scale,
+        "scale_tier": scale_tier,
+    }
+
+
+def resolve_waifu2x_method_for_tier(method, scale_tier):
+    """Rewrites a user-chosen waifu2x --method string (e.g. "noise_scale2x") to use
+    the given scale_tier (2 or 4, from compute_stereo_upscale_plan) instead,
+    preserving whichever family (noise_scale / scale / realesrgan / bsrgan / an
+    "onnx:<file>" custom model -- see waifu2x/ui_utils.py's _method_type) the
+    user actually picked. Only the trailing 2x/4x multiplier is swapped, since
+    that's the only part the scale-tier decision is actually about."""
+    for suffix in ("4x", "2x"):
+        if method.endswith(suffix):
+            return f"{method[:-len(suffix)]}{scale_tier}x"
+    # No recognizable 2x/4x suffix (a bare "noise"/"scale", or a custom onnx:
+    # model with a fixed baked-in scale) -- nothing to rewrite; the final resize
+    # step in waifu2x_upscale_stereo_cli.py still lands on the exact target.
+    return method
+
+
+def _should_use_stereo_upscale(args):
+    """True only when the user opted into BOTH waifu2x upscaling AND a real
+    (non-"auto") Target Resolution, AND the resolved output format is an actual
+    two-eye packed stereo pair (_resolve_stereo_split_axis) -- e.g. RGB-D, Half
+    RGB-D, Anaglyph, and Debug Depth output never qualify, same exclusions
+    _resolve_stereo_mode_value already applies (not a two-eye pair to split at
+    all). When this is False, the caller uses the existing plain whole-frame
+    _run_waifu2x_upscale completely unchanged -- this is the single
+    off-by-default gate for the entire per-eye split/smooth feature (ADR-040)."""
+    if not getattr(args, "waifu2x_upscale", False):
+        return False
+    target = getattr(args, "waifu2x_upscale_target", None) or "auto"
+    if target not in WAIFU2X_TARGET_PACKED_WIDTH:
+        return False
+    return _resolve_stereo_split_axis(args) is not None
+
+
+def _run_waifu2x_upscale_stereo(output_path, args):
+    """Per-eye, stereo-aware alternative to _run_waifu2x_upscale (ADR-040), used
+    only when _should_use_stereo_upscale(args) is True: splits the packed output
+    into its two independent eye videos at the correct axis, upscales EACH EYE
+    INDEPENDENTLY with waifu2x (via the same _invoke_waifu2x_cli() subprocess
+    call _run_waifu2x_upscale uses -- never duplicated), smooths each eye's own
+    upscaled frame sequence independently with RGBTemporalStabilizer (never
+    blending information across eyes), resizes to the exact computed per-eye
+    target resolution, and recombines into the final packed output at the
+    requested Target Resolution (4K/8K).
+
+    Runs as a genuinely separate subprocess (iw3.waifu2x_upscale_stereo_cli),
+    exactly mirroring _run_waifu2x_upscale/_run_rife_interpolation's own
+    subprocess pattern -- waifu2x's model must never share GPU memory with
+    iw3's depth/stereo models still resident in this process.
+
+    Returns the upscaled file's path on success, or None (having already
+    logged why) on failure -- output_path itself is never touched either way."""
+    if not _should_use_stereo_upscale(args):
+        return None
+    axis = _resolve_stereo_split_axis(args)
+    target_key = getattr(args, "waifu2x_upscale_target", None) or "auto"
+    target_packed_w = WAIFU2X_TARGET_PACKED_WIDTH[target_key]
+    method = getattr(args, "waifu2x_method", None) or "noise_scale2x"
+    noise_level = getattr(args, "waifu2x_noise_level", None)
+    if noise_level is None:
+        noise_level = 1
+    style = getattr(args, "waifu2x_style", None) or "photo"
+    crf = getattr(args, "crf", None)
+    crf = str(crf) if crf is not None else "20"
+    preset = getattr(args, "preset", None) or "medium"
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+
+    base, ext = path.splitext(str(output_path))
+    upscaled_path = f"{base}_w2x{ext}"
+
+    cmd = [sys.executable, "-m", "iw3.waifu2x_upscale_stereo_cli",
+           "-i", str(output_path), "-o", upscaled_path,
+           "--split-axis", axis,
+           "--target-packed-width", str(target_packed_w),
+           "--waifu2x-method", method,
+           "--waifu2x-noise-level", str(int(noise_level)),
+           "--waifu2x-style", style,
+           "--crf", crf,
+           "--preset", str(preset)]
+    gpu = getattr(args, "gpu", None)
+    if isinstance(gpu, (list, tuple)) and len(gpu) > 0:
+        cmd += ["--gpu", str(gpu[0])]
+    elif isinstance(gpu, int):
+        cmd += ["--gpu", str(gpu)]
+
+    print(f"[iw3] Stereo-aware upscaling finished output with waifu2x (split={axis}, "
+          f"target={target_key}, method={method}, noise={noise_level}, style={style})...",
+          file=sys.stderr)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace").strip()
+        print(f"[iw3] stereo-aware waifu2x upscale failed: {msg[:300]}", file=sys.stderr)
+        return None
+    if not path.exists(upscaled_path):
+        print("[iw3] stereo-aware waifu2x upscale exited 0 but produced no output file", file=sys.stderr)
+        return None
+    print(f"[iw3] stereo-aware waifu2x upscale done: {upscaled_path}", file=sys.stderr)
+    return upscaled_path
 
 
 def _apply_stereo_mode_tag(output_path, args, mkvpropedit_bin=None):
@@ -1297,6 +1536,9 @@ def _build_iw3_comment_metadata(args, video=True):
             f"iw3_waifu2x_upscale_requested=1 iw3_waifu2x_method={w2x_method} "
             f"iw3_waifu2x_noise_level={int(w2x_noise)} iw3_waifu2x_style={w2x_style}"
         )
+        w2x_target = getattr(args, "waifu2x_upscale_target", None) or "auto"
+        if w2x_target in WAIFU2X_TARGET_PACKED_WIDTH:
+            comment_parts.append(f"iw3_waifu2x_upscale_target={w2x_target}")
 
     return " ".join(comment_parts) if comment_parts else None
 
@@ -3020,7 +3262,10 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     # cancellation without raising, so a cancelled job would otherwise still reach here.
     stop_event = args.state.get("stop_event") if getattr(args, "state", None) else None
     if not (stop_event is not None and stop_event.is_set()):
-        _run_waifu2x_upscale(output_path, args)
+        if _should_use_stereo_upscale(args):
+            _run_waifu2x_upscale_stereo(output_path, args)
+        else:
+            _run_waifu2x_upscale(output_path, args)
         _run_rife_interpolation(output_path, args)
 
 
@@ -3999,6 +4244,27 @@ def create_parser(required_true=True):
                         help=("which RIFE model tier to use for --rife-interpolate. rife_425 (default) is "
                               "the recommended full-quality model; rife_425_lite is a lower-compute-cost "
                               "variant. Weights are downloaded on first use if not already present."))
+    parser.add_argument("--waifu2x-upscale", action="store_true",
+                        help=("after conversion finishes, run the finished output through waifu2x (a "
+                              "separate, dedicated AI upscaler bundled with this app) as one extra step. "
+                              "Written to a separate '<name>_w2x<ext>' file -- the original conversion "
+                              "output is never modified. See --waifu2x-method/--waifu2x-noise-level/"
+                              "--waifu2x-style for the plain whole-frame upscale's own settings (GUI-only "
+                              "controls historically; use waifu2x.cli directly for full control from the "
+                              "CLI). --waifu2x-upscale-target additionally selects a stereo-aware per-eye "
+                              "upscale path on a packed 3D video output."))
+    parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
+                        choices=["auto", "4k", "8k"],
+                        help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "
+                              "stereo video output (Half/Full SBS, Half/Full TB, Cross-Eyed, VR180). "
+                              "'auto' (default) leaves --waifu2x-upscale's plain whole-frame behavior "
+                              "completely unchanged (fixed 2x/4x per --waifu2x-method). '4k'/'8k' instead "
+                              "run a stereo-aware path (iw3.waifu2x_upscale_stereo_cli): split the packed "
+                              "frame into its two independent eye images, upscale each eye independently, "
+                              "apply RGB temporal smoothing to each eye's own frame sequence to reduce "
+                              "flicker at very high output resolutions, then recombine at the requested "
+                              "FINAL PACKED width (3840 for 4k, 7680 for 8k) -- the actual per-eye scale "
+                              "factor needed is computed from your source's real resolution, not assumed."))
     parser.add_argument("--foreground-scale", type=float, choices=[Range(-3.0, 3.0)], default=0,
                         help="foreground scaling level. 0 is disabled")
     parser.add_argument("--mapper-type", type=str, choices=["div", "mul", "shift"], default=None,

@@ -1,4 +1,4 @@
-import nunif.pythonw_fix  # noqa
+﻿import nunif.pythonw_fix  # noqa
 import nunif.gui.subprocess_patch  # noqa
 import sys
 import os
@@ -22,6 +22,7 @@ from .utils import (
     _get_ffmpeg_bin, _find_mkvmerge,
 )
 from . import update_check
+from . import subtitle_search_cli
 from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available, create_device
 from nunif.models.utils import check_compile_support
@@ -1908,6 +1909,28 @@ class MainFrame(wx.Frame):
         self.cbo_waifu2x_style.SetToolTip(
             T("waifu2x model style. \"photo\" is the better default for real movie footage; \"art\" is "
               "tuned for illustration/anime source material."))
+        self.cbo_waifu2x_target = wx.ComboBox(self.grp_postprocess,
+                                              choices=["auto", "4k", "8k"],
+                                              name="cbo_waifu2x_target")
+        self.cbo_waifu2x_target.SetEditable(False)
+        self.cbo_waifu2x_target.SetSelection(0)
+        self.cbo_waifu2x_target.SetToolTip(
+            T("What it's for: only takes effect on a packed 3D stereo video output (Half/Full SBS, "
+              "Half/Full TB, Cross-Eyed, VR90). \"auto\" (default) leaves the plain whole-frame upscale "
+              "above completely unchanged (fixed 2x/4x from Method). \"4k\"/\"8k\" instead switch to a "
+              "stereo-aware upscale: the video is split into its two independent eye images first, each "
+              "eye is upscaled separately (so the AI upscaler never blurs/blends pixels across the seam "
+              "between the two eyes the way upscaling the packed frame whole can), a frame-to-frame "
+              "smoothing pass reduces flicker that becomes more visible at very high output resolutions, "
+              "then the eyes are recombined. The exact per-eye enlargement needed is computed from your "
+              "source's real resolution and split direction, so the final packed video actually lands on "
+              "the requested width (3840 for 4k, 7680 for 8k) rather than assuming a fixed multiplier "
+              "happens to fit.\n"
+              "Con: several extra full passes over the video beyond the plain whole-frame path above, so "
+              "real processing time is meaningfully longer -- expect this to matter most on a full-length "
+              "video.\n"
+              "Recommended: auto unless you specifically need a 4K/8K delivery file from a 3D stereo "
+              "source and want the cleaner per-eye result."))
         self.chk_waifu2x_upscale.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_waifu2x_upscale)
         self.update_waifu2x_upscale()
 
@@ -1955,6 +1978,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_waifu2x_method, (j := j + 1, 0), flag=wx.EXPAND | wx.LEFT, border=14)
         layout.Add(self.cbo_waifu2x_noise_level, (j, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_waifu2x_style, (j, 2), flag=wx.EXPAND)
+        layout.Add(self.cbo_waifu2x_target, (j, 3), flag=wx.EXPAND)
 
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -2077,6 +2101,148 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_reinject_log, (h, 0), (0, 3), flag=wx.EXPAND)
         sizer_hdr_reinject = wx.StaticBoxSizer(self.grp_hdr_reinject, wx.VERTICAL)
         sizer_hdr_reinject.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+
+        # --- standalone utility: search/download subtitles from OpenSubtitles (ADR-039) ---
+        # NOT part of the main conversion pipeline -- searches OpenSubtitles' REST API for
+        # a matching subtitle and downloads a plain .srt, so the natural next step (Add
+        # Subtitle Track below) has something to feed it without leaving this app. Calls
+        # iw3.subtitle_search_cli's search()/download() directly (in-process, not a
+        # subprocess like the other standalone tools in this column) since it needs no
+        # GPU/process isolation -- just a real network call, still run off the GUI thread
+        # via startWorker since it's real network I/O. See that module's own docstring /
+        # docs/ai/AI_DECISIONS.md ADR-039 for the full design.
+        self.grp_subsearch = wx.StaticBox(
+            self.tab_tools, label=T("Search Subtitles (OpenSubtitles) (Standalone Tool)"))
+
+        self.lbl_subsearch_source = wx.StaticText(self.grp_subsearch, label=T("Original Source File (optional)"))
+        self.txt_subsearch_source = wx.TextCtrl(self.grp_subsearch, name="txt_subsearch_source")
+        self.txt_subsearch_source.SetToolTip(
+            T("What it's for: the ORIGINAL, pre-conversion source video file -- optional. When given "
+              "and at least 128KB, its OpenSubtitles moviehash (file size plus a checksum of only the "
+              "first and last 64KB, never the whole file) is computed and used for exact-match "
+              "results -- the same OSHash algorithm OpenSubtitles has used for years.\n"
+              "Why this is a different file from Add Subtitle Track's 'Converted 3D Video' field "
+              "below: an already-converted iw3 SBS/TB output is a structurally different file "
+              "(different size, different bytes entirely) and will essentially never hash-match "
+              "anything -- moviehash only works against the real original movie file.\n"
+              "Con: files under 128KB can't be hashed this way -- falls back to Title/IMDb ID search "
+              "automatically in that case, noted in the log below.\n"
+              "Recommended: point this at the original file you converted from, if you still have "
+              "it, for the most exact match; otherwise leave blank and use Title/IMDb ID instead."))
+        self.btn_subsearch_source = wx.Button(self.grp_subsearch, label=T("..."))
+
+        self.lbl_subsearch_title = wx.StaticText(self.grp_subsearch, label=T("Title"))
+        self.txt_subsearch_title = wx.TextCtrl(self.grp_subsearch, name="txt_subsearch_title")
+        self.txt_subsearch_title.SetToolTip(
+            T("What it's for: movie/show title to search by -- optional fallback text search, used "
+              "when Original Source File isn't given or its moviehash didn't match anything.\n"
+              "Con: text search can return multiple/ambiguous candidates for common titles -- review "
+              "the results list below (release name, uploader) before downloading.\n"
+              "Recommended: the exact title, optionally with year (e.g. 'Interstellar 2014') for a "
+              "more precise match."))
+
+        self.lbl_subsearch_imdb = wx.StaticText(self.grp_subsearch, label=T("IMDb ID"))
+        self.txt_subsearch_imdb = wx.TextCtrl(self.grp_subsearch, name="txt_subsearch_imdb")
+        self.txt_subsearch_imdb.SetToolTip(
+            T("What it's for: search by IMDb ID (e.g. tt0111161 or 111161) instead of a text title -- "
+              "optional, more precise than Title when you have it.\n"
+              "Recommended: leave blank unless you already know the exact IMDb ID; Title search "
+              "works fine for most movies."))
+
+        self.lbl_subsearch_language = wx.StaticText(self.grp_subsearch, label=T("Language"))
+        self.cbo_subsearch_language = wx.ComboBox(
+            self.grp_subsearch, value="en", name="cbo_subsearch_language",
+            choices=["en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko",
+                     "zh", "nl", "sv", "no", "da", "pl", "tr", "ar", "hi"])
+        self.cbo_subsearch_language.SetToolTip(
+            T("What it's for: the subtitle language to search for, as an ISO 639-1 two-letter code "
+              "(e.g. en, ja, fr, de) -- confirmed by a real live search against OpenSubtitles' API "
+              "that its 'languages' search parameter needs the two-letter form; this is DIFFERENT "
+              "from Add Subtitle Track's Language field below, which stores an ISO 639-2 three-"
+              "letter code (e.g. eng) as MKV track metadata -- a separate, unrelated code space, so "
+              "the two fields are deliberately not the same convention.\n"
+              "Values: pick from the dropdown, or type any other ISO 639-1 code OpenSubtitles "
+              "supports -- this list only covers the most common languages, it isn't exhaustive.\n"
+              "Recommended: match the language you want the subtitle text to actually be in; "
+              "default 'en' if unsure."))
+
+        self.btn_subsearch_search = wx.Button(self.grp_subsearch, label=T("Search"))
+        self.btn_subsearch_search.SetToolTip(
+            T("What it's for: searches OpenSubtitles' API for candidate subtitles matching whatever "
+              "criteria above are filled in -- runs in the background so the app stays responsive "
+              "while it waits on the network.\n"
+              "How it's safe: search never spends download quota -- only Download Selected below "
+              "does. Search as many times as you like.\n"
+              "Con: needs a configured OpenSubtitles API key (nunif/tmp/opensubtitles_config.json) "
+              "-- if missing, the log below shows exactly how to register one and where to paste it.\n"
+              "Recommended: fill in at least one of Original Source File / Title / IMDb ID first, "
+              "then click Search and review the results list before downloading anything."))
+
+        self.lst_subsearch_results = wx.ListCtrl(
+            self.grp_subsearch, style=wx.LC_REPORT | wx.LC_SINGLE_SEL,
+            size=self.FromDIP((-1, 140)), name="lst_subsearch_results")
+        self.lst_subsearch_results.InsertColumn(0, T("Release"), width=self.FromDIP(220))
+        self.lst_subsearch_results.InsertColumn(1, T("Lang"), width=self.FromDIP(45))
+        self.lst_subsearch_results.InsertColumn(2, T("Rating"), width=self.FromDIP(50))
+        self.lst_subsearch_results.InsertColumn(3, T("Downloads"), width=self.FromDIP(70))
+        self.lst_subsearch_results.InsertColumn(4, T("Uploader"), width=self.FromDIP(90))
+        self.lst_subsearch_results.InsertColumn(5, T("Flag"), width=self.FromDIP(45))
+        self.lst_subsearch_results.SetToolTip(
+            T("What it's for: candidate subtitles from the last search, sorted with plain (non-AI/"
+              "machine-translated) results first. Columns: Release name, Language, Rating, "
+              "Downloads, Uploader, Flag.\n"
+              "Values: a red '[MT]' Flag marks a machine-translated or AI-translated result -- most "
+              "users want to avoid these auto-translated subs, which is why they're sorted after the "
+              "plain results rather than mixed in.\n"
+              "Recommended: prefer a high-Downloads, high-Rating, unflagged result when more than "
+              "one candidate looks right for your movie."))
+        self.subsearch_results = []
+
+        self.btn_subsearch_download = wx.Button(self.grp_subsearch, label=T("Download Selected"))
+        self.btn_subsearch_download.Disable()
+        self.btn_subsearch_download.SetToolTip(
+            T("What it's for: downloads the selected result's .srt file -- disabled until a result "
+              "is selected above.\n"
+              "Con: spends exactly one of your OpenSubtitles daily download-quota credits, unlike "
+              "Search which is free -- only click this once you've picked the right candidate.\n"
+              "How it helps next: once downloaded, if Add Subtitle Track's Subtitle File field below "
+              "is still empty, it's auto-filled with the new .srt so adding it as a track is one "
+              "click away.\n"
+              "Recommended: check the log below afterward for the saved file path and your "
+              "remaining download quota for today."))
+
+        self.txt_subsearch_log = wx.TextCtrl(self.grp_subsearch, style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                              size=self.FromDIP((-1, 60)), name="txt_subsearch_log")
+        self.txt_subsearch_log.SetToolTip(
+            T("Shows this tool's own output verbatim, including the exact actionable message if no "
+              "OpenSubtitles API key is configured yet, and the server-reported download quota "
+              "(remaining/requests/reset time) after every download -- not just a generic pass/"
+              "fail."))
+
+        self.btn_subsearch_source.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_source)
+        self.btn_subsearch_search.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_search)
+        self.lst_subsearch_results.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_select_lst_subsearch_results)
+        self.lst_subsearch_results.Bind(wx.EVT_LIST_ITEM_DESELECTED, self.on_select_lst_subsearch_results)
+        self.btn_subsearch_download.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_download)
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_subsearch_source, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_subsearch_source, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_subsearch_source, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_subsearch_title, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_subsearch_title, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_subsearch_imdb, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_subsearch_imdb, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_subsearch_language, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_subsearch_language, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_subsearch_search, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.lst_subsearch_results, (h := h + 1, 0), (0, 4), flag=wx.EXPAND)
+        layout.Add(self.btn_subsearch_download, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_subsearch_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        sizer_subsearch = wx.StaticBoxSizer(self.grp_subsearch, wx.VERTICAL)
+        sizer_subsearch.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: add an SRT subtitle track (ADR-032) ---
         # NOT part of the main conversion pipeline -- takes an already-converted 3D
@@ -2332,6 +2498,7 @@ class MainFrame(wx.Frame):
 
         tab_layout = wx.BoxSizer(wx.VERTICAL)
         tab_layout.Add(sizer_hdr_reinject, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_subsearch, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_submux, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
@@ -2646,7 +2813,7 @@ class MainFrame(wx.Frame):
         for box in (
             self.grp_stereo, self.grp_depth_blend, self.grp_video_filter,
             self.grp_processor, self.grp_postprocess,
-            self.grp_hdr_reinject, self.grp_submux, self.grp_stereotag,
+            self.grp_hdr_reinject, self.grp_subsearch, self.grp_submux, self.grp_stereotag,
             self.grp_video_dec.grp_video_dec, self.grp_video.grp_video,
         ):
             box.SetForegroundColour(accent)
@@ -3111,6 +3278,7 @@ class MainFrame(wx.Frame):
         self.cbo_waifu2x_method.Enable(enabled)
         self.cbo_waifu2x_noise_level.Enable(enabled)
         self.cbo_waifu2x_style.Enable(enabled)
+        self.cbo_waifu2x_target.Enable(enabled)
 
     def on_changed_chk_waifu2x_upscale(self, event):
         self.update_waifu2x_upscale()
@@ -3509,6 +3677,7 @@ class MainFrame(wx.Frame):
             waifu2x_method=self.cbo_waifu2x_method.GetValue(),
             waifu2x_noise_level=int(self.cbo_waifu2x_noise_level.GetValue()),
             waifu2x_style=self.cbo_waifu2x_style.GetValue(),
+            waifu2x_upscale_target=self.cbo_waifu2x_target.GetValue(),
             rife_interpolate=self.chk_rife_interpolate.GetValue(),
             rife_model=self.cbo_rife_model.GetValue(),
             scene_detect=scene_detect,
@@ -4636,6 +4805,192 @@ class MainFrame(wx.Frame):
         self.btn_reinject_run.Disable()
         self.SetStatusText(T("Running HDR reinjection..."))
         startWorker(self.on_exit_reinject_worker, self.run_reinject_hdr, wargs=(cmd,))
+
+    # --- Search Subtitles (OpenSubtitles, standalone tool, see ADR-039) ---
+
+    def on_click_btn_subsearch_source(self, event):
+        with wx.FileDialog(self, message=T("Select Original Source File"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_subsearch_source.GetValue():
+                dlg.SetPath(self.txt_subsearch_source.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_subsearch_source.SetValue(dlg.GetPath())
+
+    def run_subsearch(self, moviehash, imdb_id, query, language):
+        # Runs on a background thread via startWorker -- calls subtitle_search_cli.search()
+        # directly (not via subprocess, unlike the other standalone tools in this tab) since
+        # this needs no GPU/process isolation, just a real network call to OpenSubtitles --
+        # still kept off the GUI thread since it's real network I/O. Config/API-key
+        # resolution mirrors exactly what subtitle_search_cli.run() (the CLI entry point)
+        # does itself.
+        config = subtitle_search_cli._load_config(subtitle_search_cli.CONFIG_PATH)
+        api_key = subtitle_search_cli.resolve_api_key(None, config)
+        return subtitle_search_cli.search(
+            api_key, moviehash=moviehash, imdb_id=imdb_id, query=query, languages=language)
+
+    def populate_subsearch_results(self):
+        self.lst_subsearch_results.DeleteAllItems()
+        for i, r in enumerate(self.subsearch_results):
+            flagged = bool(r.get("machine_translated") or r.get("ai_translated"))
+            idx = self.lst_subsearch_results.InsertItem(i, r.get("release") or "")
+            self.lst_subsearch_results.SetItem(idx, 1, str(r.get("language") or ""))
+            self.lst_subsearch_results.SetItem(
+                idx, 2, str(r["ratings"]) if r.get("ratings") is not None else "")
+            self.lst_subsearch_results.SetItem(
+                idx, 3, str(r["download_count"]) if r.get("download_count") is not None else "")
+            self.lst_subsearch_results.SetItem(idx, 4, r.get("uploader_name") or "")
+            self.lst_subsearch_results.SetItem(idx, 5, "[MT]" if flagged else "")
+            if flagged:
+                self.lst_subsearch_results.SetItemTextColour(idx, wx.Colour(0xcc, 0x33, 0x33))
+
+    def on_exit_subsearch_worker(self, result):
+        self.btn_subsearch_search.Enable()
+        try:
+            results, error = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_subsearch_log.AppendText("\n" + message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        if error:
+            # Surfaced verbatim -- e.g. subtitle_search_cli.REGISTER_KEY_INSTRUCTIONS when
+            # no API key is configured, per docs/ai/AI_DECISIONS.md ADR-039 -- not a
+            # generic failure toast.
+            self.txt_subsearch_log.AppendText("\n" + error)
+            self.SetStatusText(T("Subtitle search failed -- see the log below"))
+            return
+
+        # Prefer non-machine/AI-translated results first (stable sort preserves the API's
+        # own within-group ordering) -- same preference subtitle_search_cli's own
+        # _pick_best_result() applies for the CLI's auto-pick, just shown as a full sorted
+        # list here instead of auto-choosing one.
+        self.subsearch_results = sorted(
+            results, key=lambda r: bool(r.get("machine_translated") or r.get("ai_translated")))
+        self.populate_subsearch_results()
+        self.btn_subsearch_download.Disable()
+        if results:
+            self.txt_subsearch_log.AppendText(f"\nFound {len(results)} result(s).")
+            self.SetStatusText(T("Subtitle search finished"))
+        else:
+            self.txt_subsearch_log.AppendText("\n" + T("No results found."))
+            self.SetStatusText(T("Subtitle search: no results"))
+
+    def on_click_btn_subsearch_search(self, event):
+        source = self.txt_subsearch_source.GetValue().strip()
+        title = self.txt_subsearch_title.GetValue().strip()
+        imdb_id = self.txt_subsearch_imdb.GetValue().strip()
+        language = self.cbo_subsearch_language.GetValue().strip() or "en"
+
+        if not source and not title and not imdb_id:
+            wx.MessageBox(T("Provide at least one of Original Source File, Title, or IMDb ID."),
+                          T("Search Subtitles"), wx.OK | wx.ICON_WARNING)
+            return
+
+        moviehash = None
+        log_lines = []
+        if source:
+            if not path.exists(source):
+                wx.MessageBox(T("Select a valid Original Source File."),
+                              T("Search Subtitles"), wx.OK | wx.ICON_WARNING)
+                return
+            try:
+                moviehash, filesize = subtitle_search_cli.compute_moviehash(source)
+            except OSError as e:
+                wx.MessageBox(str(e), T("Search Subtitles"), wx.OK | wx.ICON_ERROR)
+                return
+            if moviehash is None:
+                log_lines.append(
+                    f"Original Source File is only {filesize} bytes (minimum "
+                    f"{subtitle_search_cli.MOVIEHASH_MIN_FILE_SIZE} needed for moviehash) -- "
+                    f"falling back to Title/IMDb ID search.")
+            else:
+                log_lines.append(f"Computed moviehash: {moviehash}")
+
+        self.subsearch_results = []
+        self.lst_subsearch_results.DeleteAllItems()
+        self.btn_subsearch_download.Disable()
+        log_lines.append(T("Searching..."))
+        self.txt_subsearch_log.SetValue("\n".join(log_lines))
+        self.btn_subsearch_search.Disable()
+        self.SetStatusText(T("Searching OpenSubtitles..."))
+        startWorker(self.on_exit_subsearch_worker, self.run_subsearch,
+                    wargs=(moviehash, imdb_id or None, title or None, language))
+
+    def on_select_lst_subsearch_results(self, event):
+        self.btn_subsearch_download.Enable(self.lst_subsearch_results.GetFirstSelected() != -1)
+
+    def run_subsearch_download(self, file_id, output_dir):
+        # Runs on a background thread via startWorker, same reasoning as run_subsearch()
+        # above -- a real network call, spends one OpenSubtitles download-quota credit.
+        config = subtitle_search_cli._load_config(subtitle_search_cli.CONFIG_PATH)
+        api_key = subtitle_search_cli.resolve_api_key(None, config)
+        return subtitle_search_cli.download(api_key, file_id, output_dir)
+
+    def on_exit_subsearch_download_worker(self, result):
+        self.btn_subsearch_download.Enable(self.lst_subsearch_results.GetFirstSelected() != -1)
+        try:
+            saved_path, error, quota_info = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_subsearch_log.AppendText("\n" + message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        if error:
+            self.txt_subsearch_log.AppendText("\n" + error)
+            self.SetStatusText(T("Subtitle download failed -- see the log below"))
+            wx.MessageBox(T("Downloading the subtitle failed -- see the log box for the exact "
+                             "reason."),
+                          T("Search Subtitles"), wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_subsearch_log.AppendText(f"\nDownloaded: {saved_path}")
+        if quota_info:
+            self.txt_subsearch_log.AppendText(
+                f"\nDownload quota (server-reported): remaining={quota_info.get('remaining')} "
+                f"requests={quota_info.get('requests')} reset_time={quota_info.get('reset_time')}")
+        self.SetStatusText(T("Subtitle downloaded successfully"))
+
+        # Convenience hand-off (see docs/ai/AI_DECISIONS.md ADR-039): auto-populate Add
+        # Subtitle Track's Subtitle File field with the just-downloaded .srt, if it's
+        # still empty, so the natural next step is one click away instead of browsing to
+        # it manually.
+        if not self.txt_submux_srt.GetValue().strip():
+            self.txt_submux_srt.SetValue(saved_path)
+
+    def on_click_btn_subsearch_download(self, event):
+        selected = self.lst_subsearch_results.GetFirstSelected()
+        if selected == -1 or selected >= len(self.subsearch_results):
+            wx.MessageBox(T("Select a result to download first."),
+                          T("Search Subtitles"), wx.OK | wx.ICON_WARNING)
+            return
+        chosen = self.subsearch_results[selected]
+
+        submux_input = self.txt_submux_input.GetValue().strip()
+        source = self.txt_subsearch_source.GetValue().strip()
+        if submux_input:
+            # Same folder as Add Subtitle Track's converted-video field, when set -- the
+            # natural place to want the .srt to land next to.
+            output_dir = path.dirname(path.abspath(submux_input))
+        elif source:
+            output_dir = path.dirname(path.abspath(source))
+        else:
+            output_dir = os.getcwd()
+
+        release = chosen.get("release") or chosen.get("file_id")
+        self.txt_subsearch_log.AppendText(f"\nDownloading {release}...")
+        self.btn_subsearch_download.Disable()
+        self.SetStatusText(T("Downloading subtitle..."))
+        startWorker(self.on_exit_subsearch_download_worker, self.run_subsearch_download,
+                    wargs=(chosen["file_id"], output_dir))
 
     # --- Add Subtitle Track (standalone tool, see ADR-032) ---
 

@@ -136,6 +136,18 @@ foreach ($f in $launcherFiles) {
 }
 Write-Host "  Launcher scripts copied to $root."
 
+# Feature overview / changelog docs -- these live at the nunif repo root (so they
+# also render nicely when browsing the repo on GitHub), copied out here too so a
+# fresh install has them sitting right next to iw3-gui.bat, not buried in nunif\.
+$docFiles = @("3DECKER_README.md", "3DECKER_CHANGELOG.md")
+foreach ($f in $docFiles) {
+    $src = Join-Path $nunifDir $f
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $root $f) -Force
+    }
+}
+Write-Host "  3DECKER_README.md / 3DECKER_CHANGELOG.md copied to $root."
+
 # ---------------------------------------------------------------------------
 Write-Step "7-Zip console extractor (needed only to unpack MKVToolNix's official .7z build)"
 

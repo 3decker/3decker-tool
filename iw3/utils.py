@@ -2778,6 +2778,60 @@ def _scene_ema_report_summary(applied_rows):
     return len(applied_rows), len({r["settings"] for r in applied_rows})
 
 
+def _fmt_hms_report(sec):
+    """m:ss.mmm (or h:mm:ss.mmm past one hour) -- shared time format for the Auto
+    EMA report's HTML and plain-text siblings (ADR-074/ADR-075)."""
+    sec = float(sec)
+    sign = "-" if sec < 0 else ""
+    sec = abs(sec)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h >= 1:
+        return f"{sign}{int(h)}:{int(m):02d}:{s:06.3f}"
+    return f"{sign}{int(m)}:{s:06.3f}"
+
+
+def _write_scene_ema_report_txt(txt_path, rows, scene_count, distinct_count, source_name):
+    """Plain-text sibling of _write_scene_ema_report's CSV (ADR-075), readable in
+    Notepad or any plain text viewer with no HTML rendering: a fixed-width
+    table, column widths sized to the actual data so it stays aligned
+    regardless of row count. Same temp-name + os.replace pattern (CS-IO-001)
+    as the CSV/HTML siblings."""
+    headers = ["Scene", "Start", "Duration", "Buffer", "Decay"]
+    cells = [
+        [
+            str(r["scene_index"]),
+            _fmt_hms_report(r["start_time_sec"]),
+            f"{float(r['duration_sec']):.3f}",
+            str(r["ema_buffer"]),
+            str(r["ema_decay"]),
+        ]
+        for r in rows
+    ]
+    widths = [max(len(headers[i]), max((len(row[i]) for row in cells), default=0)) for i in range(5)]
+
+    def fmt_row(values):
+        # Scene (column 0) left-justified, the four numeric columns right-justified.
+        parts = [values[0].ljust(widths[0])]
+        parts += [values[i].rjust(widths[i]) for i in range(1, 5)]
+        return "  ".join(parts)
+
+    lines = [
+        f"Auto EMA by Scene Length -- {source_name}",
+        f"scenes: {scene_count}   distinct buffer/decay pairs: {distinct_count}",
+        "",
+        fmt_row(headers),
+        "  ".join("-" * w for w in widths),
+    ]
+    lines += [fmt_row(row) for row in cells]
+
+    tmp_path = txt_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp_path, txt_path)
+    return txt_path
+
+
 def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, source_name):
     """Human-readable sibling of _write_scene_ema_report's plain CSV (ADR-074):
     a single self-contained HTML file (no network/CDN dependency -- this is an
@@ -2789,15 +2843,7 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace('"', "&quot;"))
 
-    def fmt_hms(sec):
-        sec = float(sec)
-        sign = "-" if sec < 0 else ""
-        sec = abs(sec)
-        h, rem = divmod(sec, 3600)
-        m, s = divmod(rem, 60)
-        if h >= 1:
-            return f"{sign}{int(h)}:{int(m):02d}:{s:06.3f}"
-        return f"{sign}{int(m)}:{s:06.3f}"
+    fmt_hms = _fmt_hms_report
 
     row_html = []
     for r in rows:
@@ -2825,7 +2871,7 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
   .summary {{ color:var(--accent); font-size:13px; }}
   .wrap {{ max-height:calc(100vh - 90px); overflow:auto; }}
   table {{ border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }}
-  th, td {{ padding:6px 14px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }}
+  th, td {{ padding:3px 10px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }}
   th:first-child, td:first-child {{ text-align:left; }}
   th {{ position:sticky; top:0; background:var(--head-bg); cursor:pointer; user-select:none; }}
   th:hover {{ color:var(--accent); }}
@@ -3364,9 +3410,18 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
         except Exception as e:
             print(f"[auto-ema] could not write HTML report ({e.__class__.__name__}: {e}) -- "
                   f"the CSV at {report_path} is still complete.", file=sys.stderr)
+        # Plain-text sibling (ADR-075) -- readable in Notepad, no HTML rendering needed.
+        # Same best-effort try/except as the HTML sibling above.
+        txt_path = output_filename + ".auto_ema_report.txt"
+        try:
+            _write_scene_ema_report_txt(txt_path, report_rows, scene_count, distinct_count,
+                                         path.basename(output_filename))
+        except Exception as e:
+            print(f"[auto-ema] could not write TXT report ({e.__class__.__name__}: {e}) -- "
+                  f"the CSV at {report_path} is still complete.", file=sys.stderr)
         print(f"[auto-ema] Auto EMA by Scene Length: {scene_count} scenes, "
-              f"{distinct_count} distinct Buffer/Decay values used (see {report_path} "
-              f"and {html_path})",
+              f"{distinct_count} distinct Buffer/Decay values used (see {report_path}, "
+              f"{html_path}, and {txt_path})",
               file=sys.stderr)
 
 

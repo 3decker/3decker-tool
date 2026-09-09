@@ -3,6 +3,7 @@ import nunif.gui.subprocess_patch  # noqa
 import sys
 import os
 from os import path
+import re
 import traceback
 import functools
 import tempfile
@@ -488,6 +489,44 @@ class SceneBatchAutoEMADialog(wx.Dialog):
         scene_batch.save_ema_overrides_file(all_overrides)
         if self.IsModal():
             self.EndModal(wx.ID_OK)
+
+
+def _split_windows_command_line(command_line):
+    """Splits a full command-line string into argv exactly the way Windows itself
+    would (via the real CommandLineToArgvW API) -- the logical inverse of
+    subprocess.list2cmdline, which is what get_cli_command() uses to build the
+    pasted string in the first place (see docs/ai/AI_DECISIONS.md ADR-074).
+    shlex.split() assumes POSIX quoting rules and mishandles real Windows
+    quoting (backslash-escaped quotes inside a path, etc.), so this goes
+    straight to the actual Win32 API via ctypes instead of hand-rolling Windows
+    quoting rules. Raises ValueError if CommandLineToArgvW itself rejects the
+    string (e.g. unbalanced quotes)."""
+    import ctypes
+
+    command_line_to_argv_w = ctypes.windll.shell32.CommandLineToArgvW
+    command_line_to_argv_w.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    command_line_to_argv_w.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+
+    argc = ctypes.c_int(0)
+    argv_p = command_line_to_argv_w(command_line, ctypes.byref(argc))
+    if not argv_p:
+        raise ValueError("CommandLineToArgvW failed to parse the command line")
+    try:
+        return [argv_p[i] for i in range(argc.value)]
+    finally:
+        ctypes.windll.kernel32.LocalFree(argv_p)
+
+
+def _apply_combo_value(combo, value):
+    """Sets a wx.ComboBox/EditableComboBox to `value`, preferring an exact choice
+    match (SetStringSelection) and falling back to typing the raw text
+    (SetValue) when the value isn't one of the preset choices -- mirrors how
+    apply_quick_preset() already sets fixed-choice vs. free-typed fields by
+    hand (see docs/ai/AI_DECISIONS.md ADR-074), without needing to know which
+    kind of combobox each field actually is."""
+    text = str(value)
+    if not combo.SetStringSelection(text):
+        combo.SetValue(text)
 
 
 class IW3App(wx.App):
@@ -3998,9 +4037,14 @@ class MainFrame(wx.Frame):
             T("Render the same short test clip with 2 or more saved presets, "
               "then join the results back-to-back into one comparison video"))
 
-        # copy command
+        # copy command / import command (ADR-074)
         self.sep_command = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
         self.btn_copy_command = wx.Button(self.pnl_preset, label=T("Copy Command"))
+        self.btn_import_command = wx.Button(self.pnl_preset, label=T("Import Command"))
+        self.btn_import_command.SetToolTip(
+            T("Paste a \"python -m iw3 ...\" command line (like the ones Copy Command produces) and "
+              "apply every matching setting from it to this window. Shows the pasted text for you to "
+              "review/edit before anything is changed -- this can overwrite a lot of settings at once."))
 
         # language
         self.sep_language = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
@@ -4121,6 +4165,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.sep_command, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
         layout.AddSpacer(4)
         layout.Add(self.btn_copy_command, flag=wx.ALL, border=2)
+        layout.Add(self.btn_import_command, flag=wx.ALL, border=2)
 
         layout.AddSpacer(2)
         layout.Add(self.sep_language, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
@@ -4218,6 +4263,7 @@ class MainFrame(wx.Frame):
         self.btn_quick_preset_3decker.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("3decker"))
         self.btn_compare_presets.Bind(wx.EVT_BUTTON, self.on_click_btn_compare_presets)
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
+        self.btn_import_command.Bind(wx.EVT_BUTTON, self.on_click_btn_import_command)
         self.cbo_language.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_language)
         self.cbo_layout.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_layout)
         self.cbo_zoom.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_zoom)
@@ -6223,6 +6269,368 @@ class MainFrame(wx.Frame):
             wx.TheClipboard.Close()
         else:
             wx.MessageBox(T("Failed to open Clipbaord"), T("Error"), wx.OK | wx.ICON_ERROR)
+
+    # --- Import Command (ADR-074): the reverse of Copy Command above. Parses a
+    # pasted "python -m iw3 ..." command line via the real create_parser(), the
+    # same one get_cli_command() diffs against to build the string in the first
+    # place, then writes the result into every matching GUI widget. See
+    # docs/ai/AI_DECISIONS.md ADR-074 for the full design/limitations. ---
+
+    def parse_cli_command_text(self, command_text):
+        """Reverse of get_cli_command(): parses a pasted command line string
+        (with or without a leading "python -m iw3") into a real
+        argparse.Namespace, via the exact same create_parser(required_true=
+        False) definition get_cli_command() uses to build the string -- so
+        Import Command can never drift out of sync with the real CLI as flags
+        are added later. Returns (args, None) on success, or (None,
+        error_message) on any parse failure; callers must not apply anything
+        when args is None -- a malformed paste must never partially apply."""
+        import io
+        import contextlib
+
+        command_text = (command_text or "").strip()
+        if not command_text:
+            return None, T("Nothing to import -- paste a command line first.")
+
+        # A real command line is one logical line -- any newline inside the
+        # pasted text is either an explicit cmd.exe "^" continuation (from
+        # copying a multi-line block formatted for a real terminal) or, just
+        # as commonly, a soft-wrap artifact reintroduced as a literal '\n' by
+        # the review textbox itself when long pasted text wraps visually
+        # (confirmed by a real user paste: "GEMINI AI" came back as
+        # "GEMINI\n  AI", corrupting the value and failing to parse). Neither
+        # case is ever *meaningful* content -- collapse every run of
+        # whitespace that contains a newline (optionally preceded by "^",
+        # cmd.exe's line-continuation marker) down to a single space before
+        # splitting, so both cases are handled the same way.
+        command_text = re.sub(r"\s*\^?[\r\n]+\s*", " ", command_text).strip()
+
+        try:
+            argv = _split_windows_command_line(command_text)
+        except Exception as e:
+            return None, T("Could not split that command line:") + f"\n{e}"
+
+        # Strip a leading "python[.exe] -m iw3" -- what Copy Command produces,
+        # and what the user has actually been running directly -- if present,
+        # so pasting the real command line verbatim (not just its flags) works.
+        i = 0
+        if i < len(argv) and path.basename(argv[i]).lower() in ("python", "python.exe", "python3", "python3.exe"):
+            i += 1
+        if i + 1 < len(argv) and argv[i] == "-m" and argv[i + 1] == "iw3":
+            i += 2
+        argv = argv[i:]
+
+        parser = create_parser(required_true=False)
+        stderr_buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr_buffer):
+                args = parser.parse_args(argv)
+        except SystemExit:
+            # argparse's own error() prints usage + the real reason to stderr and
+            # raises SystemExit -- caught here so a bad paste shows a message box
+            # instead of taking down the whole GUI process (nothing above this
+            # point has touched any widget yet, so no partial apply can happen).
+            message = stderr_buffer.getvalue().strip()
+            return None, (T("That command line could not be parsed:") + "\n\n"
+                          + (message or T("(unrecognized or invalid option)")))
+        return args, None
+
+    def apply_parsed_args_to_gui(self, args):
+        """Reverse of parse_args(): writes a real argparse.Namespace (as
+        returned by parse_cli_command_text(), i.e. actually produced by
+        create_parser().parse_args()) into every GUI widget parse_args() reads
+        FROM. Mirrors parse_args() field-by-field -- see that method for the
+        forward direction this inverts, and docs/ai/AI_DECISIONS.md ADR-074.
+
+        Not every attribute create_parser() can produce has a GUI widget
+        (--yes, deprecated --zoed-*, --warp-steps, --mapper*, --remove-bg/
+        --bg-model, --keyframe*, --scene-cache-*/--scene-detect-only,
+        --find-param, --update, and --resume-chunk-duration which the GUI
+        always sends as a fixed 300) -- those are simply never read here, so
+        they're silently skipped, matching this project's established
+        "genuinely CLI-only setting -> skip, don't error" convention.
+
+        Conversely, a handful of real GUI settings -- confirmed by reading
+        create_parser() directly, not assumed -- have NO real --flag at all
+        (waifu2x_method/noise_level/style; the Dual-Pass Depth Blend feather/
+        bilateral/CLAHE/align/edge-suppression fields; Object Stability's
+        max-shift/flat-boost/edge-protection; VR Optimized Merge/its FPS):
+        Copy Command already cannot
+        export these (get_cli_command() only iterates create_parser()'s own
+        default Namespace keys), so a pasted command can never carry them
+        either -- `args` here simply won't have these attributes, and this
+        function does not try to guess or preserve them.
+
+        Does NOT probe torch.compile support (see ADR-068, and ADR-074's use
+        of the same guard) and does NOT run a conversion -- only sets widget
+        values, then calls update_controls(probe_compile=False) once at the
+        end to refresh dependent enable/disable/show/hide state, exactly like
+        the passive startup-restore path."""
+        self.pnl_file.set_input_path(args.input or "")
+        self.pnl_file.set_output_path(args.output or "")
+
+        _apply_combo_value(self.cbo_divergence, args.divergence)
+        _apply_combo_value(self.cbo_convergence, args.convergence)
+        _apply_combo_value(self.cbo_convergence_mode, args.convergence_mode)
+        _apply_combo_value(self.cbo_convergence_smoothing, args.convergence_smoothing)
+        self.sld_ipd_offset.SetValue(int(round(args.ipd_offset)))
+        _apply_combo_value(self.cbo_synthetic_view, args.synthetic_view)
+        _apply_combo_value(self.cbo_method, args.method)
+        _apply_combo_value(self.cbo_splat_blend_temperature, args.splat_blend_temperature)
+        self.chk_preserve_screen_border.SetValue(bool(args.preserve_screen_border))
+        _apply_combo_value(self.cbo_depth_model, args.depth_model)
+        _apply_combo_value(self.cbo_foreground_scale, args.foreground_scale)
+        _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
+        _apply_combo_value(
+            self.cbo_foreground_divergence,
+            args.foreground_divergence if args.foreground_divergence is not None else "")
+        _apply_combo_value(self.cbo_background_pop, args.background_pop)
+        _apply_combo_value(self.cbo_background_pop_coverage, args.background_pop_coverage * 100.0)
+        _apply_combo_value(
+            self.cbo_background_divergence,
+            args.background_divergence if args.background_divergence is not None else "")
+        _apply_combo_value(self.cbo_edge_repair, args.edge_repair_strength)
+        self.chk_sharpen.SetValue(bool(args.sharpen))
+        _apply_combo_value(self.cbo_sharpen_strength, args.sharpen_strength)
+        self.chk_depth_aa.SetValue(bool(args.depth_aa))
+
+        edge_dilation = args.edge_dilation if isinstance(args.edge_dilation, list) else [args.edge_dilation]
+        _apply_combo_value(self.cbo_edge_dilation, edge_dilation[0])
+        _apply_combo_value(self.cbo_edge_dilation_y, edge_dilation[1] if len(edge_dilation) > 1 else "")
+
+        if args.inpaint_model:
+            _apply_combo_value(self.cbo_inpaint_model, args.inpaint_model)
+        _apply_combo_value(self.cbo_mask_inner_dilation, args.mask_inner_dilation)
+        _apply_combo_value(self.cbo_mask_outer_dilation, args.mask_outer_dilation)
+        if args.inpaint_max_width is not None:
+            _apply_combo_value(self.cbo_inpaint_max_width, args.inpaint_max_width)
+        if args.inpaint_overlap_frames:
+            pre = args.inpaint_overlap_frames[0]
+            post = args.inpaint_overlap_frames[1] if len(args.inpaint_overlap_frames) > 1 else pre
+            _apply_combo_value(self.cbo_overlap_frames_pre, pre)
+            _apply_combo_value(self.cbo_overlap_frames_post, post)
+
+        # Stereo Format -- reconstructed from the mutually-exclusive flags
+        # parse_args() reads it INTO, same priority order as build there.
+        if args.vr180:
+            stereo_format = "VR90"
+        elif args.half_sbs:
+            stereo_format = "Half SBS"
+        elif args.tb:
+            stereo_format = "Full TB"
+        elif args.half_tb:
+            stereo_format = "Half TB"
+        elif args.cross_eyed:
+            stereo_format = "Cross Eyed"
+        elif args.rgbd:
+            stereo_format = "RGB-D"
+        elif args.half_rgbd:
+            stereo_format = "Half RGB-D"
+        elif args.anaglyph is not None:
+            stereo_format = "Anaglyph"
+            _apply_combo_value(self.cbo_anaglyph_method, args.anaglyph)
+        elif args.export:
+            stereo_format = "Export"
+        elif args.export_disparity:
+            stereo_format = "Export disparity"
+        elif args.debug_depth:
+            stereo_format = "Debug Depth"
+        else:
+            stereo_format = "Full SBS"
+        _apply_combo_value(self.cbo_stereo_format, stereo_format)
+        if args.export or args.export_disparity:
+            self.chk_export_depth_only.SetValue(bool(args.export_depth_only))
+            self.chk_export_depth_fit.SetValue(bool(args.export_depth_fit))
+
+        self.chk_stereo_mode_tag.SetValue(bool(args.stereo_mode_tag))
+
+        self.chk_ema_normalize.SetValue(bool(args.ema_normalize))
+        _apply_combo_value(self.cbo_ema_decay, args.ema_decay)
+        _apply_combo_value(self.cbo_ema_buffer, args.ema_buffer)
+        self.chk_ema_motion_adaptive.SetValue(bool(args.ema_motion_adaptive))
+
+        self.chk_depth_refine.SetValue(bool(args.depth_refine))
+        _apply_combo_value(self.cbo_depth_refine_strength, args.depth_refine_strength)
+
+        self.chk_temporal_stabilize.SetValue(bool(args.temporal_stabilize))
+        _apply_combo_value(self.cbo_temporal_stabilize_strength, args.temporal_stabilize_strength)
+
+        # depth_blend_* fields beyond these 5 (feather blur, bilateral, CLAHE,
+        # align, edge suppression) are GUI-only -- see docstring above -- left as-is.
+        self.chk_depth_blend.SetValue(bool(args.depth_blend))
+        _apply_combo_value(self.cbo_depth_blend_model, args.depth_blend_model)
+        _apply_combo_value(self.cbo_depth_blend_strength, args.depth_blend_strength)
+        _apply_combo_value(self.cbo_depth_blend_region, args.depth_blend_region)
+        _apply_combo_value(self.cbo_depth_blend_region_percent, args.depth_blend_region_percent)
+
+        self.chk_waifu2x_upscale.SetValue(bool(args.waifu2x_upscale))
+        _apply_combo_value(self.cbo_waifu2x_target, args.waifu2x_upscale_target)
+
+        self.chk_rife_interpolate.SetValue(bool(args.rife_interpolate))
+        _apply_combo_value(self.cbo_rife_model, args.rife_model)
+        if args.rife_target_fps is not None:
+            _apply_combo_value(self.cbo_rife_mode, "Custom FPS...")
+            self.txt_rife_target_fps.SetValue(str(args.rife_target_fps))
+        elif args.rife_multiplier in (2, 3, 4):
+            _apply_combo_value(self.cbo_rife_mode, f"{args.rife_multiplier}x")
+
+        self.chk_scene_detect.SetValue(bool(args.scene_detect))
+        self.chk_scene_detect_cache.SetValue(not args.disable_scene_cache)
+
+        _apply_combo_value(self.cbo_image_format, args.format)
+
+        # Video Encoding (VideoEncodingBox exposes read-only properties, not
+        # setters -- its own update_video_format()/update_video_codec()
+        # reconciliation, triggered below via update_controls(), rebuilds each
+        # combobox's choice list around whatever raw value is set here first,
+        # exactly like a user changing Format/Codec by hand would).
+        grp = self.grp_video
+        _apply_combo_value(grp.cbo_fps, args.max_fps)
+        _apply_combo_value(grp.cbo_video_format, args.video_format)
+        if args.video_codec:
+            _apply_combo_value(grp.cbo_video_codec, args.video_codec)
+        _apply_combo_value(grp.cbo_pix_fmt, args.pix_fmt)
+        _apply_combo_value(grp.cbo_colorspace, args.colorspace)
+        _apply_combo_value(grp.cbo_crf, args.crf)
+        _apply_combo_value(grp.cbo_bitrate, args.video_bitrate)
+        _apply_combo_value(grp.cbo_profile_level, args.profile_level or "auto")
+        _apply_combo_value(grp.cbo_preset, args.preset)
+        tune = list(args.tune or [])
+        grp.chk_tune_fastdecode.SetValue("fastdecode" in tune)
+        grp.chk_tune_zerolatency.SetValue("zerolatency" in tune)
+        remaining_tune = next((t for t in tune if t not in ("fastdecode", "zerolatency")), "")
+        _apply_combo_value(grp.cbo_tune, remaining_tune)
+
+        self.grp_video_dec.cbo_hwaccel.SetValue(args.hwaccel or "")
+        self.grp_video_dec.chk_software_fallback.SetValue(not args.disable_software_fallback)
+
+        _apply_combo_value(self.cbo_pad_mode, "" if args.pad_mode == "tblr" else args.pad_mode)
+        _apply_combo_value(self.cbo_pad, args.pad if args.pad is not None else "")
+        if args.rotate_left:
+            self.cbo_rotate.SetSelection(1)
+        elif args.rotate_right:
+            self.cbo_rotate.SetSelection(2)
+        else:
+            self.cbo_rotate.SetSelection(0)
+        self.chk_exif_transpose.SetValue(not args.disable_exif_transpose)
+
+        vf_value = args.vf or ""
+        vf_parts = vf_value.split(",") if vf_value else []
+        if vf_parts and vf_parts[0] == "yadif":
+            self.cbo_deinterlace.SetValue("yadif")
+            self.txt_vf.SetValue(",".join(vf_parts[1:]))
+        else:
+            self.cbo_deinterlace.SetValue("")
+            self.txt_vf.SetValue(vf_value)
+
+        if args.max_output_width and args.max_output_height:
+            _apply_combo_value(self.cbo_max_output_size, f"{args.max_output_width}x{args.max_output_height}")
+        else:
+            _apply_combo_value(self.cbo_max_output_size, "")
+        self.chk_keep_aspect_ratio.SetValue(bool(args.keep_aspect_ratio))
+        self.chk_preserve_dowi.SetValue(bool(args.preserve_dowi))
+        self.chk_hdr_to_sdr.SetValue(bool(args.hdr_to_sdr))
+        self.chk_auto_resume.SetValue(bool(args.auto_resume))
+        _apply_combo_value(
+            self.cbo_upgrade_pix_fmt, args.upgrade_pix_fmt if args.upgrade_pix_fmt is not None else "")
+        self.chk_denoise.SetValue(bool(args.denoise))
+        self.chk_preview.SetValue(bool(args.preview))
+        _apply_combo_value(self.cbo_autocrop, args.autocrop or "")
+        self.chk_scene_batch.SetValue(bool(args.scene_batch))
+        self.txt_scene_batch_crop.SetValue(args.scene_batch_crop or "")
+        self.txt_scene_settings.SetValue(args.scene_settings or "")
+        self.chk_scene_batch_auto_ema.SetValue(bool(args.scene_batch_auto_ema))
+        _apply_combo_value(self.cbo_scene_batch_auto_ema_model, args.scene_batch_auto_ema_model)
+        self.txt_scene_batch_variant.SetValue(args.scene_batch_variant or "")
+        # VR Optimized Merge / vr_merge_fps are GUI-only (no real --flag, same as
+        # the fields called out above) -- left as-is, see docstring above.
+
+        gpu_ids = args.gpu or []
+        all_cuda_ids = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        if len(gpu_ids) > 1 and all_cuda_ids and sorted(gpu_ids) == sorted(all_cuda_ids):
+            target_device_id = -2
+        elif gpu_ids:
+            target_device_id = gpu_ids[0]
+        else:
+            target_device_id = None
+        if target_device_id is not None:
+            for i in range(self.cbo_device.GetCount()):
+                if self.cbo_device.GetClientData(i) == target_device_id:
+                    self.cbo_device.SetSelection(i)
+                    break
+
+        _apply_combo_value(self.cbo_batch_size, args.batch_size)
+        _apply_combo_value(self.cbo_resolution, args.resolution if args.resolution is not None else "Default")
+        self.chk_limit_resolution.SetValue(bool(args.limit_resolution))
+        _apply_combo_value(self.cbo_stereo_width, args.stereo_width if args.stereo_width is not None else "Default")
+        _apply_combo_value(self.cbo_max_workers, args.max_workers)
+        self.chk_tta.SetValue(bool(args.tta))
+        self.chk_fp16.SetValue(not args.disable_amp)
+        self.chk_low_vram.SetValue(bool(args.low_vram))
+        self.chk_pause_frees_vram.SetValue(bool(args.pause_frees_vram))
+        self.chk_cuda_stream.SetValue(bool(args.cuda_stream))
+        # torch.compile: SetValue only -- never probe here. update_controls(
+        # probe_compile=False) below is what keeps this safe, exactly like the
+        # startup-restore path (see ADR-068, and ADR-074's use of the same guard).
+        self.chk_compile.SetValue(bool(args.compile))
+
+        self.chk_resume.SetValue(bool(args.resume))
+        self.chk_recursive.SetValue(bool(args.recursive))
+        self.chk_skip_error.SetValue(bool(args.skip_error))
+        self.chk_metadata.SetValue(bool(args.metadata))
+        if args.start_time:
+            self.chk_start_time.SetValue(True)
+            self.txt_start_time.SetValue(args.start_time)
+        else:
+            self.chk_start_time.SetValue(False)
+        if args.end_time:
+            self.chk_end_time.SetValue(True)
+            self.txt_end_time.SetValue(args.end_time)
+        else:
+            self.chk_end_time.SetValue(False)
+
+        self.update_controls(probe_compile=False)
+
+    def on_click_btn_import_command(self, event):
+        clipboard_text = ""
+        if wx.TheClipboard.Open():
+            try:
+                data = wx.TextDataObject()
+                if wx.TheClipboard.GetData(data):
+                    clipboard_text = data.GetText()
+            finally:
+                wx.TheClipboard.Close()
+
+        dlg = wx.Dialog(self, title=T("Import Command"), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        lbl = wx.StaticText(
+            dlg, label=T("Paste (or edit) a full \"python -m iw3 ...\" command line below, then click "
+                         "OK to apply every matching setting from it to this window. Review it first -- "
+                         "this can overwrite a lot of your current settings at once."))
+        lbl.Wrap(dlg.FromDIP(480))
+        txt = wx.TextCtrl(dlg, value=clipboard_text, style=wx.TE_MULTILINE, size=dlg.FromDIP((480, 160)))
+        btn_sizer = dlg.CreateButtonSizer(wx.OK | wx.CANCEL)
+
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(lbl, 0, wx.ALL | wx.EXPAND, 8)
+        sizer.Add(txt, 1, wx.ALL | wx.EXPAND, 8)
+        sizer.Add(btn_sizer, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        dlg.SetSizerAndFit(sizer)
+        dlg.CentreOnParent()
+
+        modal_result = dlg.ShowModal()
+        command_text = txt.GetValue()
+        dlg.Destroy()
+
+        if modal_result != wx.ID_OK:
+            return
+
+        args, error_message = self.parse_cli_command_text(command_text)
+        if args is None:
+            wx.MessageBox(error_message, T("Import Command"), wx.OK | wx.ICON_ERROR)
+            return
+
+        self.apply_parsed_args_to_gui(args)
+        self.SetStatusText(T("Imported settings from the pasted command"))
 
     # --- Check for Updates (read-only fetch + compare only, see docs/ai/AI_DECISIONS.md) ---
 
@@ -9902,6 +10310,190 @@ def _self_test_run_update_git_checkpoint():
     print("_self_test_run_update_git_checkpoint: PASS")
 
 
+def _self_test_import_command_round_trip():
+    """Regression test for the new Import Command button (docs/ai/AI_DECISIONS.md
+    ADR-074) -- the reverse of Copy Command. Three parts, all against the REAL,
+    unmocked create_parser()/parse_args()/get_cli_command(), not a mock:
+    1) builds a real command string via get_cli_command() from real, non-default
+       GUI state on one MainFrame, imports it into a SECOND fresh MainFrame via
+       parse_cli_command_text()+apply_parsed_args_to_gui(), then confirms
+       get_cli_command() run again on the second frame parses (via
+       create_parser()) to an equivalent argparse.Namespace as the original --
+       exact string equality isn't required since argument order can differ.
+    2) the real Hocus Pocus command from a live session (see ADR-074), tracing
+       specific paired/special fields end to end: -i/-o, Method, Preserve Screen
+       Border, Depth Model, Stereo Format, Pixel Format, Output Size Limit,
+       End Time, Depth Resolution, EMA, Scene Detect/Auto EMA, AutoCrop, Inpaint
+       Model + Overlap Frames pair, Depth AA, Object Stability, Max Workers,
+       Video Format/Codec, Software Fallback, Metadata, Preserve DV, Auto
+       Resume, and torch.compile (set but NOT probed -- ADR-068's guard).
+    3) the mutually-exclusive Stereo Format dispatch (Anaglyph+method pair,
+       Export+Depth Only) on a separate frame, since these can't combine with
+       part 2's Half SBS state.
+    4) a deliberately malformed/unrecognized paste is rejected with a
+       non-crashing error message and touches no widget."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # 1) Real, non-default GUI state -> command -> re-import on a fresh frame.
+        # Codec/tune are pinned to libx264/no-tune first: this machine's own
+        # persisted GUI config (nunif/tmp/iw3-gui.cfg, loaded by MainFrame's own
+        # __init__) can carry an NVENC-only tune value (e.g. "uhq") from real
+        # prior use, which create_parser()'s own --tune choices list does not
+        # accept (a real, pre-existing mismatch between VideoEncodingBox's NVENC
+        # tune choices and create_parser()'s libx264/x265-only --tune choices,
+        # unrelated to this feature -- see docs/ai/AI_DECISIONS.md ADR-074).
+        # Pinning here keeps this test deterministic regardless of ambient state.
+        frame.grp_video.cbo_video_codec.SetStringSelection("libx264")
+        frame.grp_video.update_video_codec()
+        frame.grp_video.cbo_tune.SetValue("")
+        frame.grp_video.chk_tune_fastdecode.SetValue(False)
+        frame.grp_video.chk_tune_zerolatency.SetValue(False)
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+        frame.cbo_divergence.SetValue("3.5")
+        frame.cbo_convergence.SetValue("0.25")
+        frame.cbo_edge_dilation.SetValue("4")
+        frame.cbo_edge_dilation_y.SetValue("2")
+        frame.update_edge_dilation()
+        frame.chk_ema_normalize.SetValue(True)
+        frame.cbo_ema_decay.SetValue("0.9")
+        frame.cbo_ema_buffer.SetValue("45")
+        frame.update_ema_normalize()
+        frame.chk_start_time.SetValue(True)
+        frame.txt_start_time.SetValue("00:01:00")
+        frame.chk_rife_interpolate.SetValue(True)
+        frame.cbo_rife_mode.SetStringSelection("Custom FPS...")
+        frame.txt_rife_target_fps.SetValue("60")
+        frame.chk_waifu2x_upscale.SetValue(True)
+        frame.update_waifu2x_upscale()
+        frame.chk_compile.SetValue(False)
+
+        command1 = frame.get_cli_command()
+        assert command1 is not None
+
+        frame2 = MainFrame()
+        try:
+            args2, err2 = frame2.parse_cli_command_text(command1)
+            assert args2 is not None, err2
+            frame2.apply_parsed_args_to_gui(args2)
+            command2 = frame2.get_cli_command()
+            assert command2 is not None
+
+            parser = create_parser(required_true=False)
+            args1_reparsed = parser.parse_args(_split_windows_command_line(command1)[3:])
+            args2_reparsed = parser.parse_args(_split_windows_command_line(command2)[3:])
+            assert vars(args1_reparsed) == vars(args2_reparsed), (command1, command2)
+        finally:
+            frame2.Destroy()
+
+        # 2) The real Hocus Pocus command from a live session.
+        real_command = (
+            'python -m iw3 -i "D:\\SSD  2\\2160P MOVIES\\Hocus Pocus 1993 UHD BluRay 2160p DV.mkv" '
+            '-o "E:\\3d Movies\\test for error 2" --compile --method mlbw_l2_inpaint '
+            '--preserve-screen-border --divergence 2.5 --max-fps 1000.0 --crf 15 '
+            '--depth-model Any_V3_Mono_01 --background-pop-coverage 0.0 --half-sbs '
+            '--pix-fmt yuv420p10le --max-output-width 3840 --max-output-height 2160 '
+            '--end-time 00:06:30 --resolution 512 --ema-normalize --ema-decay 0.94 '
+            '--ema-buffer 60 --scene-detect --scene-batch-auto-ema '
+            '--scene-batch-auto-ema-model "GEMINI AI" --autocrop BLACK '
+            '--inpaint-model light_inpaint_v1 --inpaint-overlap-frames 3 0 --depth-aa '
+            '--temporal-stabilize --temporal-stabilize-strength 0.3 --max-workers 2 '
+            '--video-format mkv --video-codec hevc_nvenc --disable-software-fallback '
+            '--metadata filename --preserve-dowi --auto-resume --yes'
+        )
+        frame3 = MainFrame()
+        try:
+            args3, err3 = frame3.parse_cli_command_text(real_command)
+            assert args3 is not None, err3
+            frame3.apply_parsed_args_to_gui(args3)
+
+            assert frame3.pnl_file.input_path == \
+                "D:\\SSD  2\\2160P MOVIES\\Hocus Pocus 1993 UHD BluRay 2160p DV.mkv", frame3.pnl_file.input_path
+            assert frame3.pnl_file.output_path == "E:\\3d Movies\\test for error 2", frame3.pnl_file.output_path
+            assert frame3.cbo_method.GetValue() == "mlbw_l2_inpaint", frame3.cbo_method.GetValue()
+            assert frame3.chk_preserve_screen_border.GetValue() is True
+            assert frame3.cbo_divergence.GetValue() == "2.5", frame3.cbo_divergence.GetValue()
+            assert frame3.cbo_depth_model.GetValue() == "Any_V3_Mono_01", frame3.cbo_depth_model.GetValue()
+            assert frame3.cbo_stereo_format.GetValue() == "Half SBS", frame3.cbo_stereo_format.GetValue()
+            assert frame3.grp_video.cbo_pix_fmt.GetValue() == "yuv420p10le", frame3.grp_video.cbo_pix_fmt.GetValue()
+            assert frame3.cbo_max_output_size.GetValue() == "3840x2160", frame3.cbo_max_output_size.GetValue()
+            assert frame3.chk_end_time.GetValue() is True
+            assert frame3.txt_end_time.GetValue() == "00:06:30", frame3.txt_end_time.GetValue()
+            assert frame3.cbo_resolution.GetValue() == "512", frame3.cbo_resolution.GetValue()
+            assert frame3.chk_ema_normalize.GetValue() is True
+            assert frame3.cbo_ema_decay.GetValue() == "0.94", frame3.cbo_ema_decay.GetValue()
+            assert frame3.cbo_ema_buffer.GetValue() == "60", frame3.cbo_ema_buffer.GetValue()
+            assert frame3.chk_scene_detect.GetValue() is True
+            assert frame3.chk_scene_batch_auto_ema.GetValue() is True
+            assert frame3.cbo_scene_batch_auto_ema_model.GetValue() == "GEMINI AI", \
+                frame3.cbo_scene_batch_auto_ema_model.GetValue()
+            assert frame3.cbo_autocrop.GetValue() == "BLACK", frame3.cbo_autocrop.GetValue()
+            assert frame3.cbo_inpaint_model.GetValue() == "light_inpaint_v1", frame3.cbo_inpaint_model.GetValue()
+            assert frame3.cbo_overlap_frames_pre.GetValue() == "3", frame3.cbo_overlap_frames_pre.GetValue()
+            assert frame3.cbo_overlap_frames_post.GetValue() == "0", frame3.cbo_overlap_frames_post.GetValue()
+            assert frame3.chk_depth_aa.GetValue() is True
+            assert frame3.chk_temporal_stabilize.GetValue() is True
+            assert frame3.cbo_temporal_stabilize_strength.GetValue() == "0.3", \
+                frame3.cbo_temporal_stabilize_strength.GetValue()
+            assert frame3.cbo_max_workers.GetValue() == "2", frame3.cbo_max_workers.GetValue()
+            assert frame3.grp_video.cbo_video_format.GetValue() == "mkv", frame3.grp_video.cbo_video_format.GetValue()
+            if frame3.grp_video.has_nvenc:
+                assert frame3.grp_video.cbo_video_codec.GetValue() == "hevc_nvenc", \
+                    frame3.grp_video.cbo_video_codec.GetValue()
+            assert frame3.grp_video_dec.chk_software_fallback.GetValue() is False
+            assert frame3.chk_metadata.GetValue() is True
+            assert frame3.chk_preserve_dowi.GetValue() is True
+            assert frame3.chk_auto_resume.GetValue() is True
+            assert frame3.chk_compile.GetValue() is True, \
+                "compile checkbox itself must still be settable -- only the live GPU probe is skipped"
+        finally:
+            frame3.Destroy()
+
+        # 3) Mutually-exclusive Stereo Format dispatch: Anaglyph+method pair,
+        # then Export+Depth Only (can't combine with part 2's Half SBS state).
+        frame4 = MainFrame()
+        try:
+            args4, err4 = frame4.parse_cli_command_text(
+                'python -m iw3 -i "in.mp4" -o "out" --anaglyph dubois2 --yes')
+            assert args4 is not None, err4
+            frame4.apply_parsed_args_to_gui(args4)
+            assert frame4.cbo_stereo_format.GetValue() == "Anaglyph", frame4.cbo_stereo_format.GetValue()
+            assert frame4.cbo_anaglyph_method.GetValue() == "dubois2", frame4.cbo_anaglyph_method.GetValue()
+
+            args5, err5 = frame4.parse_cli_command_text(
+                'python -m iw3 -i "in.mp4" -o "out" --export --export-depth-only --yes')
+            assert args5 is not None, err5
+            frame4.apply_parsed_args_to_gui(args5)
+            assert frame4.cbo_stereo_format.GetValue() == "Export", frame4.cbo_stereo_format.GetValue()
+            assert frame4.chk_export_depth_only.GetValue() is True
+        finally:
+            frame4.Destroy()
+
+        # 4) Malformed/unrecognized paste: rejected with a message, nothing applied.
+        divergence_before = frame.cbo_divergence.GetValue()
+        args_bad, err_bad = frame.parse_cli_command_text("python -m iw3 --not-a-real-flag-at-all 123")
+        assert args_bad is None
+        assert err_bad
+        assert frame.cbo_divergence.GetValue() == divergence_before, \
+            "a failed parse must not have touched any widget"
+
+        # Empty paste is also rejected cleanly, not treated as valid/empty args.
+        args_empty, err_empty = frame.parse_cli_command_text("   ")
+        assert args_empty is None
+        assert err_empty
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_import_command_round_trip: PASS")
+
+
 def _run_self_tests():
     _self_test_no_eager_cuda_context()
     _self_test_compile_probe_crash_handled()
@@ -9932,6 +10524,7 @@ def _run_self_tests():
     _self_test_tool_log_clear_buttons()
     _self_test_run_update_button()
     _self_test_run_update_git_checkpoint()
+    _self_test_import_command_round_trip()
     print("All iw3.gui self-tests PASSED")
 
 

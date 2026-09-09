@@ -1,5 +1,6 @@
 from packaging import version as packaging_version
 import torch
+import warnings
 from datetime import datetime, timezone
 from collections import OrderedDict
 import torch.nn as nn
@@ -112,12 +113,39 @@ def check_compile_support(device):
                 model(torch.zeros((1, 32), device=device))
                 func(torch.zeros((32,), dtype=torch.float32, device=device))
             _COMPILER_SUPPORTED_DEVICES[device_name] = True
-        except:  # noqa  #(RuntimeError, AssertionError):
-            # import sys
-            # print(device_name, sys.exc_info())
+        except Exception as e:
+            # Any failure during this real compiler-toolchain probe (RuntimeError,
+            # AssertionError, or an OSError from a Windows-level CreateProcess/cl.exe
+            # invocation failure when the MSVC/Triton toolchain is missing or broken)
+            # means torch.compile is not usable on this device right now.
+            logger.debug(f"check_compile_support: {device_name}: {e.__class__.__name__}: {e}")
             _COMPILER_SUPPORTED_DEVICES[device_name] = False
 
     return _COMPILER_SUPPORTED_DEVICES[device_name]
+
+
+_COMPILE_FALLBACK_WARNED = False
+
+
+def _enable_compile_fallback():
+    # check_compile_support()'s probe (ADR-068) only proves a tiny throwaway model can
+    # be built-and-run on this device -- torch.compile(model, ...) below only *wraps*
+    # the real model, it does not run the real compiler toolchain yet. That real
+    # invocation (Triton/cl.exe) is deferred by torch to the model's first real
+    # forward() call, deep inside whatever real pipeline (iw3 video/image processing,
+    # waifu2x, etc.) goes on to use this model -- so a probe pass here does not
+    # guarantee the real compile of a real, larger model graph will also succeed
+    # (ADR-068 amendment). suppress_errors makes torch fall back to eager execution
+    # for the failing call instead of raising BackendCompilerFailed all the way up
+    # into caller code that has no reason to expect torch.compile could ever crash it.
+    global _COMPILE_FALLBACK_WARNED
+    torch._dynamo.config.suppress_errors = True
+    if not _COMPILE_FALLBACK_WARNED:
+        _COMPILE_FALLBACK_WARNED = True
+        warnings.warn(
+            "torch.compile is enabled. If the real compiler toolchain fails to build "
+            "a model during this run, processing will automatically continue without "
+            "the torch.compile speedup instead of stopping -- see docs/torch_compile.md.")
 
 
 def compile_model(model, device=None, **kwargs):
@@ -125,14 +153,26 @@ def compile_model(model, device=None, **kwargs):
 
     if not is_compiled_model(model) and check_compile_support(device):
         logger.debug(f"compile {model.__class__.__name__}, kwargs={kwargs}")
-        model = torch.compile(model, **kwargs)
+        try:
+            _enable_compile_fallback()
+            model = torch.compile(model, **kwargs)
+        except Exception as e:
+            # Any failure while *wrapping* the model (as opposed to the real compile
+            # failures suppress_errors above handles once this model actually runs)
+            # -- treat it the same way: keep the original, uncompiled model instead of
+            # crashing whatever real pipeline called this.
+            logger.debug(f"compile_model: {model.__class__.__name__}: {e.__class__.__name__}: {e}")
     return model
 
 
 def compile_function(func, device, **kwargs):
     if not is_compiled_function(func) and check_compile_support(device):
         logger.debug(f"compile {func.__name__}, kwargs={kwargs}")
-        func = torch.compile(func, **kwargs)
+        try:
+            _enable_compile_fallback()
+            func = torch.compile(func, **kwargs)
+        except Exception as e:
+            logger.debug(f"compile_function: {func.__name__}: {e.__class__.__name__}: {e}")
     return func
 
 

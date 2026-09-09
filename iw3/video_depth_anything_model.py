@@ -248,7 +248,14 @@ class VideoDepthAnythingModel(BaseDepthModel):
         return out
 
     def infer_with_normalize(self, x, pts, reset_pts, enable_amp=True, edge_dilation=0, depth_aa=None,
-                             tta=False, **kwargs):
+                             tta=False, ema_updates=None, **kwargs):
+        """`ema_updates` (optional): {pts: (ema_buffer, ema_decay)} -- --scene-batch-auto-ema
+        on the regular, non---scene-batch path (see iw3.utils.compute_scene_ema_schedule).
+        At a reset_pts boundary, re-arms the EMA scaler with the given decay/buffer for the
+        scene that starts right after instead of just keeping whatever was already set --
+        replaces the old bare self.reset() with the same reset_state() + an explicit
+        enable_ema()/reset_ema() so the net effect is identical when there's no entry for
+        that pts (the default, ema_updates=None, reproduces the exact prior behavior)."""
         assert x.ndim == 4
         depth_aa = self.depth_aa if depth_aa else None
         self.tta = tta
@@ -273,7 +280,13 @@ class VideoDepthAnythingModel(BaseDepthModel):
                         outputs.append(normalized_depth)
             if pts[i] in reset_pts:
                 outputs += self.flush_with_normalize(enable_amp=enable_amp, edge_dilation=edge_dilation, depth_aa=depth_aa)
-                self.reset()
+                self.reset_state()
+                update = ema_updates.get(pts[i]) if ema_updates else None
+                if update is not None:
+                    self.enable_ema(decay=update[1], buffer_size=update[0],
+                                    motion_adaptive=self.scaler.motion_adaptive)
+                else:
+                    self.reset_ema()
         if outputs:
             return outputs
         else:

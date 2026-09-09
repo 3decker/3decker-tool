@@ -257,16 +257,22 @@ def pad_to_valid_size(img, scale=1.0):
     return F.pad(img, padding), h, w
 
 
-def interpolate_frame(model, img0, img1, scale=1.0):
+def interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
     """img0/img1: NCHW float tensors, 0-1 range, same H/W, same device as model.
-    Returns the single interpolated middle frame (t=0.5), cropped back to the
-    original size -- matches the official inference_video.py two-frame call
-    convention (RIFE >=3.9 models take an explicit timestep; older ones default
-    to the midpoint via a 2-arg call)."""
+    Returns the single interpolated frame at the given `timestep` (0.0=img0,
+    1.0=img1, 0.5=midpoint -- the previous, only-ever-used default), cropped back
+    to the original size -- matches the official inference_video.py two-frame
+    call convention (RIFE >=3.9 models take an explicit timestep; older ones only
+    support the fixed midpoint via a 2-arg call, so any other timestep against
+    one of those is a real caller error, not silently rounded to 0.5)."""
     padded0, h, w = pad_to_valid_size(img0, scale)
     padded1, _h, _w = pad_to_valid_size(img1, scale)
     if getattr(model, "version", 0) >= 3.9:
-        middle = model.inference(padded0, padded1, 0.5, scale)
+        middle = model.inference(padded0, padded1, timestep, scale)
     else:
+        if timestep != 0.5:
+            raise ValueError(
+                f"RIFE model version {getattr(model, 'version', 0)} does not support arbitrary "
+                f"timesteps (only the fixed midpoint, timestep=0.5) -- got timestep={timestep}")
         middle = model.inference(padded0, padded1, scale)
     return middle[:, :, :h, :w]

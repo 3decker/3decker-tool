@@ -173,3 +173,83 @@ def repair_stereo_edges(left_eye, right_eye, depth, strength=0.0, band_width=2, 
         return img * (1.0 - mask) + blurred * mask
 
     return _clean(left_eye), _clean(right_eye)
+
+
+def _local_detail_weight(img, blur_kernel, detail_percentile):
+    """0-1 per-pixel weight (B,1,H,W) marking how much genuine local detail/edge
+    structure is present at each position of the RENDERED RGB image -- same
+    Sobel-gradient-magnitude-normalized-against-a-high-percentile technique
+    already used for TEMPORAL depth stability in depth_scaler.py's
+    _optical_flow_temporal_blend (flat_region_boost/edge_protection, ADR-020)
+    and for spatial depth-edge detection in _depth_edge_band_mask above,
+    applied here to spatial RGB detail instead.
+
+    Computed on a LIGHTLY PRE-BLURRED luminance, not the raw pixels: a real
+    edge (an object silhouette, a multi-pixel contrast transition) mostly
+    survives a light blur, but old scanned film grain -- essentially
+    single-pixel-scale noise -- is exactly the kind of high-frequency content
+    a blur damps hardest. Pre-blurring before measuring the gradient keeps the
+    weight map anchored to real multi-pixel structure rather than individual
+    noisy pixels, so a later sharpen driven by this weight stays weak across a
+    grainy-but-otherwise-flat region and strong at a genuine edge, instead of
+    amplifying whichever pixel happens to be locally noisiest."""
+    luma = (0.299 * img[:, 0:1] + 0.587 * img[:, 1:2] + 0.114 * img[:, 2:3]
+            if img.shape[1] >= 3 else img.mean(dim=1, keepdim=True))
+    luma = F.conv2d(luma, blur_kernel, padding=1)
+
+    kx = _SOBEL_X.to(img.device, img.dtype).view(1, 1, 3, 3)
+    ky = _SOBEL_Y.to(img.device, img.dtype).view(1, 1, 3, 3)
+    grad_x = F.conv2d(luma, kx, padding=1)
+    grad_y = F.conv2d(luma, ky, padding=1)
+    grad_mag = torch.sqrt(grad_x ** 2 + grad_y ** 2 + 1e-12)
+
+    B = grad_mag.shape[0]
+    weights = []
+    for i in range(B):
+        g = grad_mag[i]
+        ref = g.flatten().quantile(detail_percentile / 100.0)
+        if ref < 1e-6:
+            weights.append(torch.zeros_like(g))
+        else:
+            weights.append(torch.clamp(g / ref, 0.0, 1.0))
+    return torch.stack(weights, dim=0)
+
+
+def apply_sharpen(left_eye, right_eye, strength=0.0, detail_percentile=95.0):
+    """Final-stage unsharp-mask sharpening pass on the RENDERED stereo views,
+    applied AFTER whichever stereo method produced them (row_flow/MLBW/monobw/
+    forward-fill/inpaint all converge here, same hook point as repair_stereo_
+    edges above) -- so it enhances the actual picture being delivered, never
+    an intermediate depth map, regardless of which stereo method made it.
+
+    Runs AFTER Edge Repair in apply_divergence() (iw3/utils.py), deliberately:
+    Edge Repair's whole job is smoothing away thin fringing/ghosting residue
+    right at a depth edge, and running sharpening first would hand it a
+    sharpened (i.e. exaggerated) version of exactly that residue to clean up,
+    working against it. Sharpening after Edge Repair instead enhances detail
+    across an already-cleaned frame, including a now-clean edge band, without
+    re-amplifying the artifact Edge Repair just removed.
+
+    Classic unsharp mask: sharpened = original + strength * (original -
+    blurred(original)), clipped back to the valid [0, 1] range this pipeline's
+    image tensors use throughout. Scaled per-pixel by an edge-aware weight
+    (_local_detail_weight, computed from the rendered image's OWN structure)
+    so the boost is strongest at real detail/edges and tapers to near zero in
+    flat or grain-only regions -- avoids the classic unsharp-mask failure mode
+    of aggressively amplifying film grain/sensor noise into ugly speckling on
+    scanned/older source material. strength=0.0 (the default) is an exact
+    no-op with zero extra cost, so nothing changes for anyone who doesn't turn
+    this on."""
+    if strength <= 0.0 or left_eye is None or right_eye is None:
+        return left_eye, right_eye
+
+    blur_kernel = _BLUR3.to(left_eye.device, left_eye.dtype).view(1, 1, 3, 3)
+
+    def _sharpen(img):
+        C = img.shape[1]
+        weight = _local_detail_weight(img, blur_kernel, detail_percentile) * strength
+        blurred = F.conv2d(img, blur_kernel.repeat(C, 1, 1, 1), padding=1, groups=C)
+        detail = img - blurred
+        return torch.clamp(img + weight * detail, 0.0, 1.0)
+
+    return _sharpen(left_eye), _sharpen(right_eye)

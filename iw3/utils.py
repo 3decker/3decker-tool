@@ -1,6 +1,7 @@
 ﻿import sys
 import traceback
 import os
+import csv
 import subprocess
 from os import path
 from datetime import datetime
@@ -160,6 +161,7 @@ def _run_waifu2x_upscale(output_path, args):
     base, ext = path.splitext(str(output_path))
     upscaled_path = f"{base}_w2x{ext}"
 
+    _notify_stage(args, STAGE_WAIFU2X_UPSCALE)
     print(f"[iw3] Upscaling finished output with waifu2x ({method}, noise={noise_level}, "
           f"style={style})...", file=sys.stderr)
     if not _invoke_waifu2x_cli(output_path, upscaled_path, method, noise_level, style, nunif_dir):
@@ -190,6 +192,12 @@ def _run_rife_interpolation(output_path, args):
     RIFE's synthetic in-between frames), so this function does not need to
     re-check that here.
 
+    args.rife_target_fps (if set) takes priority over args.rife_multiplier --
+    both are forwarded to rife_cli.py as-is, which re-validates the mutual
+    exclusion and the "target must exceed source fps" rule itself (see
+    docs/ai/AI_DECISIONS.md ADR-049); args.rife_multiplier defaults to the
+    original 2x behavior when neither is set.
+
     Returns the interpolated file's path on success, or None (having already
     logged why) on failure -- verifies the output file actually exists rather
     than trusting the subprocess's exit code alone (see the HDR extraction
@@ -197,6 +205,8 @@ def _run_rife_interpolation(output_path, args):
     if not getattr(args, "rife_interpolate", False):
         return None
     rife_model = getattr(args, "rife_model", None) or "rife_425"
+    rife_multiplier = getattr(args, "rife_multiplier", None)
+    rife_target_fps = getattr(args, "rife_target_fps", None)
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
 
     base, ext = path.splitext(str(output_path))
@@ -204,7 +214,12 @@ def _run_rife_interpolation(output_path, args):
     cmd = [sys.executable, "-m", "iw3.rife_cli",
            "-i", str(output_path), "-o", interpolated_path,
            "--rife-model", rife_model]
+    if rife_target_fps is not None:
+        cmd += ["--rife-target-fps", str(rife_target_fps)]
+    elif rife_multiplier is not None:
+        cmd += ["--rife-multiplier", str(rife_multiplier)]
 
+    _notify_stage(args, STAGE_RIFE_INTERPOLATE)
     print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
     try:
         subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
@@ -526,9 +541,17 @@ def _run_waifu2x_upscale_stereo(output_path, args):
     preset = getattr(args, "preset", None) or "medium"
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
 
+    # target_key ("4k"/"8k") is folded into the derivative filename itself
+    # (_w2x4k / _w2x8k) so it is actually distinguishable from the plain
+    # whole-frame _run_waifu2x_upscale path's "_w2x" output -- see
+    # docs/ai/AI_DECISIONS.md ADR-050. Before this, both paths produced the
+    # identical "<name>_w2x<ext>" filename, contradicting the comment in
+    # _build_iw3_comment_metadata that claims "the derivative file's own
+    # '_w2x' suffix already marks it".
     base, ext = path.splitext(str(output_path))
-    upscaled_path = f"{base}_w2x{ext}"
+    upscaled_path = f"{base}_w2x{target_key}{ext}"
 
+    _notify_stage(args, STAGE_WAIFU2X_UPSCALE)
     cmd = [sys.executable, "-m", "iw3.waifu2x_upscale_stereo_cli",
            "-i", str(output_path), "-o", upscaled_path,
            "--split-axis", axis,
@@ -1183,6 +1206,26 @@ DEBUG_SUFFIX = "_debug"
 SMB_INVALID_CHARS = '\\/:*?"<>|'
 
 
+def _scene_auto_ema_active(args, ema_normalize, video=True):
+    """True when --scene-batch-auto-ema governs a REGULAR (non---scene-batch)
+    conversion's EMA settings -- i.e. it's on, --scene-detect is also on (the only
+    way it has scene boundaries to key off of), and this isn't one of --scene-batch's
+    own per-scene file conversions. --scene-batch already sets args.ema_decay/
+    args.ema_buffer to that SPECIFIC scene's real overridden values before calling
+    process_video() per scene (see scene_batch._process_scenes), so its own per-file
+    output already tags a truthful, non-misleading fixed number -- excluded here via
+    `not args.scene_batch` so that existing behavior is untouched. Used by both
+    make_output_filename/_build_iw3_comment_metadata (a misleading fixed ema_decay/
+    ema_buffer would otherwise be tagged, since a regular conversion never mutates
+    those for tagging purposes -- see process_video_full) and, with the max-fps-
+    adjusted ema_normalize local, by process_video_full itself to decide whether to
+    precompute a per-scene EMA schedule at all."""
+    return bool(
+        video and ema_normalize and getattr(args, "scene_detect", False)
+        and getattr(args, "scene_batch_auto_ema", False) and not getattr(args, "scene_batch", False)
+    )
+
+
 def make_output_filename(input_filename, args, video=False):
     basename = path.splitext(path.basename(input_filename))[0]
     basename = basename.translate({ord(c): ord("_") for c in SMB_INVALID_CHARS})
@@ -1227,8 +1270,12 @@ def make_output_filename(input_filename, args, video=False):
         else:
             daa = ""
         if args.ema_normalize and video:
-            ema_ma = "ma" if getattr(args, "ema_motion_adaptive", False) else ""
-            ema = f"_ema{to_deciaml(args.ema_decay, 100, 2)}b{args.ema_buffer}{ema_ma}"
+            if _scene_auto_ema_active(args, args.ema_normalize, video):
+                auto_model = getattr(args, "scene_batch_auto_ema_model", None) or "3DECKER VDA_L"
+                ema = f"_autoema{auto_model}"
+            else:
+                ema_ma = "ma" if getattr(args, "ema_motion_adaptive", False) else ""
+                ema = f"_ema{to_deciaml(args.ema_decay, 100, 2)}b{args.ema_buffer}{ema_ma}"
         else:
             ema = ""
         if isinstance(args.edge_dilation, (list, tuple)):
@@ -1362,11 +1409,29 @@ def make_output_filename(input_filename, args, video=False):
         edge_repair_strength = getattr(args, "edge_repair_strength", 0.0) or 0.0
         er_tag = f"_er{to_deciaml(edge_repair_strength, 100, 2)}" if edge_repair_strength > 0.0 else ""
 
+        if getattr(args, "sharpen", False):
+            sharpen_strength = getattr(args, "sharpen_strength", None)
+            sharpen_strength = 0.5 if sharpen_strength is None else sharpen_strength
+        else:
+            sharpen_strength = 0.0
+        sharp_tag = f"_sharp{to_deciaml(sharpen_strength, 100, 2)}" if sharpen_strength > 0.0 else ""
+
         if getattr(args, "rife_interpolate", False):
             rife_model_val = getattr(args, "rife_model", None) or "rife_425"
             rife_tag = "_rife"
             if rife_model_val != "rife_425":
                 rife_tag += rife_model_val[len("rife_"):] if rife_model_val.startswith("rife_") else rife_model_val
+            # Multiplier/target-fps suffix, same "only when non-default" convention --
+            # --rife-target-fps (when given) always wins over --rife-multiplier (see
+            # ADR-049/set_state_args()'s mutual-exclusion check), and the plain
+            # default (2x, neither flag set) adds nothing, exactly matching this
+            # feature's original hardcoded-doubling filename output.
+            rife_target_fps_val = getattr(args, "rife_target_fps", None)
+            rife_multiplier_val = getattr(args, "rife_multiplier", None)
+            if rife_target_fps_val is not None:
+                rife_tag += f"{rife_target_fps_val:g}".replace(".", "p") + "fps"
+            elif rife_multiplier_val is not None and rife_multiplier_val != 2:
+                rife_tag += f"{rife_multiplier_val}x"
         else:
             rife_tag = ""
 
@@ -1388,7 +1453,7 @@ def make_output_filename(input_filename, args, video=False):
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}{bp}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
-                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{rife_tag}{smtag}{bitrate}")
+                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{sharp_tag}{rife_tag}{smtag}{bitrate}")
     else:
         metadata = ""
 
@@ -1515,11 +1580,15 @@ def _build_iw3_comment_metadata(args, video=True):
         if ts_edge_protect != 0.0:
             comment_parts.append(f"iw3_temporal_stabilize_edge_protection={ts_edge_protect}")
     if args.ema_normalize and video:
-        ma = "1" if getattr(args, "ema_motion_adaptive", False) else "0"
-        comment_parts.append(
-            f"iw3_ema_decay={args.ema_decay} iw3_ema_buffer={args.ema_buffer} "
-            f"iw3_ema_motion_adaptive={ma}"
-        )
+        if _scene_auto_ema_active(args, args.ema_normalize, video):
+            auto_model = getattr(args, "scene_batch_auto_ema_model", None) or "3DECKER VDA_L"
+            comment_parts.append(f"iw3_scene_auto_ema=1 iw3_scene_auto_ema_model={auto_model}")
+        else:
+            ma = "1" if getattr(args, "ema_motion_adaptive", False) else "0"
+            comment_parts.append(
+                f"iw3_ema_decay={args.ema_decay} iw3_ema_buffer={args.ema_buffer} "
+                f"iw3_ema_motion_adaptive={ma}"
+            )
     stereo_w = getattr(args, "stereo_width", None)
     if stereo_w:
         comment_parts.append(f"iw3_stereo_width={int(stereo_w)}")
@@ -1529,9 +1598,21 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append("iw3_preserve_screen_border=1")
     if getattr(args, "edge_repair_strength", 0.0):
         comment_parts.append(f"iw3_edge_repair_strength={args.edge_repair_strength}")
+    if getattr(args, "sharpen", False):
+        sharpen_strength = getattr(args, "sharpen_strength", None)
+        if sharpen_strength is None:
+            sharpen_strength = 0.5
+        if sharpen_strength > 0.0:
+            comment_parts.append(f"iw3_sharpen_strength={sharpen_strength}")
     if getattr(args, "rife_interpolate", False):
         rife_model_val = getattr(args, "rife_model", None) or "rife_425"
         comment_parts.append(f"iw3_rife_interpolate=1 iw3_rife_model={rife_model_val}")
+        rife_target_fps_val = getattr(args, "rife_target_fps", None)
+        rife_multiplier_val = getattr(args, "rife_multiplier", None)
+        if rife_target_fps_val is not None:
+            comment_parts.append(f"iw3_rife_target_fps={rife_target_fps_val}")
+        elif rife_multiplier_val is not None and rife_multiplier_val != 2:
+            comment_parts.append(f"iw3_rife_multiplier={rife_multiplier_val}")
     if (getattr(args, "stereo_mode_tag", False) and video
             and getattr(args, "video_extension", None) == ".mkv"
             and _resolve_stereo_mode_value(args) is not None):
@@ -1556,6 +1637,47 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_waifu2x_upscale_target={w2x_target}")
 
     return " ".join(comment_parts) if comment_parts else None
+
+
+# Job-level stage names, shared with iw3/gui.py (imported from there, not
+# re-typed) so the GUI's precomputed "Step X of N" stage list and the actual
+# _notify_stage() calls below can never drift apart on spelling.
+# ADR-052 amendment (2026-09-08): four more real stages a regular conversion can go
+# through were added -- STAGE_SCENE_DETECT/STAGE_AUTOCROP/STAGE_HDR_EXTRACT/
+# STAGE_AUDIO_EXTRACT -- so "Step X of N" reflects the true number of phases for
+# whatever combination of features a given run has enabled, not just the 4 stages
+# originally wired in. Listed here in the real order process_video_full/
+# process_video_with_resume run them.
+STAGE_SCENE_DETECT = "Scene Boundary Detection"
+STAGE_AUTOCROP = "AutoCrop Analysis"
+STAGE_HDR_EXTRACT = "HDR/DV RPU Extraction"
+STAGE_AUDIO_EXTRACT = "Audio Extraction"
+STAGE_DEPTH_STEREO = "Depth & Stereo Conversion"
+STAGE_WAIFU2X_UPSCALE = "Upscaling with waifu2x"
+STAGE_RIFE_INTERPOLATE = "RIFE Frame Interpolation"
+STAGE_HDR_REINJECT = "HDR/Dolby Vision Reinjection"
+
+
+def _notify_stage(args, name):
+    """Posts a job-level stage-change notification, if something is listening
+    (args.state["stage_fn"], wired only by iw3/gui.py -- see docs/ai/AI_DECISIONS.md
+    for the progress-display ADR). No-op for CLI use and for any other caller that
+    never set stage_fn.
+
+    Exists because waifu2x upscaling, RIFE interpolation, and HDR/DV reinjection run
+    as blocking subprocess.run(..., capture_output=True) calls (CS-SUBPROCESS-001)
+    AFTER the tqdm-tracked depth/stereo encode has already finished -- unlike that
+    encode (which reports live per-frame progress via tqdm_fn), these steps produced
+    no signal the GUI could show at all, so a multi-minute RIFE pass looked identical
+    to the job being finished or hung. This is purely a display signal: it computes
+    nothing and changes no processing behavior, matching every other tqdm_fn call
+    site in this module."""
+    stage_fn = (getattr(args, "state", None) or {}).get("stage_fn")
+    if stage_fn is not None:
+        try:
+            stage_fn(name)
+        except Exception:
+            pass
 
 
 def _progress_title(basename, args):
@@ -1835,6 +1957,18 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
         left_eye, right_eye = DE.repair_stereo_edges(
             left_eye, right_eye, depth, strength=edge_repair_strength)
 
+    # Runs AFTER Edge Repair, deliberately (see DE.apply_sharpen's own docstring):
+    # sharpening the frame BEFORE Edge Repair cleans up hairline fringing/ghosting
+    # would exaggerate exactly the artifact Edge Repair is about to smooth away,
+    # working against it instead of alongside it.
+    if getattr(args, "sharpen", False):
+        sharpen_strength = getattr(args, "sharpen_strength", None)
+        if sharpen_strength is None:
+            sharpen_strength = 0.5
+        if sharpen_strength > 0.0:
+            left_eye, right_eye = DE.apply_sharpen(
+                left_eye, right_eye, strength=sharpen_strength)
+
     if not batch:
         if left_eye is not None:
             left_eye = left_eye.squeeze(0)
@@ -2069,7 +2203,8 @@ def process_images(files, output_dir, args, depth_model, side_model, title=None)
 
 # video callbacks
 
-def bind_single_frame_callback(depth_model, side_model, segment_pts, args):
+def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene_ema_settings=None,
+                               scene_ema_report=None):
     src_queue = []
     frame_cpu_offload = depth_model.get_ema_buffer_size() > 1
 
@@ -2141,13 +2276,28 @@ def bind_single_frame_callback(depth_model, side_model, segment_pts, args):
         if flush:
             depths += depth_model.flush_minmax_normalize()
             depth_model.reset_state()
+            # --scene-batch-auto-ema on the regular path (see compute_scene_ema_schedule):
+            # the scaler was just cleared above -- re-arm it with the UPCOMING scene's
+            # own Buffer/Decay instead of leaving the fixed --ema-decay/--ema-buffer in
+            # place for the rest of the run. No-op (scene_ema_settings stays empty) unless
+            # the feature is actually enabled.
+            if scene_ema_settings:
+                update = scene_ema_settings.get(frame.pts)
+                if update is not None:
+                    depth_model.enable_ema(decay=update[1], buffer_size=update[0],
+                                           motion_adaptive=getattr(args, "ema_motion_adaptive", False))
+                    if scene_ema_report:
+                        row = scene_ema_report.get(frame.pts)
+                        if row is not None:
+                            _log_scene_ema_row(row)
 
         yield from _postprocess(depths, flush=flush)
 
     return _frame_callback
 
 
-def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
+def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_ema_settings=None,
+                              scene_ema_report=None):
     depth_lock = threading.RLock()
     sbs_lock = threading.RLock()
     enqueue_ticket_lock = TicketLock()
@@ -2157,14 +2307,15 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
     frame_cpu_offload = depth_model.get_ema_buffer_size() > 1
     use_16bit = VU.pix_fmt_requires_16bit(args.pix_fmt)
 
-    def _postprocess(depth_batch, reset_ema, dequeue_ticket_id, flush, device):
+    def _postprocess(depth_batch, reset_ema, ema_updates, dequeue_ticket_id, flush, device):
         # Reorder threads
         with dequeue_ticket_lock(dequeue_ticket_id):
             with depth_lock:
                 if flush:
                     depth_list = depth_model.flush_minmax_normalize()
                 else:
-                    depth_list = depth_model.minmax_normalize(depth_batch, reset_ema=reset_ema)
+                    depth_list = depth_model.minmax_normalize(depth_batch, reset_ema=reset_ema,
+                                                               ema_updates=ema_updates)
 
             for depths in chunks(depth_list, args.batch_size):
                 if isinstance(depths, list):
@@ -2188,8 +2339,19 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
                         left_eyes, right_eyes = apply_rgbd(x_srcs, depths, mapper=args.mapper)
                     else:
                         if args.method in {"forward_fill", "forward", "forward_splat_fill"}:
-                            # lock all threads (sbs_lock -> ticket_lock -> depth_lock order)
-                            with enqueue_ticket_lock, dequeue_ticket_lock, depth_lock:
+                            # ordered_index_copy() flips the *global* torch.use_deterministic_algorithms
+                            # flag, so no other thread may run CUDA depth inference while this executes.
+                            # depth_lock alone is sufficient for that: _batch_infer() already holds
+                            # depth_lock for its entire depth_model.infer() call, and this whole
+                            # _postprocess() call is already the only one running at a time (it holds
+                            # dequeue_ticket_lock's ticket for its full duration, from the top of this
+                            # function). Do NOT also raw-acquire enqueue_ticket_lock/dequeue_ticket_lock
+                            # here: _batch_infer() acquires enqueue_ticket_lock THEN dequeue_ticket_lock
+                            # (to mint a dequeue ticket while holding its enqueue turn), while this
+                            # function already holds dequeue_ticket_lock from entry -- grabbing
+                            # enqueue_ticket_lock here too is the reverse order and is a real deadlock
+                            # (confirmed via py-spy: see docs/ai/AI_DECISIONS.md ADR-067).
+                            with depth_lock:
                                 left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts)
                         else:
                             left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts)
@@ -2225,12 +2387,13 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
         if flush:
             device = args.state["device"]
             reset_ema = None
+            ema_updates = None
             depth_batch, dequeue_ticket_id = _batch_infer(
                 None, None, flush=flush, enqueue_ticket_id=enqueue_ticket_id)
             # Return a generator directly to avoid out-of-memory errors during flush.
             # Processing is performed on the main thread.
             return _postprocess(
-                depth_batch, reset_ema,
+                depth_batch, reset_ema, ema_updates,
                 dequeue_ticket_id=dequeue_ticket_id,
                 flush=flush,
                 device=device
@@ -2238,6 +2401,18 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
         else:
             device = x.device
             reset_ema = [t in segment_pts for t in pts]
+            # --scene-batch-auto-ema on the regular path: pairs each True reset flag
+            # above with the UPCOMING scene's own (ema_buffer, ema_decay), looked up
+            # once upfront in process_video_full (compute_scene_ema_schedule) -- None
+            # for every index when the feature is off, an exact no-op downstream.
+            ema_updates = ([scene_ema_settings.get(t) if r else None for t, r in zip(pts, reset_ema)]
+                          if scene_ema_settings else None)
+            if scene_ema_report:
+                for t, r in zip(pts, reset_ema):
+                    if r:
+                        row = scene_ema_report.get(t)
+                        if row is not None:
+                            _log_scene_ema_row(row)
             if args.cuda_stream and device_is_cuda(x.device):
                 device_name = str(device)
                 if not hasattr(streams, device_name):
@@ -2253,7 +2428,7 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
                     x, pts, flush=flush, enqueue_ticket_id=enqueue_ticket_id)
 
             results = _postprocess(
-                depth_batch, reset_ema,
+                depth_batch, reset_ema, ema_updates,
                 dequeue_ticket_id=dequeue_ticket_id,
                 flush=flush,
                 device=device
@@ -2268,7 +2443,8 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args):
     return _cuda_stream_wrapper, _preprocess
 
 
-def bind_vda_frame_callback(depth_model, side_model, segment_pts, args):
+def bind_vda_frame_callback(depth_model, side_model, segment_pts, args, scene_ema_settings=None,
+                            scene_ema_report=None):
     src_queue = []
     batch_queue = []
     pts_queue = []
@@ -2310,13 +2486,21 @@ def bind_vda_frame_callback(depth_model, side_model, segment_pts, args):
         for i in range(len(batch_queue)):
             src_queue.append((VU.OffloadFrame(batch_queue[i], dtype=pix_dtype), pts_queue[i]))
 
+        if scene_ema_report:
+            for t in pts_queue:
+                if t in segment_pts:
+                    row = scene_ema_report.get(t)
+                    if row is not None:
+                        _log_scene_ema_row(row)
+
         x = torch.stack(batch_queue)
         depth_list = depth_model.infer_with_normalize(
             x, pts_queue, segment_pts,
             enable_amp=not args.disable_amp,
             edge_dilation=args.edge_dilation,
             depth_aa=args.depth_aa,
-            tta=args.tta)
+            tta=args.tta,
+            ema_updates=scene_ema_settings or None)
 
         pts_queue.clear()
         batch_queue.clear()
@@ -2408,6 +2592,33 @@ def save_scene_cache(video_path, segment_pts, args, start_time=None, end_time=No
         )
 
 
+def should_save_scene_cache(disable_scene_cache, is_preview, stop_event):
+    """
+    A scene-boundary scan's result must only ever be written to the cache if BOTH:
+      1. it's a real (non-preview-quality) scan -- unchanged from the original
+         "don't let a fast/low-fps preview scan overwrite the real cache with
+         lower-quality results" guard, and
+      2. it actually finished scanning the full requested start_time/end_time range.
+
+    (2) matters because SBD.detect_boundary() returns an incomplete result (in
+    practice, an empty set -- see nunif.utils.shot_boundary_detection.detect_boundary,
+    which returns set() the moment it notices `stop_event` was set, discarding
+    whatever partial results it had accumulated) the instant a scan is interrupted
+    partway through, e.g. the user clicking Cancel/Stop mid-scan. Without this check,
+    the caller would still save that incomplete/empty result to the cache tagged with
+    the FULL originally-requested start_time/end_time -- so a later real request
+    covering that same range would pass is_within_range() and silently trust the
+    incomplete data (e.g. "zero scene cuts in this whole range") as if the scan had
+    actually completed. Called BEFORE any stop_event-triggered early return, so the
+    caller must check `stop_event` again afterward to actually stop.
+    """
+    if disable_scene_cache or is_preview:
+        return False
+    if stop_event is not None and stop_event.is_set():
+        return False
+    return True
+
+
 def get_cached_scene_range(video_path, args, max_fps=None):
     if max_fps is None:
         max_fps = args.max_fps
@@ -2440,6 +2651,133 @@ def widen_scene_scan_range(video_path, args, max_fps=None):
     return scan_start_time, scan_end_time
 
 
+def _resolve_auto_ema_table(model_name):
+    """The real (override-aware) EMA-by-duration Buffer/Decay table for `model_name` --
+    reuses --scene-batch's own ADR-057 user-editable table (scene_batch.EMA_OVERRIDES_PATH)
+    so --scene-batch-auto-ema on a regular (non---scene-batch) conversion is governed by
+    the exact same, possibly hand-edited, values as --scene-batch's. Imported lazily (not
+    at module load time) since scene_batch.py itself imports from this module at call
+    time, and a module-level import here would create a circular import."""
+    from . import scene_batch
+    base_table = scene_batch.EMA_BY_DURATION_TABLES.get(model_name, scene_batch.EMA_BY_DURATION_VDA_L)
+    return scene_batch._table_from_override(model_name, base_table) or base_table
+
+
+def _scene_ema_schedule_rows(segment_pts, args, native_fps, range_start, range_end):
+    """The real per-scene lookup shared by compute_scene_ema_schedule (applies the
+    schedule at each reset point -- ADR-060) and the Auto EMA report/live-log
+    (records what was actually applied -- ADR-062). One row per scene, in order:
+    {"scene_index" (0-based), "start_sec", "end_sec", "settings"} where "settings"
+    is (ema_buffer, ema_decay) or None if the table had no valid match for that
+    scene's duration; every row but the first also carries "pts", the exact
+    boundary pts (reset_pts/segment_pts membership elsewhere in this file) at
+    which that scene starts. See compute_scene_ema_schedule for the meaning of
+    `range_start`/`range_end`."""
+    from .scene_batch import resolve_scene_scan_fps, _overrides_for_scene
+
+    table = _resolve_auto_ema_table(getattr(args, "scene_batch_auto_ema_model", None) or "3DECKER VDA_L")
+    scan_fps = resolve_scene_scan_fps(native_fps, args.max_fps)
+    sorted_pts = sorted(segment_pts)
+
+    def _lookup(scene_index, scene_start, scene_end):
+        overrides = _overrides_for_scene(table, scene_index, scene_start, max(scene_end - scene_start, 0.0))
+        buffer, decay = overrides.get("ema_buffer"), overrides.get("ema_decay")
+        return (buffer, decay) if buffer is not None and decay is not None else None
+
+    if not sorted_pts:
+        return [{"scene_index": 0, "start_sec": range_start, "end_sec": range_end,
+                 "settings": _lookup(0, range_start, range_end)}]
+
+    first_cut_time = sorted_pts[0] / scan_fps
+    rows = [{"scene_index": 0, "start_sec": range_start, "end_sec": first_cut_time,
+             "settings": _lookup(0, range_start, first_cut_time)}]
+
+    for i, pts in enumerate(sorted_pts):
+        start_sec = pts / scan_fps
+        end_sec = sorted_pts[i + 1] / scan_fps if i + 1 < len(sorted_pts) else range_end
+        rows.append({"scene_index": i + 1, "start_sec": start_sec, "end_sec": end_sec,
+                     "settings": _lookup(i + 1, start_sec, end_sec), "pts": pts})
+
+    return rows
+
+
+def compute_scene_ema_schedule(segment_pts, args, native_fps, range_start, range_end):
+    """
+    Precomputes --scene-batch-auto-ema's Buffer/Decay for every scene of a regular
+    (non---scene-batch) --scene-detect run, from the COMPLETE, upfront `segment_pts`
+    set -- every scene's real duration is known before frame processing starts, the
+    same way --scene-batch already knows it for its own, separate per-file pipeline
+    (see scene_batch._overrides_for_scene, which this reuses directly).
+
+    `range_start`/`range_end` are the ABSOLUTE (from the true start of the source
+    video) seconds of the portion actually being converted (--start-time/--end-time,
+    or the full source when unset). This matters because FPSFilter's pts (the same
+    units `segment_pts` values and resolve_scene_scan_fps are already expressed in,
+    see ADR-059) are absolute source-timeline positions, not relative to any trim --
+    so scene 0 starts at range_start, not at 0. `range_end` also stands in for "the
+    very last scene has no next boundary" -- that scene's duration is measured out to
+    range_end (the end of the portion being converted, i.e. the remaining video
+    length from its own start).
+
+    Returns (first_scene_settings, boundary_settings):
+      - first_scene_settings: (ema_buffer, ema_decay) for the scene starting at
+        range_start (applied once, before frame processing begins, overriding the
+        fixed --ema-decay/--ema-buffer), or None if the table has no valid match.
+      - boundary_settings: {pts: (ema_buffer, ema_decay)} for the scene that STARTS
+        at each detected cut, keyed by the exact pts value already used for
+        reset_pts/segment_pts membership elsewhere in this file.
+    """
+    rows = _scene_ema_schedule_rows(segment_pts, args, native_fps, range_start, range_end)
+    first_scene_settings = rows[0]["settings"]
+    boundary_settings = {r["pts"]: r["settings"] for r in rows[1:] if r["settings"] is not None}
+    return first_scene_settings, boundary_settings
+
+
+def _log_scene_ema_row(row):
+    """Live text visibility for Auto EMA by Scene Length on the regular
+    (non---scene-batch) path (ADR-062): prints the real per-scene Buffer/Decay AS
+    that scene's schedule is actually applied during the run, mirroring
+    scene_batch._process_scenes's own "[scene-batch] converting scene N/M: ..."
+    per-scene print convention -- this project's established style for a live,
+    per-scene status line. `row` is one entry from _scene_ema_schedule_rows, with
+    "settings" already confirmed non-None by the caller. Scene numbering here is
+    1-based (matching scene_batch's own live "scene N/M" line); the saved CSV
+    report uses the 0-based "scene_index" instead, matching scene_manifest.csv's
+    own column."""
+    buffer, decay = row["settings"]
+    start_sec, end_sec = row["start_sec"], row["end_sec"]
+    print(f"[auto-ema] scene {row['scene_index'] + 1}: {start_sec:.1f}s-{end_sec:.1f}s "
+          f"({end_sec - start_sec:.1f}s) -> buffer={buffer} decay={decay:.3f}", file=sys.stderr)
+
+
+def _write_scene_ema_report(report_path, rows):
+    """Sidecar CSV (ADR-062) recording exactly which EMA Buffer/Decay Auto EMA by
+    Scene Length actually applied to each scene of a regular (non---scene-batch)
+    conversion -- the after-the-fact equivalent of --scene-batch's own
+    scene_manifest.csv (see _write_scene_manifest) for the pipeline that had no
+    saved record at all before this. Written once, after the whole run has already
+    finished successfully (unlike scene_manifest.csv, nothing reads this
+    incrementally mid-run), via temp-name + os.replace so a reader can never
+    observe a partially-written file (CS-IO-001)."""
+    fieldnames = ["scene_index", "start_time_sec", "duration_sec", "ema_buffer", "ema_decay"]
+    tmp_path = report_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(tmp_path, report_path)
+    return report_path
+
+
+def _scene_ema_report_summary(applied_rows):
+    """(scene_count, distinct_count) for Auto EMA by Scene Length's end-of-run
+    summary line (ADR-062) -- `applied_rows` is the subset of
+    _scene_ema_schedule_rows' output whose "settings" resolved to a real
+    (ema_buffer, ema_decay) pair. distinct_count counts unique (ema_buffer,
+    ema_decay) pairs actually used, not unique scenes."""
+    return len(applied_rows), len({r["settings"] for r in applied_rows})
+
+
 def process_video_full(input_filename, output_path, args, depth_model, side_model):
     is_preview = getattr(args, "preview", False)
     scene_cache_max_fps = args.max_fps  # capture before --preview clamps it, so cache key stays stable
@@ -2463,7 +2801,18 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             not isinstance(side_model, DeviceSwitchInference) and
             not hasattr(side_model, "compile_context")
     ):
-        side_model = compile_model(side_model, device=args.state["device"])
+        try:
+            # compile_model() (nunif/models/utils.py) already catches real compile
+            # failures on its own (ADR-068 amendment) and enables torch._dynamo's
+            # suppress_errors fallback so a failure deferred to the first real
+            # forward() call doesn't crash this conversion either -- this try/except
+            # is defense-in-depth at this real pipeline entry point, matching the
+            # same "not a change to what gets compiled, only to what can possibly
+            # crash the run" precedent ADR-068 established at the GUI checkbox site.
+            side_model = compile_model(side_model, device=args.state["device"])
+        except Exception as e:
+            warnings.warn(f"torch.compile failed for the stereo model -- "
+                           f"continuing without it: {e.__class__.__name__}: {e}")
 
     if getattr(args, "preview", False):
         import copy as _copy
@@ -2503,6 +2852,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
 
     make_parent_dir(output_filename)
     if args.scene_detect or args.scene_detect_only:
+        _notify_stage(args, STAGE_SCENE_DETECT)
         segment_pts = None
         scan_start_time, scan_end_time = args.start_time, args.end_time
         if not args.disable_scene_cache:
@@ -2528,9 +2878,13 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     tqdm_fn=args.state["tqdm_fn"],
                     tqdm_title=f"{path.basename(input_filename)}: Scene Boundary Detection",
                 )
-                # Don't let a fast/low-fps preview scan overwrite the real cache with
-                # lower-quality results.
-                if not args.disable_scene_cache and not is_preview:
+                # Don't let a fast/low-fps preview scan, or a scan that got cancelled
+                # partway through, overwrite the real cache with lower-quality or
+                # incomplete results saved under the full requested range (see
+                # should_save_scene_cache). Checked BEFORE the stop_event early-return
+                # below, not after -- saving first and checking stop_event second would
+                # let a cancelled scan's incomplete result get cached as if complete.
+                if should_save_scene_cache(args.disable_scene_cache, is_preview, args.state["stop_event"]):
                     save_scene_cache(input_filename, segment_pts, args,
                                       start_time=scan_start_time, end_time=scan_end_time,
                                       max_fps=scene_cache_max_fps)
@@ -2542,7 +2896,56 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     if args.scene_detect_only:
         return
 
+    # --scene-batch-auto-ema on the regular (non---scene-batch) path: segment_pts is
+    # now the COMPLETE, upfront list of every cut in the whole processed range, so
+    # every scene's real duration can be computed before frame processing starts (see
+    # _scene_ema_schedule_rows). scene_ema_boundary_settings maps each boundary pts
+    # to the (ema_buffer, ema_decay) for the scene that STARTS there, applied at each
+    # reset_ema/reset_pts point in bind_single_frame_callback/bind_batch_frame_callback/
+    # bind_vda_frame_callback below; the very first scene (no boundary of its own) is
+    # applied here by re-calling enable_ema(), immediately overriding the fixed
+    # --ema-decay/--ema-buffer set above. Off by default -- stays {}/[] (an exact
+    # no-op downstream) unless --scene-batch-auto-ema and --scene-detect are both on.
+    # scene_ema_report_rows/scene_ema_report_by_pts (ADR-062) are the same schedule
+    # kept around purely for user-visible reporting: a live "[auto-ema] scene N: ..."
+    # log line as each scene's settings are actually applied (see _log_scene_ema_row,
+    # passed into the binders below), plus a saved "<output>.auto_ema_report.csv"
+    # sidecar and an end-of-run summary line written once processing finishes (see
+    # the bottom of this function).
+    scene_ema_boundary_settings = {}
+    scene_ema_report_rows = []
+    scene_ema_report_by_pts = {}
+    if _scene_auto_ema_active(args, ema_normalize):
+        native_fps = None
+        metadata_duration = None
+        try:
+            metadata = VU.VideoMetadata.from_file(input_filename)
+            native_fps = float(metadata.get_fps())
+            metadata_duration = metadata.guess_duration(to_int=False)
+        except Exception as e:
+            warnings.warn(f"--scene-batch-auto-ema: could not read '{input_filename}' metadata "
+                          f"({e}) -- falling back to the fixed --ema-decay/--ema-buffer for this file.")
+        if native_fps:
+            range_start = SceneBoundaryCache.time_to_sec(args.start_time, 0.0)
+            range_end = SceneBoundaryCache.time_to_sec(args.end_time, None)
+            if range_end is None:
+                range_end = metadata_duration if metadata_duration and metadata_duration > 0 else range_start
+            elif metadata_duration and metadata_duration > 0:
+                range_end = min(range_end, metadata_duration)
+            scene_ema_report_rows = _scene_ema_schedule_rows(
+                segment_pts, args, native_fps, range_start, range_end)
+            first_scene_settings = scene_ema_report_rows[0]["settings"]
+            scene_ema_boundary_settings = {r["pts"]: r["settings"] for r in scene_ema_report_rows[1:]
+                                           if r["settings"] is not None}
+            scene_ema_report_by_pts = {r["pts"]: r for r in scene_ema_report_rows[1:]
+                                       if r["settings"] is not None}
+            if first_scene_settings is not None:
+                depth_model.enable_ema(decay=first_scene_settings[1], buffer_size=first_scene_settings[0],
+                                       motion_adaptive=getattr(args, "ema_motion_adaptive", False))
+                _log_scene_ema_row(scene_ema_report_rows[0])
+
     if args.autocrop is not None:
+        _notify_stage(args, STAGE_AUTOCROP)
         crop = AutoCrop.from_video_file(
             input_filename,
             mode=args.autocrop,
@@ -2584,6 +2987,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             print("--preserve-dowi: no DV or HDR10+ detected in source, skipping extraction.",
                   file=sys.stderr)
         else:
+            _notify_stage(args, STAGE_HDR_EXTRACT)
             _hdr_tmp_hevc = path.join(_hdr_out_dir, "_iw3_src.hevc")
             # Match whatever time range is ACTUALLY being converted -- without this, a
             # full-movie run "worked" only by coincidence (its extraction naturally
@@ -2675,7 +3079,9 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     depth_model=depth_model,
                     side_model=side_model,
                     segment_pts=segment_pts,
-                    args=args
+                    args=args,
+                    scene_ema_settings=scene_ema_boundary_settings,
+                    scene_ema_report=scene_ema_report_by_pts,
                 ),
                 vf=video_filter,
                 stop_event=args.state["stop_event"],
@@ -2699,6 +3105,8 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     side_model=side_model,
                     segment_pts=segment_pts,
                     args=args,
+                    scene_ema_settings=scene_ema_boundary_settings,
+                    scene_ema_report=scene_ema_report_by_pts,
                 ),
                 vf=video_filter,
                 stop_event=args.state["stop_event"],
@@ -2719,7 +3127,9 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             depth_model=depth_model,
             side_model=side_model,
             segment_pts=segment_pts,
-            args=args
+            args=args,
+            scene_ema_settings=scene_ema_boundary_settings,
+            scene_ema_report=scene_ema_report_by_pts,
         )
         frame_callback = VU.FrameCallbackPool(
             frame_callback=frame_callback,
@@ -2754,6 +3164,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
 
     # HDR metadata injection (DV RPU + HDR10+) after encoding
     if (_hdr_rpu_path or _hdr_h10p_path) and path.exists(output_filename):
+        _notify_stage(args, STAGE_HDR_REINJECT)
         try:
             _inject_hdr_metadata(
                 output_filename,
@@ -2775,6 +3186,31 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     # any HDR reinjection above, has already finished) -- see ADR-033 / _apply_stereo_mode_tag.
     if path.exists(output_filename):
         _apply_stereo_mode_tag(output_filename, args)
+
+    # Auto EMA by Scene Length report (ADR-062): a saved, after-the-fact record of
+    # exactly which Buffer/Decay this run actually applied to each scene, matching
+    # --scene-batch's own scene_manifest.csv in spirit -- the regular (non---
+    # scene-batch) path had no equivalent before this. Off by default: nothing is
+    # written unless the feature genuinely ran (scene_ema_report_rows non-empty,
+    # i.e. --scene-batch-auto-ema and --scene-detect were both actually on) and the
+    # run actually produced its final output.
+    applied_ema_rows = [r for r in scene_ema_report_rows if r["settings"] is not None]
+    if applied_ema_rows and path.exists(output_filename):
+        report_path = output_filename + ".auto_ema_report.csv"
+        _write_scene_ema_report(report_path, [
+            {
+                "scene_index": r["scene_index"],
+                "start_time_sec": f"{r['start_sec']:.3f}",
+                "duration_sec": f"{r['end_sec'] - r['start_sec']:.3f}",
+                "ema_buffer": r["settings"][0],
+                "ema_decay": r["settings"][1],
+            }
+            for r in applied_ema_rows
+        ])
+        scene_count, distinct_count = _scene_ema_report_summary(applied_ema_rows)
+        print(f"[auto-ema] Auto EMA by Scene Length: {scene_count} scenes, "
+              f"{distinct_count} distinct Buffer/Decay values used (see {report_path})",
+              file=sys.stderr)
 
 
 def _probe_video_duration(path_str):
@@ -3075,6 +3511,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
 
     # Extract audio once, directly from the original source, over the full effective
     # range — a single clean encode instead of N stitched chunk-local encodes.
+    _notify_stage(args, STAGE_AUDIO_EXTRACT)
     audio_tmp = base + "_resume_audio.m4a"
     has_audio = False
     try:
@@ -3166,6 +3603,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
                         pass
 
             if rpu_path or h10p_path:
+                _notify_stage(args, STAGE_HDR_REINJECT)
                 try:
                     _inject_hdr_metadata(output_filename, rpu_path, h10p_path,
                                          fb, dovi_b, h10p_b, out_dir,
@@ -3246,6 +3684,13 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     # disable ema minmax for each process
     depth_model.reset()
     depth_model.disable_ema()
+
+    # Explicit stage announcement (not just relying on GUI startup default) because
+    # this function is called once per file in directory/batch mode -- without this,
+    # a second file's Depth & Stereo Conversion pass would start while the GUI's
+    # stage indicator was still left on "RIFE Frame Interpolation"/"Upscaling with
+    # waifu2x" from the previous file.
+    _notify_stage(args, STAGE_DEPTH_STEREO)
 
     input_filename, hdr_tmp_file = _tonemap_hdr_to_sdr(input_filename, args)
     input_filename, denoise_tmp_file = _denoise_preprocess(input_filename, args)
@@ -3686,7 +4131,10 @@ def export_video(input_filename, output_dir, args, title=None):
                     tqdm_fn=args.state["tqdm_fn"],
                     tqdm_title=f"{path.basename(input_filename)}: Scene Boundary Detection",
                 )
-                if not args.disable_scene_cache:
+                # See should_save_scene_cache: must not cache a scan that got cancelled
+                # partway through under metadata claiming the full requested range, and
+                # must be checked before (not after) the stop_event early-return below.
+                if should_save_scene_cache(args.disable_scene_cache, False, args.state["stop_event"]):
                     save_scene_cache(input_filename, segment_pts, args,
                                       start_time=scan_start_time, end_time=scan_end_time)
                 if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
@@ -4257,18 +4705,41 @@ def create_parser(required_true=True):
                               "method made it), gently smoothing only a thin band right around real depth "
                               "edges to reduce hairline fringing/ghosting residue. 0.0=off (default, zero "
                               "cost), 1.0=strongest. Cannot affect flat regions or areas with no depth edge."))
+    parser.add_argument("--sharpen", action="store_true",
+                        help=("final unsharp-mask sharpening pass on the RENDERED stereo output (after "
+                              "whichever stereo method made it, and after --edge-repair-strength if that is "
+                              "also set). Edge-aware: boosted at real local detail/edges, tapered to near "
+                              "zero in flat or grain-only areas, so it does not aggressively amplify film "
+                              "grain/sensor noise the way a plain unsharp mask would. Off by default. Use "
+                              "--sharpen-strength to control the amount."))
+    parser.add_argument("--sharpen-strength", type=float, default=0.5,
+                        help=("how strong the --sharpen unsharp-mask pass is (0.0=no effect, 1.0=strongest). "
+                              "Default 0.5. Has no effect unless --sharpen is also set."))
     parser.add_argument("--rife-interpolate", action="store_true",
                         help=("after conversion finishes, run the finished PACKED stereo output (both eyes "
                               "already combined, e.g. Half-SBS) through RIFE frame interpolation as a "
-                              "separate post-processing step, doubling the effective frame rate. Written to "
-                              "a separate '<name>_rife<ext>' file -- the original conversion output is never "
-                              "modified. Cannot be combined with --preserve-dowi (no correct DV/HDR10+ "
-                              "metadata can be assigned to RIFE's synthetic in-between frames)."))
+                              "separate post-processing step, raising the effective frame rate (2x by "
+                              "default -- see --rife-multiplier/--rife-target-fps for 3x/4x or an exact "
+                              "target fps). Written to a separate '<name>_rife<ext>' file -- the original "
+                              "conversion output is never modified. Cannot be combined with --preserve-dowi "
+                              "(no correct DV/HDR10+ metadata can be assigned to RIFE's synthetic "
+                              "in-between frames)."))
     parser.add_argument("--rife-model", type=str, default="rife_425",
                         choices=["rife_425", "rife_425_lite"],
                         help=("which RIFE model tier to use for --rife-interpolate. rife_425 (default) is "
                               "the recommended full-quality model; rife_425_lite is a lower-compute-cost "
                               "variant. Weights are downloaded on first use if not already present."))
+    parser.add_argument("--rife-multiplier", type=int, default=None, choices=[2, 3, 4],
+                        help=("frame-rate multiplier for --rife-interpolate: inserts N-1 evenly-spaced "
+                              "synthetic frames between every real frame pair (N=2 doubles the frame rate, "
+                              "N=3/N=4 triple/quadruple it at proportionally higher processing cost). "
+                              "Mutually exclusive with --rife-target-fps. Defaults to 2 (the original "
+                              "doubling behavior) when neither is given."))
+    parser.add_argument("--rife-target-fps", type=float, default=None,
+                        help=("interpolate --rife-interpolate's output to this exact frame rate instead of "
+                              "a simple multiplier (e.g. 60 to go from a 24fps source to 60fps). Must be "
+                              "higher than the source's own frame rate. Mutually exclusive with "
+                              "--rife-multiplier."))
     parser.add_argument("--waifu2x-upscale", action="store_true",
                         help=("after conversion finishes, run the finished output through waifu2x (a "
                               "separate, dedicated AI upscaler bundled with this app) as one extra step. "
@@ -4383,21 +4854,25 @@ def create_parser(required_true=True):
                               "must both be satisfied for it to apply."))
     parser.add_argument("--scene-batch-auto-ema", action="store_true",
                         help=("automatically pick EMA Decay/Buffer per scene based on that scene's own "
-                              "length, using a built-in table (one bucket per whole second, 0-15s+) "
-                              "tuned for --scene-batch's independent-scene processing (short scenes get "
-                              "a smaller Buffer so the smoothing actually finishes settling within the "
-                              "scene, instead of a Buffer sized for one long continuous shot). Applied "
-                              "before --scene-settings, so anything that file sets explicitly (EMA "
-                              "included) still wins. Which table is used depends on "
+                              "length, using a built-in table (one bucket per whole second, 0-15s+). "
+                              "Works two ways: with --scene-batch, tuned for its independent-scene "
+                              "processing (short scenes get a smaller Buffer so the smoothing actually "
+                              "finishes settling within the scene, instead of a Buffer sized for one long "
+                              "continuous shot), applied before --scene-settings so anything that file "
+                              "sets explicitly (EMA included) still wins; without --scene-batch, requires "
+                              "plain --scene-detect instead (there are no scene boundaries to key off of "
+                              "otherwise) and re-picks EMA Decay/Buffer at every detected cut within the "
+                              "same continuous video, overriding the fixed --ema-decay/--ema-buffer for "
+                              "each scene as it starts. Which table is used depends on "
                               "--scene-batch-auto-ema-model."))
-    parser.add_argument("--scene-batch-auto-ema-model", type=str, default="VDA_L",
-                        choices=["VDA_L", "Any_V3_Mono_01"],
+    parser.add_argument("--scene-batch-auto-ema-model", type=str, default="3DECKER VDA_L",
+                        choices=["3DECKER VDA_L", "3DECKER Any_V3_Mono_01"],
                         help=("which built-in EMA-by-duration table --scene-batch-auto-ema uses, "
-                              "matched to the Depth Model in use. VDA_L: a real video depth model with "
-                              "its own frame-to-frame memory, needs only light smoothing on top. "
-                              "Any_V3_Mono_01: a stills-only model with no frame-to-frame memory of its "
-                              "own (prone to visible 'depth breathing' without help), so this table uses "
-                              "double VDA_L's Buffer at every scene length with a correspondingly "
+                              "matched to the Depth Model in use. 3DECKER VDA_L: a real video depth model "
+                              "with its own frame-to-frame memory, needs only light smoothing on top. "
+                              "3DECKER Any_V3_Mono_01: a stills-only model with no frame-to-frame memory of "
+                              "its own (prone to visible 'depth breathing' without help), so this table "
+                              "uses double VDA_L's Buffer at every scene length with a correspondingly "
                               "higher Decay to compensate."))
     parser.add_argument("--scene-batch-variant", type=str, default=None,
                         help=("optional name for --scene-batch. Reuses the shared, already-done work "
@@ -4642,7 +5117,7 @@ class _PauseVramSuspendEvent():
         return result
 
 
-def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None):
+def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None, stage_fn=None):
     if depth_model is None:
         depth_model = create_depth_model(args.depth_model)
     depth_model.enable_refine(getattr(args, "depth_refine", False),
@@ -4684,6 +5159,12 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             "synthetic in-between frames that have no correct Dolby Vision/HDR10+ per-frame "
             "metadata to assign, so there is currently no way to preserve DV/HDR10+ through "
             "frame interpolation. Disable one of the two options and try again.")
+
+    if getattr(args, "rife_multiplier", None) is not None and getattr(args, "rife_target_fps", None) is not None:
+        raise ValueError(
+            "--rife-multiplier and --rife-target-fps cannot be used together: specify at most "
+            "one of the two (see docs/ai/AI_DECISIONS.md ADR-049). --rife-target-fps is a more "
+            "precise override of --rife-multiplier's simple N-times behavior.")
 
     if depth_model.get_name() == "VideoDepthAnything":
         if not args.ema_normalize:
@@ -4729,6 +5210,7 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         "stop_event": stop_event,
         "suspend_event": suspend_event,
         "tqdm_fn": tqdm_fn,
+        "stage_fn": stage_fn,
         "depth_model": depth_model,
         "convergence_model": convergence_model,
         "device": create_device(args.gpu),
@@ -4810,6 +5292,10 @@ def iw3_main(args):
 
     if args.export and is_yaml(args.input):
         raise ValueError("YAML file input does not support --export")
+
+    if getattr(args, "scene_batch_auto_ema", False) and not args.scene_batch and not args.scene_detect:
+        raise ValueError("--scene-batch-auto-ema requires either --scene-batch or --scene-detect -- "
+                         "there are no scene boundaries to key off of otherwise.")
 
     if args.tune and args.video_codec == "libx265":
         if len(args.tune) != 1:

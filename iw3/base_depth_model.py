@@ -295,10 +295,19 @@ class BaseDepthModel(metaclass=ABCMeta):
         self._motion_activity_log = []
         return log
 
-    def minmax_normalize(self, depth, reset_ema=None):
+    def minmax_normalize(self, depth, reset_ema=None, ema_updates=None):
+        """`ema_updates`, when given, must be the same length as `depth`/`reset_ema` --
+        an entry is either None (plain reset, keep the current decay/buffer_size, same
+        as before) or an (ema_buffer, ema_decay) pair to re-arm the scaler with for the
+        scene that starts right after this reset point (--scene-batch-auto-ema on the
+        regular, non---scene-batch path -- see iw3.utils.compute_scene_ema_schedule).
+        Only consulted where reset_ema[i] is True; None everywhere (including the
+        default, ema_updates=None) reproduces the exact prior behavior."""
         assert depth.ndim == 4
         reset_ema = [False] * depth.shape[0] if reset_ema is None else reset_ema
         assert len(reset_ema) == depth.shape[0]
+        if ema_updates is not None:
+            assert len(ema_updates) == depth.shape[0]
         normalized_depths = []
         for i in range(depth.shape[0]):
             normalized_depth = self.minmax_normalize_chw(depth[i])
@@ -306,7 +315,12 @@ class BaseDepthModel(metaclass=ABCMeta):
                 normalized_depths.append(normalized_depth)
             if reset_ema[i]:
                 normalized_depths += self.flush_minmax_normalize()
-                self.reset_ema()
+                update = ema_updates[i] if ema_updates is not None else None
+                if update is not None:
+                    self.enable_ema(decay=update[1], buffer_size=update[0],
+                                    motion_adaptive=self.scaler.motion_adaptive)
+                else:
+                    self.reset_ema()
         return normalized_depths
 
     @staticmethod

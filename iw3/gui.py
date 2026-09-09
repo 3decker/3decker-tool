@@ -20,9 +20,12 @@ from .utils import (
     create_parser, set_state_args, iw3_main,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
     _get_ffmpeg_bin, _find_mkvmerge,
+    STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
+    STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
 )
 from . import update_check
 from . import subtitle_search_cli
+from . import scene_batch
 from nunif.initializer import gc_collect
 from nunif.device import mps_is_available, xpu_is_available, create_device
 from nunif.models.utils import check_compile_support
@@ -157,6 +160,276 @@ def _zoom_font_point(base_pt, zoom_level):
 LAYOUT_DEBUG = False
 
 
+# Job-level "stage changed" notification (progress bar improvement, see
+# docs/ai/AI_DECISIONS.md). Deliberately a separate, self-contained wx event --
+# not a new `type` value on nunif/gui/common.py's shared TQDMEvent/EVT_TQDM --
+# so this stays entirely local to iw3/gui.py and never touches the common wx
+# event plumbing waifu2x-gui/iw3-player-gui/stlizer-gui also depend on.
+# `_notify_stage()` (iw3/utils.py) calls this from the background worker thread
+# (via functools.partial(_post_stage_change, self) passed as args.state["stage_fn"]),
+# so it must stay a plain wx.PostEvent -- the same thread-safety pattern TQDMGUI
+# already established -- never touch a wx widget directly from here.
+_myEVT_IW3_STAGE = wx.NewEventType()
+EVT_IW3_STAGE = wx.PyEventBinder(_myEVT_IW3_STAGE, 1)
+
+
+# Genre Preset quick-fill for Flicker Reduction's Decay Rate/Buffer fields (ADR-057
+# Amendment 9). A deliberately separate, simpler mechanism from "Auto EMA by Scene
+# Length" above: this is a ONE-TIME fill of the two FIXED Decay Rate/Buffer fields
+# for the whole movie's general pace, not a per-scene table -- selecting a preset
+# just writes two numbers into cbo_ema_decay/cbo_ema_buffer once, with no ongoing
+# link back to this dropdown afterward. Buffer stays conservative and close across
+# all three presets (never anywhere near GEMINI AI/ChatGPT's 480-600-frame
+# territory above) since Buffer is a real future-frame lookahead cost (VRAM/
+# startup-latency, not a "quality" dial -- see the Nagadomi_Reference tooltip
+# above); Decay is what actually differentiates the presets, since it costs
+# nothing extra (a pure per-frame math weighting). 120 (the most conservative
+# preset's Buffer) stays within nagadomi's own documented reference ceiling, not
+# beyond it.
+GENRE_PRESET_PLACEHOLDER = "-- Select --"
+GENRE_PRESET_CHOICES = [
+    GENRE_PRESET_PLACEHOLDER,
+    "Fast Action",
+    "Medium / Magical",
+    "Drama / Slow-Paced",
+]
+GENRE_PRESET_EMA_VALUES = {
+    "Fast Action": (0.75, 30),
+    "Medium / Magical": (0.85, 72),
+    "Drama / Slow-Paced": (0.94, 120),
+}
+# ADR-057 Amendment 11's "My Preferred Settings" entry (previously part of
+# GENRE_PRESET_CHOICES above) moved to a top-bar quick-preset button --
+# see MainFrame.apply_quick_preset("3decker") and docs/ai/AI_DECISIONS.md ADR-057
+# Amendment 12.
+
+
+class StageChangeEvent(wx.PyCommandEvent):
+    def __init__(self, etype, eid, name=None):
+        super(StageChangeEvent, self).__init__(etype, eid)
+        self.name = name
+
+
+def _post_stage_change(window, name):
+    wx.PostEvent(window, StageChangeEvent(_myEVT_IW3_STAGE, -1, name))
+
+
+def _find_update_bat():
+    """Resolve update.bat at the nunif-windows distribution root -- the same
+    relative-path convention as iw3/update_check.py's _find_git()/
+    _get_nunif_repo_root() (two levels up from this file: iw3/ -> nunif/ ->
+    nunif-windows root, where update.bat, setenv.bat, git/, python/ all live).
+    Returns (update_bat_path, nunif_windows_root) so the caller can launch it with
+    an explicit matching cwd -- update.bat's own setenv.bat call is anchored to its
+    own location (%~dp0) so it would likely work from any cwd, but this avoids
+    depending on that rather than assuming it, matching CS-SUBPROCESS-001's
+    "never assume PATH/cwd" convention used for every other bundled tool."""
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))  # nunif/
+    nunif_windows_root = path.dirname(nunif_dir)
+    return path.join(nunif_windows_root, "update.bat"), nunif_windows_root
+
+
+class RunUpdateDialog(wx.Dialog):
+    """Live output window for "Run Update" (see docs/ai/AI_DECISIONS.md ADR-069,
+    the direct follow-up to ADR-035's "Check for Updates" button -- that one only
+    checks, this dialog shows the real update.bat run that actually applies it).
+
+    A separate window rather than a log box inlined into pnl_preset's toolbar row:
+    that row is a thin horizontal strip sized for buttons/combo boxes (Preset Load/
+    Save, Quick Presets, Language, Layout, Zoom, ...), not a multi-line log, and
+    update.bat can run long enough (package installs, model downloads, a source
+    pull) that the user needs a persistent, clearly-labeled place to watch it happen
+    -- not a few squeezed-in lines.
+
+    Close is disabled, and the window's own titlebar close button is vetoed, until
+    the run actually finishes (mark_finished()), so the user can't lose the log or
+    think a still-running update finished early by closing this window."""
+
+    def __init__(self, parent):
+        super().__init__(parent, title=T("Run Update"),
+                          size=parent.FromDIP((640, 420)),
+                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self.finished = False
+        self.txt_log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
+        self.btn_close = wx.Button(self, id=wx.ID_CLOSE, label=T("Close"))
+        self.btn_close.Disable()
+
+        layout = wx.BoxSizer(wx.VERTICAL)
+        layout.Add(self.txt_log, 1, wx.EXPAND | wx.ALL, 8)
+        layout.Add(self.btn_close, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        self.SetSizer(layout)
+
+        self.btn_close.Bind(wx.EVT_BUTTON, lambda event: self.Close())
+        self.Bind(wx.EVT_CLOSE, self.on_close)
+
+    def on_close(self, event):
+        if not self.finished:
+            event.Veto()
+            return
+        event.Skip()
+
+    def append(self, text):
+        self.txt_log.AppendText(text)
+        self.txt_log.ShowPosition(self.txt_log.GetLastPosition())
+
+    def mark_finished(self):
+        self.finished = True
+        self.btn_close.Enable()
+
+
+class SceneBatchAutoEMADialog(wx.Dialog):
+    """Editor for Auto EMA by Scene Length's Buffer/Decay table (ADR-057). Opens
+    already scoped to `model_name` -- there is no live model switch inside the dialog
+    itself; the caller (MainFrame.on_click_btn_scene_batch_auto_ema_edit) reads the
+    dropdown's CURRENT selection once, at open time, and reopening this dialog after
+    changing the dropdown edits the other model's table. This was chosen over an
+    in-dialog model switch to keep Save/Reset unambiguous about which table they act
+    on, and to avoid silently discarding unsaved edits to one model when switching to
+    the other mid-edit.
+
+    Only Buffer and Decay per existing scene-length row are editable; the row
+    boundaries themselves (min_duration/max_duration) are fixed labels, never editable
+    controls, and are never read from or written to the override file (see
+    scene_batch._table_from_override) -- so nothing this dialog does can resize or
+    misalign the bucket structure.
+
+    Reset to Default only repopulates the on-screen fields with the hardcoded
+    defaults; it does not touch the saved override file by itself. Saving (Save
+    button) is what persists -- and if every field's value at Save time exactly
+    matches the hardcoded default for that row, Save removes any stored override for
+    this model entirely (rather than writing a redundant copy of the defaults), so
+    Reset-then-Save reliably returns the model to true default/fallback behavior."""
+
+    def __init__(self, parent, model_name):
+        super().__init__(parent,
+                         title=T("Edit Auto EMA by Scene Length") + f" -- {model_name}",
+                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self.model_name = model_name
+        self.base_table = scene_batch.EMA_BY_DURATION_TABLES.get(
+            model_name, scene_batch.EMA_BY_DURATION_VDA_L)
+        current_table = scene_batch._table_from_override(model_name, self.base_table) or self.base_table
+
+        root = wx.BoxSizer(wx.VERTICAL)
+
+        # ADR-057 amendment (table extended from 16 to 21 rows, 0-1s through 20s+): the
+        # full row grid can now exceed a shorter screen's usable height, so it lives in
+        # its own ScrolledPanel (same SetSizer/SetAutoLayout/SetupScrolling/SetMinSize
+        # pattern this file already uses for the main window's own option tabs -- see
+        # _compose_options_layout_tabbed/_compose_options_layout_single_page) instead of
+        # assuming it always fits, and the dialog itself is clamped to the real screen
+        # work area below (see _clamp_to_screen, mirroring ADR-056's fix for MainFrame).
+        self.scroll_panel = scrolledpanel.ScrolledPanel(self, style=wx.TAB_TRAVERSAL)
+        grid = wx.GridBagSizer(vgap=4, hgap=10)
+        grid.Add(wx.StaticText(self.scroll_panel, label=T("Scene Length")), (0, 0))
+        grid.Add(wx.StaticText(self.scroll_panel, label=T("Buffer")), (0, 1))
+        grid.Add(wx.StaticText(self.scroll_panel, label=T("Decay")), (0, 2))
+
+        self.buffer_ctrls = []
+        self.decay_ctrls = []
+        for row, base_rule in enumerate(self.base_table):
+            lo = base_rule.get("min_duration", 0)
+            hi = base_rule.get("max_duration")
+            label = f"{lo}-{hi}s" if hi is not None else f"{lo}s+"
+            grid.Add(wx.StaticText(self.scroll_panel, label=label), (row + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+            row_overrides = current_table[row]["overrides"]
+            buf_ctrl = wx.TextCtrl(self.scroll_panel, value=str(row_overrides["ema_buffer"]), size=(70, -1))
+            decay_ctrl = wx.TextCtrl(self.scroll_panel, value=str(row_overrides["ema_decay"]), size=(70, -1))
+            grid.Add(buf_ctrl, (row + 1, 1))
+            grid.Add(decay_ctrl, (row + 1, 2))
+            self.buffer_ctrls.append(buf_ctrl)
+            self.decay_ctrls.append(decay_ctrl)
+
+        self.scroll_panel.SetSizer(grid)
+        self.scroll_panel.SetAutoLayout(1)
+        self.scroll_panel.SetupScrolling(scroll_x=False, scroll_y=True)
+        # Same reasoning as the main window's own ScrolledPanel wrappers: GetBestSize()
+        # is deliberately tiny regardless of content, so without an explicit MinSize the
+        # dialog would Fit() down to almost nothing instead of showing every row when
+        # there's room -- pinning this does not defeat scrolling when _clamp_to_screen
+        # later forces the dialog shorter than this.
+        self.scroll_panel.SetMinSize(grid.CalcMin())
+        root.Add(self.scroll_panel, 1, wx.ALL | wx.EXPAND, 10)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_reset = wx.Button(self, label=T("Reset to Default"))
+        self.btn_reset.SetToolTip(
+            T("Fills every row above back in with this project's built-in default Buffer/Decay "
+              "values for {} -- does not save by itself. Click Save afterward to actually apply "
+              "and persist the reset (this also removes any previously saved custom values for "
+              "this model, so it goes back to true default behavior, not just matching numbers)."
+              ).format(model_name))
+        self.btn_reset.Bind(wx.EVT_BUTTON, self.on_reset)
+        btn_row.Add(self.btn_reset, 0, wx.RIGHT, 12)
+        btn_row.AddStretchSpacer()
+        btn_save = wx.Button(self, wx.ID_OK, label=T("Save"))
+        btn_cancel = wx.Button(self, wx.ID_CANCEL, label=T("Cancel"))
+        btn_row.Add(btn_save, 0, wx.RIGHT, 4)
+        btn_row.Add(btn_cancel)
+        root.Add(btn_row, 0, wx.ALL | wx.EXPAND, 10)
+
+        self.SetSizerAndFit(root)
+        self._clamp_to_screen()
+        btn_save.Bind(wx.EVT_BUTTON, self.on_save)
+
+    def _clamp_to_screen(self):
+        """ADR-057 amendment -- keeps every row (now 21, was 16) and the Save/Cancel/
+        Reset row reachable on a screen shorter than the dialog's natural Fit() height,
+        the same class of bug ADR-056 fixed for MainFrame itself. Only ever shrinks/
+        repositions -- a dialog that already fits is left exactly as SetSizerAndFit()
+        sized it. Safe to shrink because the row grid's ScrolledPanel (see __init__)
+        absorbs the deficit by actually scrolling, already verified elsewhere in this
+        file (_compose_options_layout_tabbed) to correctly do so when forced shorter
+        than its own pinned MinSize."""
+        self.CentreOnParent()
+        display_index = wx.Display.GetFromWindow(self)
+        if display_index == wx.NOT_FOUND:
+            display_index = 0
+        work_area = wx.Display(display_index).GetClientArea()
+        width, height = self.GetSize()
+        new_width = min(width, work_area.GetWidth())
+        new_height = min(height, work_area.GetHeight())
+        if (new_width, new_height) != (width, height):
+            self.SetSize((new_width, new_height))
+        x, y = self.GetPosition()
+        new_x = min(max(x, work_area.GetX()), work_area.GetRight() - new_width)
+        new_y = min(max(y, work_area.GetY()), work_area.GetBottom() - new_height)
+        if (new_x, new_y) != (x, y):
+            self.SetPosition((new_x, new_y))
+
+    def on_reset(self, event):
+        for row, base_rule in enumerate(self.base_table):
+            row_overrides = base_rule["overrides"]
+            self.buffer_ctrls[row].SetValue(str(row_overrides["ema_buffer"]))
+            self.decay_ctrls[row].SetValue(str(row_overrides["ema_decay"]))
+
+    def on_save(self, event):
+        entries = []
+        for row in range(len(self.base_table)):
+            buf_s = self.buffer_ctrls[row].GetValue()
+            decay_s = self.decay_ctrls[row].GetValue()
+            if not validate_number(buf_s, 1, 1800, is_int=True):
+                self.GetParent().show_validation_error_message(T("Auto EMA Buffer"), 1, 1800)
+                return
+            if not (validate_number(decay_s, 0.0, 1.0) and 0.0 < float(decay_s) < 1.0):
+                self.GetParent().show_validation_error_message(T("Auto EMA Decay"), 0.0, 1.0)
+                return
+            entries.append({"ema_buffer": int(buf_s), "ema_decay": float(decay_s)})
+
+        is_default = all(
+            entries[row]["ema_buffer"] == self.base_table[row]["overrides"]["ema_buffer"]
+            and entries[row]["ema_decay"] == self.base_table[row]["overrides"]["ema_decay"]
+            for row in range(len(self.base_table))
+        )
+        all_overrides = scene_batch.load_ema_overrides_file()
+        if is_default:
+            all_overrides.pop(self.model_name, None)
+        else:
+            all_overrides[self.model_name] = entries
+        scene_batch.save_ema_overrides_file(all_overrides)
+        if self.IsModal():
+            self.EndModal(wx.ID_OK)
+
+
 class IW3App(wx.App):
     def OnInit(self):
         set_tooltip_long_hover()
@@ -176,6 +449,11 @@ class IW3App(wx.App):
         main_frame.Show()
         main_frame.Layout()
         main_frame.Fit()
+        # ADR-056: Fit() above sizes the frame to its full natural content height,
+        # with nothing clamping that against the real screen -- see
+        # MainFrame._clamp_frame_to_screen() for why that can push the progress bar
+        # row off-screen, and why shrinking is safe here.
+        main_frame._clamp_frame_to_screen()
         self.SetTopWindow(main_frame)
         return True
 
@@ -197,7 +475,15 @@ class MainFrame(wx.Frame):
             size=(1000, 840),
             style=(wx.DEFAULT_FRAME_STYLE & ~wx.MAXIMIZE_BOX)
         )
+        # ADR-056: Maximize is disabled (no wx.MAXIMIZE_BOX above), so a window sized
+        # taller than the screen by Fit() cannot be recovered from with a single
+        # maximize click -- base_title backs _set_title_progress()'s condensed
+        # progress readout, a redundant signal that stays visible even if the
+        # progress bar itself is off-screen on some display.
+        self.base_title = self.GetTitle()
         self.processing = False
+        self.updating = False
+        self.dlg_run_update = None
         self.start_time = 0
         self.input_type = None
         self.cuda_context_initialized = False
@@ -205,6 +491,24 @@ class MainFrame(wx.Frame):
         self.suspend_event = threading.Event()
         self.suspend_pos = 0
         self.suspend_event.set()
+        # Job-level stage tracking (progress bar "Step X of N" display, see
+        # docs/ai/AI_DECISIONS.md): job_stages is the ordered list of stage names
+        # this specific job will run through, precomputed from the user's own
+        # settings right before Start (waifu2x/RIFE/preserve-dowi are all opt-in, so
+        # a plain conversion has only one stage). job_stage_index is 1-based;
+        # current_stage_name/stage_start_time back the "Step k of N: <name>...
+        # (running MM:SS)" status text, ticked live by stage_pulse_timer for stages
+        # (waifu2x/RIFE/HDR reinjection) that run as a single blocking subprocess
+        # call with no real per-item progress to report -- see on_stage_change()
+        # for why the Gauge itself is deliberately left alone during these (a real,
+        # verified wx.Gauge.Pulse() rendering bug on this project's Windows/wx
+        # combination, not a design choice).
+        self.job_stages = [STAGE_DEPTH_STEREO]
+        self.job_stage_index = 1
+        self.current_stage_name = self.job_stages[0]
+        self.stage_start_time = 0
+        self.job_start_time = 0
+        self.stage_pulse_timer = wx.Timer(self)
         self.depth_model = None
         self.depth_model_type = None
         self.depth_model_device_id = None
@@ -1128,6 +1432,38 @@ class MainFrame(wx.Frame):
               "residue left over from the 3D warp. Cannot affect flat areas or anywhere without a depth "
               "edge. 0.0=off (default), 1.0=strongest."))
 
+        self.chk_sharpen = wx.CheckBox(self.grp_stereo, label=T("Sharpen"), name="chk_sharpen")
+        self.chk_sharpen.SetValue(False)
+        self.chk_sharpen.SetToolTip(
+            T("What it's for: enhances fine detail/sharpness in the FINISHED, fully-rendered 3D picture "
+              "itself (after Edge Repair above, if that's also on) -- different from every other "
+              "sharpness-adjacent setting in this app, which all work on the DEPTH MAP instead (Depth "
+              "Resolution, Depth Detail Refinement, Dual-Pass Depth Blend). This is the only control that "
+              "sharpens the actual delivered image.\n"
+              "How it avoids amplifying film grain: classic unsharp-mask sharpening (boost = original - "
+              "blurred) applied flatly makes old scanned film grain look like ugly speckling, because grain "
+              "IS high-frequency detail to a naive sharpener. This one measures how much real local "
+              "detail/edge structure is actually at each spot first (same technique already used elsewhere "
+              "in this app to protect real depth edges from over-smoothing) and only applies the boost "
+              "where that's genuinely high -- real edges and texture get sharpened, flat or grain-only "
+              "areas are left close to untouched.\n"
+              "Pros: makes fine detail (hair, texture, text) pop more in the final image, safer on grainy/"
+              "noisy source than a plain sharpen filter would be.\n"
+              "Cons: any sharpening pass can still exaggerate real compression artifacts or genuinely fine "
+              "noise that happens to look edge-like; if the image starts looking harsh/over-crisp, lower "
+              "the Strength box to its right.\n"
+              "Recommended: off (default) unless the finished 3D output looks a little soft to you; start "
+              "at the default 0.5 Strength and raise only if you still want more."))
+
+        self.cbo_sharpen_strength = EditableComboBox(self.grp_stereo,
+                                                     choices=["0.25", "0.5", "0.75", "1.0"],
+                                                     name="cbo_sharpen_strength")
+        self.cbo_sharpen_strength.SetSelection(1)
+        self.cbo_sharpen_strength.SetToolTip(
+            T("How strong the Sharpen effect is (0.0-1.0). Higher = more pronounced detail boost at real "
+              "edges/texture, but also more risk of an over-crisp/harsh look or exaggerating real "
+              "compression artifacts. Recommended: 0.5 (default) as a safe starting point."))
+
         self.lbl_edge_dilation = wx.StaticText(self.grp_stereo, label=T("Edge Fix"))
         self.cbo_edge_dilation = EditableComboBox(self.grp_stereo,
                                                   choices=["0", "1", "2", "3", "4"],
@@ -1194,7 +1530,10 @@ class MainFrame(wx.Frame):
               "noticeably flat for a beat before catching up to the real new depth.\n"
               "Recommended: pair with Buffer below rather than tuning alone — see Buffer's tooltip for "
               "matched pairs (e.g. Decay 0.98 pairs with Buffer 120 for scenes with real smearing/bleeding "
-              "artifacts)."))
+              "artifacts).\n"
+              "Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own "
+              "per-scene Decay/Buffer instead — this value is still kept and still used as the fallback "
+              "before the first detected scene boundary."))
 
         self.cbo_ema_buffer = EditableComboBox(self.grp_stereo, choices=["150", "60", "30", "1"],
                                                name="cbo_ema_buffer")
@@ -1216,7 +1555,233 @@ class MainFrame(wx.Frame):
               "Recommended: measure your actual footage's typical shot length if possible (Scene Boundary "
               "Detection can log real cut points) and size the buffer around 30-35% of the MEDIAN shot "
               "length, rather than guessing from genre — measured testing on this project found genre "
-              "assumptions about pacing were sometimes simply wrong."))
+              "assumptions about pacing were sometimes simply wrong.\n"
+              "Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own "
+              "per-scene Decay/Buffer instead — this value is still kept and still used as the fallback "
+              "before the first detected scene boundary."))
+
+        # Parented to grp_stereo (Flicker Reduction's own StaticBox) and laid out
+        # directly under the Decay Rate/Buffer row above, not grp_video_filter, so it
+        # sits visually next to the fixed values it overrides -- see
+        # docs/ai/AI_DECISIONS.md ADR-057 amendment (2026-09-08, relocation +
+        # Decay/Buffer disable-when-checked).
+        self.chk_scene_batch_auto_ema = wx.CheckBox(self.grp_stereo,
+                                                    label=T("Auto EMA by Scene Length"),
+                                                    name="chk_scene_batch_auto_ema")
+        self.chk_scene_batch_auto_ema.SetValue(False)
+        self.chk_scene_batch_auto_ema.SetToolTip(
+            T("Automatically picks EMA Decay/Buffer per scene based on that scene's own length, "
+              "using a default table (one step per whole second, 0-20s+) -- a short scene gets a "
+              "smaller Buffer so the smoothing actually finishes settling before the scene ends, "
+              "instead of a Buffer sized for one long continuous shot. Works two ways, depending on "
+              "what else is turned on:\n"
+              "With Automated Scene Batch: tuned for its independent-scene processing. Applied before "
+              "Scene Settings File, so anything that file sets explicitly (EMA included) still wins "
+              "for scenes it covers.\n"
+              "Without Automated Scene Batch: requires Scene Detection to be turned on instead (there "
+              "are no scene boundaries to key off of otherwise -- Start will refuse to run and explain "
+              "this if it's missing). Re-picks EMA Decay/Buffer at every detected cut within the same "
+              "continuous video, overriding the fixed Flicker Reduction/Flicker Reduction Buffer for "
+              "each scene as it starts -- the output filename gets an \"_autoema<model>\" tag instead "
+              "of a fixed EMA number, since no single number was used throughout.\n"
+              "Either way: pick the matching Depth Model in the dropdown to its right -- see that "
+              "dropdown's own tooltip for the default Buffer/Decay values used at each scene length, "
+              "and the \"Edit Values...\" button below it to change them (the same edited table "
+              "governs both uses).\n"
+              "While this is checked, Flicker Reduction's own Decay Rate/Buffer fields just above are "
+              "greyed out, since this picks per-scene values instead -- their typed-in values are kept, "
+              "not cleared, and come right back (still editable) the moment you uncheck this."))
+
+        self.cbo_scene_batch_auto_ema_model = wx.ComboBox(self.grp_stereo,
+                                                          choices=["3DECKER VDA_L", "3DECKER Any_V3_Mono_01",
+                                                                   "Nagadomi_Reference",
+                                                                   "GEMINI AI", "ChatGPT", "Grok",
+                                                                   "Fast Action", "Medium Magical",
+                                                                   "Drama Slow Paced"],
+                                                          name="cbo_scene_batch_auto_ema_model")
+        self.cbo_scene_batch_auto_ema_model.SetEditable(False)
+        # Default table changed from "3DECKER VDA_L" (index 0) to "Nagadomi_Reference"
+        # (index 2) per user request -- see ADR-057 Amendment 7. This only changes which
+        # table a user gets if they turn on "Auto EMA by Scene Length" without picking a
+        # table first; the checkbox itself still defaults to off (chk_scene_batch_auto_ema
+        # .SetValue(False) above, unchanged), and the choices list order/values are
+        # untouched.
+        self.cbo_scene_batch_auto_ema_model.SetSelection(2)
+        self.cbo_scene_batch_auto_ema_model.SetToolTip(
+            T("Which Auto EMA by Scene Length table to use (for both Automated Scene Batch and a "
+              "regular Scene Detection conversion -- see that checkbox's own tooltip), matched to "
+              "the Depth Model above. "
+              "3DECKER VDA_L: a real video depth model with its own frame-to-frame memory, needs only "
+              "light smoothing on top. 3DECKER Any_V3_Mono_01: a stills-only model with no "
+              "frame-to-frame memory of its own (prone to visible 'depth breathing' without help), so "
+              "this table uses double VDA_L's Buffer at every scene length with a correspondingly "
+              "higher Decay to compensate. (These two tables were this project's own original design, "
+              "hence the \"3DECKER\" prefix -- distinguishing them from the externally-sourced "
+              "reference tables below.)\n"
+              "Default values (Buffer/Decay by scene length, one step per whole second -- use the "
+              "\"Edit Values...\" button below to change them for whichever model is selected here; "
+              "these are what you get back if you ever click Reset to Default). 15-16s through "
+              "19-20s and the 20s+ ceiling deliberately hold flat at each model's 15s value rather "
+              "than growing further -- real testing showed Buffer pushed meaningfully past that "
+              "point causes visible lag, not just smoother depth:\n"
+              "3DECKER VDA_L -- 0-1s: 8/0.65, 1-2s: 12/0.70, 2-3s: 16/0.74, 3-4s: 20/0.78, 4-5s: 25/0.80, "
+              "5-6s: 30/0.83, 6-7s: 38/0.86, 7-8s: 46/0.89, 8-9s: 55/0.91, 9-10s: 65/0.93, "
+              "10-11s: 76/0.945, 11-12s: 87/0.955, 12-13s: 98/0.965, 13-14s: 108/0.972, "
+              "14-15s: 116/0.977, 15-16s through 19-20s and 20s+: 120/0.98 (flat).\n"
+              "3DECKER Any_V3_Mono_01 -- 0-1s: 16/0.825, 1-2s: 21/0.85, 2-3s: 32/0.87, 3-4s: 40/0.89, "
+              "4-5s: 50/0.90, 5-6s: 60/0.915, 6-7s: 76/0.93, 7-8s: 92/0.945, 8-9s: 110/0.955, "
+              "9-10s: 130/0.965, 10-11s: 152/0.9725, 11-12s: 174/0.9775, 12-13s: 196/0.9825, "
+              "13-14s: 216/0.986, 14-15s: 232/0.9885, 15-16s through 19-20s and 20s+: 240/0.99 "
+              "(flat).\n"
+              "Nagadomi_Reference -- a more conservative third option, not tied to a specific "
+              "Depth Model. 3DECKER VDA_L/3DECKER Any_V3_Mono_01 above were custom-built for this "
+              "project; this one instead uses nagadomi's (this tool's original author) own real documented "
+              "presets for this exact mechanism as its anchors (iw3/depth_scaler.py) -- "
+              "IncrementalEMAScaler (decay=0.75, buffer=1) for very short scenes, settling at "
+              "WindowEMAScaler (decay=0.9, buffer=30) -- nagadomi's own 'strong' preset -- for "
+              "every scene 4 seconds or longer, unmodified, never pushed higher. Buffer is a "
+              "literal future-frame lookahead count (confirmed by reading EMAMinMaxScaler's own "
+              "code), not an abstract smoothing dial, so unlike the other two tables it does NOT "
+              "keep growing Buffer for longer and longer scenes -- there's no real basis for a "
+              "long scene needing MORE lookahead than nagadomi's own reference number. Recommended "
+              "if you're seeing lag or smearing with 3DECKER VDA_L/3DECKER Any_V3_Mono_01 on long scenes (e.g. a "
+              "continuous multi-minute shot) and would rather stay within nagadomi's own tested "
+              "range than push past it:\n"
+              "Nagadomi_Reference -- 0-1s: 1/0.750, 1-2s: 8/0.786, 2-3s: 16/0.828, 3-4s: 24/0.869, "
+              "4-5s through 20s+: 30/0.900 (flat, exactly nagadomi's own WindowEMAScaler preset).\n"
+              "GEMINI AI -- a fourth option, added for real A/B testing at the user's own "
+              "request. Unlike the three tables above, its specific per-second curve came from a "
+              "DIFFERENT AI assistant's suggestion (not this tool's own design, and not anchored to "
+              "anything nagadomi documented) and was NOT verified against nunif's own source code or "
+              "documentation the way Nagadomi_Reference was -- it's included as-is for comparison, not "
+              "because it's confirmed correct. Requests a MUCH larger lookahead Buffer than the other "
+              "three: it grows every single bucket all the way out to 480 frames (20 seconds at "
+              "24fps) by 20s+, versus 3DECKER VDA_L/3DECKER Any_V3_Mono_01's 120/240-frame ceilings and "
+              "Nagadomi_Reference's flat 30-frame ceiling. That means a long scene under this table "
+              "needs the tool to look nearly all the way through the scene before it can compute a "
+              "depth range for even its first frame -- expect real added VRAM use and startup delay, "
+              "especially on long scenes with a heavier Depth Model:\n"
+              "GEMINI AI -- 0-1s: 24/0.750, 1-2s: 48/0.800, 2-3s: 72/0.840, 3-4s: 96/0.870, "
+              "4-5s: 120/0.890, 5-6s: 144/0.905, 6-7s: 168/0.918, 7-8s: 192/0.928, 8-9s: 216/0.936, "
+              "9-10s: 240/0.943, 10-11s: 264/0.949, 11-12s: 288/0.954, 12-13s: 312/0.958, "
+              "13-14s: 336/0.962, 14-15s: 360/0.965, 15-16s: 384/0.968, 16-17s: 408/0.970, "
+              "17-18s: 432/0.972, 18-19s: 456/0.974, 19-20s: 480/0.975, 20s+: 480/0.975 (flat).\n"
+              "ChatGPT -- a fifth option, added for real A/B testing at the user's own request, same "
+              "as GEMINI AI. Its specific per-second curve came from yet another, DIFFERENT AI "
+              "assistant's suggestion (ChatGPT this time) and was likewise NOT verified against "
+              "nunif's own source code or documentation -- included as-is for comparison, not because "
+              "it's confirmed correct. This one asks for an even LARGER lookahead Buffer than GEMINI "
+              "AI: it grows every single bucket all the way out to 600 frames (25 seconds at 24fps) by "
+              "20s+, versus GEMINI AI's 480-frame ceiling, 3DECKER VDA_L/3DECKER Any_V3_Mono_01's 120/240-frame "
+              "ceilings, and Nagadomi_Reference's flat 30-frame ceiling -- the largest lookahead of "
+              "any table in this tool. That means a long scene under this table needs the tool to look "
+              "even further through the scene before it can compute a depth range for its first frame "
+              "-- expect the most VRAM use and startup delay of all five options, especially on long "
+              "scenes with a heavier Depth Model:\n"
+              "ChatGPT -- 0-1s: 30/0.75, 1-2s: 60/0.77, 2-3s: 90/0.79, 3-4s: 120/0.81, 4-5s: 150/0.83, "
+              "5-6s: 180/0.84, 6-7s: 210/0.85, 7-8s: 240/0.86, 8-9s: 270/0.87, 9-10s: 300/0.88, "
+              "10-11s: 330/0.885, 11-12s: 360/0.89, 12-13s: 390/0.90, 13-14s: 420/0.91, "
+              "14-15s: 450/0.92, 15-16s: 480/0.93, 16-17s: 510/0.94, 17-18s: 540/0.95, "
+              "18-19s: 570/0.97, 19-20s: 600/0.99, 20s+: 600/0.99 (flat).\n"
+              "Grok -- a sixth option, added for real A/B testing at the user's own request, same "
+              "as GEMINI AI and ChatGPT. Its specific per-second curve came from yet another, "
+              "DIFFERENT AI assistant's suggestion (Grok this time) and was likewise NOT verified "
+              "against nunif's own source code or documentation -- included as-is for comparison, "
+              "not because it's confirmed correct. Its own distinct character: Decay saturates very "
+              "early, reaching 0.99 by the 8-9s bucket and staying flat there for every bucket after, "
+              "while Buffer keeps climbing linearly the entire way to 480 frames (20 seconds at "
+              "24fps) by 20s+ -- unlike GEMINI AI and ChatGPT, where Buffer and Decay both keep "
+              "climbing together. That means past roughly 9 seconds, only the lookahead window "
+              "(and its VRAM/startup-delay cost) keeps growing, while actual blend strength buys "
+              "nothing further. Buffer's own 480-frame ceiling matches GEMINI AI's exactly and is "
+              "smaller than ChatGPT's 600-frame ceiling:\n"
+              "Grok -- 0-1s: 24/0.90, 1-2s: 48/0.95, 2-3s: 72/0.97, 3-4s: 96/0.975, 4-5s: 120/0.98, "
+              "5-6s: 144/0.98, 6-7s: 168/0.986, 7-8s: 192/0.988, 8-9s: 216/0.99, 9-10s: 240/0.99, "
+              "10-11s: 264/0.99, 11-12s: 288/0.99, 12-13s: 312/0.99, 13-14s: 336/0.99, "
+              "14-15s: 360/0.99, 15-16s: 384/0.99, 16-17s: 408/0.99, 17-18s: 432/0.99, "
+              "18-19s: 456/0.99, 19-20s: 480/0.99, 20s+: 480/0.99 (flat).\n"
+              "Fast Action / Medium Magical / Drama Slow Paced -- three more options, added for "
+              "real A/B testing at the user's own request, same as GEMINI AI/ChatGPT/Grok. Their "
+              "specific per-second curves came from a ChatGPT conversation proposing genre-specific "
+              "pacing schedules and were likewise NOT verified against nunif's own source code or "
+              "documentation -- included as-is for comparison. Unlike GEMINI AI/ChatGPT/Grok, these "
+              "three are explicitly capped at 10 seconds: Buffer/Decay both ramp up through the 9-10s "
+              "bucket, then hold flat from 10-11s all the way through 20s+, at a 240-frame Buffer "
+              "ceiling (half of GEMINI AI's 480-frame ceiling). Buffer is identical bucket-for-bucket "
+              "across all three -- only Decay differentiates them, from Fast Action's quick-to-react, "
+              "minimal smoothing up to Drama Slow Paced's maximum stability. These are a separate, "
+              "per-scene mechanism from the \"Genre Preset\" quick-fill next to Flicker Reduction's "
+              "Decay Rate/Buffer fields below -- that one writes one fixed pair for a whole movie, "
+              "these three vary automatically by each scene's own measured length:\n"
+              "Fast Action -- 0-1s: 24/0.750, 1-2s: 48/0.753, 2-3s: 72/0.755, 3-4s: 96/0.758, "
+              "4-5s: 120/0.761, 5-6s: 144/0.763, 6-7s: 168/0.766, 7-8s: 192/0.768, 8-9s: 216/0.771, "
+              "9-10s: 240/0.774, 10-11s through 20s+: 240/0.774 (flat).\n"
+              "Medium Magical -- 0-1s: 24/0.820, 1-2s: 48/0.823, 2-3s: 72/0.826, 3-4s: 96/0.829, "
+              "4-5s: 120/0.832, 5-6s: 144/0.835, 6-7s: 168/0.838, 7-8s: 192/0.841, 8-9s: 216/0.844, "
+              "9-10s: 240/0.847, 10-11s through 20s+: 240/0.847 (flat).\n"
+              "Drama Slow Paced -- 0-1s: 24/0.900, 1-2s: 48/0.903, 2-3s: 72/0.905, 3-4s: 96/0.908, "
+              "4-5s: 120/0.911, 5-6s: 144/0.913, 6-7s: 168/0.916, 7-8s: 192/0.918, 8-9s: 216/0.921, "
+              "9-10s: 240/0.924, 10-11s through 20s+: 240/0.924 (flat)."))
+
+        self.btn_scene_batch_auto_ema_edit = wx.Button(self.grp_stereo,
+                                                        label=T("Edit Values..."),
+                                                        name="btn_scene_batch_auto_ema_edit")
+        self.btn_scene_batch_auto_ema_edit.SetToolTip(
+            T("What it's for: opens an editor for the Buffer/Decay numbers Auto EMA by Scene Length "
+              "uses, for whichever model is currently selected in the dropdown above.\n"
+              "What you can change: Buffer and Decay for each of the 21 scene-length rows (0-1s "
+              "through 19-20s, plus 20s+). The scene-length ranges themselves are fixed.\n"
+              "Why: the built-in numbers are a general-purpose starting point -- if your own footage "
+              "consistently looks better with a bit more or less smoothing at a particular scene "
+              "length, you can dial that in yourself instead of only ever getting the defaults.\n"
+              "Pro: changes are saved and reused automatically on every future run, no need to "
+              "re-enter them each time.\n"
+              "Con: it's easy to type in a value that looks reasonable but actually smooths too "
+              "little (visible flicker) or too much (ghosting/lag) for a given scene length -- change "
+              "one row at a time and re-check the result before trusting a whole edited table.\n"
+              "Recommended: leave untouched unless you've already noticed Auto EMA by Scene Length "
+              "under- or over-smoothing a specific range of scene lengths on your own material. Click "
+              "Reset to Default inside the editor at any time to undo your changes for that model."))
+
+        # Genre Preset (ADR-057 Amendment 9): a quick-fill shortcut for Flicker
+        # Reduction's OWN fixed Decay Rate/Buffer fields above, not a new per-scene
+        # mechanism like Auto EMA by Scene Length. Parented/laid out right alongside
+        # it for the same reason Amendment 8 moved Auto EMA here -- both are ways to
+        # arrive at Flicker Reduction's Decay/Buffer values, so both live next to
+        # those fields.
+        self.lbl_genre_preset = wx.StaticText(self.grp_stereo, label=T("Genre Preset"))
+        self.cbo_genre_preset = wx.ComboBox(self.grp_stereo,
+                                            choices=GENRE_PRESET_CHOICES,
+                                            name="cbo_genre_preset")
+        self.cbo_genre_preset.SetEditable(False)
+        self.cbo_genre_preset.SetSelection(0)
+        genre_preset_tooltip = (
+            T("What it's for: a quick-fill shortcut for Flicker Reduction's Decay Rate/Buffer fields "
+              "above, based on a whole movie's general content/pacing -- NOT the same thing as \"Auto "
+              "EMA by Scene Length\" below, which instead varies Decay/Buffer automatically PER SCENE "
+              "based on each scene's own measured length. Pick one approach for a given job: type "
+              "Decay/Buffer by hand, use this to quick-fill them once, or turn on Auto EMA by Scene "
+              "Length to bypass fixed values entirely.\n"
+              "How it works: selecting a preset immediately writes that preset's Decay/Buffer numbers "
+              "into the two fields above, once -- it is not a live link, so hand-editing either field "
+              "afterward is completely safe and does not reset this dropdown or cause any error.\n"
+              "Why only Decay differs between presets: Decay is a pure per-frame math weighting with no "
+              "extra cost, so it can safely differentiate the presets. Buffer is a literal future-frame "
+              "lookahead window (real VRAM/startup-latency cost, not a \"quality\" dial -- see the Auto "
+              "EMA dropdown's own tooltip below), so it stays conservative and close across all three "
+              "presets instead of growing with intensity.\n"
+              "Values: Fast Action = Decay 0.75/Buffer 30 (max responsiveness, minimal lookahead). "
+              "Medium / Magical = Decay 0.85/Buffer 72 (balanced -- fantasy/VFX-heavy content with "
+              "mixed pacing). Drama / Slow-Paced = Decay 0.94/Buffer 120 (maximum stability, still "
+              "within nagadomi's own documented reference ceiling, not beyond it).\n"
+              "Recommended: a reasonable starting point, not a guarantee -- a movie's pace can vary "
+              "within itself (a drama can have an action beat, etc.), so spot-check the result and "
+              "hand-adjust Decay/Buffer if a specific stretch doesn't match the chosen preset's pace.\n"
+              "Greyed out, same as Decay Rate/Buffer above, whenever \"Auto EMA by Scene Length\" below "
+              "is checked -- quick-filling fields that are themselves currently irrelevant makes no "
+              "sense while that feature is picking its own per-scene values instead."))
+        self.lbl_genre_preset.SetToolTip(genre_preset_tooltip)
+        self.cbo_genre_preset.SetToolTip(genre_preset_tooltip)
 
         self.chk_ema_motion_adaptive = wx.CheckBox(self.grp_stereo,
                                                    label=T("Motion-Adaptive Smoothing"),
@@ -1449,6 +2014,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_background_divergence, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_edge_repair, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_edge_repair, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_sharpen, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sharpen_strength, (i, 1), flag=wx.EXPAND)
 
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -1456,6 +2023,11 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_ema_normalize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_ema_decay, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_ema_buffer, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_scene_batch_auto_ema, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
+        layout.Add(self.cbo_scene_batch_auto_ema_model, (i, 2), (0, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_genre_preset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_genre_preset, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.btn_scene_batch_auto_ema_edit, (i, 2), flag=wx.EXPAND)
         layout.Add(self.chk_ema_motion_adaptive, (i := i + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_scene_detect, (i := i + 1, 0), (0, 1), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_scene_detect_cache, (i, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -1687,32 +2259,6 @@ class MainFrame(wx.Frame):
               "(e.g. a different Divergence for different stretches of the movie). Leave blank to "
               "use the same settings for every scene."))
 
-        self.chk_scene_batch_auto_ema = wx.CheckBox(self.grp_video_filter,
-                                                    label=T("Auto EMA by Scene Length"),
-                                                    name="chk_scene_batch_auto_ema")
-        self.chk_scene_batch_auto_ema.SetValue(False)
-        self.chk_scene_batch_auto_ema.SetToolTip(
-            T("For Automated Scene Batch. Automatically picks EMA Decay/Buffer per scene based on "
-              "that scene's own length, using a built-in table (one step per whole second, 0-15s+) "
-              "tuned for independent-scene processing -- a short scene gets a smaller Buffer so the "
-              "smoothing actually finishes settling before the scene ends, instead of a Buffer sized "
-              "for one long continuous shot. Applied before Scene Settings File, so anything that "
-              "file sets explicitly (EMA included) still wins for scenes it covers. Pick the "
-              "matching Depth Model in the dropdown to its right."))
-
-        self.cbo_scene_batch_auto_ema_model = wx.ComboBox(self.grp_video_filter,
-                                                          choices=["VDA_L", "Any_V3_Mono_01"],
-                                                          name="cbo_scene_batch_auto_ema_model")
-        self.cbo_scene_batch_auto_ema_model.SetEditable(False)
-        self.cbo_scene_batch_auto_ema_model.SetSelection(0)
-        self.cbo_scene_batch_auto_ema_model.SetToolTip(
-            T("Which Auto EMA by Scene Length table to use, matched to the Depth Model above. "
-              "VDA_L: a real video depth model with its own frame-to-frame memory, needs only light "
-              "smoothing on top. Any_V3_Mono_01: a stills-only model with no frame-to-frame memory "
-              "of its own (prone to visible 'depth breathing' without help), so this table uses "
-              "double VDA_L's Buffer at every scene length with a correspondingly higher Decay to "
-              "compensate."))
-
         self.chk_vr_optimized_merge = wx.CheckBox(self.grp_video_filter,
                                                   label=T("VR Optimized Merge"),
                                                   name="chk_vr_optimized_merge")
@@ -1828,8 +2374,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_scene_settings, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.txt_scene_settings, (i, 1), flag=wx.EXPAND)
         layout.Add(self.btn_scene_settings, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_scene_batch_auto_ema, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
-        layout.Add(self.cbo_scene_batch_auto_ema_model, (i, 2), (0, 1), flag=wx.EXPAND)
+        # chk_scene_batch_auto_ema/cbo_scene_batch_auto_ema_model/btn_scene_batch_auto_ema_edit
+        # moved to grp_stereo's own layout (Flicker Reduction group), directly under
+        # the Decay Rate/Buffer row -- see docs/ai/AI_DECISIONS.md ADR-057 amendment
+        # (2026-09-08, relocation). No longer added here.
         layout.Add(self.lbl_scene_batch_variant, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.txt_scene_batch_variant, (i, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_vr_optimized_merge, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
@@ -2043,8 +2591,8 @@ class MainFrame(wx.Frame):
         self.chk_rife_interpolate.SetToolTip(
             T("What it's for (single video and Dual-Pass Depth Blend jobs only): once this job's finished "
               "output is fully written, runs it through RIFE (a separate AI frame-interpolation model) as "
-              "one extra step, generating a new in-between frame for every pair of real frames -- doubling "
-              "the effective frame rate for smoother-looking motion.\n"
+              "one extra step, generating new in-between frames for smoother-looking motion. How many/where "
+              "is controlled by the Rate mode dropdown below (2x by default).\n"
               "How it's safe: saved to a separate '_rife' file -- the original conversion output is always "
               "left untouched, even if the interpolation step itself fails.\n"
               "Con: real extra processing time after the main conversion already finished; RIFE "
@@ -2070,6 +2618,36 @@ class MainFrame(wx.Frame):
               "Weights are downloaded automatically the first time you use a given tier (not bundled with "
               "the app).\n"
               "Recommended: rife_425 unless interpolation time is a real bottleneck for you."))
+
+        self.cbo_rife_mode = wx.ComboBox(self.grp_postprocess,
+                                         choices=["2x", "3x", "4x", "Custom FPS..."],
+                                         name="cbo_rife_mode")
+        self.cbo_rife_mode.SetEditable(False)
+        self.cbo_rife_mode.SetSelection(0)
+        self.cbo_rife_mode.SetToolTip(
+            T("What it's for: how many new frames RIFE inserts, and where.\n"
+              "2x/3x/4x: inserts 1/2/3 evenly-spaced new frames between every pair of real frames, "
+              "multiplying the frame rate by that exact amount (e.g. 24fps source -> 48/72/96fps).\n"
+              "Custom FPS...: interpolate to an exact frame rate you choose in the field to the right "
+              "instead (e.g. 24fps source -> 60fps target), even when it isn't a clean multiple of the "
+              "source -- RIFE works out the correct in-between timing for each new frame automatically.\n"
+              "Con: 3x/4x do roughly 2x/3x as many interpolation passes as the 2x default, so processing "
+              "time increases proportionally. For a non-integer Custom FPS target (like 24->60), the new "
+              "frames aren't perfectly evenly spaced in time (some land slightly closer to one real frame "
+              "than the next), which can show as very slightly uneven motion smoothness on some frames -- "
+              "usually not noticeable, unlike the perfectly even spacing of the clean 2x/3x/4x multipliers.\n"
+              "Recommended: 2x for most uses; Custom FPS if you need to match a specific display or "
+              "editing timeline's exact frame rate."))
+        self.txt_rife_target_fps = wx.TextCtrl(self.grp_postprocess, name="txt_rife_target_fps")
+        self.txt_rife_target_fps.SetToolTip(
+            T("What it's for: the exact output frame rate to interpolate to, used only when Rate mode "
+              "above is set to \"Custom FPS...\".\n"
+              "Values: any number higher than your source video's own frame rate (e.g. 60 for a 24fps "
+              "source). A target at or below the source's frame rate is rejected -- RIFE only adds frames, "
+              "it never removes them.\n"
+              "Recommended: 60 for standard smooth-motion displays, or match your target display/editing "
+              "timeline's exact refresh rate."))
+        self.cbo_rife_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_mode)
         self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
         self.update_rife_interpolate()
 
@@ -2087,6 +2665,8 @@ class MainFrame(wx.Frame):
         layout.Add((0, 4), (j := j + 1, 0))
         layout.Add(self.chk_rife_interpolate, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_model, (j := j + 1, 0), flag=wx.EXPAND | wx.LEFT, border=14)
+        layout.Add(self.cbo_rife_mode, (j, 1), flag=wx.EXPAND)
+        layout.Add(self.txt_rife_target_fps, (j, 2), flag=wx.EXPAND)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -2135,6 +2715,31 @@ class MainFrame(wx.Frame):
               "here."))
         self.btn_reinject_output = wx.Button(self.grp_hdr_reinject, label=T("..."))
 
+        # RIFE Manifest (optional) -- wires the existing, already-real
+        # reinject_hdr_cli.py --rife-manifest flag (ADR-051) into this panel (ADR-064
+        # amendment). Left blank, this preserves today's exact existing behavior
+        # (--rife-manifest is simply never passed). The .rife_manifest.json sidecar
+        # this points at is written by the RIFE Frame Interpolation (Standalone Tool)
+        # panel below, never by this tool itself.
+        self.lbl_reinject_rife_manifest = wx.StaticText(self.grp_hdr_reinject, label=T("RIFE Manifest (optional)"))
+        self.txt_reinject_rife_manifest = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_rife_manifest")
+        self.txt_reinject_rife_manifest.SetToolTip(
+            T("What it's for: only needed when the 'Already-Converted 3D File' above was ALSO run "
+              "through the RIFE Frame Interpolation (Standalone Tool) panel below. RIFE changes the "
+              "frame count, so this tool cannot normally line it back up with the original source -- "
+              "this manifest (a small '<rife output>.rife_manifest.json' file the RIFE panel writes "
+              "next to its own output, recording exactly how it expanded the frame timeline) is what "
+              "lets it expand the Dolby Vision/HDR10+ metadata to match instead of refusing.\n"
+              "How it's safe: leave this blank for a normal (non-RIFE) conversion -- behaves exactly "
+              "as before, --rife-manifest is simply never passed.\n"
+              "Auto-fill: picking an 'Already-Converted 3D File' above that has a matching "
+              "'<file>.rife_manifest.json' sitting right next to it (the RIFE panel's own real output "
+              "naming) fills this in for you automatically -- still fully editable/clearable "
+              "afterward.\n"
+              "Recommended: leave blank unless your converted file came out of the RIFE panel; if it "
+              "did, point this at the '.rife_manifest.json' that panel wrote next to its output."))
+        self.btn_reinject_rife_manifest = wx.Button(self.grp_hdr_reinject, label=T("..."))
+
         self.chk_reinject_start_time = wx.CheckBox(self.grp_hdr_reinject, label=T("Start"),
                                                     name="chk_reinject_start_time")
         self.chk_reinject_start_time.SetToolTip(
@@ -2174,11 +2779,18 @@ class MainFrame(wx.Frame):
             T("Shows this tool's own output: pre-flight frame-count/duration numbers, and the exact "
               "reason if it refuses to proceed (e.g. a frame-count mismatch or detected RIFE "
               "interpolation) -- not just a generic pass/fail."))
+        self.btn_reinject_clear = wx.Button(self.grp_hdr_reinject, label=T("Clear"))
+        self.btn_reinject_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
 
         self.btn_reinject_source.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_source)
         self.btn_reinject_converted.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_converted)
         self.btn_reinject_output.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_output)
+        self.btn_reinject_rife_manifest.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_rife_manifest)
         self.btn_reinject_run.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_run)
+        self.btn_reinject_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_reinject_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -2192,6 +2804,9 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_reinject_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_reinject_output, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_reinject_rife_manifest, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_rife_manifest, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_reinject_rife_manifest, (h, 3), flag=wx.EXPAND)
         # Start/End Time + Run share one compact row rather than each taking a row of
         # their own -- this whole section lives in the Dual-Pass Depth Blend column,
         # which has limited spare vertical room.
@@ -2201,6 +2816,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_reinject_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_reinject_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_reinject_clear, (h := h + 1, 3), flag=wx.EXPAND)
         sizer_hdr_reinject = wx.StaticBoxSizer(self.grp_hdr_reinject, wx.VERTICAL)
         sizer_hdr_reinject.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -2319,12 +2935,18 @@ class MainFrame(wx.Frame):
               "OpenSubtitles API key is configured yet, and the server-reported download quota "
               "(remaining/requests/reset time) after every download -- not just a generic pass/"
               "fail."))
+        self.btn_subsearch_clear = wx.Button(self.grp_subsearch, label=T("Clear"))
+        self.btn_subsearch_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a search or download is running so it can't wipe output you may still be reading "
+              "mid-run; re-enabled once it finishes."))
 
         self.btn_subsearch_source.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_source)
         self.btn_subsearch_search.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_search)
         self.lst_subsearch_results.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_select_lst_subsearch_results)
         self.lst_subsearch_results.Bind(wx.EVT_LIST_ITEM_DESELECTED, self.on_select_lst_subsearch_results)
         self.btn_subsearch_download.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_download)
+        self.btn_subsearch_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_subsearch_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -2342,6 +2964,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lst_subsearch_results, (h := h + 1, 0), (0, 4), flag=wx.EXPAND)
         layout.Add(self.btn_subsearch_download, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_subsearch_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_subsearch_clear, (h := h + 1, 3), flag=wx.EXPAND)
         sizer_subsearch = wx.StaticBoxSizer(self.grp_subsearch, wx.VERTICAL)
         sizer_subsearch.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -2405,9 +3028,10 @@ class MainFrame(wx.Frame):
               "'_180x180_LR', '_RGBD', '_HRGBD', '_redcyan').\n"
               "Con: if the filename doesn't carry one of those tags (e.g. it was renamed), auto "
               "detection is inconclusive and the tool refuses rather than guessing -- pick the "
-              "correct layout here explicitly in that case. This value doesn't change how the "
-              "subtitle is added either way (a plain track works the same regardless of layout) -- "
-              "it's just a safety check so the tool never guesses wrong silently.\n"
+              "correct layout here explicitly in that case. By itself this value doesn't change "
+              "how the subtitle is added -- a plain track works the same regardless of layout. It "
+              "only matters together with the 'Position for external players (dual-eye)' checkbox "
+              "below, which needs to know which layouts are a genuine two-eye split.\n"
               "Recommended: leave on 'auto' unless the tool's log below reports it couldn't detect "
               "the format."))
 
@@ -2433,6 +3057,116 @@ class MainFrame(wx.Frame):
               "player track menus, e.g. 'English (Forced)'). Leave blank to default to the SRT "
               "file's own name."))
 
+        self.chk_submux_dual_eye = wx.CheckBox(
+            self.grp_submux, name="chk_submux_dual_eye",
+            label=T("Position for external players (dual-eye)"))
+        self.chk_submux_dual_eye.SetValue(True)
+        self.chk_submux_dual_eye.SetToolTip(
+            T("What it's for: fixes a real problem when playing the output in an EXTERNAL "
+              "player (VLC, MPC-HC, a TV's built-in player, etc.) -- not iw3-player. On a "
+              "split-eye Format (half_sbs, full_sbs, cross_eyed, vr90, half_tb, full_tb), a "
+              "plain subtitle is centered against the WHOLE frame by a normal player, which "
+              "lands it right on the seam between the two eyes and tears every line of text in "
+              "half. Turning this on converts the subtitle into a track with two copies per "
+              "line, one positioned inside each eye-half, so it reads correctly in an external "
+              "player (ADR-053).\n"
+              "Why it defaults ON: most output from this project is watched in an external "
+              "player, not iw3-player, so this checkbox defaults to the setting that's correct "
+              "there. The tradeoff: iw3-player already does its own correct per-eye rendering "
+              "of a PLAIN subtitle track, so if this stays checked, iw3-player will show each "
+              "line twice, wrongly positioned, because it re-duplicates an already-duplicated "
+              "track. Uncheck this box specifically when you know this file will be watched in "
+              "iw3-player -- that restores the original plain-track behavior (ADR-032).\n"
+              "Con: no effect for Format rgbd, half_rgbd, or anaglyph -- those aren't a "
+              "two-eye split, so there's no seam to fix (the tool's log below will note this "
+              "if you check the box with one of those formats selected). Also requires probing "
+              "the video's real width/height via ffprobe before muxing, which adds a brief "
+              "extra step.\n"
+              "Recommended: leave ON for external players (VLC, MPC-HC, TVs, etc.) -- the "
+              "common case. Uncheck ONLY if you'll specifically watch the result in iw3-player."))
+
+        # --- ADR-055: optional Font Size override for the dual-eye ASS track above ---
+        self.lbl_submux_font_size = wx.StaticText(self.grp_submux, label=T("Font Size"))
+        self.txt_submux_font_size = wx.TextCtrl(self.grp_submux, name="txt_submux_font_size")
+        self.txt_submux_font_size.SetToolTip(
+            T("What it's for: fixes a real bug -- subtitles added with Position for external "
+              "players (dual-eye) checked above used to render TINY, because the underlying "
+              "library's own fixed default text size (20px) was never designed for this "
+              "project's typical output resolutions (e.g. a 3840x2076 double-wide 4K SBS "
+              "frame, where 20px is under 1% of the frame's height). Left blank (the default, "
+              "recommended for almost everyone), the text size now automatically scales with "
+              "the video's real resolution instead, so it looks a normal, readable size with "
+              "zero configuration. Enter a number here only if you want one specific exact "
+              "pixel size instead of the automatic one.\n"
+              "Why it defaults to blank/automatic: a fixed number that looks right at 1080p "
+              "would be far too small at 4K and vice versa -- scaling automatically with the "
+              "video's actual resolution gets it right every time without you having to guess "
+              "or measure anything.\n"
+              "Pro: automatic sizing already accounts for Top/Bottom formats needing smaller "
+              "text than Side-by-Side formats at the same resolution, since each eye only gets "
+              "half the vertical space in a Top/Bottom video.\n"
+              "Con: only affects Position for external players (dual-eye)'s track -- it has no "
+              "effect at all if that checkbox above is unchecked (a plain subtitle file has no "
+              "text-size setting to control), and no effect for Format rgbd, half_rgbd, or "
+              "anaglyph either, for the same reason that checkbox has none there. This also "
+              "does not affect iw3-player's own subtitle text -- that has its own separate "
+              "size control in the player itself (the on-screen Subtitles panel), unrelated to "
+              "this tool.\n"
+              "Values: any positive number (pixels). Typical readable sizes run roughly "
+              "40-60px at 1080p and 80-120px at 4K, but leaving this blank already picks a "
+              "sensible number for whatever resolution the video actually is.\n"
+              "Recommended: leave blank so the size always matches the video's real "
+              "resolution automatically. Only set an exact number if the automatic size still "
+              "doesn't look right to you for some reason."))
+
+        # --- ADR-054: optional Start Time/End Time trim+rebase for a full-movie SRT
+        # applied to a trimmed clip. Same field NAME and time format (hh:mm:ss/mm:ss)
+        # as this app's own main conversion tab (chk_start_time/txt_start_time on the
+        # Video Filter group) and iw3.subtitle_mux_cli's own --start-time/--end-time,
+        # which reuse iw3's exact parse_time() -- so a value typed here or copied from
+        # there is always correct in both places. Checkbox + TimeCtrl pair mirrors HDR
+        # Reinjection's own Start/End Time controls just above (same underlying
+        # --start-time/--end-time flag names, same "position within the full source
+        # that the trimmed/converted file starts/ends at" idea).
+        self.chk_submux_start_time = wx.CheckBox(self.grp_submux, label=T("Start Time"),
+                                                  name="chk_submux_start_time")
+        self.chk_submux_start_time.SetToolTip(
+            T("What it's for: the real problem this solves -- you converted only a TRIMMED "
+              "CLIP of a full movie with iw3's own Start Time/End Time (e.g. "
+              "--start-time 00:01:15 --end-time 00:06:15 on the main conversion tab), but "
+              "Subtitle File above has timestamps for the FULL movie (e.g. downloaded via "
+              "Search Subtitles above). Without this, a line that was originally at 1:16 in "
+              "the full movie would still say 1:16 in the new track -- 1 minute 16 seconds "
+              "into a 5-minute clip that has already ended. Checking this and entering the "
+              "SAME Start Time you used for the original iw3 conversion trims Subtitle File "
+              "to that point onward and REBASES it so that point becomes 0:00, lining up with "
+              "the clip's own first frame.\n"
+              "Con: there is no auto-detection of this -- you must know and enter the exact "
+              "point within the full-movie subtitle file that matches the clip's first frame. "
+              "A cue straddling this point is clipped to begin at 0 rather than dropped.\n"
+              "Recommended: leave unchecked when Subtitle File already matches the converted "
+              "video's own timeline (e.g. it was made/downloaded specifically for this clip). "
+              "Check it and match iw3's own Start Time exactly when Subtitle File is for the "
+              "full source instead."))
+        self.txt_submux_start_time = TimeCtrl(self.grp_submux, value="00:00:00", fmt24hr=True,
+                                               name="txt_submux_start_time")
+        self.chk_submux_end_time = wx.CheckBox(self.grp_submux, label=T("End Time"),
+                                                name="chk_submux_end_time")
+        self.chk_submux_end_time.SetToolTip(
+            T("Same idea as Start Time, but for where the trimmed clip ends within the "
+              "full-movie subtitle file's own timeline -- match iw3's own End Time from the "
+              "original conversion. A cue extending past this point is clipped to end at "
+              "(End Time - Start Time) rather than left running past the clip's last frame; "
+              "cues entirely after it are dropped.\n"
+              "Con: given without Start Time checked, Start Time is treated as 00:00:00 "
+              "(trimming only the tail end) -- check Start Time too if the clip doesn't "
+              "start at the very beginning of the full movie.\n"
+              "Recommended: leave unchecked to keep everything through the end of Subtitle "
+              "File; check it and match iw3's own End Time when the clip ends before the "
+              "full movie does."))
+        self.txt_submux_end_time = TimeCtrl(self.grp_submux, value="00:00:00", fmt24hr=True,
+                                             name="txt_submux_end_time")
+
         self.btn_submux_run = wx.Button(self.grp_submux, label=T("Run"))
         self.btn_submux_run.SetToolTip(
             T("What it's for: runs the mux as a separate background process (python -m "
@@ -2452,11 +3186,17 @@ class MainFrame(wx.Frame):
             T("Shows this tool's own output verbatim, including the exact hard-refusal message "
               "if Format detection fails or the SRT file fails validation -- not just a generic "
               "pass/fail toast."))
+        self.btn_submux_clear = wx.Button(self.grp_submux, label=T("Clear"))
+        self.btn_submux_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
 
         self.btn_submux_input.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_input)
         self.btn_submux_srt.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_srt)
         self.btn_submux_output.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_output)
         self.btn_submux_run.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_run)
+        self.btn_submux_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_submux_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -2479,8 +3219,18 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_submux_language, (h, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_submux_track_name, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_submux_track_name, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.chk_submux_dual_eye, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_submux_font_size, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_font_size, (h, 1), flag=wx.EXPAND)
+        # Start Time/End Time share one compact row (ADR-054) -- same convention as
+        # HDR Reinjection's/Add Audio Track's own Start/End Time rows above.
+        layout.Add(self.chk_submux_start_time, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_start_time, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_submux_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_submux_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.btn_submux_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_submux_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_submux_clear, (h := h + 1, 3), flag=wx.EXPAND)
         sizer_submux = wx.StaticBoxSizer(self.grp_submux, wx.VERTICAL)
         sizer_submux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -2609,11 +3359,17 @@ class MainFrame(wx.Frame):
             T("Shows this tool's own output verbatim, including the exact ffmpeg trim "
               "command(s) when Source Start/End Time is used, and the exact refusal reason "
               "if anything fails -- not just a generic pass/fail toast."))
+        self.btn_audiomux_clear = wx.Button(self.grp_audiomux, label=T("Clear"))
+        self.btn_audiomux_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
 
         self.btn_audiomux_input.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_input)
         self.btn_audiomux_audio.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_audio)
         self.btn_audiomux_output.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_output)
         self.btn_audiomux_run.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_run)
+        self.btn_audiomux_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_audiomux_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -2642,6 +3398,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_audiomux_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.btn_audiomux_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_audiomux_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_audiomux_clear, (h := h + 1, 3), flag=wx.EXPAND)
         sizer_audiomux = wx.StaticBoxSizer(self.grp_audiomux, wx.VERTICAL)
         sizer_audiomux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -2713,9 +3470,15 @@ class MainFrame(wx.Frame):
         self.txt_stereotag_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact refusal reason if Format "
               "detection fails or the resolved format isn't taggable -- not just a generic pass/fail."))
+        self.btn_stereotag_clear = wx.Button(self.grp_stereotag, label=T("Clear"))
+        self.btn_stereotag_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
 
         self.btn_stereotag_input.Bind(wx.EVT_BUTTON, self.on_click_btn_stereotag_input)
         self.btn_stereotag_run.Bind(wx.EVT_BUTTON, self.on_click_btn_stereotag_run)
+        self.btn_stereotag_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_stereotag_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -2728,8 +3491,356 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_stereotag_backup, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_stereotag_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_stereotag_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_stereotag_clear, (h := h + 1, 3), flag=wx.EXPAND)
         sizer_stereotag = wx.StaticBoxSizer(self.grp_stereotag, wx.VERTICAL)
         sizer_stereotag.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+
+        # --- standalone utility: apply the Sharpen filter to an already-converted
+        # video (ADR-063) ---
+        # NOT part of the main conversion pipeline -- takes an already-converted 3D
+        # video and applies ADR-061's edge-aware unsharp-mask Sharpen filter to it,
+        # without re-running depth/stereo conversion. Reuses DE.apply_sharpen
+        # directly (never forked/duplicated) via iw3.sharpen_cli, launched as its own
+        # subprocess -- same out-of-process convention as the other standalone tools
+        # in this column (see docs/ai/CODING_STANDARDS.md CS-SUBPROCESS-001). Unlike
+        # Retroactively Tag MKV as 3D just above, this DOES write a separate output
+        # file (an unsharp mask re-encodes the video track, unlike a pure
+        # metadata-only edit), same convention as HDR Reinjection/Add Subtitle
+        # Track/Add Audio Track.
+        self.grp_sharpen = wx.StaticBox(
+            self.tab_tools, label=T("Sharpen (Standalone Tool)"))
+
+        self.lbl_sharpen_input = wx.StaticText(self.grp_sharpen, label=T("Converted 3D Video (.mkv)"))
+        self.txt_sharpen_input = wx.TextCtrl(self.grp_sharpen, name="txt_sharpen_input")
+        self.txt_sharpen_input.SetToolTip(
+            T("What it's for: the already-converted 3D video to sharpen. Must be an .mkv "
+              "file -- mkvmerge is what guarantees every other track (audio, subtitles, "
+              "chapters, attachments) is copied through byte-for-byte unchanged around the "
+              "freshly re-encoded video, and that's only available for Matroska.\n"
+              "Con: read-only -- never modified. A new file is always written to Output "
+              "File below.\n"
+              "Recommended: the direct iw3 output file, with its normal SBS/TB/RGBD/"
+              "Anaglyph filename tag intact (e.g. '..._LR.mkv') so Format below can "
+              "auto-detect."))
+        self.btn_sharpen_input = wx.Button(self.grp_sharpen, label=T("..."))
+
+        self.lbl_sharpen_output = wx.StaticText(self.grp_sharpen, label=T("Output File"))
+        self.txt_sharpen_output = wx.TextCtrl(self.grp_sharpen, name="txt_sharpen_output")
+        self.txt_sharpen_output.SetToolTip(
+            T("Where to write the new sharpened copy. Auto-filled with '<converted file "
+              "name>_sharpened.mkv' in the same folder once you pick the converted video "
+              "above -- change it if you want it saved somewhere else.\n"
+              "How it's safe: this tool never overwrites the input video, only ever writes "
+              "here."))
+        self.btn_sharpen_output = wx.Button(self.grp_sharpen, label=T("..."))
+
+        self.lbl_sharpen_format = wx.StaticText(self.grp_sharpen, label=T("Format"))
+        self.cbo_sharpen_format = wx.ComboBox(
+            self.grp_sharpen, name="cbo_sharpen_format",
+            choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb",
+                     "cross_eyed", "vr90", "rgbd", "half_rgbd", "anaglyph"])
+        self.cbo_sharpen_format.SetEditable(False)
+        self.cbo_sharpen_format.SetSelection(0)
+        self.cbo_sharpen_format.SetToolTip(
+            T("What it's for: the stereo/output layout of the converted video above -- "
+              "needed so this tool knows how to split it before sharpening (a genuine "
+              "two-eye layout is split into its eye halves and each is sharpened "
+              "independently, never across the seam; RGBD/Half RGBD only sharpens the RGB "
+              "half, since the other half is a depth map, not a picture; Anaglyph has no "
+              "seam and is sharpened as one whole frame). 'auto' (default) detects this "
+              "from its filename using the same tags iw3 itself writes (e.g. '_LR', '_TB', "
+              "'_LRF_Full_SBS', '_TBF_fulltb', '_RLF_cross', '_180x180_LR', '_RGBD', "
+              "'_HRGBD', '_redcyan').\n"
+              "Con: if the filename doesn't carry one of those tags (e.g. it was renamed), "
+              "auto detection is inconclusive and the tool refuses rather than guessing -- "
+              "pick the correct layout here explicitly in that case.\n"
+              "Recommended: leave on 'auto' unless the tool's log below reports it "
+              "couldn't detect the format."))
+
+        self.lbl_sharpen_strength = wx.StaticText(self.grp_sharpen, label=T("Strength"))
+        self.cbo_sharpen_strength_standalone = EditableComboBox(
+            self.grp_sharpen, choices=["0.25", "0.5", "0.75", "1.0"],
+            name="cbo_sharpen_strength_standalone")
+        self.cbo_sharpen_strength_standalone.SetSelection(1)
+        self.cbo_sharpen_strength_standalone.SetToolTip(
+            T("How strong the Sharpen effect is (0.0-1.0) -- the exact same edge-aware "
+              "unsharp-mask filter, range, and default (0.5) as the in-pipeline Sharpen "
+              "control on the Stereo tab (ADR-061), just applied here to an already-"
+              "converted file instead of during conversion.\n"
+              "Values: higher = more pronounced detail boost at real edges/texture, but "
+              "also more risk of an over-crisp/harsh look or exaggerating real compression "
+              "artifacts. 0.0 is an exact no-op (the video track is still fully "
+              "re-encoded, but every pixel is left unchanged) -- useful only for testing.\n"
+              "Recommended: 0.5 (default) as a safe starting point, same as the "
+              "in-pipeline control."))
+
+        self.btn_sharpen_run = wx.Button(self.grp_sharpen, label=T("Run"))
+        self.btn_sharpen_run.SetToolTip(
+            T("What it's for: runs the sharpen pass as a separate background process "
+              "(python -m iw3.sharpen_cli) -- this app's own GPU/model state is never "
+              "touched, and the input video is never modified.\n"
+              "How it's safe: every existing track (audio, subtitles, chapters, "
+              "attachments) is copied into the output completely unchanged -- only the "
+              "video track is re-encoded, and only its pixels are touched.\n"
+              "Con: if Format can't be auto-detected from the input filename, this refuses "
+              "immediately with that exact message shown in the log box below, rather than "
+              "guessing the layout. Re-encoding the video track takes time proportional to "
+              "the video's length.\n"
+              "Recommended: check the log box below afterward to confirm it actually "
+              "succeeded rather than refused."))
+
+        self.txt_sharpen_log = wx.TextCtrl(self.grp_sharpen, style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                            size=self.FromDIP((-1, 60)), name="txt_sharpen_log")
+        self.txt_sharpen_log.SetToolTip(
+            T("Shows this tool's own output verbatim, including the exact hard-refusal "
+              "message if Format detection fails -- not just a generic pass/fail toast."))
+        self.btn_sharpen_clear = wx.Button(self.grp_sharpen, label=T("Clear"))
+        self.btn_sharpen_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
+
+        self.btn_sharpen_input.Bind(wx.EVT_BUTTON, self.on_click_btn_sharpen_input)
+        self.btn_sharpen_output.Bind(wx.EVT_BUTTON, self.on_click_btn_sharpen_output)
+        self.btn_sharpen_run.Bind(wx.EVT_BUTTON, self.on_click_btn_sharpen_run)
+        self.btn_sharpen_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_sharpen_log.Clear())
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_sharpen_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_sharpen_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_sharpen_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_sharpen_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_sharpen_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_sharpen_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_sharpen_format, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sharpen_format, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_sharpen_strength, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sharpen_strength_standalone, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_sharpen_run, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_sharpen_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_sharpen_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        sizer_sharpen = wx.StaticBoxSizer(self.grp_sharpen, wx.VERTICAL)
+        sizer_sharpen.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+
+        # --- standalone utility: RIFE frame interpolation on an already-converted
+        # video (ADR-029/ADR-049/ADR-051's own CLI tool, iw3/rife_cli.py, previously
+        # CLI-only -- see ADR-051's own note this was left as a deliberate follow-up).
+        # NOT part of the main conversion pipeline (that's chk_rife_interpolate/
+        # cbo_rife_model/cbo_rife_mode/txt_rife_target_fps up in Post-Processing above,
+        # untouched by this) -- this is the SAME iw3.rife_cli tool, just launched
+        # retroactively against a video that was already converted, following the exact
+        # same out-of-process pattern/layout as Sharpen (Standalone Tool) just above
+        # (see docs/ai/CODING_STANDARDS.md CS-SUBPROCESS-001). Every control maps to a
+        # real rife_cli.py create_parser() flag: --input/--output/--rife-model/
+        # --rife-multiplier/--rife-target-fps/--gpu (original), plus --video-codec
+        # (added 2026-09-08 fixing the real, confirmed bug that RIFE could never
+        # output HEVC at all -- see docs/ai/AI_DECISIONS.md ADR-051/ADR-064
+        # amendments; cbo_rife_standalone_codec below).
+        self.grp_rife_standalone = wx.StaticBox(
+            self.tab_tools, label=T("RIFE Frame Interpolation (Standalone Tool)"))
+
+        self.lbl_rife_standalone_input = wx.StaticText(self.grp_rife_standalone,
+                                                         label=T("Converted 3D Video"))
+        self.txt_rife_standalone_input = wx.TextCtrl(self.grp_rife_standalone,
+                                                       name="txt_rife_standalone_input")
+        self.txt_rife_standalone_input.SetToolTip(
+            T("What it's for: an already-converted 3D video to smooth the motion of. RIFE is a separate "
+              "AI model that creates new, genuinely synthesized in-between frames (not simple frame "
+              "duplication/blending) so motion looks smoother at a higher frame rate -- e.g. a 24fps "
+              "movie interpolated to 48fps.\n"
+              "How it's safe: read-only -- never modified. A new file is always written to Output File "
+              "below.\n"
+              "Con: RIFE interpolates the FINAL PACKED stereo frame (both eyes already combined) as one "
+              "image, so it will see the seam between the two packed eyes -- it wasn't trained on that, "
+              "though in practice both eyes move together so this doesn't cause left/right desync (same "
+              "accepted tradeoff as the in-pipeline RIFE step above).\n"
+              "Recommended: the direct iw3 output file you already made."))
+        self.btn_rife_standalone_input = wx.Button(self.grp_rife_standalone, label=T("..."))
+
+        self.lbl_rife_standalone_output = wx.StaticText(self.grp_rife_standalone, label=T("Output File"))
+        self.txt_rife_standalone_output = wx.TextCtrl(self.grp_rife_standalone,
+                                                        name="txt_rife_standalone_output")
+        self.txt_rife_standalone_output.SetToolTip(
+            T("Where to write the new, motion-smoothed copy. Auto-filled with '<converted file "
+              "name>_rife<ext>' in the same folder once you pick the converted video above -- change it "
+              "if you want it saved somewhere else.\n"
+              "How it's safe: this tool never overwrites the input video, only ever writes here. It also "
+              "always writes a small '<output>.rife_manifest.json' file next to it, recording which "
+              "output frames are real and which are RIFE-synthetic -- see Run below for what that's for."))
+        self.btn_rife_standalone_output = wx.Button(self.grp_rife_standalone, label=T("..."))
+
+        self.lbl_rife_standalone_model = wx.StaticText(self.grp_rife_standalone, label=T("RIFE Model"))
+        self.cbo_rife_standalone_model = wx.ComboBox(self.grp_rife_standalone,
+                                                       choices=["rife_425", "rife_425_lite"],
+                                                       name="cbo_rife_standalone_model")
+        self.cbo_rife_standalone_model.SetEditable(False)
+        self.cbo_rife_standalone_model.SetSelection(0)
+        self.cbo_rife_standalone_model.SetToolTip(
+            T("Which RIFE model quality tier to use -- the same two tiers, and same tradeoff, as the "
+              "in-pipeline RIFE step above.\n"
+              "rife_425: the recommended full model -- better motion accuracy, especially on complex/fast "
+              "motion, at a higher compute cost.\n"
+              "rife_425_lite: a lower-compute-cost variant of the same generation, trades a little "
+              "accuracy for speed.\n"
+              "Weights are downloaded automatically the first time you use a given tier (not bundled with "
+              "the app).\n"
+              "Recommended: rife_425 unless interpolation time is a real bottleneck for you."))
+
+        self.lbl_rife_standalone_mode = wx.StaticText(self.grp_rife_standalone, label=T("Rate"))
+        self.cbo_rife_standalone_mode = wx.ComboBox(self.grp_rife_standalone,
+                                                      choices=["2x", "3x", "4x", "Custom FPS..."],
+                                                      name="cbo_rife_standalone_mode")
+        self.cbo_rife_standalone_mode.SetEditable(False)
+        self.cbo_rife_standalone_mode.SetSelection(0)
+        self.cbo_rife_standalone_mode.SetToolTip(
+            T("What it's for: how many new frames RIFE inserts, and where.\n"
+              "2x/3x/4x: inserts 1/2/3 evenly-spaced new frames between every pair of real frames, "
+              "multiplying the frame rate by that exact amount (e.g. 24fps source -> 48/72/96fps).\n"
+              "Custom FPS...: interpolate to an exact frame rate you choose in the field to the right "
+              "instead (e.g. 24fps source -> 60fps target), even when it isn't a clean multiple of the "
+              "source -- RIFE works out the correct in-between timing for each new frame automatically. "
+              "Must be higher than the source video's own frame rate -- this tool refuses (see the log "
+              "box below) rather than silently misbehaving if it isn't.\n"
+              "Con: 3x/4x do roughly 2x/3x as many interpolation passes as the 2x default, so processing "
+              "time increases proportionally. For a non-integer Custom FPS target (like 24->60), the new "
+              "frames aren't perfectly evenly spaced in time, which can show as very slightly uneven "
+              "motion smoothness on some frames -- usually not noticeable, unlike the perfectly even "
+              "spacing of the clean 2x/3x/4x multipliers.\n"
+              "Recommended: 2x for most uses; Custom FPS if you need to match a specific display or "
+              "editing timeline's exact frame rate."))
+        self.txt_rife_standalone_target_fps = wx.TextCtrl(self.grp_rife_standalone,
+                                                            name="txt_rife_standalone_target_fps")
+        self.txt_rife_standalone_target_fps.SetToolTip(
+            T("What it's for: the exact output frame rate to interpolate to, used only when Rate above is "
+              "set to \"Custom FPS...\".\n"
+              "Values: any number higher than your source video's own frame rate (e.g. 60 for a 24fps "
+              "source). A target at or below the source's frame rate is rejected -- RIFE only adds "
+              "frames, it never removes them.\n"
+              "Recommended: 60 for standard smooth-motion displays, or match your target display/editing "
+              "timeline's exact refresh rate."))
+
+        self.lbl_rife_standalone_gpu = wx.StaticText(self.grp_rife_standalone, label=T("GPU"))
+        self.cbo_rife_standalone_gpu = wx.ComboBox(self.grp_rife_standalone, name="cbo_rife_standalone_gpu")
+        self.cbo_rife_standalone_gpu.SetEditable(False)
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                device_name = torch.cuda.get_device_properties(i).name
+                self.cbo_rife_standalone_gpu.Append(f"{i}:{device_name}", i)
+        elif mps_is_available():
+            self.cbo_rife_standalone_gpu.Append("MPS", 0)
+        elif xpu_is_available():
+            for i in range(torch.xpu.device_count()):
+                device_name = torch.xpu.get_device_name(i)
+                self.cbo_rife_standalone_gpu.Append(f"{i}:{device_name}", i)
+        self.cbo_rife_standalone_gpu.Append("CPU", -1)
+        self.cbo_rife_standalone_gpu.SetSelection(0)
+        self.cbo_rife_standalone_gpu.SetToolTip(
+            T("Which GPU (or CPU) runs this tool's own RIFE model -- reuses the Device selector's "
+              "convention from the Processor tab, but without \"All CUDA Device\": this tool runs as one "
+              "single background process (see Run below) and iw3.rife_cli's own --gpu option only ever "
+              "targets one device, it cannot split work across several the way the main conversion's "
+              "Device selector can.\n"
+              "Con: CPU works without a GPU but is dramatically slower -- only use it if you have no "
+              "compatible graphics card.\n"
+              "Recommended: your main GPU (the first entry) unless you're deliberately running this "
+              "alongside another GPU job and want to keep them on separate devices."))
+
+        self.lbl_rife_standalone_codec = wx.StaticText(self.grp_rife_standalone, label=T("Output Codec"))
+        self.cbo_rife_standalone_codec = wx.ComboBox(self.grp_rife_standalone,
+                                                       name="cbo_rife_standalone_codec")
+        self.cbo_rife_standalone_codec.SetEditable(False)
+        # ClientData carries the real --video-codec value each choice maps to (None
+        # for the unchanged default) -- same convention as cbo_rife_standalone_gpu
+        # above.
+        self.cbo_rife_standalone_codec.Append(T("H.264 (default)"), None)
+        self.cbo_rife_standalone_codec.Append(T("H.265/HEVC -- libx265 (CPU)"), "libx265")
+        self.cbo_rife_standalone_codec.Append(T("H.265/HEVC -- hevc_nvenc (GPU)"), "hevc_nvenc")
+        self.cbo_rife_standalone_codec.SetSelection(0)
+        self.cbo_rife_standalone_codec.SetToolTip(
+            T("What it's for: which video format this tool encodes its OUTPUT with.\n"
+              "Why you would change it: RIFE's own output has always defaulted to H.264, unrelated to "
+              "Dolby Vision/HDR entirely -- leave this on the default for that. But if the video you're "
+              "interpolating has Dolby Vision or HDR10+ and you plan to fix that metadata afterward with "
+              "the Retroactive HDR/DV Reinjection tool above (its \"RIFE Manifest\" field is built for "
+              "exactly this), that tool can ONLY inject into an HEVC (H.265) file -- RIFE's H.264 default "
+              "output can NEVER accept that metadata, no matter what. Pick an HEVC option here FIRST if "
+              "that's your plan.\n"
+              "H.265/HEVC -- libx265 (CPU): software encode, works on any machine, slower and produces a "
+              "larger file than the H.264 default at the same quality setting.\n"
+              "H.265/HEVC -- hevc_nvenc (GPU): hardware encode on the GPU selected above, much faster "
+              "than libx265, requires an NVIDIA GPU with NVENC support (most GeForce/RTX cards from the "
+              "last several generations).\n"
+              "Con: HEVC output is somewhat less universally compatible with older/non-4K playback "
+              "devices than H.264, and both HEVC options here produce a larger or slower-to-produce file "
+              "than the H.264 default.\n"
+              "Recommended: leave on the default (H.264) unless you specifically plan to run the "
+              "Retroactive HDR/DV Reinjection tool afterward -- then pick libx265 (works everywhere) or "
+              "hevc_nvenc (faster, if your GPU supports it)."))
+
+        self.btn_rife_standalone_run = wx.Button(self.grp_rife_standalone, label=T("Run"))
+        self.btn_rife_standalone_run.SetToolTip(
+            T("What it's for: runs RIFE interpolation as a separate background process (python -m "
+              "iw3.rife_cli) -- this app's own GPU/model state is never touched, and the input video is "
+              "never modified.\n"
+              "How it's safe: writes to a new output file only; a '<output>.rife_manifest.json' sidecar "
+              "is always written alongside it too, recording which output frames are real and which are "
+              "RIFE-synthetic.\n"
+              "Important -- Dolby Vision/HDR: RIFE itself does NOT touch DV/HDR10+ metadata at all (it "
+              "doesn't even look at it). If the video you're interpolating has Dolby Vision, don't stop "
+              "here -- first, set Output Codec above to an HEVC option (DV/HDR10+ reinjection requires "
+              "HEVC output, and this tool's H.264 default can never accept it). Then use the Retroactive "
+              "HDR/DV Reinjection tool above, pointing its \"Converted\" field at this Run's output and "
+              "its \"RIFE Manifest\" field at the '.rife_manifest.json' sidecar this Run writes, against "
+              "your ORIGINAL Dolby Vision source. Skipping either step means the output plays back "
+              "without correct Dolby Vision metadata.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded rather "
+              "than refused, and note the printed manifest file path if you'll need it for Dolby Vision."))
+
+        self.txt_rife_standalone_log = wx.TextCtrl(self.grp_rife_standalone,
+                                                     style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                                     size=self.FromDIP((-1, 60)), name="txt_rife_standalone_log")
+        self.txt_rife_standalone_log.SetToolTip(
+            T("Shows this tool's own output verbatim, including the exact refusal message if Custom FPS "
+              "isn't genuinely higher than the source's own frame rate, and the manifest file path it "
+              "wrote on success."))
+        self.btn_rife_standalone_clear = wx.Button(self.grp_rife_standalone, label=T("Clear"))
+        self.btn_rife_standalone_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
+
+        self.btn_rife_standalone_input.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_input)
+        self.btn_rife_standalone_output.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_output)
+        self.cbo_rife_standalone_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_standalone_mode)
+        self.btn_rife_standalone_run.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_run)
+        self.btn_rife_standalone_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_rife_standalone_log.Clear())
+        self.update_rife_standalone_mode()
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_rife_standalone_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_rife_standalone_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_rife_standalone_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_rife_standalone_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_rife_standalone_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_model, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rife_standalone_model, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_gpu, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rife_standalone_gpu, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rife_standalone_codec, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_mode, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rife_standalone_mode, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.txt_rife_standalone_target_fps, (h, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_rife_standalone_run, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_rife_standalone_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_rife_standalone_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        sizer_rife_standalone = wx.StaticBoxSizer(self.grp_rife_standalone, wx.VERTICAL)
+        sizer_rife_standalone.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
         # Each category below is its own panel (a Notebook tab, or a Single Page
         # section -- see ADR-037) instead of one big 4-column grid -- every sizer_*
@@ -2769,6 +3880,8 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_submux, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_audiomux, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_sharpen, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
         # ADR-037: the 7 category panels built above are already fully self-contained
@@ -2804,6 +3917,19 @@ class MainFrame(wx.Frame):
             T("Quick preset: strong pop effects for action/VFX scenes. Sets 3D Strength 3.0, Convergence "
               "Plane 0.5 in auto (face_detect) mode, Foreground Pop 0.5 — a more aggressive, "
               "attention-grabbing look, at some cost to comfort over long viewing."))
+        # ADR-057 Amendment 12: moved here from the Genre Preset dropdown's "My
+        # Preferred Settings" entry (Amendment 11) at the user's request, to match
+        # Movie/Action's own top-bar quick-preset button pattern instead of living
+        # inside a Flicker-Reduction-scoped dropdown.
+        self.btn_quick_preset_3decker = wx.Button(self.pnl_preset, label=T("3DECKER Preferred"))
+        self.btn_quick_preset_3decker.SetToolTip(
+            T("Quick preset: applies your own confirmed-best combo across depth/divergence/convergence/"
+              "refinement/stability/EMA settings at once, from a real tuning session. Sets Depth Model "
+              "Any_V3_Mono_01, Divergence 2.5, Convergence 0.5, Depth Detail Refinement on (strength "
+              "1.0), Object Stability on (strength 0.3, Flat-Area Boost 0, Edge Protection 0, Max Shift "
+              "off), Scene Detection on, and Auto EMA by Scene Length on using the Nagadomi_Reference "
+              "table -- so it also greys out Flicker Reduction's Decay Rate/Buffer/Genre Preset fields, "
+              "same as checking \"Auto EMA by Scene Length\" by hand would."))
 
         # preset comparison test
         self.sep_compare_preset = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
@@ -2894,6 +4020,27 @@ class MainFrame(wx.Frame):
               "and upstream commits could conflict with this fork's own customizations if applied later.\n"
               "Recommended: safe to click any time -- it only reads and reports, never changes anything."))
 
+        # run update (applies the real update.bat -- see docs/ai/AI_DECISIONS.md
+        # ADR-069, the direct follow-up to ADR-035's deliberately-deferred
+        # "applying an update" scope)
+        self.btn_run_update = wx.Button(self.pnl_preset, label=T("Run Update"))
+        self.btn_run_update.SetToolTip(
+            T("What it's for: actually runs the real update.bat script from inside the app -- the "
+              "same script you'd otherwise have to find and double-click outside the app -- to "
+              "update Python packages, downloaded models, and the source code together, all in "
+              "one real operation.\n"
+              "Why it's separate from Check for Updates: that button only checks and reports what's "
+              "different upstream and changes nothing on disk; this button actually applies an "
+              "update to real files.\n"
+              "Con: a real, somewhat time-consuming operation (package downloads, model downloads, "
+              "a source pull) with no undo -- a confirmation dialog appears before anything runs, "
+              "and, as Check for Updates already warns, an upstream source update could in "
+              "principle conflict with this fork's own customizations.\n"
+              "Disabled while a conversion (or other background job) is running, so packages/source "
+              "can't change out from under a job that's using them.\n"
+              "Recommended: use it when you actually want to apply an update you already know about "
+              "(e.g. from Check for Updates) -- not as a routine/automatic click."))
+
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.lbl_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
         layout.Add(self.cbo_app_preset, flag=wx.ALL, border=2)
@@ -2905,6 +4052,7 @@ class MainFrame(wx.Frame):
         layout.AddSpacer(4)
         layout.Add(self.btn_quick_preset_movie, flag=wx.ALL, border=2)
         layout.Add(self.btn_quick_preset_action, flag=wx.ALL, border=2)
+        layout.Add(self.btn_quick_preset_3decker, flag=wx.ALL, border=2)
         layout.AddSpacer(2)
         layout.Add(self.sep_compare_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
         layout.AddSpacer(4)
@@ -2936,6 +4084,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.sep_update, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
         layout.AddSpacer(4)
         layout.Add(self.btn_check_updates, flag=wx.ALL, border=2)
+        layout.AddSpacer(2)
+        layout.Add(self.btn_run_update, flag=wx.ALL, border=2)
         layout.AddSpacer(8)
         self.pnl_preset.SetSizer(layout)
 
@@ -2982,6 +4132,8 @@ class MainFrame(wx.Frame):
         self.cbo_depth_model.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_depth_model)
         self.cbo_edge_dilation_y.Bind(wx.EVT_TEXT, self.on_changed_edge_dilation)
         self.chk_ema_normalize.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_ema_normalize)
+        self.chk_scene_batch_auto_ema.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_scene_batch_auto_ema)
+        self.cbo_genre_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_genre_preset)
         self.chk_depth_blend.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend)
         self.chk_temporal_stabilize.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_temporal_stabilize)
         self.cbo_depth_blend_region.Bind(wx.EVT_TEXT, self.on_changed_chk_depth_blend)
@@ -2989,6 +4141,7 @@ class MainFrame(wx.Frame):
         self.chk_depth_blend_clahe.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend_clahe)
         self.chk_depth_blend_align.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend_align)
         self.chk_depth_refine.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_refine)
+        self.chk_sharpen.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_sharpen)
 
         self.cbo_stereo_format.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_stereo_format)
 
@@ -3002,15 +4155,18 @@ class MainFrame(wx.Frame):
         self.btn_delete_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_delete_preset)
         self.btn_quick_preset_movie.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("movie"))
         self.btn_quick_preset_action.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("action"))
+        self.btn_quick_preset_3decker.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("3decker"))
         self.btn_compare_presets.Bind(wx.EVT_BUTTON, self.on_click_btn_compare_presets)
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
         self.cbo_language.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_language)
         self.cbo_layout.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_layout)
         self.cbo_zoom.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_zoom)
         self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_updates)
+        self.btn_run_update.Bind(wx.EVT_BUTTON, self.on_click_btn_run_update)
 
         self.btn_autocrop_test.Bind(wx.EVT_BUTTON, self.on_click_btn_autocrop_test)
         self.btn_scene_settings.Bind(wx.EVT_BUTTON, self.on_click_btn_scene_settings)
+        self.btn_scene_batch_auto_ema_edit.Bind(wx.EVT_BUTTON, self.on_click_btn_scene_batch_auto_ema_edit)
 
         self.btn_start.Bind(wx.EVT_BUTTON, self.on_click_btn_start)
         self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_cancel)
@@ -3018,6 +4174,8 @@ class MainFrame(wx.Frame):
         self.btn_quick_preview.Bind(wx.EVT_BUTTON, self.on_click_btn_quick_preview)
 
         self.Bind(EVT_TQDM, self.on_tqdm)
+        self.Bind(EVT_IW3_STAGE, self.on_stage_change)
+        self.Bind(wx.EVT_TIMER, self.on_stage_pulse_timer, self.stage_pulse_timer)
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
         editable_comboboxes = self.get_editable_comboboxes()
@@ -3215,6 +4373,7 @@ class MainFrame(wx.Frame):
         # already trusts to get that right, rather than a smaller ad hoc subset of it.
         self.apply_accent_theme()
         refresh_layouts(self)
+        self._clamp_frame_to_screen()
 
     def apply_zoom_level(self, zoom_level):
         """Live UI Zoom: rescales the whole app's base font and re-lays-out every
@@ -3263,6 +4422,59 @@ class MainFrame(wx.Frame):
                     wrap.SetMinSize(wrap_sizer.CalcMin())
 
         refresh_layouts(self)
+        self._clamp_frame_to_screen()
+
+    def _clamp_frame_to_screen(self):
+        """ADR-056 -- keeps pnl_process (the progress bar row plus Start/Suspend/
+        Cancel) reliably on-screen. refresh_layouts()/Fit() size this frame to its
+        full natural content height -- which, in the top-level vertical sizer built in
+        initialize_component(), pins pnl_options's ScrolledPanel content (see
+        _compose_options_layout_single_page's/_compose_options_layout_tabbed's own
+        SetMinSize comments) to its entire UN-scrolled size -- with nothing clamping
+        that height against the real screen, it can exceed the monitor's usable work
+        area (most easily in Single Page mode, or at a higher Zoom level), pushing
+        pnl_process off the bottom edge or behind the taskbar. Maximize is disabled
+        on this frame (wx.MAXIMIZE_BOX removed in __init__), so a user can't just
+        maximize their way back to it either.
+
+        pnl_process has sizer proportion 0 (fixed) while pnl_options has proportion 1
+        (stretch) in that same top-level sizer, and pnl_options's own content is
+        already real ScrolledPanel(s) with scrolling wired up (SetupScrolling) --
+        already verified elsewhere in this file to correctly show scrollbars even when
+        its parent forces it shorter than its own pinned MinSize (see
+        _compose_options_layout_tabbed's wrap.SetMinSize comment). So shrinking the
+        FRAME itself down to the screen's work area lets the sizer hand 100% of the
+        deficit to pnl_options, which scrolls, while pnl_process keeps its full
+        requested height and stays fully visible. Only ever shrinks/repositions the
+        frame -- a window that already fits the screen is left exactly as Fit() sized
+        it.
+
+        ADR-056 Amendment -- also called after every other runtime self.Fit() on this
+        frame, not just the original three (IW3App.OnInit, switch_layout_mode,
+        apply_zoom_level): update_anaglyph_state, update_export_option_state,
+        update_inpaint_options, update_model_selection, update_divergence_warning, and
+        on_click_divergence_warning all Show()/Hide() real controls in response to an
+        ordinary field change (Stereo Format, Method, Depth Model, Divergence) and
+        already called self.Fit() on their own, but never this clamp -- confirmed by
+        measurement to be the actual regression: these were never covered by the
+        original fix, but stayed harmless while the frame's natural height had enough
+        margin under the screen; once tonight's other additions shrank that margin, an
+        ordinary field change (e.g. Method -> forward_inpaint, or a Divergence warning
+        appearing) was again enough to push pnl_process behind the taskbar."""
+        display_index = wx.Display.GetFromWindow(self)
+        if display_index == wx.NOT_FOUND:
+            display_index = 0
+        work_area = wx.Display(display_index).GetClientArea()
+        width, height = self.GetSize()
+        new_width = min(width, work_area.GetWidth())
+        new_height = min(height, work_area.GetHeight())
+        if (new_width, new_height) != (width, height):
+            self.SetSize((new_width, new_height))
+        x, y = self.GetPosition()
+        new_x = min(max(x, work_area.GetX()), work_area.GetRight() - new_width)
+        new_y = min(max(y, work_area.GetY()), work_area.GetBottom() - new_height)
+        if (new_x, new_y) != (x, y):
+            self.SetPosition((new_x, new_y))
 
     def _set_font_recursive(self, window, font):
         window.SetFont(font)
@@ -3335,6 +4547,7 @@ class MainFrame(wx.Frame):
         self.update_ema_normalize()
         self.update_depth_blend()
         self.update_depth_refine()
+        self.update_sharpen()
         self.update_temporal_stabilize()
         self.update_convergence_mode()
         self.update_scene_segment()
@@ -3438,6 +4651,7 @@ class MainFrame(wx.Frame):
             self.cbo_background_pop_coverage,
             self.cbo_background_divergence,
             self.cbo_edge_repair,
+            self.cbo_sharpen_strength,
             self.cbo_pad,
             self.cbo_app_preset,
         ]
@@ -3488,10 +4702,12 @@ class MainFrame(wx.Frame):
 
     def update_start_button_state(self):
         if not self.processing:
-            if self.pnl_file.input_path and self.pnl_file.output_path:
+            if self.pnl_file.input_path and self.pnl_file.output_path and not self.updating:
                 self.btn_start.Enable()
             else:
                 self.btn_start.Disable()
+        if hasattr(self, "btn_run_update"):
+            self.btn_run_update.Enable(not self.processing and not self.updating)
 
     def update_input_option_state(self):
         input_path = self.pnl_file.input_path
@@ -3575,6 +4791,7 @@ class MainFrame(wx.Frame):
 
         self.Layout()
         self.Fit()
+        self._clamp_frame_to_screen()
 
     def update_anaglyph_state(self):
         if self.cbo_stereo_format.GetValue() == "Anaglyph":
@@ -3586,6 +4803,7 @@ class MainFrame(wx.Frame):
 
         self.Layout()
         self.Fit()
+        self._clamp_frame_to_screen()
 
     def update_export_option_state(self):
         if self.cbo_stereo_format.GetValue() in {"Export", "Export disparity"}:
@@ -3597,6 +4815,7 @@ class MainFrame(wx.Frame):
 
         self.Layout()
         self.Fit()
+        self._clamp_frame_to_screen()
 
     def on_selected_index_changed_cbo_depth_model(self, event):
         self.update_model_selection()
@@ -3666,6 +4885,7 @@ class MainFrame(wx.Frame):
 
         self.Layout()
         self.Fit()
+        self._clamp_frame_to_screen()
 
     def on_changed_edge_dilation(self, event):
         self.update_edge_dilation()
@@ -3681,13 +4901,24 @@ class MainFrame(wx.Frame):
 
     def update_ema_normalize(self):
         if self.chk_ema_normalize.IsChecked():
+            self.chk_ema_motion_adaptive.Enable()
+        else:
+            self.chk_ema_motion_adaptive.Disable()
+        # Decay Rate/Buffer are greyed out (never cleared) whenever "Auto EMA by
+        # Scene Length" is checked, since that feature picks its own per-scene
+        # values instead and these fixed ones only matter as its pre-first-scene
+        # fallback -- see docs/ai/AI_DECISIONS.md ADR-057 amendment (2026-09-08).
+        # Genre Preset (cbo_genre_preset, ADR-057 Amendment 9) only ever quick-fills
+        # Decay Rate/Buffer, so it follows the exact same enable/disable condition as
+        # the two fields it fills -- reusing this same gating, not a new mechanism.
+        if self.chk_ema_normalize.IsChecked() and not self.chk_scene_batch_auto_ema.IsChecked():
             self.cbo_ema_decay.Enable()
             self.cbo_ema_buffer.Enable()
-            self.chk_ema_motion_adaptive.Enable()
+            self.cbo_genre_preset.Enable()
         else:
             self.cbo_ema_decay.Disable()
             self.cbo_ema_buffer.Disable()
-            self.chk_ema_motion_adaptive.Disable()
+            self.cbo_genre_preset.Disable()
 
     def update_scene_segment(self, *args, **kwargs):
         pass
@@ -3695,6 +4926,21 @@ class MainFrame(wx.Frame):
     def on_changed_chk_ema_normalize(self, event):
         self.update_ema_normalize()
         self.update_scene_segment()
+
+    def on_changed_chk_scene_batch_auto_ema(self, event):
+        self.update_ema_normalize()
+
+    def on_changed_cbo_genre_preset(self, event):
+        # One-time quick-fill only -- writes Decay/Buffer once into the plain
+        # wx.TextCtrl-backed fields and keeps no live link back to this dropdown
+        # afterward, so a later hand-edit of either field is always safe (ADR-057
+        # Amendment 9). The placeholder entry intentionally maps to nothing.
+        preset = self.cbo_genre_preset.GetValue()
+        values = GENRE_PRESET_EMA_VALUES.get(preset)
+        if values is not None:
+            decay, buffer = values
+            self.cbo_ema_decay.SetValue(str(decay))
+            self.cbo_ema_buffer.SetValue(str(buffer))
 
     def update_depth_blend(self):
         if self.chk_depth_blend.IsChecked():
@@ -3744,6 +4990,12 @@ class MainFrame(wx.Frame):
     def on_changed_chk_depth_refine(self, event):
         self.update_depth_refine()
 
+    def update_sharpen(self):
+        self.cbo_sharpen_strength.Enable(self.chk_sharpen.IsChecked())
+
+    def on_changed_chk_sharpen(self, event):
+        self.update_sharpen()
+
     def on_changed_chk_depth_blend(self, event):
         self.update_depth_blend()
 
@@ -3769,8 +5021,13 @@ class MainFrame(wx.Frame):
     def update_rife_interpolate(self):
         enabled = self.chk_rife_interpolate.GetValue()
         self.cbo_rife_model.Enable(enabled)
+        self.cbo_rife_mode.Enable(enabled)
+        self.txt_rife_target_fps.Enable(enabled and self.cbo_rife_mode.GetValue() == "Custom FPS...")
 
     def on_changed_chk_rife_interpolate(self, event):
+        self.update_rife_interpolate()
+
+    def on_changed_cbo_rife_mode(self, event):
         self.update_rife_interpolate()
 
     def update_temporal_stabilize(self):
@@ -3839,6 +5096,19 @@ class MainFrame(wx.Frame):
                 style=wx.OK) as dlg:
             dlg.ShowModal()
 
+    def show_error_message(self, message):
+        with wx.MessageDialog(None, message=message, caption=T("Error"), style=wx.OK) as dlg:
+            dlg.ShowModal()
+
+    def scene_auto_ema_gate_ok(self):
+        """`Auto EMA by Scene Length` is meaningless without scene boundaries to key
+        off of -- true unless it's off, or either `Scene Detection` (the regular,
+        non--Scene-Batch path) or `Automated Scene Batch` (its own, separate pipeline,
+        which always scene-detects internally) is turned on."""
+        if not self.chk_scene_batch_auto_ema.GetValue():
+            return True
+        return self.chk_scene_batch.GetValue() or self.chk_scene_detect.IsChecked()
+
     def parse_args(self, skip_set_state=False):
         if not validate_number(self.cbo_divergence.GetValue(), 0.0, 100.0):
             self.show_validation_error_message(T("3D Strength"), 0.0, 100.0)
@@ -3887,6 +5157,12 @@ class MainFrame(wx.Frame):
             return None
         if not validate_number(self.cbo_ema_buffer.GetValue(), 1, 1800, is_int=True):
             self.show_validation_error_message(T("Flicker Reduction Buffer"), 1, 1800)
+            return None
+        if not self.scene_auto_ema_gate_ok():
+            self.show_error_message(
+                T("`Auto EMA by Scene Length` requires either `Scene Detection` or "
+                  "`Automated Scene Batch` to be turned on -- there are no scene "
+                  "boundaries to key off of otherwise."))
             return None
         if self.chk_depth_blend.GetValue() and not validate_number(self.cbo_depth_blend_strength.GetValue(), 0.0, 1.0):
             self.show_validation_error_message(T("Dual-Pass Depth Blend"), 0.0, 1.0)
@@ -3963,6 +5239,19 @@ class MainFrame(wx.Frame):
                 self.show_validation_error_message(T("Stereo processing Width"), 320, 8190)
                 return
             stereo_width = int(stereo_width)
+
+        rife_mode = self.cbo_rife_mode.GetValue()
+        if self.chk_rife_interpolate.GetValue() and rife_mode == "Custom FPS...":
+            if not validate_number(self.txt_rife_target_fps.GetValue(), 0.1, 1000.0, allow_empty=False):
+                self.show_validation_error_message(T("RIFE Rate: Custom FPS"), 0.1, 1000.0)
+                return
+        if rife_mode == "Custom FPS...":
+            rife_multiplier = None
+            rife_target_fps = (float(self.txt_rife_target_fps.GetValue())
+                                if self.txt_rife_target_fps.GetValue().strip() else None)
+        else:
+            rife_multiplier = int(rife_mode[0])  # "2x"/"3x"/"4x" -> 2/3/4
+            rife_target_fps = None
 
         parser = create_parser(required_true=False)
 
@@ -4123,6 +5412,8 @@ class MainFrame(wx.Frame):
             background_pop_coverage=float(self.cbo_background_pop_coverage.GetValue()) / 100.0,
             background_divergence=background_divergence,
             edge_repair_strength=float(self.cbo_edge_repair.GetValue()),
+            sharpen=self.chk_sharpen.GetValue(),
+            sharpen_strength=float(self.cbo_sharpen_strength.GetValue()),
             depth_aa=depth_aa,
             edge_dilation=edge_dilation,
             inpaint_model=inpaint_model,
@@ -4164,6 +5455,8 @@ class MainFrame(wx.Frame):
             waifu2x_upscale_target=self.cbo_waifu2x_target.GetValue(),
             rife_interpolate=self.chk_rife_interpolate.GetValue(),
             rife_model=self.cbo_rife_model.GetValue(),
+            rife_multiplier=rife_multiplier,
+            rife_target_fps=rife_target_fps,
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
 
@@ -4235,8 +5528,77 @@ class MainFrame(wx.Frame):
                 stop_event=self.stop_event,
                 suspend_event=self.suspend_event,
                 tqdm_fn=functools.partial(TQDMGUI, self),
+                stage_fn=functools.partial(_post_stage_change, self),
                 depth_model=self.depth_model)
         return args
+
+    def _compute_job_stages(self, args):
+        """Precomputes the ordered list of stage names THIS job will actually run
+        through, purely from the user's own already-chosen settings (all of these
+        are opt-in flags known synchronously here, before the background worker even
+        starts) -- lets the progress bar show "Step k of N" instead of an
+        undifferentiated single bar for a job that can really be up to 8 separate
+        phases (see docs/ai/AI_DECISIONS.md ADR-052 and its amendment). Order here
+        matches the REAL order process_video_full()/process_video_with_resume() run
+        these phases in, confirmed by reading both directly rather than assumed:
+        Scene Boundary Detection, AutoCrop Analysis, and HDR/DV RPU Extraction all
+        happen BEFORE the depth/stereo encode; Audio Extraction (auto-resume's own
+        single clean-audio pass over the whole file) happens AFTER it, once all
+        segments are already encoded, not before -- so it is listed after
+        STAGE_DEPTH_STEREO, not before it. Dual-Pass Depth Blend passes are still
+        shown as detail WITHIN stage Depth & Stereo Conversion (their own live
+        per-frame tqdm progress and sub-label via _progress_title's step_label makes
+        a separate top-level stage unnecessary).
+        Two of these conditions are necessarily an upper-bound estimate, same
+        limitation STAGE_HDR_REINJECT already had before this amendment: whether
+        --preserve-dowi's source actually HAS DV/HDR10+ metadata, and whether
+        --auto-resume's clip is actually long enough to need segmenting, can only be
+        known by probing the file once the job is running, not synchronously here --
+        so a run that turns on Preserve Dolby Vision against an SDR source, or Auto-
+        Resume against a short clip, shows one more stage in "Step k/N" than actually
+        fires (N is a maximum, matching how STAGE_HDR_REINJECT already behaved).
+        Stage names here must stay byte-identical to iw3/utils.py's STAGE_* constants
+        (imported, not re-typed) since _notify_stage() matches against this exact
+        list to compute the current stage index."""
+        stages = []
+        if getattr(args, "scene_detect", False) or getattr(args, "scene_detect_only", False):
+            stages.append(STAGE_SCENE_DETECT)
+        if getattr(args, "autocrop", None) is not None:
+            stages.append(STAGE_AUTOCROP)
+        if getattr(args, "preserve_dowi", False):
+            stages.append(STAGE_HDR_EXTRACT)
+        stages.append(STAGE_DEPTH_STEREO)
+        if getattr(args, "auto_resume", False):
+            stages.append(STAGE_AUDIO_EXTRACT)
+        if getattr(args, "waifu2x_upscale", False):
+            stages.append(STAGE_WAIFU2X_UPSCALE)
+        if getattr(args, "rife_interpolate", False):
+            stages.append(STAGE_RIFE_INTERPOLATE)
+        if getattr(args, "preserve_dowi", False):
+            stages.append(STAGE_HDR_REINJECT)
+        return stages
+
+    @staticmethod
+    def _format_duration(seconds):
+        seconds = max(0, int(seconds))
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        return f"{m:02d}:{s:02d}" if h == 0 else f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _stage_prefix(self):
+        total = len(self.job_stages) if self.job_stages else 1
+        idx = min(max(self.job_stage_index, 1), total)
+        return f"Step {idx}/{total}: {self.current_stage_name}"
+
+    def _set_title_progress(self, suffix=None):
+        """ADR-056 -- a condensed, redundant progress signal in the window title bar
+        (taskbar/Alt-Tab), on top of (not instead of) the real positioning fix in
+        _clamp_frame_to_screen(). Content mirrors what the status bar already shows
+        (ADR-052's stage/time/rate data) -- never a new computation -- just a shorter
+        second surface for it that stays visible even if a user's real desktop layout
+        (multi-monitor, taskbar auto-hide, etc.) still manages to obscure the window
+        itself."""
+        self.SetTitle(f"{self.base_title} -- {suffix}" if suffix else self.base_title)
 
     def ensure_cuda_context(self):
         # Deferred from module import time (see docs/ai/AI_DECISIONS.md) so that just
@@ -4271,6 +5633,7 @@ class MainFrame(wx.Frame):
 
         self.btn_autocrop_test.Disable()
         self.btn_start.Disable()
+        self.btn_run_update.Disable()
         self.btn_cancel.Enable()
         self.btn_suspend.Enable()
         self.stop_event.clear()
@@ -4278,18 +5641,27 @@ class MainFrame(wx.Frame):
         self.prg_tqdm.SetValue(0)
         self.SetStatusText("...")
 
+        self.job_stages = self._compute_job_stages(args)
+        self.job_stage_index = 1
+        self.current_stage_name = self.job_stages[0]
+        self.job_start_time = time()
+        self.stage_start_time = self.job_start_time
+        self.stage_pulse_timer.Stop()
+
         if args.state["depth_model"].has_checkpoint_file(args.depth_model):
             # Realod depth model
             self.SetStatusText(f"Loading {args.depth_model}...")
         else:
             # Need to download the model
             self.SetStatusText(f"Downloading {args.depth_model}...")
+        self._set_title_progress(self._stage_prefix())
 
         self.ensure_cuda_context()
         startWorker(self.on_exit_worker, iw3_main, wargs=(args,))
         self.processing = True
 
     def on_exit_worker(self, result):
+        self.stage_pulse_timer.Stop()
         try:
             args = result.get()
             self.depth_model = args.state["depth_model"]
@@ -4300,7 +5672,8 @@ class MainFrame(wx.Frame):
 
             if not self.stop_event.is_set():
                 self.prg_tqdm.SetValue(self.prg_tqdm.GetRange())
-                self.SetStatusText(T("Finished"))
+                total_elapsed = self._format_duration(time() - self.job_start_time)
+                self.SetStatusText(f"{T('Finished')} ({total_elapsed})")
             else:
                 self.SetStatusText(T("Cancelled"))
         except: # noqa
@@ -4316,6 +5689,7 @@ class MainFrame(wx.Frame):
         self.btn_suspend.SetLabel(T("Suspend"))
         self.btn_autocrop_test.Enable()
         self.update_start_button_state()
+        self._set_title_progress()
 
         # free vram
         gc_collect()
@@ -4348,6 +5722,12 @@ class MainFrame(wx.Frame):
         desc = desc if desc else ""
         if type == 0:
             # initialize
+            # Real per-item progress data is available again (this is what every
+            # tqdm-tracked phase -- AutoCrop Analysis, Scene Boundary Detection,
+            # Dual-Pass Depth Blend passes, the main depth/stereo encode -- reports
+            # through this same event) -- stop any indeterminate pulse animation left
+            # running from a preceding waifu2x/RIFE/HDR blocking-subprocess stage.
+            self.stage_pulse_timer.Stop()
             if 0 < value:
                 self.prg_tqdm.SetRange(value)
             else:
@@ -4355,9 +5735,11 @@ class MainFrame(wx.Frame):
             self.prg_tqdm.SetValue(0)
             self.start_time = time()
             self.suspend_pos = 0
-            self.SetStatusText(f"{0}/{value} {desc}")
+            self.SetStatusText(f"{self._stage_prefix()} -- {0}/{value} {desc}")
+            self._set_title_progress(self._stage_prefix())
         elif type == 1:
             # update
+            self.stage_pulse_timer.Stop()
             if self.prg_tqdm.GetValue() + value <= self.prg_tqdm.GetRange():
                 self.prg_tqdm.SetValue(self.prg_tqdm.GetValue() + value)
             else:
@@ -4366,17 +5748,61 @@ class MainFrame(wx.Frame):
             now = time()
             pos = self.prg_tqdm.GetValue()
             end_pos = self.prg_tqdm.GetRange()
-            fps = (pos - self.suspend_pos) / (now - self.start_time + 1e-6)
+            elapsed = now - self.start_time
+            fps = (pos - self.suspend_pos) / (elapsed + 1e-6)
             if fps > 0:
-                remaining_time = int((end_pos - pos) / fps)
-                h = remaining_time // 3600
-                m = (remaining_time - h * 3600) // 60
-                s = (remaining_time - h * 3600 - m * 60)
-                t = f"{m:02d}:{s:02d}" if h == 0 else f"{h:02d}:{m:02d}:{s:02d}"
-                self.SetStatusText(f"{pos}/{end_pos} [ {t}, {fps:.2f}FPS ] {desc}")
+                remaining_time = (end_pos - pos) / fps
+                eta = self._format_duration(remaining_time)
+                elapsed_str = self._format_duration(elapsed)
+                self.SetStatusText(
+                    f"{self._stage_prefix()} -- {pos}/{end_pos} frames "
+                    f"[{fps:.2f} FPS, elapsed {elapsed_str}, ETA {eta}] {desc}")
+                percent = int(pos / end_pos * 100) if end_pos else 0
+                self._set_title_progress(f"{percent}% -- {self._stage_prefix()}")
         elif type == 2:
             # close
             pass
+
+    def on_stage_change(self, event):
+        """Handles a job-level stage transition posted from the background worker
+        thread (see _post_stage_change/_notify_stage). Fires only for the stages
+        that give no per-item tqdm progress of their own -- waifu2x upscaling, RIFE
+        interpolation, HDR/Dolby Vision reinjection -- each a single blocking
+        subprocess.run() call (CS-SUBPROCESS-001) with nothing to report until it
+        finishes. There is no real progress fraction to show, so the Gauge itself is
+        deliberately left exactly as the previous stage left it (usually full, since
+        Depth & Stereo Conversion just finished at 100%) -- liveness for these
+        stages comes entirely from stage_pulse_timer ticking the status bar's
+        "running MM:SS" text every 500ms.
+
+        The Gauge is deliberately NOT driven into wx.Gauge's indeterminate Pulse()
+        ("marquee") mode here -- verified directly (an isolated wx probe, real
+        PrintWindow captures, not just plausible-in-theory) that on this project's
+        real wx/Windows combination, once Pulse() is called, the control gets stuck
+        rendering the marquee's last frame: neither a plain SetValue() nor
+        SetRange()+SetValue(0)+SetValue(<final>) afterward, nor manually clearing
+        PBS_MARQUEE via SendMessage(PBM_SETMARQUEE)/SetWindowLong, restored correct
+        determinate rendering (GetValue()/GetRange() reported the right numbers
+        throughout -- only the native control's paint output was wrong). Using
+        Pulse() here would have left the bar looking visually broken/empty at
+        "Finished", which is worse than todays plain frozen-value behavior. See
+        docs/ai/AI_DECISIONS.md for the full investigation."""
+        name = event.name
+        if name in self.job_stages:
+            self.job_stage_index = self.job_stages.index(name) + 1
+        self.current_stage_name = name
+        self.stage_start_time = time()
+        if not self.stage_pulse_timer.IsRunning():
+            self.stage_pulse_timer.Start(500)
+        self._refresh_stage_status_text()
+
+    def on_stage_pulse_timer(self, event):
+        self._refresh_stage_status_text()
+
+    def _refresh_stage_status_text(self):
+        running_for = self._format_duration(time() - self.stage_start_time)
+        self.SetStatusText(f"{self._stage_prefix()}... (running {running_for})")
+        self._set_title_progress(f"{self._stage_prefix()} ({running_for})")
 
     def apply_quick_preset(self, name):
         if name == "movie":
@@ -4391,6 +5817,37 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_mode.SetStringSelection("face_detect")
             self.cbo_foreground_pop.SetValue("0.5")
             self.SetStatusText(T("Applied preset: Action (strong pop effects)"))
+        elif name == "3decker":
+            # ADR-057 Amendment 12: moved here from the Genre Preset dropdown's "My
+            # Preferred Settings" entry (Amendment 11) -- the user's own confirmed-
+            # best combo across many real controls at once, not just Decay/Buffer.
+            # Checking chk_scene_batch_auto_ema here goes through the exact same
+            # on_changed_chk_scene_batch_auto_ema()/update_ema_normalize() chain a
+            # real user click would use, so Decay Rate/Buffer/the Genre Preset
+            # dropdown grey out exactly like a manual checkbox click (ADR-057
+            # Amendment 8/9) -- not bypassed.
+            self.cbo_depth_model.SetStringSelection("Any_V3_Mono_01")
+            self.cbo_divergence.SetValue("2.5")
+            self.cbo_convergence.SetValue("0.5")
+
+            self.chk_depth_refine.SetValue(True)
+            self.cbo_depth_refine_strength.SetValue("1.0")
+            self.update_depth_refine()
+
+            self.chk_temporal_stabilize.SetValue(True)
+            self.cbo_temporal_stabilize_strength.SetValue("0.3")
+            self.cbo_temporal_stabilize_flat_boost.SetValue("0.0")
+            self.cbo_temporal_stabilize_edge_protect.SetValue("0.0")
+            self.cbo_temporal_stabilize_max_shift.SetValue("")
+            self.update_temporal_stabilize()
+
+            self.chk_scene_detect.SetValue(True)
+
+            self.cbo_scene_batch_auto_ema_model.SetStringSelection("Nagadomi_Reference")
+            self.chk_scene_batch_auto_ema.SetValue(True)
+            self.on_changed_chk_scene_batch_auto_ema(None)
+
+            self.SetStatusText(T("Applied preset: 3DECKER Preferred"))
 
     def save_preset(self, name=None):
         if not name:
@@ -4526,6 +5983,7 @@ class MainFrame(wx.Frame):
 
         self.Layout()
         self.Fit()
+        self._clamp_frame_to_screen()
 
     def update_divergence_warning(self, *args, **kwargs):
         try:
@@ -4570,6 +6028,7 @@ class MainFrame(wx.Frame):
 
             self.Layout()
             self.Fit()
+            self._clamp_frame_to_screen()
         except ValueError:
             pass
 
@@ -4592,8 +6051,20 @@ class MainFrame(wx.Frame):
             # CUDA context the instant the window opens. See docs/ai/AI_DECISIONS.md.
             if self.chk_compile.IsChecked():
                 device = create_device(device_id)
-                if not check_compile_support(device):
+                try:
+                    supported = check_compile_support(device)
+                except Exception:
+                    # check_compile_support() already catches real compile-probe
+                    # failures internally, but this is the actual real-world GUI
+                    # entry point for a real Windows compiler-toolchain probe, so
+                    # guard it too rather than letting any surprise here crash the
+                    # GUI with a raw error popup (see docs/ai/AI_DECISIONS.md).
+                    supported = False
+                if not supported:
                     self.chk_compile.SetValue(False)
+                    self.SetStatusText(
+                        T("torch.compile is not available on this system right now "
+                          "-- see docs/torch_compile.md for setup"))
 
     def update_pad_mode(self, *args, **kwargs):
         if self.cbo_pad_mode.GetValue() == "16:9":
@@ -4703,6 +6174,103 @@ class MainFrame(wx.Frame):
         self.btn_check_updates.Disable()
         self.SetStatusText(T("Checking for updates..."))
         startWorker(self.on_exit_check_updates_worker, self.run_check_updates)
+
+    # --- Run Update (applies the real update.bat -- see docs/ai/AI_DECISIONS.md
+    # ADR-069, the direct follow-up to ADR-035's deliberately-deferred "applying an
+    # update" scope; the Check for Updates feature just above stays read-only) ---
+
+    def run_update(self, cmd, cwd, dlg):
+        # Runs on a background thread via startWorker -- never blocks the GUI
+        # thread. update.bat can run long enough (package installs, model
+        # downloads, a source pull) that its output is streamed line-by-line to
+        # `dlg` via wx.CallAfter as it's produced, rather than captured and shown
+        # only at the end the way this file's other standalone-tool log boxes work
+        # (run_sharpen/run_rife_standalone/etc.) -- a run this long needs live
+        # visibility, not just a final dump. stdin is explicitly closed (DEVNULL):
+        # update.bat ends with `pause` on both its success and error paths, which
+        # would otherwise wait forever for a keypress this non-interactive
+        # subprocess can never provide (CS-SUBPROCESS-001: arg list, never
+        # shell=True; cmd.exe /c is the explicit, documented way to run a .bat file
+        # via CreateProcess without shell=True's quoting/injection risk).
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1)
+        for line in proc.stdout:
+            wx.CallAfter(dlg.append, line)
+        proc.wait()
+        return proc.returncode
+
+    def on_exit_run_update_worker(self, result):
+        self.updating = False
+        self.update_start_button_state()
+        dlg = self.dlg_run_update
+        try:
+            returncode = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            if dlg is not None:
+                dlg.append("\n" + message)
+                dlg.mark_finished()
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        if dlg is not None:
+            dlg.mark_finished()
+        if returncode == 0:
+            self.SetStatusText(T("Update finished successfully"))
+        else:
+            self.SetStatusText(T("Update failed -- see the log window"))
+            wx.MessageBox(T("update.bat exited with an error -- see the log window for the exact "
+                             "reason."),
+                          T("Run Update"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_run_update(self, event):
+        if self.processing or self.updating:
+            wx.MessageBox(
+                T("A conversion (or another background job) is currently running. Wait for it to "
+                  "finish, or cancel it, before running the updater -- updating packages/models/"
+                  "source while a job is using them could break that job."),
+                T("Run Update"), wx.OK | wx.ICON_WARNING)
+            return
+
+        with wx.MessageDialog(
+                self,
+                message=(T("This runs the real update.bat script and will update your Python "
+                           "packages, downloaded models, and source code together.") + "\n\n" +
+                         T("This can take a while (package downloads and model downloads can be "
+                           "large) and there is no undo -- don't close this window while it's "
+                           "running.") + "\n\n" +
+                         T("Continue?")),
+                caption=T("Run Update"),
+                style=wx.YES_NO | wx.ICON_WARNING) as dlg:
+            if dlg.ShowModal() != wx.ID_YES:
+                return
+
+        update_bat_path, cwd = _find_update_bat()
+        if not path.exists(update_bat_path):
+            wx.MessageBox(
+                T("update.bat was not found at the expected location:") + f"\n{update_bat_path}",
+                T("Run Update"), wx.OK | wx.ICON_ERROR)
+            return
+
+        comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
+        cmd = [comspec, "/c", update_bat_path]
+
+        self.updating = True
+        self.update_start_button_state()
+        self.SetStatusText(T("Running update..."))
+
+        self.dlg_run_update = RunUpdateDialog(self)
+        self.dlg_run_update.append(
+            T("Running update.bat...") + "\n" + T("This can take a while -- please wait.") + "\n\n")
+        self.dlg_run_update.Show()
+
+        startWorker(self.on_exit_run_update_worker, self.run_update,
+                    wargs=(cmd, cwd, self.dlg_run_update))
 
     def test_autocrop(self):
         self.txt_autocrop_test.SetValue("")
@@ -5197,6 +6765,14 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_scene_settings.SetValue(dlg.GetPath())
 
+    def on_click_btn_scene_batch_auto_ema_edit(self, event):
+        # ADR-057: dialog opens scoped to whichever model is currently selected in the
+        # dropdown -- there is no live model switch inside the dialog itself. Change
+        # the dropdown, then reopen this dialog, to edit the other model's table.
+        model_name = self.cbo_scene_batch_auto_ema_model.GetValue()
+        with SceneBatchAutoEMADialog(self, model_name) as dlg:
+            dlg.ShowModal()
+
     # --- Retroactive HDR/DV Reinjection (standalone tool, see ADR-031) ---
 
     def on_click_btn_reinject_source(self, event):
@@ -5220,6 +6796,18 @@ class MainFrame(wx.Frame):
                 if not self.txt_reinject_output.GetValue():
                     base, ext = path.splitext(converted_path)
                     self.txt_reinject_output.SetValue(f"{base}_hdr_reinjected{ext}")
+                # Auto-suggest the RIFE manifest (ADR-064 amendment): rife_cli.py
+                # always writes its sidecar as literally "<its own output
+                # path>.rife_manifest.json" (iw3.rife_cli._rife_manifest_path) -- if
+                # picking this file finds that exact sidecar sitting right next to it,
+                # it can only mean this file WAS a real RIFE output, so pre-fill is
+                # reliable rather than a guess. Never overwrites a value the user
+                # already typed/picked, and the field stays fully editable/clearable
+                # either way.
+                if not self.txt_reinject_rife_manifest.GetValue():
+                    candidate_manifest = converted_path + ".rife_manifest.json"
+                    if path.exists(candidate_manifest):
+                        self.txt_reinject_rife_manifest.SetValue(candidate_manifest)
 
     def on_click_btn_reinject_output(self, event):
         with wx.FileDialog(self, message=T("Save HDR-Reinjected Output As"),
@@ -5229,6 +6817,16 @@ class MainFrame(wx.Frame):
                 dlg.SetPath(self.txt_reinject_output.GetValue())
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_reinject_output.SetValue(dlg.GetPath())
+
+    def on_click_btn_reinject_rife_manifest(self, event):
+        with wx.FileDialog(self, message=T("Select RIFE Manifest"),
+                           wildcard=T("RIFE Manifest") + " (*.rife_manifest.json)|*.rife_manifest.json|"
+                                     + T("All files") + " (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_reinject_rife_manifest.GetValue():
+                dlg.SetPath(self.txt_reinject_rife_manifest.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_reinject_rife_manifest.SetValue(dlg.GetPath())
 
     def run_reinject_hdr(self, cmd):
         # Runs on a background thread via startWorker -- never blocks the GUI thread,
@@ -5242,6 +6840,7 @@ class MainFrame(wx.Frame):
 
     def on_exit_reinject_worker(self, result):
         self.btn_reinject_run.Enable()
+        self.btn_reinject_clear.Enable()
         try:
             returncode, output = result.get()
         except: # noqa
@@ -5284,16 +6883,25 @@ class MainFrame(wx.Frame):
                           T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
             return
 
+        rife_manifest = self.txt_reinject_rife_manifest.GetValue().strip()
+        if rife_manifest and not path.exists(rife_manifest):
+            wx.MessageBox(T("RIFE Manifest file does not exist -- clear the field or pick a valid file."),
+                          T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+            return
+
         cmd = [sys.executable, "-m", "iw3.reinject_hdr_cli",
                "--source", source, "--converted", converted, "--output", output]
         if self.chk_reinject_start_time.GetValue():
             cmd += ["--start-time", self.txt_reinject_start_time.GetValue()]
         if self.chk_reinject_end_time.GetValue():
             cmd += ["--end-time", self.txt_reinject_end_time.GetValue()]
+        if rife_manifest:
+            cmd += ["--rife-manifest", rife_manifest]
 
         self.txt_reinject_log.SetValue(
             T("Running -- this decodes the full clip to verify frame counts, so it may take a while...\n"))
         self.btn_reinject_run.Disable()
+        self.btn_reinject_clear.Disable()
         self.SetStatusText(T("Running HDR reinjection..."))
         startWorker(self.on_exit_reinject_worker, self.run_reinject_hdr, wargs=(cmd,))
 
@@ -5337,6 +6945,7 @@ class MainFrame(wx.Frame):
 
     def on_exit_subsearch_worker(self, result):
         self.btn_subsearch_search.Enable()
+        self.btn_subsearch_clear.Enable()
         try:
             results, error = result.get()
         except: # noqa
@@ -5408,6 +7017,7 @@ class MainFrame(wx.Frame):
         log_lines.append(T("Searching..."))
         self.txt_subsearch_log.SetValue("\n".join(log_lines))
         self.btn_subsearch_search.Disable()
+        self.btn_subsearch_clear.Disable()
         self.SetStatusText(T("Searching OpenSubtitles..."))
         startWorker(self.on_exit_subsearch_worker, self.run_subsearch,
                     wargs=(moviehash, imdb_id or None, title or None, language))
@@ -5424,6 +7034,7 @@ class MainFrame(wx.Frame):
 
     def on_exit_subsearch_download_worker(self, result):
         self.btn_subsearch_download.Enable(self.lst_subsearch_results.GetFirstSelected() != -1)
+        self.btn_subsearch_clear.Enable()
         try:
             saved_path, error, quota_info = result.get()
         except: # noqa
@@ -5479,6 +7090,7 @@ class MainFrame(wx.Frame):
         release = chosen.get("release") or chosen.get("file_id")
         self.txt_subsearch_log.AppendText(f"\nDownloading {release}...")
         self.btn_subsearch_download.Disable()
+        self.btn_subsearch_clear.Disable()
         self.SetStatusText(T("Downloading subtitle..."))
         startWorker(self.on_exit_subsearch_download_worker, self.run_subsearch_download,
                     wargs=(chosen["file_id"], output_dir))
@@ -5527,6 +7139,7 @@ class MainFrame(wx.Frame):
 
     def on_exit_submux_worker(self, result):
         self.btn_submux_run.Enable()
+        self.btn_submux_clear.Enable()
         try:
             returncode, output = result.get()
         except: # noqa
@@ -5569,6 +7182,10 @@ class MainFrame(wx.Frame):
             wx.MessageBox(T("Output File must be different from the input video."),
                           T("Add Subtitle Track"), wx.OK | wx.ICON_WARNING)
             return
+        font_size = self.txt_submux_font_size.GetValue().strip()
+        if font_size and not validate_number(font_size, 0.1, 1000.0, allow_empty=True):
+            self.show_validation_error_message(T("Font Size"), 0.1, 1000.0)
+            return
 
         cmd = [sys.executable, "-m", "iw3.subtitle_mux_cli",
                "--input", input_path, "--srt", srt_path, "--output", output_path,
@@ -5579,9 +7196,18 @@ class MainFrame(wx.Frame):
         track_name = self.txt_submux_track_name.GetValue().strip()
         if track_name:
             cmd += ["--track-name", track_name]
+        if self.chk_submux_dual_eye.GetValue():
+            cmd += ["--dual-eye-subtitles"]
+        if font_size:
+            cmd += ["--font-size", font_size]
+        if self.chk_submux_start_time.GetValue():
+            cmd += ["--start-time", self.txt_submux_start_time.GetValue()]
+        if self.chk_submux_end_time.GetValue():
+            cmd += ["--end-time", self.txt_submux_end_time.GetValue()]
 
         self.txt_submux_log.SetValue(T("Running...\n"))
         self.btn_submux_run.Disable()
+        self.btn_submux_clear.Disable()
         self.SetStatusText(T("Adding subtitle track..."))
         startWorker(self.on_exit_submux_worker, self.run_submux, wargs=(cmd,))
 
@@ -5631,6 +7257,7 @@ class MainFrame(wx.Frame):
 
     def on_exit_audiomux_worker(self, result):
         self.btn_audiomux_run.Enable()
+        self.btn_audiomux_clear.Enable()
         try:
             returncode, output = result.get()
         except: # noqa
@@ -5691,6 +7318,7 @@ class MainFrame(wx.Frame):
 
         self.txt_audiomux_log.SetValue(T("Running...\n"))
         self.btn_audiomux_run.Disable()
+        self.btn_audiomux_clear.Disable()
         self.SetStatusText(T("Adding audio track..."))
         startWorker(self.on_exit_audiomux_worker, self.run_audiomux, wargs=(cmd,))
 
@@ -5715,6 +7343,7 @@ class MainFrame(wx.Frame):
 
     def on_exit_stereotag_worker(self, result):
         self.btn_stereotag_run.Enable()
+        self.btn_stereotag_clear.Enable()
         try:
             returncode, output = result.get()
         except: # noqa
@@ -5751,8 +7380,221 @@ class MainFrame(wx.Frame):
 
         self.txt_stereotag_log.SetValue(T("Running...\n"))
         self.btn_stereotag_run.Disable()
+        self.btn_stereotag_clear.Disable()
         self.SetStatusText(T("Tagging MKV as 3D..."))
         startWorker(self.on_exit_stereotag_worker, self.run_stereotag, wargs=(cmd,))
+
+    # --- Sharpen (standalone tool, see ADR-063) ---
+
+    def on_click_btn_sharpen_input(self, event):
+        with wx.FileDialog(self, message=T("Select Converted 3D Video (.mkv)"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_sharpen_input.GetValue():
+                dlg.SetPath(self.txt_sharpen_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                input_path = dlg.GetPath()
+                self.txt_sharpen_input.SetValue(input_path)
+                if not self.txt_sharpen_output.GetValue():
+                    base = path.splitext(input_path)[0]
+                    self.txt_sharpen_output.SetValue(f"{base}_sharpened.mkv")
+
+    def on_click_btn_sharpen_output(self, event):
+        with wx.FileDialog(self, message=T("Save Sharpened Output As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_sharpen_output.GetValue():
+                dlg.SetPath(self.txt_sharpen_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_sharpen_output.SetValue(dlg.GetPath())
+
+    def run_sharpen(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread.
+        # This tool decodes/re-encodes the video track (conv2d ops on whatever GPU
+        # --gpu selects), kept out-of-process anyway for the same convention as the
+        # other standalone tools in this column -- this app's own GPU/model state is
+        # never touched. Captures combined stdout+stderr since sharpen_cli prints its
+        # resolved format, per-eye/RGBD/anaglyph handling note, and any refusal
+        # reason to stderr.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def on_exit_sharpen_worker(self, result):
+        self.btn_sharpen_run.Enable()
+        self.btn_sharpen_clear.Enable()
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_sharpen_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_sharpen_log.SetValue(output)
+        self.txt_sharpen_log.ShowPosition(self.txt_sharpen_log.GetLastPosition())
+        if returncode == 0:
+            self.SetStatusText(T("Sharpen applied successfully"))
+        else:
+            self.SetStatusText(T("Sharpen failed -- see the log below"))
+            wx.MessageBox(T("Applying Sharpen failed or refused -- see the log box for the "
+                             "exact reason."),
+                          T("Sharpen"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_sharpen_run(self, event):
+        input_path = self.txt_sharpen_input.GetValue().strip()
+        output_path = self.txt_sharpen_output.GetValue().strip()
+
+        if not input_path or not path.exists(input_path):
+            wx.MessageBox(T("Select a valid Converted 3D Video file first."),
+                          T("Sharpen"), wx.OK | wx.ICON_WARNING)
+            return
+        if not output_path:
+            wx.MessageBox(T("Set an Output File path first."),
+                          T("Sharpen"), wx.OK | wx.ICON_WARNING)
+            return
+        if path.abspath(output_path) == path.abspath(input_path):
+            wx.MessageBox(T("Output File must be different from the input video."),
+                          T("Sharpen"), wx.OK | wx.ICON_WARNING)
+            return
+        strength = self.cbo_sharpen_strength_standalone.GetValue().strip()
+        if not validate_number(strength, 0.0, 1.0):
+            self.show_validation_error_message(T("Strength"), 0.0, 1.0)
+            return
+
+        cmd = [sys.executable, "-m", "iw3.sharpen_cli",
+               "--input", input_path, "--output", output_path,
+               "--format", self.cbo_sharpen_format.GetValue(),
+               "--sharpen-strength", strength]
+
+        self.txt_sharpen_log.SetValue(T("Running...\n"))
+        self.btn_sharpen_run.Disable()
+        self.btn_sharpen_clear.Disable()
+        self.SetStatusText(T("Applying Sharpen..."))
+        startWorker(self.on_exit_sharpen_worker, self.run_sharpen, wargs=(cmd,))
+
+    # --- RIFE Frame Interpolation (standalone tool) ---
+
+    def on_click_btn_rife_standalone_input(self, event):
+        with wx.FileDialog(self, message=T("Select Converted 3D Video"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_rife_standalone_input.GetValue():
+                dlg.SetPath(self.txt_rife_standalone_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                input_path = dlg.GetPath()
+                self.txt_rife_standalone_input.SetValue(input_path)
+                if not self.txt_rife_standalone_output.GetValue():
+                    base, ext = path.splitext(input_path)
+                    self.txt_rife_standalone_output.SetValue(f"{base}_rife{ext}")
+
+    def on_click_btn_rife_standalone_output(self, event):
+        with wx.FileDialog(self, message=T("Save RIFE-Interpolated Output As"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_rife_standalone_output.GetValue():
+                dlg.SetPath(self.txt_rife_standalone_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_rife_standalone_output.SetValue(dlg.GetPath())
+
+    def update_rife_standalone_mode(self):
+        # Same enable/disable pattern as the in-pipeline update_rife_interpolate():
+        # the Custom FPS field is only meaningful (and only enabled) when Rate is set
+        # to "Custom FPS...".
+        self.txt_rife_standalone_target_fps.Enable(
+            self.cbo_rife_standalone_mode.GetValue() == "Custom FPS...")
+
+    def on_changed_cbo_rife_standalone_mode(self, event):
+        self.update_rife_standalone_mode()
+
+    def run_rife_standalone(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread.
+        # Kept out-of-process the same way the other standalone tools in this column
+        # are (this app's own GPU/model state is never touched). Captures combined
+        # stdout+stderr since rife_cli prints its resolved fps/validation refusal
+        # reason and the written manifest path to stderr.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def on_exit_rife_standalone_worker(self, result):
+        self.btn_rife_standalone_run.Enable()
+        self.btn_rife_standalone_clear.Enable()
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_rife_standalone_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_rife_standalone_log.SetValue(output)
+        self.txt_rife_standalone_log.ShowPosition(self.txt_rife_standalone_log.GetLastPosition())
+        if returncode == 0:
+            self.SetStatusText(T("RIFE interpolation applied successfully"))
+        else:
+            self.SetStatusText(T("RIFE interpolation failed -- see the log below"))
+            wx.MessageBox(T("RIFE interpolation failed or refused -- see the log box for the "
+                             "exact reason."),
+                          T("RIFE Frame Interpolation"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_rife_standalone_run(self, event):
+        input_path = self.txt_rife_standalone_input.GetValue().strip()
+        output_path = self.txt_rife_standalone_output.GetValue().strip()
+
+        if not input_path or not path.exists(input_path):
+            wx.MessageBox(T("Select a valid Converted 3D Video file first."),
+                          T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+            return
+        if not output_path:
+            wx.MessageBox(T("Set an Output File path first."),
+                          T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+            return
+        if path.abspath(output_path) == path.abspath(input_path):
+            wx.MessageBox(T("Output File must be different from the input video."),
+                          T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+            return
+
+        rife_mode = self.cbo_rife_standalone_mode.GetValue()
+        if rife_mode == "Custom FPS...":
+            if not validate_number(self.txt_rife_standalone_target_fps.GetValue(), 0.1, 1000.0,
+                                    allow_empty=False):
+                self.show_validation_error_message(T("RIFE Rate: Custom FPS"), 0.1, 1000.0)
+                return
+            rife_multiplier = None
+            rife_target_fps = float(self.txt_rife_standalone_target_fps.GetValue())
+        else:
+            rife_multiplier = int(rife_mode[0])  # "2x"/"3x"/"4x" -> 2/3/4
+            rife_target_fps = None
+
+        gpu_id = int(self.cbo_rife_standalone_gpu.GetClientData(self.cbo_rife_standalone_gpu.GetSelection()))
+        video_codec = self.cbo_rife_standalone_codec.GetClientData(self.cbo_rife_standalone_codec.GetSelection())
+
+        cmd = [sys.executable, "-m", "iw3.rife_cli",
+               "--input", input_path, "--output", output_path,
+               "--rife-model", self.cbo_rife_standalone_model.GetValue(),
+               "--gpu", str(gpu_id)]
+        if rife_target_fps is not None:
+            cmd += ["--rife-target-fps", str(rife_target_fps)]
+        else:
+            cmd += ["--rife-multiplier", str(rife_multiplier)]
+        # Only appended when a non-default codec is picked (ClientData None for the
+        # default "H.264 (default)" choice) -- omitting the flag entirely for anyone
+        # who doesn't touch this new control keeps today's exact existing command
+        # byte-for-byte, matching rife_cli.py's own --video-codec default=None
+        # backward-compat guarantee.
+        if video_codec:
+            cmd += ["--video-codec", str(video_codec)]
+
+        self.txt_rife_standalone_log.SetValue(T("Running...\n"))
+        self.btn_rife_standalone_run.Disable()
+        self.btn_rife_standalone_clear.Disable()
+        self.SetStatusText(T("Applying RIFE interpolation..."))
+        startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd,))
 
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))
@@ -5818,6 +7660,60 @@ def _self_test_no_eager_cuda_context():
             app.Destroy()
 
     print("_self_test_no_eager_cuda_context: PASS")
+
+
+def _self_test_compile_probe_crash_handled():
+    """Regression test for a real crash: clicking the torch.compile checkbox with a
+    specific GPU/CPU selected (not "All CUDA Device") used to throw a raw, uncaught
+    error (a real Windows OSError [Errno 129] from a broken Triton/MSVC toolchain on
+    the user's machine surfaced this way) instead of failing gracefully -- see
+    docs/ai/AI_DECISIONS.md. `check_compile_support()` itself (nunif/models/utils.py)
+    now catches any real probe failure, but `update_compile()` is the actual GUI entry
+    point named in the bug report, so this drives it directly with a REAL MainFrame
+    and a mocked check_compile_support that raises OSError (plus RuntimeError/
+    AssertionError, to confirm this isn't narrowed to one exception type), and
+    confirms: no exception escapes, the checkbox ends up unchecked, and a status-bar
+    message appears -- no crash, no popup, matching this file's other lightweight
+    SetStatusText failure notices."""
+    import iw3.gui as gui_mod
+
+    for exc in (OSError(129, "Error number -129 occurred"), RuntimeError("compile backend failed"),
+                AssertionError("probe assertion failed")):
+        def _raising_check_compile_support(device, _exc=exc):
+            raise _exc
+
+        orig_compile = gui_mod.check_compile_support
+        gui_mod.check_compile_support = _raising_check_compile_support
+        app = None
+        frame = None
+        try:
+            app = wx.App()
+            frame = gui_mod.MainFrame()
+
+            device_id = None
+            for i in range(frame.cbo_device.GetCount()):
+                if int(frame.cbo_device.GetClientData(i)) != -2:
+                    device_id = i
+                    break
+            assert device_id is not None, "no non-'All CUDA Device' entry to select"
+            frame.cbo_device.SetSelection(device_id)
+
+            frame.chk_compile.SetValue(True)
+            frame.update_compile(probe=True)  # must not raise
+
+            assert not frame.chk_compile.IsChecked(), \
+                f"checkbox must end up unchecked after a real probe failure ({exc.__class__.__name__})"
+            status = frame.GetStatusBar().GetStatusText()
+            assert "torch.compile" in status and "docs/torch_compile.md" in status, \
+                f"expected an informative status message, got: {status!r}"
+        finally:
+            gui_mod.check_compile_support = orig_compile
+            if frame is not None:
+                frame.Destroy()
+            if app is not None:
+                app.Destroy()
+
+    print("_self_test_compile_probe_crash_handled: PASS")
 
 
 def _self_test_layout_modes():
@@ -6148,14 +8044,1701 @@ def _self_test_zoom_live_rescale():
     print("_self_test_zoom_live_rescale: PASS")
 
 
+def _self_test_progress_stage_display():
+    """Regression test for the progress-bar stage/time/rate display (see
+    docs/ai/AI_DECISIONS.md ADR-052 and its amendment): feeds synthetic tqdm-style
+    and stage-change events straight into MainFrame.on_tqdm()/on_stage_change() (no
+    real wx.PostEvent, no GPU, no movie file -- CS-TEST-001) and asserts the computed
+    stage list, stage index, status text, Gauge state, and indeterminate-pulse timer
+    behave correctly, including the exact real-world gap this feature fixes: a job
+    with every real optional phase enabled (Scene Boundary Detection, AutoCrop
+    Analysis, HDR/DV RPU Extraction, Audio Extraction, waifu2x, RIFE, HDR
+    Reinjection -- 8 stages total with the always-on Depth & Stereo Conversion) must
+    show all 8 in the REAL order process_video_full()/process_video_with_resume()
+    run them (confirmed by reading both directly -- Audio Extraction falls AFTER
+    Depth & Stereo Conversion, not before, since it is auto-resume's own single
+    clean-audio pass over the whole file, done once every segment is already
+    encoded) and advance through all of them; the pulse timer used for the
+    no-progress-data subprocess stages must stop the instant real per-frame tqdm
+    data resumes."""
+    import types
+    import iw3.gui as gui_mod
+
+    class _FakeTqdmEvent:
+        def __init__(self, type_, value, desc):
+            self._v = (type_, value, desc)
+
+        def GetValue(self):
+            return self._v
+
+    class _FakeStageEvent:
+        def __init__(self, name):
+            self.name = name
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+
+        # _compute_job_stages: purely a function of already-known settings.
+        plain_args = types.SimpleNamespace(
+            scene_detect=False, scene_detect_only=False, autocrop=None, preserve_dowi=False,
+            auto_resume=False, waifu2x_upscale=False, rife_interpolate=False)
+        assert frame._compute_job_stages(plain_args) == [gui_mod.STAGE_DEPTH_STEREO]
+
+        # Each of the 4 new conditional stages gates on its own real setting,
+        # independent of the others -- confirmed one at a time, not just in
+        # combination, so a single wrong condition can't hide behind another.
+        only_scene_detect = types.SimpleNamespace(
+            scene_detect=True, scene_detect_only=False, autocrop=None, preserve_dowi=False,
+            auto_resume=False, waifu2x_upscale=False, rife_interpolate=False)
+        assert frame._compute_job_stages(only_scene_detect) == [
+            gui_mod.STAGE_SCENE_DETECT, gui_mod.STAGE_DEPTH_STEREO]
+
+        only_autocrop = types.SimpleNamespace(
+            scene_detect=False, scene_detect_only=False, autocrop="768:432", preserve_dowi=False,
+            auto_resume=False, waifu2x_upscale=False, rife_interpolate=False)
+        assert frame._compute_job_stages(only_autocrop) == [
+            gui_mod.STAGE_AUTOCROP, gui_mod.STAGE_DEPTH_STEREO]
+
+        only_preserve_dowi = types.SimpleNamespace(
+            scene_detect=False, scene_detect_only=False, autocrop=None, preserve_dowi=True,
+            auto_resume=False, waifu2x_upscale=False, rife_interpolate=False)
+        assert frame._compute_job_stages(only_preserve_dowi) == [
+            gui_mod.STAGE_HDR_EXTRACT, gui_mod.STAGE_DEPTH_STEREO, gui_mod.STAGE_HDR_REINJECT], \
+            "--preserve-dowi gates BOTH HDR/DV RPU Extraction (before the encode) and " \
+            "HDR/Dolby Vision Reinjection (after it) -- same flag, two real stages"
+
+        only_auto_resume = types.SimpleNamespace(
+            scene_detect=False, scene_detect_only=False, autocrop=None, preserve_dowi=False,
+            auto_resume=True, waifu2x_upscale=False, rife_interpolate=False)
+        assert frame._compute_job_stages(only_auto_resume) == [
+            gui_mod.STAGE_DEPTH_STEREO, gui_mod.STAGE_AUDIO_EXTRACT], \
+            "Audio Extraction must come AFTER Depth & Stereo Conversion, not before"
+
+        full_args = types.SimpleNamespace(
+            scene_detect=True, scene_detect_only=False, autocrop="768:432", preserve_dowi=True,
+            auto_resume=True, waifu2x_upscale=True, rife_interpolate=True)
+        assert frame._compute_job_stages(full_args) == [
+            gui_mod.STAGE_SCENE_DETECT, gui_mod.STAGE_AUTOCROP, gui_mod.STAGE_HDR_EXTRACT,
+            gui_mod.STAGE_DEPTH_STEREO, gui_mod.STAGE_AUDIO_EXTRACT, gui_mod.STAGE_WAIFU2X_UPSCALE,
+            gui_mod.STAGE_RIFE_INTERPOLATE, gui_mod.STAGE_HDR_REINJECT,
+        ]
+
+        # _format_duration
+        assert gui_mod.MainFrame._format_duration(0) == "00:00"
+        assert gui_mod.MainFrame._format_duration(65) == "01:05"
+        assert gui_mod.MainFrame._format_duration(3661) == "01:01:01"
+
+        # An 8-stage job: simulate Start, then the main tqdm-tracked encode running live.
+        frame.job_stages = full_args and frame._compute_job_stages(full_args)
+        frame.job_stage_index = 1
+        frame.current_stage_name = frame.job_stages[0]
+        frame.job_start_time = time()
+        frame.stage_start_time = frame.job_start_time
+        frame.stage_pulse_timer.Stop()
+
+        # Stage 1: Scene Boundary Detection (already tqdm-tracked -- live per-frame
+        # progress, no pulse timer needed).
+        frame.on_tqdm(_FakeTqdmEvent(0, 100, "movie.mp4 [ZoeD_Any_N]"))
+        assert frame.prg_tqdm.GetRange() == 100
+        assert frame.prg_tqdm.GetValue() == 0
+        assert not frame.stage_pulse_timer.IsRunning()
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 1/8" in status and gui_mod.STAGE_SCENE_DETECT in status, status
+
+        frame.on_tqdm(_FakeTqdmEvent(1, 10, "movie.mp4 [ZoeD_Any_N]"))
+        assert frame.prg_tqdm.GetValue() == 10
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 1/8" in status and "FPS" in status and "elapsed" in status and "ETA" in status, status
+
+        # Stage 2: AutoCrop Analysis (also tqdm-tracked).
+        frame.on_stage_change(_FakeStageEvent(gui_mod.STAGE_AUTOCROP))
+        assert frame.job_stage_index == 2
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 2/8" in status and gui_mod.STAGE_AUTOCROP in status, status
+
+        # Stage 3: HDR/DV RPU Extraction -- a blocking subprocess with no per-item
+        # progress, same class of gap as waifu2x/RIFE below -- must animate the
+        # Gauge via the pulse timer instead of sitting frozen.
+        frame.on_stage_change(_FakeStageEvent(gui_mod.STAGE_HDR_EXTRACT))
+        assert frame.job_stage_index == 3
+        assert frame.stage_pulse_timer.IsRunning()
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 3/8" in status and gui_mod.STAGE_HDR_EXTRACT in status, status
+
+        # Stage 4: Depth & Stereo Conversion -- real per-frame tqdm data resuming
+        # must stop the pulse timer left running by stage 3.
+        frame.on_stage_change(_FakeStageEvent(gui_mod.STAGE_DEPTH_STEREO))
+        assert frame.job_stage_index == 4
+        frame.on_tqdm(_FakeTqdmEvent(0, 200, "movie.mp4 [ZoeD_Any_N]"))
+        assert not frame.stage_pulse_timer.IsRunning()
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 4/8" in status and gui_mod.STAGE_DEPTH_STEREO in status, status
+
+        # Stage 5: Audio Extraction.
+        frame.on_stage_change(_FakeStageEvent(gui_mod.STAGE_AUDIO_EXTRACT))
+        assert frame.job_stage_index == 5
+        assert frame.stage_pulse_timer.IsRunning()
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 5/8" in status and gui_mod.STAGE_AUDIO_EXTRACT in status, status
+
+        # Stage 6: waifu2x upscale.
+        frame.on_stage_change(_FakeStageEvent(gui_mod.STAGE_WAIFU2X_UPSCALE))
+        assert frame.job_stage_index == 6
+        assert frame.stage_pulse_timer.IsRunning()
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 6/8" in status and gui_mod.STAGE_WAIFU2X_UPSCALE in status, status
+
+        # Stage 7: RIFE.
+        frame.on_stage_change(_FakeStageEvent(gui_mod.STAGE_RIFE_INTERPOLATE))
+        assert frame.job_stage_index == 7
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 7/8" in status and gui_mod.STAGE_RIFE_INTERPOLATE in status, status
+
+        # Stage 8: HDR reinjection.
+        frame.on_stage_change(_FakeStageEvent(gui_mod.STAGE_HDR_REINJECT))
+        assert frame.job_stage_index == 8
+        status = frame.GetStatusBar().GetStatusText()
+        assert "Step 8/8" in status and gui_mod.STAGE_HDR_REINJECT in status, status
+
+        # Real per-frame tqdm data resuming (e.g. a second file in a batch job
+        # starting its own Depth & Stereo Conversion pass) must stop the pulse timer.
+        frame.on_tqdm(_FakeTqdmEvent(0, 50, "movie2.mp4 [ZoeD_Any_N]"))
+        assert not frame.stage_pulse_timer.IsRunning()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_progress_stage_display: PASS")
+
+
+def _self_test_progress_bar_visible_on_screen():
+    """Regression test for ADR-056 (progress bar getting pushed off the bottom of the
+    screen). The confirmed root cause: refresh_layouts()/Fit() size the frame to its
+    full natural content height (Single Page/Tabbed both pin their ScrolledPanel
+    content's MinSize to the entire un-scrolled size -- see
+    _compose_options_layout_single_page()/_compose_options_layout_tabbed()) with
+    nothing clamping that against the real screen, so on a tall enough content set
+    (or high enough Zoom level) the frame can become taller than the monitor's usable
+    work area -- and since pnl_process (the Gauge plus Start/Suspend/Cancel) is the
+    LAST, fixed-proportion row in the frame's own top-level vertical sizer, it is
+    exactly what gets pushed past the visible screen edge. This deterministically
+    reproduces that pre-fix symptom (forcing the frame taller than the screen,
+    regardless of this test machine's real resolution) and asserts
+    MainFrame._clamp_frame_to_screen() brings both the frame and pnl_process back
+    within the display's client (work) area. No GPU or real movie file, and no human
+    screenshot inspection needed for this part -- a real running-conversion
+    screenshot comparison was also done manually, see docs/ai/AI_DECISIONS.md."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        frame.Show()
+        display_index = wx.Display.GetFromWindow(frame)
+        if display_index == wx.NOT_FOUND:
+            display_index = 0
+        work_area = wx.Display(display_index).GetClientArea()
+
+        # Deliberately force the frame taller than the real screen -- reproduces the
+        # pre-fix symptom regardless of what resolution this test machine actually has.
+        oversized_height = work_area.GetHeight() + 400
+        frame.SetSize((frame.GetSize().GetWidth(), oversized_height))
+        frame.Layout()
+        assert frame.GetSize().GetHeight() > work_area.GetHeight(), \
+            "test setup failed to actually oversize the frame"
+
+        frame._clamp_frame_to_screen()
+        frame.Layout()
+
+        new_size = frame.GetSize()
+        assert new_size.GetHeight() <= work_area.GetHeight(), \
+            f"frame height {new_size.GetHeight()} still exceeds the screen work area {work_area.GetHeight()}"
+        assert new_size.GetWidth() <= work_area.GetWidth(), \
+            f"frame width {new_size.GetWidth()} still exceeds the screen work area {work_area.GetWidth()}"
+
+        progress_rect = frame.pnl_process.GetScreenRect()
+        assert progress_rect.GetBottom() <= work_area.GetBottom(), \
+            f"pnl_process bottom {progress_rect.GetBottom()} still extends past the screen's " \
+            f"usable area (work area bottom {work_area.GetBottom()}) -- this is the reported bug"
+        assert progress_rect.GetTop() >= work_area.GetTop(), \
+            f"pnl_process top {progress_rect.GetTop()} is above the screen's usable area"
+
+        frame_rect = frame.GetScreenRect()
+        assert frame_rect.Contains(progress_rect), \
+            "pnl_process is not fully contained within the (now-clamped) frame"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_progress_bar_visible_on_screen: PASS")
+
+
+def _self_test_progress_bar_visible_after_live_field_changes():
+    """Regression test for the ADR-056 amendment: a real-usage regression where
+    progress bar/Start-Suspend-Cancel got pushed behind the taskbar AGAIN, even with
+    ADR-056's original clamp mechanism intact and working. Root cause, confirmed by
+    measurement (see docs/ai/AI_DECISIONS.md ADR-056 amendment): several pre-existing
+    runtime handlers -- update_anaglyph_state, update_export_option_state,
+    update_inpaint_options, update_model_selection, update_divergence_warning, and
+    on_click_divergence_warning -- Show()/Hide() real controls in response to an
+    ordinary field change (Stereo Format, Method, Depth Model, Divergence value) and
+    call self.Fit() on their own, but were never paired with
+    MainFrame._clamp_frame_to_screen() the way IW3App.OnInit/switch_layout_mode/
+    apply_zoom_level are. This was harmless while the frame's natural content height
+    had comfortable margin under the real screen; once other same-night additions
+    (RIFE/Sharpen standalone panels, Auto EMA by Scene Length's relocation, Genre
+    Preset) shrank that margin, an everyday field change was again enough to exceed
+    the screen. Deterministic regardless of this test machine's real resolution: the
+    frame is first forced to sit exactly at the screen's usable height (simulating an
+    already-tightly-clamped window, the realistic worst case after tonight's
+    additions), then a real field change that Show()s additional controls
+    (Method -> forward_inpaint, which reveals ~9 inpaint controls via
+    update_inpaint_options) is applied through its real event handler -- not a direct
+    call to the clamp -- and pnl_process must still end up fully on-screen afterward."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        frame.Show()
+        display_index = wx.Display.GetFromWindow(frame)
+        if display_index == wx.NOT_FOUND:
+            display_index = 0
+        work_area = wx.Display(display_index).GetClientArea()
+
+        # Simulate the realistic worst case: a window already sitting exactly at the
+        # screen's usable height (i.e. already at the clamp boundary, as a real user's
+        # window commonly is after tonight's additions), before any live field change.
+        frame.SetSize((frame.GetSize().GetWidth(), work_area.GetHeight()))
+        frame.Layout()
+
+        # A real field change, through its real event handler -- not a synthetic
+        # resize -- that Show()s additional controls and calls self.Fit() internally.
+        frame.cbo_method.SetValue("forward_inpaint")
+        frame.on_selected_index_changed_cbo_method(None)
+
+        new_size = frame.GetSize()
+        assert new_size.GetHeight() <= work_area.GetHeight(), \
+            f"frame height {new_size.GetHeight()} exceeds the screen work area " \
+            f"{work_area.GetHeight()} after a live field change grew the content -- " \
+            f"the field-change handler's self.Fit() was not followed by a clamp"
+
+        progress_rect = frame.pnl_process.GetScreenRect()
+        assert progress_rect.GetBottom() <= work_area.GetBottom(), \
+            f"pnl_process bottom {progress_rect.GetBottom()} extends past the screen's " \
+            f"usable area (work area bottom {work_area.GetBottom()}) after a live field " \
+            f"change -- this is the reported regression"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_progress_bar_visible_after_live_field_changes: PASS")
+
+
+def _self_test_scene_batch_auto_ema_editor():
+    """Regression test for ADR-057 (Auto EMA by Scene Length's "Edit Values..."
+    editor). Redirects scene_batch.EMA_OVERRIDES_PATH to a throwaway temp file (never
+    touches the real nunif/tmp/iw3_auto_ema_overrides.json) and drives
+    SceneBatchAutoEMADialog directly -- no ShowModal() (would block on real user
+    input), no GPU, no real movie file. Covers every acceptance check from this
+    feature's spec: default-unchanged-when-no-override-file, an edited value actually
+    being used by the real _load_scene_settings() lookup, validation rejecting bad
+    Buffer/Decay input, Reset to Default really restoring built-in values, and bucket
+    boundaries (min_duration/max_duration) surviving a save round-trip unchanged."""
+    import tempfile
+    import iw3.scene_batch as scene_batch_mod
+
+    tmp_dir = tempfile.mkdtemp(prefix="iw3_auto_ema_selftest_")
+    orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+    scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+
+    app = None
+    frame = None
+    try:
+        # 1. Default-unchanged-when-no-override-file (key regression check).
+        assert not path.exists(scene_batch_mod.EMA_OVERRIDES_PATH)
+        assert scene_batch_mod.load_ema_overrides_file() == {}
+        default_rules = scene_batch_mod._load_scene_settings(
+            None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+        assert default_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+            "default rules changed with no override file present"
+
+        app = wx.App()
+        frame = MainFrame()
+        assert isinstance(frame.btn_scene_batch_auto_ema_edit, wx.Button)
+
+        validation_errors = []
+        frame.show_validation_error_message = lambda name, lo, hi: validation_errors.append((name, lo, hi))
+
+        dlg = SceneBatchAutoEMADialog(frame, "3DECKER VDA_L")
+        assert dlg.buffer_ctrls[0].GetValue() == "8" and dlg.decay_ctrls[0].GetValue() == "0.65"
+
+        # 2. Validation rejects bad Buffer/Decay input, and never writes a file for it.
+        dlg.buffer_ctrls[0].SetValue("-1")
+        dlg.decay_ctrls[0].SetValue("0.65")
+        dlg.on_save(None)
+        assert len(validation_errors) == 1, "non-positive Buffer was not rejected"
+        assert not path.exists(scene_batch_mod.EMA_OVERRIDES_PATH), "invalid input must not be saved"
+
+        validation_errors.clear()
+        dlg.buffer_ctrls[0].SetValue("8")
+        dlg.decay_ctrls[0].SetValue("1.0")
+        dlg.on_save(None)
+        assert len(validation_errors) == 1, "decay=1.0 (not strictly < 1) was not rejected"
+
+        validation_errors.clear()
+        dlg.decay_ctrls[0].SetValue("0.0")
+        dlg.on_save(None)
+        assert len(validation_errors) == 1, "decay=0.0 (not strictly > 0) was not rejected"
+
+        # 3. A real edit persists and is actually used by _load_scene_settings().
+        validation_errors.clear()
+        dlg.buffer_ctrls[0].SetValue("99")
+        dlg.decay_ctrls[0].SetValue("0.5")
+        dlg.on_save(None)
+        assert not validation_errors
+        saved = scene_batch_mod.load_ema_overrides_file()
+        assert saved["3DECKER VDA_L"][0] == {"ema_buffer": 99, "ema_decay": 0.5}
+
+        rules = scene_batch_mod._load_scene_settings(
+            None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+        assert rules[0]["overrides"] == {"ema_buffer": 99, "ema_decay": 0.5}
+        assert rules[0]["min_duration"] == 0 and rules[0]["max_duration"] == 1, \
+            "bucket boundaries must come from the hardcoded table, never the override file"
+
+        other_rules = scene_batch_mod._load_scene_settings(
+            None, auto_ema_by_duration=True, auto_ema_model="3DECKER Any_V3_Mono_01")
+        assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_ANY_V3_MONO_01), \
+            "editing 3DECKER VDA_L must not affect the other model's table"
+
+        # 4. Reset to Default (+ Save) really restores the built-in values and removes
+        # the stored override entirely, rather than just writing a copy of the defaults.
+        dlg2 = SceneBatchAutoEMADialog(frame, "3DECKER VDA_L")
+        assert dlg2.buffer_ctrls[0].GetValue() == "99", "dialog did not load the saved override"
+        dlg2.on_reset(None)
+        assert dlg2.buffer_ctrls[0].GetValue() == "8" and dlg2.decay_ctrls[0].GetValue() == "0.65"
+        dlg2.on_save(None)
+        assert "3DECKER VDA_L" not in scene_batch_mod.load_ema_overrides_file()
+        reset_rules = scene_batch_mod._load_scene_settings(
+            None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+        assert reset_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L)
+
+        # 5. Bucket boundaries never corrupted by a save round-trip.
+        dlg3 = SceneBatchAutoEMADialog(frame, "3DECKER VDA_L")
+        dlg3.buffer_ctrls[3].SetValue("21")
+        dlg3.decay_ctrls[3].SetValue("0.79")
+        dlg3.on_save(None)
+        combined = scene_batch_mod._table_from_override("3DECKER VDA_L", scene_batch_mod.EMA_BY_DURATION_VDA_L)
+        for base_rule, combined_rule in zip(scene_batch_mod.EMA_BY_DURATION_VDA_L, combined):
+            assert combined_rule.get("min_duration") == base_rule.get("min_duration")
+            assert combined_rule.get("max_duration") == base_rule.get("max_duration")
+    finally:
+        scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_scene_batch_auto_ema_editor: PASS")
+
+
+def _self_test_nagadomi_reference_ema_option():
+    """Regression test for the third Auto EMA by Scene Length table, "Nagadomi_Reference"
+    (docs/ai/AI_DECISIONS.md ADR-057 second amendment): confirms the dropdown now offers
+    all three choices with Nagadomi_Reference as the default (index 2, per ADR-057
+    Amendment 7), and that
+    SceneBatchAutoEMADialog correctly loads the new table's 21 rows when opened for it --
+    in particular buffer=1/decay=0.750 at 0-1s and buffer=30/decay=0.900 at 20s+, per the
+    task's real-GUI acceptance check. No GPU, no ShowModal() (would block on real user
+    input), matching this file's other self-tests."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        choices = list(frame.cbo_scene_batch_auto_ema_model.GetItems())
+        assert choices == ["3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference", "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical", "Drama Slow Paced"], choices
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2, \
+            "default selection must be Nagadomi_Reference (index 2) -- ADR-057 Amendment 7"
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+
+        dlg = SceneBatchAutoEMADialog(frame, "Nagadomi_Reference")
+        assert len(dlg.buffer_ctrls) == 21 and len(dlg.decay_ctrls) == 21
+        assert dlg.buffer_ctrls[0].GetValue() == "1" and dlg.decay_ctrls[0].GetValue() == "0.75"
+        assert dlg.buffer_ctrls[20].GetValue() == "30" and dlg.decay_ctrls[20].GetValue() == "0.9"
+
+        # Editing/saving/resetting works the same generic way as the other two models --
+        # verify it round-trips through _load_scene_settings for this model specifically.
+        import iw3.scene_batch as scene_batch_mod
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="iw3_nagadomi_ref_selftest_")
+        orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+        scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+        try:
+            dlg.buffer_ctrls[0].SetValue("2")
+            dlg.decay_ctrls[0].SetValue("0.76")
+            dlg.on_save(None)
+            rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="Nagadomi_Reference")
+            assert rules[0]["overrides"] == {"ema_buffer": 2, "ema_decay": 0.76}
+            other_rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+            assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+                "editing Nagadomi_Reference must not affect 3DECKER VDA_L's table"
+        finally:
+            scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_nagadomi_reference_ema_option: PASS")
+
+
+def _self_test_gemini_ai_ema_option():
+    """Regression test for the fourth Auto EMA by Scene Length table, dropdown choice
+    "GEMINI AI" (docs/ai/AI_DECISIONS.md ADR-057 third amendment): confirms the
+    dropdown now offers all four choices with Nagadomi_Reference as the default (index 2,
+    per ADR-057 Amendment 7), and that SceneBatchAutoEMADialog correctly loads the new table's 21
+    rows when opened for it -- in particular buffer=24/decay=0.750 at 0-1s and
+    buffer=480/decay=0.975 at 20s+, per the task's real-GUI acceptance check. No GPU,
+    no ShowModal() (would block on real user input), matching this file's other
+    self-tests."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        choices = list(frame.cbo_scene_batch_auto_ema_model.GetItems())
+        assert choices == ["3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference", "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical", "Drama Slow Paced"], choices
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2, \
+            "default selection must be Nagadomi_Reference (index 2) -- ADR-057 Amendment 7"
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+
+        dlg = SceneBatchAutoEMADialog(frame, "GEMINI AI")
+        assert len(dlg.buffer_ctrls) == 21 and len(dlg.decay_ctrls) == 21
+        assert dlg.buffer_ctrls[0].GetValue() == "24" and dlg.decay_ctrls[0].GetValue() == "0.75"
+        assert dlg.buffer_ctrls[9].GetValue() == "240" and dlg.decay_ctrls[9].GetValue() == "0.943"
+        assert dlg.buffer_ctrls[19].GetValue() == "480" and dlg.decay_ctrls[19].GetValue() == "0.975"
+        assert dlg.buffer_ctrls[20].GetValue() == "480" and dlg.decay_ctrls[20].GetValue() == "0.975"
+
+        # Editing/saving/resetting works the same generic way as the other three models --
+        # verify it round-trips through _load_scene_settings for this model specifically.
+        import iw3.scene_batch as scene_batch_mod
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="iw3_gemini_ai_selftest_")
+        orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+        scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+        try:
+            dlg.buffer_ctrls[0].SetValue("25")
+            dlg.decay_ctrls[0].SetValue("0.76")
+            dlg.on_save(None)
+            rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="GEMINI AI")
+            assert rules[0]["overrides"] == {"ema_buffer": 25, "ema_decay": 0.76}
+            other_rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+            assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+                "editing GEMINI AI must not affect 3DECKER VDA_L's table"
+        finally:
+            scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_gemini_ai_ema_option: PASS")
+
+
+def _self_test_chatgpt_ema_option():
+    """Regression test for the fifth Auto EMA by Scene Length table, dropdown choice
+    "ChatGPT" (docs/ai/AI_DECISIONS.md ADR-057 fourth amendment): confirms the
+    dropdown now offers all five choices with Nagadomi_Reference as the default (index 2,
+    per ADR-057 Amendment 7), and that SceneBatchAutoEMADialog correctly loads the new table's 21
+    rows when opened for it -- in particular buffer=30/decay=0.75 at 0-1s and
+    buffer=600/decay=0.99 at 20s+, per the task's real-GUI acceptance check. No GPU,
+    no ShowModal() (would block on real user input), matching this file's other
+    self-tests."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        choices = list(frame.cbo_scene_batch_auto_ema_model.GetItems())
+        assert choices == ["3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference", "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical", "Drama Slow Paced"], choices
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2, \
+            "default selection must be Nagadomi_Reference (index 2) -- ADR-057 Amendment 7"
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+
+        dlg = SceneBatchAutoEMADialog(frame, "ChatGPT")
+        assert len(dlg.buffer_ctrls) == 21 and len(dlg.decay_ctrls) == 21
+        assert dlg.buffer_ctrls[0].GetValue() == "30" and dlg.decay_ctrls[0].GetValue() == "0.75"
+        assert dlg.buffer_ctrls[9].GetValue() == "300" and dlg.decay_ctrls[9].GetValue() == "0.88"
+        assert dlg.buffer_ctrls[19].GetValue() == "600" and dlg.decay_ctrls[19].GetValue() == "0.99"
+        assert dlg.buffer_ctrls[20].GetValue() == "600" and dlg.decay_ctrls[20].GetValue() == "0.99"
+
+        # Editing/saving/resetting works the same generic way as the other four models --
+        # verify it round-trips through _load_scene_settings for this model specifically.
+        import iw3.scene_batch as scene_batch_mod
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="iw3_chatgpt_selftest_")
+        orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+        scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+        try:
+            dlg.buffer_ctrls[0].SetValue("31")
+            dlg.decay_ctrls[0].SetValue("0.76")
+            dlg.on_save(None)
+            rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="ChatGPT")
+            assert rules[0]["overrides"] == {"ema_buffer": 31, "ema_decay": 0.76}
+            other_rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+            assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+                "editing ChatGPT must not affect 3DECKER VDA_L's table"
+        finally:
+            scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_chatgpt_ema_option: PASS")
+
+
+def _self_test_grok_ema_option():
+    """Regression test for the sixth Auto EMA by Scene Length table, dropdown choice
+    "Grok" (docs/ai/AI_DECISIONS.md ADR-057 fifth amendment): confirms the dropdown
+    now offers all six choices with Nagadomi_Reference as the default (index 2, per
+    ADR-057 Amendment 7), and
+    that SceneBatchAutoEMADialog correctly loads the new table's 21 rows when opened
+    for it -- in particular buffer=24/decay=0.90 at 0-1s, decay first reaching 0.99 at
+    8-9s (buffer=216) and staying flat there, and buffer=480/decay=0.99 at both 19-20s
+    and 20s+, per the task's real-GUI acceptance check. No GPU, no ShowModal() (would
+    block on real user input), matching this file's other self-tests."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        choices = list(frame.cbo_scene_batch_auto_ema_model.GetItems())
+        assert choices == ["3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference", "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical", "Drama Slow Paced"], choices
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2, \
+            "default selection must be Nagadomi_Reference (index 2) -- ADR-057 Amendment 7"
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+
+        dlg = SceneBatchAutoEMADialog(frame, "Grok")
+        assert len(dlg.buffer_ctrls) == 21 and len(dlg.decay_ctrls) == 21
+        assert dlg.buffer_ctrls[0].GetValue() == "24" and dlg.decay_ctrls[0].GetValue() == "0.9"
+        assert dlg.buffer_ctrls[8].GetValue() == "216" and dlg.decay_ctrls[8].GetValue() == "0.99"
+        assert dlg.buffer_ctrls[19].GetValue() == "480" and dlg.decay_ctrls[19].GetValue() == "0.99"
+        assert dlg.buffer_ctrls[20].GetValue() == "480" and dlg.decay_ctrls[20].GetValue() == "0.99"
+
+        # Editing/saving/resetting works the same generic way as the other five models --
+        # verify it round-trips through _load_scene_settings for this model specifically.
+        import iw3.scene_batch as scene_batch_mod
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="iw3_grok_selftest_")
+        orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+        scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+        try:
+            dlg.buffer_ctrls[0].SetValue("25")
+            dlg.decay_ctrls[0].SetValue("0.91")
+            dlg.on_save(None)
+            rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="Grok")
+            assert rules[0]["overrides"] == {"ema_buffer": 25, "ema_decay": 0.91}
+            other_rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+            assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+                "editing Grok must not affect 3DECKER VDA_L's table"
+        finally:
+            scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_grok_ema_option: PASS")
+
+
+def _self_test_fast_action_ema_option():
+    """Regression test for the seventh Auto EMA by Scene Length table, dropdown choice
+    "Fast Action" (docs/ai/AI_DECISIONS.md ADR-057 Amendment 10): confirms the dropdown
+    now offers all nine choices with Nagadomi_Reference as the default (index 2, per
+    ADR-057 Amendment 7), and that SceneBatchAutoEMADialog correctly loads the new
+    table's 21 rows when opened for it -- in particular buffer=24/decay=0.750 at 0-1s,
+    buffer=240/decay=0.774 at 9-10s, and every bucket from 10-11s through 20s+ holding
+    flat at buffer=240/decay=0.774, per the task's real-GUI acceptance check. No GPU,
+    no ShowModal() (would block on real user input), matching this file's other
+    self-tests."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        choices = list(frame.cbo_scene_batch_auto_ema_model.GetItems())
+        assert choices == ["3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference", "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical", "Drama Slow Paced"], choices
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2, \
+            "default selection must be Nagadomi_Reference (index 2) -- ADR-057 Amendment 7"
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+
+        dlg = SceneBatchAutoEMADialog(frame, "Fast Action")
+        assert len(dlg.buffer_ctrls) == 21 and len(dlg.decay_ctrls) == 21
+        assert dlg.buffer_ctrls[0].GetValue() == "24" and dlg.decay_ctrls[0].GetValue() == "0.75"
+        assert dlg.buffer_ctrls[9].GetValue() == "240" and dlg.decay_ctrls[9].GetValue() == "0.774"
+        for i in range(10, 21):
+            assert dlg.buffer_ctrls[i].GetValue() == "240" and dlg.decay_ctrls[i].GetValue() == "0.774", \
+                f"row {i} must hold flat at the 9-10s bucket's value (10s cap, ADR-057 Amendment 10)"
+
+        # Editing/saving/resetting works the same generic way as the other six models --
+        # verify it round-trips through _load_scene_settings for this model specifically.
+        import iw3.scene_batch as scene_batch_mod
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="iw3_fast_action_selftest_")
+        orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+        scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+        try:
+            dlg.buffer_ctrls[0].SetValue("25")
+            dlg.decay_ctrls[0].SetValue("0.76")
+            dlg.on_save(None)
+            rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="Fast Action")
+            assert rules[0]["overrides"] == {"ema_buffer": 25, "ema_decay": 0.76}
+            other_rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+            assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+                "editing Fast Action must not affect 3DECKER VDA_L's table"
+        finally:
+            scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_fast_action_ema_option: PASS")
+
+
+def _self_test_medium_magical_ema_option():
+    """Regression test for the eighth Auto EMA by Scene Length table, dropdown choice
+    "Medium Magical" (docs/ai/AI_DECISIONS.md ADR-057 Amendment 10): confirms the
+    dropdown now offers all nine choices with Nagadomi_Reference as the default (index
+    2, per ADR-057 Amendment 7), and that SceneBatchAutoEMADialog correctly loads the
+    new table's 21 rows when opened for it -- in particular buffer=24/decay=0.820 at
+    0-1s, buffer=240/decay=0.847 at 9-10s, and every bucket from 10-11s through 20s+
+    holding flat at buffer=240/decay=0.847, per the task's real-GUI acceptance check.
+    No GPU, no ShowModal() (would block on real user input), matching this file's
+    other self-tests."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        choices = list(frame.cbo_scene_batch_auto_ema_model.GetItems())
+        assert choices == ["3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference", "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical", "Drama Slow Paced"], choices
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2, \
+            "default selection must be Nagadomi_Reference (index 2) -- ADR-057 Amendment 7"
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+
+        dlg = SceneBatchAutoEMADialog(frame, "Medium Magical")
+        assert len(dlg.buffer_ctrls) == 21 and len(dlg.decay_ctrls) == 21
+        assert dlg.buffer_ctrls[0].GetValue() == "24" and dlg.decay_ctrls[0].GetValue() == "0.82"
+        assert dlg.buffer_ctrls[9].GetValue() == "240" and dlg.decay_ctrls[9].GetValue() == "0.847"
+        for i in range(10, 21):
+            assert dlg.buffer_ctrls[i].GetValue() == "240" and dlg.decay_ctrls[i].GetValue() == "0.847", \
+                f"row {i} must hold flat at the 9-10s bucket's value (10s cap, ADR-057 Amendment 10)"
+
+        # Editing/saving/resetting works the same generic way as the other seven models --
+        # verify it round-trips through _load_scene_settings for this model specifically.
+        import iw3.scene_batch as scene_batch_mod
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="iw3_medium_magical_selftest_")
+        orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+        scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+        try:
+            dlg.buffer_ctrls[0].SetValue("25")
+            dlg.decay_ctrls[0].SetValue("0.83")
+            dlg.on_save(None)
+            rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="Medium Magical")
+            assert rules[0]["overrides"] == {"ema_buffer": 25, "ema_decay": 0.83}
+            other_rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+            assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+                "editing Medium Magical must not affect 3DECKER VDA_L's table"
+        finally:
+            scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_medium_magical_ema_option: PASS")
+
+
+def _self_test_drama_slow_paced_ema_option():
+    """Regression test for the ninth Auto EMA by Scene Length table, dropdown choice
+    "Drama Slow Paced" (docs/ai/AI_DECISIONS.md ADR-057 Amendment 10): confirms the
+    dropdown now offers all nine choices with Nagadomi_Reference as the default (index
+    2, per ADR-057 Amendment 7), and that SceneBatchAutoEMADialog correctly loads the
+    new table's 21 rows when opened for it -- in particular buffer=24/decay=0.900 at
+    0-1s, buffer=240/decay=0.924 at 9-10s, and every bucket from 10-11s through 20s+
+    holding flat at buffer=240/decay=0.924, per the task's real-GUI acceptance check.
+    No GPU, no ShowModal() (would block on real user input), matching this file's
+    other self-tests."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        choices = list(frame.cbo_scene_batch_auto_ema_model.GetItems())
+        assert choices == ["3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference", "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical", "Drama Slow Paced"], choices
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2, \
+            "default selection must be Nagadomi_Reference (index 2) -- ADR-057 Amendment 7"
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+
+        dlg = SceneBatchAutoEMADialog(frame, "Drama Slow Paced")
+        assert len(dlg.buffer_ctrls) == 21 and len(dlg.decay_ctrls) == 21
+        assert dlg.buffer_ctrls[0].GetValue() == "24" and dlg.decay_ctrls[0].GetValue() == "0.9"
+        assert dlg.buffer_ctrls[9].GetValue() == "240" and dlg.decay_ctrls[9].GetValue() == "0.924"
+        for i in range(10, 21):
+            assert dlg.buffer_ctrls[i].GetValue() == "240" and dlg.decay_ctrls[i].GetValue() == "0.924", \
+                f"row {i} must hold flat at the 9-10s bucket's value (10s cap, ADR-057 Amendment 10)"
+
+        # Editing/saving/resetting works the same generic way as the other eight models --
+        # verify it round-trips through _load_scene_settings for this model specifically.
+        import iw3.scene_batch as scene_batch_mod
+        import tempfile
+        tmp_dir = tempfile.mkdtemp(prefix="iw3_drama_slow_paced_selftest_")
+        orig_override_path = scene_batch_mod.EMA_OVERRIDES_PATH
+        scene_batch_mod.EMA_OVERRIDES_PATH = path.join(tmp_dir, "iw3_auto_ema_overrides.json")
+        try:
+            dlg.buffer_ctrls[0].SetValue("25")
+            dlg.decay_ctrls[0].SetValue("0.91")
+            dlg.on_save(None)
+            rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="Drama Slow Paced")
+            assert rules[0]["overrides"] == {"ema_buffer": 25, "ema_decay": 0.91}
+            other_rules = scene_batch_mod._load_scene_settings(
+                None, auto_ema_by_duration=True, auto_ema_model="3DECKER VDA_L")
+            assert other_rules == list(scene_batch_mod.EMA_BY_DURATION_VDA_L), \
+                "editing Drama Slow Paced must not affect 3DECKER VDA_L's table"
+        finally:
+            scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_drama_slow_paced_ema_option: PASS")
+
+
+def _self_test_auto_ema_default_is_nagadomi_reference():
+    """Regression test for ADR-057 Amendment 7 (default Auto EMA by Scene Length table
+    changed from "3DECKER VDA_L" to "Nagadomi_Reference"): confirms the dropdown's
+    default SELECTION changed (index 2 / "Nagadomi_Reference") without reordering the
+    choices list or changing the "Auto EMA by Scene Length" checkbox's own separate
+    off-by-default state, on a fresh MainFrame (no config file, no user interaction)."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert list(frame.cbo_scene_batch_auto_ema_model.GetItems()) == [
+            "3DECKER VDA_L", "3DECKER Any_V3_Mono_01", "Nagadomi_Reference",
+            "GEMINI AI", "ChatGPT", "Grok", "Fast Action", "Medium Magical",
+            "Drama Slow Paced"], \
+            "choices list order (first six) must be unchanged by this default-selection-only " \
+            "change -- ADR-057 Amendment 10's three new entries are appended after, not " \
+            "inserted"
+        assert frame.cbo_scene_batch_auto_ema_model.GetSelection() == 2
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference"
+        assert frame.chk_scene_batch_auto_ema.GetValue() is False, \
+            "Auto EMA by Scene Length checkbox must still default to off -- only the " \
+            "table selected for IF it's turned on changed"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_auto_ema_default_is_nagadomi_reference: PASS")
+
+
+def _self_test_scene_auto_ema_regular_gate():
+    """Regression test for extending Auto EMA by Scene Length to a regular (non--
+    Scene Batch) conversion: --scene-batch-auto-ema now also works with plain Scene
+    Detection, but is meaningless (no scene boundaries to key off of) without EITHER
+    Scene Detection or Automated Scene Batch turned on. Drives the real
+    MainFrame.scene_auto_ema_gate_ok() (the exact method parse_args() calls, not a
+    hand-copied condition) -- deliberately does NOT call parse_args() itself, which
+    runs on to build a full args Namespace and is not meant for a self-test context."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # Auto EMA on, neither Scene Detection nor Scene Batch on -> blocked.
+        frame.chk_scene_batch_auto_ema.SetValue(True)
+        frame.chk_scene_batch.SetValue(False)
+        frame.chk_scene_detect.SetValue(False)
+        assert not frame.scene_auto_ema_gate_ok(), "must be blocked with no scene boundaries to key off of"
+
+        # Auto EMA on, Scene Detection on (the new regular path) -> gate passes.
+        frame.chk_scene_detect.SetValue(True)
+        assert frame.scene_auto_ema_gate_ok(), "Scene Detection alone must satisfy the gate"
+
+        # Auto EMA on, Scene Batch on (existing behavior) -> gate passes too.
+        frame.chk_scene_detect.SetValue(False)
+        frame.chk_scene_batch.SetValue(True)
+        assert frame.scene_auto_ema_gate_ok(), "Automated Scene Batch alone must satisfy the gate"
+
+        # Auto EMA off -> gate never blocks, regardless of the other two.
+        frame.chk_scene_batch_auto_ema.SetValue(False)
+        frame.chk_scene_batch.SetValue(False)
+        frame.chk_scene_detect.SetValue(False)
+        assert frame.scene_auto_ema_gate_ok(), "gate must not block when Auto EMA by Scene Length is off"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_scene_auto_ema_regular_gate: PASS")
+
+
+def _self_test_auto_ema_relocated_and_disables_ema_fields():
+    """Regression test for the ADR-057 relocation amendment (2026-09-08): Auto EMA by
+    Scene Length's controls (chk_scene_batch_auto_ema/cbo_scene_batch_auto_ema_model/
+    btn_scene_batch_auto_ema_edit) were moved from the Video Filter group box into
+    Flicker Reduction's own StaticBox (grp_stereo), directly under the Decay Rate/
+    Buffer row, and checking "Auto EMA by Scene Length" now greys out (but does NOT
+    clear) Flicker Reduction's own Decay Rate/Buffer fields (cbo_ema_decay/
+    cbo_ema_buffer) -- unchecking it re-enables them with whatever value was typed in
+    still present. Confirms all three parts on a real MainFrame: parent/sizer
+    relocation, disable-without-clear, and re-enable-with-value-intact."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # (a) Relocation: the three controls are now real children of grp_stereo
+        # (Flicker Reduction's StaticBox), not grp_video_filter, and are laid out in
+        # the SAME GridBagSizer as cbo_ema_buffer (Flicker Reduction's own Buffer
+        # field) -- i.e. genuinely inside that group's layout, not merely reparented.
+        assert frame.chk_scene_batch_auto_ema.GetParent() is frame.grp_stereo
+        assert frame.cbo_scene_batch_auto_ema_model.GetParent() is frame.grp_stereo
+        assert frame.btn_scene_batch_auto_ema_edit.GetParent() is frame.grp_stereo
+
+        stereo_grid = frame.cbo_ema_buffer.GetContainingSizer()
+        assert isinstance(stereo_grid, wx.GridBagSizer), "Flicker Reduction's own layout must be a GridBagSizer"
+        assert frame.chk_scene_batch_auto_ema.GetContainingSizer() is stereo_grid, \
+            "chk_scene_batch_auto_ema must be laid out in the same grid as Flicker Reduction's fields"
+        assert frame.cbo_scene_batch_auto_ema_model.GetContainingSizer() is stereo_grid
+        assert frame.btn_scene_batch_auto_ema_edit.GetContainingSizer() is stereo_grid
+
+        # Sits directly under (a larger grid row index than) the Decay Rate/Buffer
+        # row it visually relates to, in that same underlying GridBagSizer.
+        buffer_pos = stereo_grid.GetItem(frame.cbo_ema_buffer).GetPos()
+        auto_ema_pos = stereo_grid.GetItem(frame.chk_scene_batch_auto_ema).GetPos()
+        assert auto_ema_pos.GetRow() > buffer_pos.GetRow(), \
+            "Auto EMA by Scene Length must sit below the Decay Rate/Buffer row"
+
+        # (b) Checking Auto EMA disables Decay/Buffer WITHOUT clearing their values.
+        frame.cbo_ema_decay.SetValue("0.87")
+        frame.cbo_ema_buffer.SetValue("77")
+        frame.chk_ema_normalize.SetValue(True)
+        frame.update_ema_normalize()
+        assert frame.cbo_ema_decay.IsEnabled() and frame.cbo_ema_buffer.IsEnabled(), \
+            "must be enabled before Auto EMA is turned on (Flicker Reduction itself is on)"
+
+        frame.chk_scene_batch_auto_ema.SetValue(True)
+        frame.on_changed_chk_scene_batch_auto_ema(None)
+        assert not frame.cbo_ema_decay.IsEnabled(), "Decay must be greyed out while Auto EMA is checked"
+        assert not frame.cbo_ema_buffer.IsEnabled(), "Buffer must be greyed out while Auto EMA is checked"
+        assert frame.cbo_ema_decay.GetValue() == "0.87", "Decay's value must NOT be cleared by disabling"
+        assert frame.cbo_ema_buffer.GetValue() == "77", "Buffer's value must NOT be cleared by disabling"
+
+        # (c) Unchecking Auto EMA re-enables them, value still intact.
+        frame.chk_scene_batch_auto_ema.SetValue(False)
+        frame.on_changed_chk_scene_batch_auto_ema(None)
+        assert frame.cbo_ema_decay.IsEnabled(), "Decay must re-enable once Auto EMA is unchecked"
+        assert frame.cbo_ema_buffer.IsEnabled(), "Buffer must re-enable once Auto EMA is unchecked"
+        assert frame.cbo_ema_decay.GetValue() == "0.87", "Decay's value must still be there after re-enabling"
+        assert frame.cbo_ema_buffer.GetValue() == "77", "Buffer's value must still be there after re-enabling"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_auto_ema_relocated_and_disables_ema_fields: PASS")
+
+
+def _self_test_genre_preset_quick_fill():
+    """Regression test for the Genre Preset quick-fill feature (ADR-057 Amendment 9):
+    a dropdown next to Flicker Reduction's Decay Rate/Buffer fields that fills them
+    once with a fixed preset pair, distinct from the per-scene "Auto EMA by Scene
+    Length" mechanism. Confirms each of the three real presets fills the exact
+    correct Decay/Buffer values, the dropdown is disabled/enabled in lockstep with
+    Flicker Reduction's own fields (including while Auto EMA by Scene Length is
+    checked), and hand-editing a filled-in field afterward causes no error and does
+    not reset the dropdown's own selection."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert list(frame.cbo_genre_preset.GetItems()) == [
+            "-- Select --", "Fast Action", "Medium / Magical", "Drama / Slow-Paced"]
+        assert frame.cbo_genre_preset.GetValue() == "-- Select --", \
+            "placeholder must be selected by default, no preset applied"
+
+        frame.chk_ema_normalize.SetValue(True)
+        frame.chk_scene_batch_auto_ema.SetValue(False)
+        frame.update_ema_normalize()
+
+        # (a) Each real preset fills the exact correct Decay/Buffer values.
+        expected = {
+            "Fast Action": ("0.75", "30"),
+            "Medium / Magical": ("0.85", "72"),
+            "Drama / Slow-Paced": ("0.94", "120"),
+        }
+        for preset_name, (expected_decay, expected_buffer) in expected.items():
+            frame.cbo_ema_decay.SetValue("")
+            frame.cbo_ema_buffer.SetValue("")
+            frame.cbo_genre_preset.SetStringSelection(preset_name)
+            frame.on_changed_cbo_genre_preset(None)
+            assert frame.cbo_ema_decay.GetValue() == expected_decay, \
+                f"{preset_name}: expected Decay {expected_decay}, got {frame.cbo_ema_decay.GetValue()}"
+            assert frame.cbo_ema_buffer.GetValue() == expected_buffer, \
+                f"{preset_name}: expected Buffer {expected_buffer}, got {frame.cbo_ema_buffer.GetValue()}"
+
+        # The placeholder itself must never fill anything.
+        frame.cbo_ema_decay.SetValue("0.42")
+        frame.cbo_ema_buffer.SetValue("42")
+        frame.cbo_genre_preset.SetStringSelection(GENRE_PRESET_PLACEHOLDER)
+        frame.on_changed_cbo_genre_preset(None)
+        assert frame.cbo_ema_decay.GetValue() == "0.42", "placeholder must not touch Decay"
+        assert frame.cbo_ema_buffer.GetValue() == "42", "placeholder must not touch Buffer"
+
+        # (b) Hand-editing a filled-in field afterward is safe: no exception, and the
+        # Genre Preset dropdown's own selection is left exactly as it was.
+        frame.cbo_genre_preset.SetStringSelection("Drama / Slow-Paced")
+        frame.on_changed_cbo_genre_preset(None)
+        frame.cbo_ema_decay.SetValue("0.60")
+        frame.cbo_ema_buffer.SetValue("99")
+        assert frame.cbo_genre_preset.GetValue() == "Drama / Slow-Paced", \
+            "hand-editing Decay/Buffer must not reset the Genre Preset dropdown"
+        assert frame.cbo_ema_decay.GetValue() == "0.60" and frame.cbo_ema_buffer.GetValue() == "99"
+
+        # (c) Disabled/enabled in lockstep with Flicker Reduction's own fields,
+        # including while Auto EMA by Scene Length is checked.
+        assert frame.cbo_genre_preset.IsEnabled(), \
+            "Genre Preset must be enabled while Flicker Reduction is on and Auto EMA is off"
+
+        frame.chk_scene_batch_auto_ema.SetValue(True)
+        frame.on_changed_chk_scene_batch_auto_ema(None)
+        assert not frame.cbo_ema_decay.IsEnabled() and not frame.cbo_ema_buffer.IsEnabled()
+        assert not frame.cbo_genre_preset.IsEnabled(), \
+            "Genre Preset must grey out together with Decay/Buffer while Auto EMA is checked"
+
+        frame.chk_scene_batch_auto_ema.SetValue(False)
+        frame.on_changed_chk_scene_batch_auto_ema(None)
+        assert frame.cbo_ema_decay.IsEnabled() and frame.cbo_ema_buffer.IsEnabled()
+        assert frame.cbo_genre_preset.IsEnabled(), \
+            "Genre Preset must re-enable together with Decay/Buffer once Auto EMA is unchecked"
+
+        # Selecting/filling a preset must never touch the Auto EMA checkbox itself,
+        # and vice versa -- independent controls.
+        assert frame.chk_scene_batch_auto_ema.GetValue() is False
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_genre_preset_quick_fill: PASS")
+
+
+def _self_test_hdr_reinject_rife_manifest_field():
+    """Regression test for wiring reinject_hdr_cli.py's existing, already-real
+    --rife-manifest flag (ADR-051) into the HDR Reinjection panel's new "RIFE
+    Manifest (optional)" field (docs/ai/AI_DECISIONS.md ADR-064 amendment). Confirms:
+    a blank field omits --rife-manifest entirely (today's exact existing behavior,
+    unchanged); a filled-in, existing path passes --rife-manifest through verbatim; a
+    non-blank but non-existent path refuses with a warning instead of silently
+    passing a bad path; and picking an "Already-Converted 3D File" that has a
+    matching real "<file>.rife_manifest.json" sidecar next to it (the RIFE Frame
+    Interpolation panel's own real output-naming convention) auto-fills the new
+    field, while a converted file with no such sidecar leaves it blank rather than
+    guessing. No GPU or real movie file needed: startWorker is monkeypatched to
+    capture command args instead of launching a real subprocess."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_message_box = gui_mod.wx.MessageBox
+    message_box_calls = []
+    # Several of this method's real validation-failure branches call the real, truly
+    # blocking wx.MessageBox (a native modal dialog that pumps its own nested event
+    # loop and waits for a real click) -- deliberately exercising one of those
+    # branches below (case (c)) needs this mocked out, exactly the kind of
+    # synthetic/mocked substitution this project's own --self-test convention already
+    # uses for GPU/subprocess calls (CS-TEST-001), just applied to a GUI dialog call
+    # instead.
+    gui_mod.wx.MessageBox = lambda *a, **kw: message_box_calls.append(a)
+    try:
+        frame = gui_mod.MainFrame()
+
+        assert frame.txt_reinject_rife_manifest.GetParent() is frame.grp_hdr_reinject
+        assert frame.btn_reinject_rife_manifest.GetParent() is frame.grp_hdr_reinject
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["cmd"] = wargs[0]
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = path.join(tmpdir, "source.mkv")
+            converted_path = path.join(tmpdir, "movie_3d.mkv")
+            output_path = path.join(tmpdir, "movie_3d_hdr_reinjected.mkv")
+            for p in (source_path, converted_path):
+                with open(p, "wb") as f:
+                    f.write(b"fake")
+
+            frame.txt_reinject_source.SetValue(source_path)
+            frame.txt_reinject_converted.SetValue(converted_path)
+            frame.txt_reinject_output.SetValue(output_path)
+            frame.chk_reinject_start_time.SetValue(False)
+            frame.chk_reinject_end_time.SetValue(False)
+
+            # (a) Blank manifest field -> --rife-manifest omitted entirely (existing
+            # behavior for anyone not using RIFE, unchanged).
+            frame.txt_reinject_rife_manifest.SetValue("")
+            frame.on_click_btn_reinject_run(None)
+            cmd = captured["cmd"]
+            assert "--rife-manifest" not in cmd, cmd
+            assert cmd == [sys.executable, "-m", "iw3.reinject_hdr_cli",
+                            "--source", source_path, "--converted", converted_path,
+                            "--output", output_path], cmd
+
+            # (b) Filled-in, existing manifest path -> passed through verbatim.
+            manifest_path = path.join(tmpdir, "movie_3d_rife.mkv.rife_manifest.json")
+            with open(manifest_path, "w") as f:
+                f.write("{}")
+            captured.clear()
+            frame.txt_reinject_rife_manifest.SetValue(manifest_path)
+            frame.on_click_btn_reinject_run(None)
+            cmd = captured["cmd"]
+            assert "--rife-manifest" in cmd and manifest_path in cmd, cmd
+
+            # (c) Non-blank but non-existent manifest path -> refuses with a warning
+            # (no command built at all), rather than silently passing a bad path
+            # through.
+            captured.clear()
+            message_box_calls.clear()
+            frame.txt_reinject_rife_manifest.SetValue(path.join(tmpdir, "does_not_exist.rife_manifest.json"))
+            frame.on_click_btn_reinject_run(None)
+            assert "cmd" not in captured, "must refuse before building a command for a missing manifest path"
+            assert len(message_box_calls) == 1, "must warn the user exactly once about the missing manifest path"
+
+            # (d) Auto-suggest on picking "Already-Converted 3D File": a real RIFE
+            # output naming convention (<file>_rife<ext>) WITH a matching real
+            # sidecar next to it auto-fills the field.
+            rife_output_path = path.join(tmpdir, "clip2_rife.mkv")
+            with open(rife_output_path, "wb") as f:
+                f.write(b"fake")
+            rife_manifest_path = rife_output_path + ".rife_manifest.json"
+            with open(rife_manifest_path, "w") as f:
+                f.write("{}")
+
+            frame.txt_reinject_converted.SetValue("")
+            frame.txt_reinject_output.SetValue("")
+            frame.txt_reinject_rife_manifest.SetValue("")
+
+            class _FakeDialog:
+                def __init__(self, chosen_path):
+                    self.chosen_path = chosen_path
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def GetValue(self):
+                    return ""
+
+                def SetPath(self, p):
+                    pass
+
+                def ShowModal(self):
+                    return wx.ID_OK
+
+                def GetPath(self):
+                    return self.chosen_path
+
+            orig_file_dialog = gui_mod.wx.FileDialog
+            gui_mod.wx.FileDialog = lambda *a, **kw: _FakeDialog(rife_output_path)
+            try:
+                frame.on_click_btn_reinject_converted(None)
+            finally:
+                gui_mod.wx.FileDialog = orig_file_dialog
+            assert frame.txt_reinject_converted.GetValue() == rife_output_path
+            assert frame.txt_reinject_rife_manifest.GetValue() == rife_manifest_path, \
+                frame.txt_reinject_rife_manifest.GetValue()
+
+            # A converted file with no matching sidecar must leave the field blank
+            # rather than guessing.
+            no_sidecar_path = path.join(tmpdir, "clip3_rife.mkv")
+            with open(no_sidecar_path, "wb") as f:
+                f.write(b"fake")
+            frame.txt_reinject_converted.SetValue("")
+            frame.txt_reinject_output.SetValue("")
+            frame.txt_reinject_rife_manifest.SetValue("")
+            gui_mod.wx.FileDialog = lambda *a, **kw: _FakeDialog(no_sidecar_path)
+            try:
+                frame.on_click_btn_reinject_converted(None)
+            finally:
+                gui_mod.wx.FileDialog = orig_file_dialog
+            assert frame.txt_reinject_rife_manifest.GetValue() == "", \
+                "must not guess a manifest path when no real sidecar exists"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        gui_mod.wx.MessageBox = orig_message_box
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_hdr_reinject_rife_manifest_field: PASS")
+
+
+def _self_test_3decker_quick_preset():
+    """Regression test for the "3DECKER Preferred" top-bar quick-preset button
+    (docs/ai/AI_DECISIONS.md ADR-057 Amendment 12) -- moved here from the Genre
+    Preset dropdown's "My Preferred Settings" entry (Amendment 11), now
+    btn_quick_preset_3decker next to btn_quick_preset_movie/btn_quick_preset_action,
+    following their exact apply_quick_preset(name) click-handler pattern. Confirms
+    every one of the 11 real controls lands on the exact right value, that clicking
+    it correctly checks "Auto EMA by Scene Length" and drives the SAME grey-out
+    chain a real click on that checkbox would (Decay Rate/Buffer/the Genre Preset
+    dropdown itself all grey out), that "My Preferred Settings" is gone from the
+    Genre Preset dropdown, and that hand-editing afterward causes no error -- same
+    as the Movie/Action quick presets."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        items = list(frame.cbo_genre_preset.GetItems())
+        assert items == ["-- Select --", "Fast Action", "Medium / Magical", "Drama / Slow-Paced"], items
+        assert "My Preferred Settings" not in items, items
+
+        frame.chk_ema_normalize.SetValue(True)
+        frame.chk_scene_batch_auto_ema.SetValue(False)
+        frame.update_ema_normalize()
+
+        frame.apply_quick_preset("3decker")
+
+        assert frame.cbo_depth_model.GetValue() == "Any_V3_Mono_01", frame.cbo_depth_model.GetValue()
+        assert frame.cbo_divergence.GetValue() == "2.5", frame.cbo_divergence.GetValue()
+        assert frame.cbo_convergence.GetValue() == "0.5", frame.cbo_convergence.GetValue()
+        assert frame.chk_depth_refine.GetValue() is True
+        assert frame.cbo_depth_refine_strength.GetValue() == "1.0", frame.cbo_depth_refine_strength.GetValue()
+        assert frame.cbo_depth_refine_strength.IsEnabled()
+        assert frame.chk_temporal_stabilize.GetValue() is True
+        assert frame.cbo_temporal_stabilize_strength.GetValue() == "0.3", \
+            frame.cbo_temporal_stabilize_strength.GetValue()
+        assert frame.cbo_temporal_stabilize_flat_boost.GetValue() == "0.0", \
+            frame.cbo_temporal_stabilize_flat_boost.GetValue()
+        assert frame.cbo_temporal_stabilize_edge_protect.GetValue() == "0.0", \
+            frame.cbo_temporal_stabilize_edge_protect.GetValue()
+        assert frame.cbo_temporal_stabilize_max_shift.GetValue() == "", \
+            frame.cbo_temporal_stabilize_max_shift.GetValue()
+        assert frame.cbo_temporal_stabilize_strength.IsEnabled()
+        assert frame.chk_scene_detect.GetValue() is True
+        assert frame.chk_scene_batch_auto_ema.GetValue() is True
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference", \
+            frame.cbo_scene_batch_auto_ema_model.GetValue()
+
+        # Checking Auto EMA (via this preset) must trigger the exact same grey-out
+        # chain a real checkbox click drives (ADR-057 Amendment 8/9): Decay
+        # Rate/Buffer/the Genre Preset dropdown itself all disabled.
+        assert not frame.cbo_ema_decay.IsEnabled()
+        assert not frame.cbo_ema_buffer.IsEnabled()
+        assert not frame.cbo_genre_preset.IsEnabled()
+
+        # Hand-editing afterward causes no error, same guarantee as Movie/Action.
+        frame.cbo_divergence.SetValue("4.0")
+        assert frame.cbo_divergence.GetValue() == "4.0"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_3decker_quick_preset: PASS")
+
+
+def _self_test_rife_standalone_panel():
+    """Regression test for the new RIFE Frame Interpolation (Standalone Tool) panel
+    (see docs/ai/AI_DECISIONS.md) -- pure GUI wiring around the existing, unmodified
+    iw3/rife_cli.py, following the exact ADR-063 Sharpen (Standalone Tool) panel
+    pattern. Confirms: every new control exists and is parented to grp_rife_standalone
+    inside tab_tools (not disturbing any pre-existing control); the Rate mode
+    enable/disable pattern for the Custom FPS field matches the in-pipeline RIFE
+    controls' own established convention; the GPU dropdown deliberately has no "All
+    CUDA Device" entry, since rife_cli.py's own --gpu targets exactly one device,
+    unlike the main conversion's multi-GPU-capable Device selector; the Run button's
+    tooltip actually carries the Dolby Vision/HDR reinjection reminder (the whole
+    point of this task, not just a planned addition); and the exact command line Run
+    constructs for both a simple multiplier and a Custom FPS target matches
+    rife_cli.py's real create_parser() flag names read directly from that file. No
+    GPU or real movie file needed: startWorker is monkeypatched to capture its args
+    instead of actually launching a background subprocess."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+
+        assert frame.grp_rife_standalone.GetParent() is frame.tab_tools
+        for name in ("txt_rife_standalone_input", "txt_rife_standalone_output",
+                     "cbo_rife_standalone_model", "cbo_rife_standalone_mode",
+                     "txt_rife_standalone_target_fps", "cbo_rife_standalone_gpu",
+                     "cbo_rife_standalone_codec",
+                     "btn_rife_standalone_run", "txt_rife_standalone_log"):
+            ctrl = getattr(frame, name)
+            assert ctrl.GetParent() is frame.grp_rife_standalone, name
+
+        # Output Codec: real, confirmed fix (2026-09-08, see docs/ai/AI_DECISIONS.md
+        # ADR-051/ADR-064 amendments) for the bug that RIFE could never output HEVC
+        # at all -- confirmed via ffprobe against a real RIFE output (codec_name:
+        # h264, not hevc). Default choice must map to ClientData None (the same
+        # unset default rife_cli.py's own --video-codec has always had).
+        assert frame.cbo_rife_standalone_codec.GetValue() == T("H.264 (default)")
+        default_codec_index = frame.cbo_rife_standalone_codec.GetSelection()
+        assert frame.cbo_rife_standalone_codec.GetClientData(default_codec_index) is None
+
+        # Default state: 2x mode, Custom FPS field disabled.
+        assert frame.cbo_rife_standalone_mode.GetValue() == "2x"
+        assert not frame.txt_rife_standalone_target_fps.IsEnabled()
+
+        # Switching to Custom FPS... enables the field; switching back disables it.
+        frame.cbo_rife_standalone_mode.SetValue("Custom FPS...")
+        frame.update_rife_standalone_mode()
+        assert frame.txt_rife_standalone_target_fps.IsEnabled()
+        frame.cbo_rife_standalone_mode.SetValue("2x")
+        frame.update_rife_standalone_mode()
+        assert not frame.txt_rife_standalone_target_fps.IsEnabled()
+
+        # GPU dropdown reuses the main Device selector's enumeration convention but
+        # deliberately omits "All CUDA Device" (rife_cli.py's --gpu is single-device only).
+        gpu_items = [frame.cbo_rife_standalone_gpu.GetString(i)
+                     for i in range(frame.cbo_rife_standalone_gpu.GetCount())]
+        assert "All CUDA Device" not in gpu_items, gpu_items
+        assert "CPU" in gpu_items, gpu_items
+        cpu_index = gpu_items.index("CPU")
+        assert int(frame.cbo_rife_standalone_gpu.GetClientData(cpu_index)) == -1
+
+        # The Dolby Vision / HDR reinjection reminder must actually be present in the
+        # Run button's tooltip text, not just planned -- updated 2026-09-08 to point
+        # at the real Output Codec control and the Retroactive HDR/DV Reinjection
+        # panel's own real "RIFE Manifest" field (both now real, see
+        # docs/ai/AI_DECISIONS.md ADR-051/ADR-064 amendments) rather than a raw
+        # command line, since both steps can now be done entirely through the GUI.
+        run_tip = frame.btn_rife_standalone_run.GetToolTip().GetTip()
+        assert "Retroactive HDR/DV Reinjection" in run_tip, run_tip
+        assert "RIFE Manifest" in run_tip, run_tip
+        assert "Output Codec" in run_tip, run_tip
+        assert "Dolby Vision" in run_tip, run_tip
+
+        # Command construction, mirroring on_click_btn_rife_standalone_run's real
+        # validation/build path -- captured via a monkeypatched startWorker instead of
+        # a real GPU subprocess.
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["cmd"] = wargs[0]
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = path.join(tmpdir, "movie_3d.mkv")
+            with open(input_path, "wb") as f:
+                f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_rife.mkv")
+
+            frame.txt_rife_standalone_input.SetValue(input_path)
+            frame.txt_rife_standalone_output.SetValue(output_path)
+            frame.cbo_rife_standalone_model.SetValue("rife_425_lite")
+            frame.cbo_rife_standalone_gpu.SetSelection(cpu_index)
+            frame.cbo_rife_standalone_mode.SetValue("3x")
+            frame.update_rife_standalone_mode()
+
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert cmd == [sys.executable, "-m", "iw3.rife_cli",
+                            "--input", input_path, "--output", output_path,
+                            "--rife-model", "rife_425_lite",
+                            "--gpu", "-1",
+                            "--rife-multiplier", "3"], cmd
+
+            captured.clear()
+            frame.cbo_rife_standalone_mode.SetValue("Custom FPS...")
+            frame.update_rife_standalone_mode()
+            frame.txt_rife_standalone_target_fps.SetValue("60")
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert cmd == [sys.executable, "-m", "iw3.rife_cli",
+                            "--input", input_path, "--output", output_path,
+                            "--rife-model", "rife_425_lite",
+                            "--gpu", "-1",
+                            "--rife-target-fps", "60.0"], cmd
+
+            # Output Codec: default (index 0, "H.264 (default)") must omit
+            # --video-codec entirely -- byte-for-byte the same command as above,
+            # backward-compat for anyone who never touches this new control.
+            assert "--video-codec" not in cmd, cmd
+
+            # Picking an HEVC choice appends --video-codec with the real flag value
+            # rife_cli.py's own create_parser() expects (read directly from that
+            # file, not assumed). Uses SetSelection (not SetValue) -- this is a
+            # non-editable ComboBox whose ClientData (read via GetSelection) carries
+            # the real --video-codec value, same convention as cbo_rife_standalone_gpu
+            # above; SetValue() alone does not reliably update the selection index
+            # backing GetClientData() for this control type.
+            captured.clear()
+            frame.cbo_rife_standalone_mode.SetValue("2x")
+            frame.update_rife_standalone_mode()
+            frame.cbo_rife_standalone_codec.SetSelection(
+                frame.cbo_rife_standalone_codec.FindString(T("H.265/HEVC -- libx265 (CPU)")))
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert cmd == [sys.executable, "-m", "iw3.rife_cli",
+                            "--input", input_path, "--output", output_path,
+                            "--rife-model", "rife_425_lite",
+                            "--gpu", "-1",
+                            "--rife-multiplier", "2",
+                            "--video-codec", "libx265"], cmd
+
+            captured.clear()
+            frame.cbo_rife_standalone_codec.SetSelection(
+                frame.cbo_rife_standalone_codec.FindString(T("H.265/HEVC -- hevc_nvenc (GPU)")))
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert "--video-codec" in cmd and "hevc_nvenc" in cmd, cmd
+
+            # Reset to default -> --video-codec disappears again (not sticky/broken).
+            captured.clear()
+            frame.cbo_rife_standalone_codec.SetSelection(default_codec_index)
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert "--video-codec" not in cmd, cmd
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_panel: PASS")
+
+
+def _self_test_tool_log_clear_buttons():
+    """Regression test for the "Clear" button added next to each standalone tool's
+    log/output box on the Tools tab (Retroactive HDR/DV Reinjection, Search
+    Subtitles, Add Subtitle Track, Add Audio Track, Stereo Mode Tag, Sharpen, RIFE
+    Frame Interpolation), so a finished run's output doesn't just accumulate run
+    after run with no way to empty it. Confirms every one of the 7 new Clear buttons
+    exists next to its real log box and is enabled by default (a fresh GUI has no job
+    running); that clicking it -- a real fired wx.EVT_BUTTON event, not just calling
+    TextCtrl.Clear() directly -- empties exactly that log box and no other; and, for
+    two representative panels using different underlying tools (Sharpen, Retroactive
+    HDR/DV Reinjection), that starting a job disables Clear in lockstep with Run (so
+    it can't wipe output still being read mid-run -- the safer of the two options
+    named in the task, chosen over leaving it always-clickable) and finishing the job
+    re-enables both together. No GPU or real movie file needed: startWorker is
+    monkeypatched to capture args instead of launching a real subprocess."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    def _click(btn):
+        evt = wx.CommandEvent(wx.EVT_BUTTON.typeId, btn.GetId())
+        evt.SetEventObject(btn)
+        btn.GetEventHandler().ProcessEvent(evt)
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+
+        pairs = [
+            ("txt_reinject_log", "btn_reinject_clear", "grp_hdr_reinject"),
+            ("txt_subsearch_log", "btn_subsearch_clear", "grp_subsearch"),
+            ("txt_submux_log", "btn_submux_clear", "grp_submux"),
+            ("txt_audiomux_log", "btn_audiomux_clear", "grp_audiomux"),
+            ("txt_stereotag_log", "btn_stereotag_clear", "grp_stereotag"),
+            ("txt_sharpen_log", "btn_sharpen_clear", "grp_sharpen"),
+            ("txt_rife_standalone_log", "btn_rife_standalone_clear", "grp_rife_standalone"),
+        ]
+        for log_name, btn_name, group_name in pairs:
+            btn = getattr(frame, btn_name)
+            group = getattr(frame, group_name)
+            assert btn.GetParent() is group, btn_name
+            assert btn.GetLabelText() == T("Clear"), btn_name
+            assert btn.IsEnabled(), f"{btn_name} must be enabled by default (no job running)"
+
+        # Functional: clicking Clear empties exactly its own log box, none other.
+        frame.txt_sharpen_log.SetValue("sharpen output")
+        frame.txt_reinject_log.SetValue("reinject output")
+        _click(frame.btn_sharpen_clear)
+        assert frame.txt_sharpen_log.GetValue() == "", "Clear must empty the Sharpen log"
+        assert frame.txt_reinject_log.GetValue() == "reinject output", \
+            "Clearing Sharpen's log must not touch Reinjection's log"
+        _click(frame.btn_reinject_clear)
+        assert frame.txt_reinject_log.GetValue() == "", "Clear must empty the Reinjection log"
+
+        # Disabled while a job is running, re-enabled once it finishes -- two
+        # representative panels driven through their real on_click_btn_*_run/
+        # on_exit_*_worker handlers (not just manually toggled Enable/Disable calls).
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            pass
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = path.join(tmpdir, "movie_3d.mp4")
+            with open(input_path, "wb") as f:
+                f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_sharp.mp4")
+            frame.txt_sharpen_input.SetValue(input_path)
+            frame.txt_sharpen_output.SetValue(output_path)
+
+            frame.on_click_btn_sharpen_run(None)
+            assert not frame.btn_sharpen_run.IsEnabled()
+            assert not frame.btn_sharpen_clear.IsEnabled(), \
+                "Clear must disable in lockstep with Run while a job is running"
+            frame.on_exit_sharpen_worker(_FakeResult((0, "done")))
+            assert frame.btn_sharpen_run.IsEnabled()
+            assert frame.btn_sharpen_clear.IsEnabled(), \
+                "Clear must re-enable in lockstep with Run once the job finishes"
+
+            source_path = path.join(tmpdir, "source.mkv")
+            converted_path = path.join(tmpdir, "movie_3d.mkv")
+            reinject_output = path.join(tmpdir, "movie_3d_hdr.mkv")
+            for p in (source_path, converted_path):
+                with open(p, "wb") as f:
+                    f.write(b"fake")
+            frame.txt_reinject_source.SetValue(source_path)
+            frame.txt_reinject_converted.SetValue(converted_path)
+            frame.txt_reinject_output.SetValue(reinject_output)
+
+            frame.on_click_btn_reinject_run(None)
+            assert not frame.btn_reinject_run.IsEnabled()
+            assert not frame.btn_reinject_clear.IsEnabled()
+            frame.on_exit_reinject_worker(_FakeResult((0, "done")))
+            assert frame.btn_reinject_run.IsEnabled()
+            assert frame.btn_reinject_clear.IsEnabled()
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_tool_log_clear_buttons: PASS")
+
+
+def _self_test_run_update_button():
+    """Regression test for the "Run Update" button (ADR-069, ADR-035's direct
+    follow-up): confirms (a) the button and its confirmation dialog exist and are
+    wired to the real click handler, (b) declining the confirmation dialog never
+    launches update.bat -- startWorker is never called, (c) accepting it launches
+    update.bat via the real subprocess command (cmd.exe /c <real update.bat path>,
+    with the nunif-windows root as cwd) exactly once, and toggles self.updating/
+    button state correctly while it's "running" and once it finishes, (d) the
+    button refuses to start a new run (and never touches startWorker) while a
+    conversion job (self.processing) is already active, warning the user instead
+    of silently doing nothing, and (e) the button is visually disabled while
+    self.processing is True and re-enabled once it's False -- the same
+    disable-during-a-job pattern this file's other real-process buttons (ADR-066's
+    Clear buttons) already use. No GPU or real movie file needed, and update.bat is
+    never actually executed: startWorker is monkeypatched to capture its args
+    instead of running the worker function, and wx.MessageDialog/wx.MessageBox are
+    monkeypatched so no real modal blocks this test waiting on real user input."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    class _FakeConfirmDialog:
+        result = wx.ID_YES
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ShowModal(self):
+            return _FakeConfirmDialog.result
+
+    message_box_calls = []
+
+    def _fake_message_box(message, caption="", style=0):
+        message_box_calls.append((message, caption, style))
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_message_dialog = gui_mod.wx.MessageDialog
+    orig_message_box = gui_mod.wx.MessageBox
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.btn_run_update.GetLabelText() == T("Run Update")
+        tip = frame.btn_run_update.GetToolTip().GetTip()
+        assert "update.bat" in tip and "Check for Updates" in tip, tip
+        assert frame.btn_run_update.IsEnabled(), "must be enabled by default (nothing running)"
+
+        gui_mod.wx.MessageDialog = _FakeConfirmDialog
+        gui_mod.wx.MessageBox = _fake_message_box
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["on_exit"] = on_exit
+            captured["wargs"] = wargs
+        gui_mod.startWorker = _fake_start_worker
+
+        # Declining the confirmation must never launch anything.
+        _FakeConfirmDialog.result = wx.ID_NO
+        frame.on_click_btn_run_update(None)
+        assert "wargs" not in captured, "declining the confirmation must never call startWorker"
+        assert not frame.updating
+        assert frame.btn_run_update.IsEnabled()
+
+        # Accepting it launches the real update.bat via the real subprocess command.
+        _FakeConfirmDialog.result = wx.ID_YES
+        frame.on_click_btn_run_update(None)
+        assert "wargs" in captured, "accepting the confirmation must launch update.bat"
+        cmd, cwd, dlg = captured["wargs"]
+        expected_bat, expected_root = gui_mod._find_update_bat()
+        assert path.exists(expected_bat), expected_bat
+        assert cmd[-1] == expected_bat, cmd
+        assert cmd[0].lower().endswith("cmd.exe"), cmd
+        assert cmd[1] == "/c", cmd
+        assert cwd == expected_root, (cwd, expected_root)
+        assert frame.updating
+        assert not frame.btn_run_update.IsEnabled(), "must disable while update.bat is 'running'"
+        assert not frame.btn_start.IsEnabled(), "Start must be disabled while updating too"
+        assert not dlg.btn_close.IsEnabled(), "Close must be disabled until the run finishes"
+
+        on_exit = captured["on_exit"]
+        on_exit(_FakeResult(0))
+        assert not frame.updating
+        assert frame.btn_run_update.IsEnabled()
+        assert dlg.finished
+        assert dlg.btn_close.IsEnabled()
+
+        # Refuses to start (and never touches startWorker) while a conversion job
+        # is already running, warning the user instead of silently doing nothing.
+        captured.clear()
+        message_box_calls.clear()
+        frame.processing = True
+        frame.on_click_btn_run_update(None)
+        assert "wargs" not in captured, "must never launch update.bat while a job is running"
+        assert message_box_calls, "must warn the user instead of silently doing nothing"
+
+        # Visual disable/re-enable in lockstep with self.processing, via the same
+        # central update_start_button_state() other job-lifecycle transitions use.
+        frame.update_start_button_state()
+        assert not frame.btn_run_update.IsEnabled()
+        frame.processing = False
+        frame.update_start_button_state()
+        assert frame.btn_run_update.IsEnabled()
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        gui_mod.wx.MessageDialog = orig_message_dialog
+        gui_mod.wx.MessageBox = orig_message_box
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_run_update_button: PASS")
+
+
 def _run_self_tests():
     _self_test_no_eager_cuda_context()
+    _self_test_compile_probe_crash_handled()
     _self_test_layout_modes()
     _self_test_layout_mode_live_switch()
     _self_test_tabbed_scrolling()
     _self_test_zoom_level_persistence()
     _self_test_zoom_startup_restore()
     _self_test_zoom_live_rescale()
+    _self_test_progress_stage_display()
+    _self_test_progress_bar_visible_on_screen()
+    _self_test_progress_bar_visible_after_live_field_changes()
+    _self_test_scene_batch_auto_ema_editor()
+    _self_test_nagadomi_reference_ema_option()
+    _self_test_gemini_ai_ema_option()
+    _self_test_chatgpt_ema_option()
+    _self_test_grok_ema_option()
+    _self_test_fast_action_ema_option()
+    _self_test_medium_magical_ema_option()
+    _self_test_drama_slow_paced_ema_option()
+    _self_test_auto_ema_default_is_nagadomi_reference()
+    _self_test_scene_auto_ema_regular_gate()
+    _self_test_auto_ema_relocated_and_disables_ema_fields()
+    _self_test_genre_preset_quick_fill()
+    _self_test_3decker_quick_preset()
+    _self_test_hdr_reinject_rife_manifest_field()
+    _self_test_rife_standalone_panel()
+    _self_test_tool_log_clear_buttons()
+    _self_test_run_update_button()
     print("All iw3.gui self-tests PASSED")
 
 

@@ -59,6 +59,7 @@ def _parse_ffmpeg_time(line):
 from nunif.utils.ui import make_parent_dir
 import nunif.utils.shot_boundary_detection as SBD
 from nunif.utils.autocrop import AutoCrop
+from nunif.utils.home_dir import ensure_home_dir
 
 
 class _Tee:
@@ -336,16 +337,42 @@ def _extract_rpu_once(input_path, work_dir, args, log_fp):
     return rpu_path
 
 
+def resolve_scene_scan_fps(native_fps, max_fps):
+    """The real fps SBD.detect_boundary() resamples to and expresses its returned pts
+    against, whenever `max_fps` is not None -- see
+    nunif.utils.video.video_filter.fps.FPSFilter (which OVERWRITES frame.pts/time_base
+    to a frame-index counter in units of 1/target_fps) and
+    shot_boundary_detection._fps_config (target_fps = min(native_fps, max_fps)).
+    Detected pts are NOT milliseconds in this case -- converting them with a fixed
+    "/ 1000.0" is only coincidentally close to right, and silently wrong whenever
+    target_fps isn't ~1000. This must mirror that exact clamp or converted times will
+    drift off from where the real cut is."""
+    if max_fps is None:
+        return native_fps
+    return min(native_fps, max_fps)
+
+
 def _detect_scenes(input_path, args, log_fp):
     from nunif.utils.video import pyav_init_cuda_primary_context
-    from .utils import try_load_scene_cache, save_scene_cache
+    from .utils import try_load_scene_cache, save_scene_cache, should_save_scene_cache
+
+    # try_load_scene_cache()/save_scene_cache() key their cache file on args.max_fps
+    # (see iw3.scene_boundary_cache.get_cache_path), so detect_boundary() here must be
+    # called with that SAME max_fps -- otherwise a cache entry written by a normal
+    # `iw3 --scene-detect` run (pts = frame-index units at min(native_fps, max_fps))
+    # and one written by this function (if it silently used raw/native-timebase pts
+    # instead) would share one cache file under two incompatible pts units. See
+    # resolve_scene_scan_fps() and docs/ai/AI_DECISIONS.md ADR-059.
+    max_fps = getattr(args, "max_fps", None)
+    native_fps = _video_stream_info(input_path)["fps"]
+    scan_fps = resolve_scene_scan_fps(native_fps, max_fps)
 
     # Reuse iw3's own scene-detection cache (the same one --scene-detect uses) so a
     # cancelled/restarted run doesn't repeat this multi-minute AI pass from scratch.
     if not getattr(args, "disable_scene_cache", False):
         segment_pts = try_load_scene_cache(input_path, args)
         if segment_pts is not None:
-            times = sorted(p / 1000.0 for p in segment_pts)
+            times = sorted(p / scan_fps for p in segment_pts)
             print(f"[scene-batch] found {len(times)} scene cuts (loaded from cache)", file=sys.stderr)
             return times
 
@@ -353,13 +380,16 @@ def _detect_scenes(input_path, args, log_fp):
     pyav_init_cuda_primary_context()
     device = args.state["device"]
     segment_pts = SBD.detect_boundary(
-        input_path, device=device, hwaccel=args.hwaccel,
+        input_path, device=device, hwaccel=args.hwaccel, max_fps=max_fps,
         tqdm_fn=args.state["tqdm_fn"], tqdm_title="Scene Boundary Detection",
         stop_event=args.state["stop_event"], suspend_event=args.state["suspend_event"],
     )
-    if not getattr(args, "disable_scene_cache", False):
+    stop_event = args.state.get("stop_event") if getattr(args, "state", None) else None
+    # See should_save_scene_cache (iw3/utils.py): must not cache a scan that got
+    # cancelled partway through under metadata claiming the full requested range.
+    if should_save_scene_cache(getattr(args, "disable_scene_cache", False), False, stop_event):
         save_scene_cache(input_path, segment_pts, args)
-    times = sorted(p / 1000.0 for p in segment_pts)
+    times = sorted(p / scan_fps for p in segment_pts)
     print(f"[scene-batch] found {len(times)} scene cuts", file=sys.stderr)
     return times
 
@@ -476,18 +506,31 @@ def _split_scenes(keyed_timed_path, times, vinfo, work_dir, args, log_fp):
 
 
 # Built-in EMA Decay/Buffer-by-scene-duration tables, one bucket per whole second from
-# 0-1s up to 14-15s plus a 15s+ ceiling. Every scene now gets processed independently
+# 0-1s up to 19-20s plus a 20s+ ceiling. Every scene now gets processed independently
 # and resets its own temporal smoothing from nothing, so Buffer is kept safely under
 # even the shortest clip in each bucket (using ~24fps: bucket N's shortest clip has
 # about N*24 frames) -- otherwise the EMA never finishes "warming up" before the scene
-# ends. Both Buffer and Decay increase smoothly bucket-to-bucket: short clips get light,
-# fast-reacting smoothing (little footage to safely average over); long clips can afford
-# progressively heavier smoothing. These largely supersede the earlier coarse 6-tier
-# table (real production values 15/0.75 .. 120/0.98 at the 0-3s/10s+ ends are kept as
-# anchor points here, just filled in with a step for every second in between).
+# ends. Both Buffer and Decay increase smoothly bucket-to-bucket up through 14-15s: short
+# clips get light, fast-reacting smoothing (little footage to safely average over); long
+# clips can afford progressively heavier smoothing. These largely supersede the earlier
+# coarse 6-tier table (real production values 15/0.75 .. 120/0.98 at the 0-3s/10s+ ends
+# are kept as anchor points here, just filled in with a step for every second in
+# between).
+#
+# 15-16s through 19-20s (and the 20s+ ceiling) are a deliberate DEPARTURE from that
+# growth curve -- they hold flat at each model's existing 15s+ ceiling value rather than
+# continuing to extrapolate Buffer/Decay upward. Real-world testing on a continuous
+# 300-second clip at Any_V3_Mono_01's old ceiling extended further (Buffer well past 240)
+# showed noticeable temporal lag even with Object Stability turned down low -- concrete
+# evidence that pushing Buffer meaningfully past the ~240 (Any_V3_Mono_01) / ~120 (VDA_L)
+# ceiling starts costing more in visible lag than it gains in smoothness. So instead of
+# growing further, every second-bucket from 15-16s up to 20s+ simply repeats the same
+# Buffer/Decay the table already reached at 15s.
 #
 # Two variants, chosen by which Depth Model you're using (see the "Auto EMA by Scene
-# Length" model dropdown in the GUI):
+# Length" model dropdown in the GUI, where these are the "3DECKER VDA_L"/"3DECKER
+# Any_V3_Mono_01" choices -- this project's own two originally-designed tables, named
+# to distinguish them from the externally-sourced reference tables below):
 #   VDA_L            -- a real video depth model with its own frame-to-frame memory,
 #                        so it only needs this table's smoothing on top as a light touch.
 #   Any_V3_Mono_01    -- a stills-only model with NO frame-to-frame memory of its own
@@ -515,7 +558,12 @@ EMA_BY_DURATION_VDA_L = [
     {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 98, "ema_decay": 0.965}},
     {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 108, "ema_decay": 0.972}},
     {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 116, "ema_decay": 0.977}},
-    {"min_duration": 15, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
 ]
 
 EMA_BY_DURATION_ANY_V3_MONO_01 = [
@@ -534,25 +582,394 @@ EMA_BY_DURATION_ANY_V3_MONO_01 = [
     {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 196, "ema_decay": 0.9825}},
     {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 216, "ema_decay": 0.986}},
     {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 232, "ema_decay": 0.9885}},
-    {"min_duration": 15, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+]
+
+# A third, more conservative table -- unlike VDA_L/Any_V3_Mono_01 above (custom-built
+# for this project), this one is anchored directly to nagadomi's own real reference
+# presets for this same EMA smoothing mechanism, documented in `iw3/depth_scaler.py`
+# (~line 321-324):
+#   SimpleMinMaxScaler:   decay=0,    buffer_size=1   (no smoothing)
+#   IncrementalEMAScaler: decay=0.75, buffer_size=1   (light/fast-reacting)
+#   WindowEMAScaler:      decay=0.9,  buffer_size=30  (nagadomi's own "strong" preset)
+#
+# IMPORTANT -- what ema_buffer actually is (confirmed by reading EMAMinMaxScaler.update()
+# directly, not assumed): it is a literal count of FUTURE frames the scaler looks ahead
+# before emitting anything, not an abstract "smoothing strength" dial. update() only
+# starts popping/emitting frame_queue[0] once minmax_buffer.is_filled(), i.e. after
+# buffer_size frames have been queued -- so buffer_size is a real output-delay/lookahead
+# window in frames, directly convertible to seconds via the real fps (nagadomi's own
+# user docs: "Buffer Size = 30 means looking ahead 1 second at 30 FPS"). It is NOT true
+# that a longer scene needs a LARGER lookahead window -- if anything a longer scene has
+# more stable future content to look ahead into, so nagadomi's own single documented
+# "strong" preset (buffer=30, ~1s of lookahead @ ~24-30fps) is a reasonable target for
+# every scene long enough to safely support it. Growing Buffer past that preset for
+# longer scenes (the way VDA_L/Any_V3_Mono_01 do) has no grounding in nagadomi's own
+# documentation -- this table deliberately does NOT do that. Decay, by contrast, really
+# is a smoothing-strength dial (an EMA blend factor, unitless, not frame-count-based),
+# and nagadomi's own docs separately confirm "the appropriate [decay] range is between
+# 0.75 and 0.99" -- so 0.9 here is nagadomi's own specific "strong" preset value, not an
+# arbitrary custom ceiling either.
+#
+# Design: for scenes 4 seconds or longer, use nagadomi's own WindowEMAScaler preset
+# EXACTLY (buffer=30, decay=0.9), unmodified, for every bucket out to 20s+ -- no
+# extrapolation past it. Only the first four one-second buckets (0-4s) ramp buffer up
+# from 1 (IncrementalEMAScaler's own value) toward 30 in equal frame-count steps of 8
+# (1, 8, 16, 24, then 30 from 4-5s on), and ONLY for the real correctness reason the
+# other two tables' own comment already documents: a buffer_size larger than the
+# scene's own available frame count means the scaler never finishes warming up (never
+# emits real output) before the scene ends. At ~24fps a 4-second scene already has
+# ~96 frames available, safely more than triple the 30-frame lookahead nagadomi's own
+# preset asks for, so no scene 4s or longer needs Buffer reduced below nagadomi's real
+# number. Decay is interpolated over those same four buckets in lockstep with buffer's
+# fractional progress toward 30 (decay = 0.75 + 0.15 * (buffer-1)/29), reaching exactly
+# 0.9 the moment buffer reaches 30 -- so from 4-5s onward every bucket is simply
+# nagadomi's own (30, 0.9) WindowEMAScaler pair, verbatim.
+EMA_BY_DURATION_NAGADOMI_REFERENCE = [
+    {"min_duration": 0, "max_duration": 1, "overrides": {"ema_buffer": 1, "ema_decay": 0.750}},
+    {"min_duration": 1, "max_duration": 2, "overrides": {"ema_buffer": 8, "ema_decay": 0.786}},
+    {"min_duration": 2, "max_duration": 3, "overrides": {"ema_buffer": 16, "ema_decay": 0.828}},
+    {"min_duration": 3, "max_duration": 4, "overrides": {"ema_buffer": 24, "ema_decay": 0.869}},
+    {"min_duration": 4, "max_duration": 5, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 5, "max_duration": 6, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 6, "max_duration": 7, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 7, "max_duration": 8, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 8, "max_duration": 9, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 9, "max_duration": 10, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 10, "max_duration": 11, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 11, "max_duration": 12, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 30, "ema_decay": 0.900}},
+]
+
+# A fourth table, dropdown choice "GEMINI AI" -- unlike the three tables above (either
+# custom-built for this project, or anchored directly to nagadomi's own documented
+# EMAMinMaxScaler presets), this one's specific per-second Buffer/Decay curve was
+# suggested by a DIFFERENT AI assistant (Gemini), pasted in by the user, who was then
+# shown a critical review of it (its decay curve doesn't actually match its own stated
+# design goal, and growing Buffer all the way out to a full 20-second/480-frame
+# lookahead by the 20s+ bucket has no grounding in anything nagadomi ever documented --
+# nagadomi's own largest documented reference point is Buffer 30/~1s, not Buffer
+# 480/20s) and asked for it to be added anyway, as a genuine selectable option for
+# real A/B testing on real footage, not as a "corrected" reinterpretation of it. So:
+# these values are used verbatim, exactly as given, with NO adjustment for the
+# reviewed inconsistency.
+#
+# Real cost worth knowing before selecting this table: Buffer here is the same literal
+# future-frame lookahead window `ema_buffer` always is in this codebase (see the
+# Nagadomi_Reference comment above) -- it grows linearly all the way to 480 frames
+# (20 seconds at 24fps) by the 20-20s+ bucket, four times VDA_L/Any_V3_Mono_01's own
+# 120/240-frame ceilings and sixteen times Nagadomi_Reference's flat 30-frame ceiling.
+# A long scene converted under this table requires the tool to look ahead nearly all
+# the way through that scene before it can emit a depth range for even its very first
+# frame -- real added VRAM and startup-latency cost, worth expecting going in.
+EMA_BY_DURATION_GEMINI_AI = [
+    {"min_duration": 0, "max_duration": 1, "overrides": {"ema_buffer": 24, "ema_decay": 0.750}},
+    {"min_duration": 1, "max_duration": 2, "overrides": {"ema_buffer": 48, "ema_decay": 0.800}},
+    {"min_duration": 2, "max_duration": 3, "overrides": {"ema_buffer": 72, "ema_decay": 0.840}},
+    {"min_duration": 3, "max_duration": 4, "overrides": {"ema_buffer": 96, "ema_decay": 0.870}},
+    {"min_duration": 4, "max_duration": 5, "overrides": {"ema_buffer": 120, "ema_decay": 0.890}},
+    {"min_duration": 5, "max_duration": 6, "overrides": {"ema_buffer": 144, "ema_decay": 0.905}},
+    {"min_duration": 6, "max_duration": 7, "overrides": {"ema_buffer": 168, "ema_decay": 0.918}},
+    {"min_duration": 7, "max_duration": 8, "overrides": {"ema_buffer": 192, "ema_decay": 0.928}},
+    {"min_duration": 8, "max_duration": 9, "overrides": {"ema_buffer": 216, "ema_decay": 0.936}},
+    {"min_duration": 9, "max_duration": 10, "overrides": {"ema_buffer": 240, "ema_decay": 0.943}},
+    {"min_duration": 10, "max_duration": 11, "overrides": {"ema_buffer": 264, "ema_decay": 0.949}},
+    {"min_duration": 11, "max_duration": 12, "overrides": {"ema_buffer": 288, "ema_decay": 0.954}},
+    {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 312, "ema_decay": 0.958}},
+    {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 336, "ema_decay": 0.962}},
+    {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 360, "ema_decay": 0.965}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 384, "ema_decay": 0.968}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 408, "ema_decay": 0.970}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 432, "ema_decay": 0.972}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 456, "ema_decay": 0.974}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 480, "ema_decay": 0.975}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 480, "ema_decay": 0.975}},
+]
+
+# A fifth table, dropdown choice "ChatGPT" -- like "GEMINI AI" above, this one's
+# specific per-second Buffer/Decay curve was supplied by the user, this time from a
+# DIFFERENT AI assistant (ChatGPT), pasted in for real A/B comparison against the
+# other four tables. These values are used verbatim, exactly as given: NOT
+# verified against nunif's own source/docs (unlike Nagadomi_Reference, which is
+# anchored directly to nagadomi's own documented EMAMinMaxScaler presets), and NOT
+# "corrected" or reinterpreted in any way -- included as-is so the user can test it
+# for himself.
+#
+# Real cost worth knowing before selecting this table: Buffer here grows even
+# further than "GEMINI AI"'s does -- all the way to 600 frames (25 seconds of
+# lookahead at 24fps) by the 20s+ bucket, the largest lookahead of any table in
+# this tool (versus GEMINI AI's 480-frame ceiling, VDA_L/Any_V3_Mono_01's
+# 120/240-frame ceilings, and Nagadomi_Reference's flat 30-frame ceiling). A long
+# scene converted under this table needs the tool to look ahead even further
+# through that scene before it can emit a depth range for its first frame -- the
+# most VRAM/startup-latency cost among all five options, worth expecting going in.
+EMA_BY_DURATION_CHATGPT = [
+    {"min_duration": 0, "max_duration": 1, "overrides": {"ema_buffer": 30, "ema_decay": 0.75}},
+    {"min_duration": 1, "max_duration": 2, "overrides": {"ema_buffer": 60, "ema_decay": 0.77}},
+    {"min_duration": 2, "max_duration": 3, "overrides": {"ema_buffer": 90, "ema_decay": 0.79}},
+    {"min_duration": 3, "max_duration": 4, "overrides": {"ema_buffer": 120, "ema_decay": 0.81}},
+    {"min_duration": 4, "max_duration": 5, "overrides": {"ema_buffer": 150, "ema_decay": 0.83}},
+    {"min_duration": 5, "max_duration": 6, "overrides": {"ema_buffer": 180, "ema_decay": 0.84}},
+    {"min_duration": 6, "max_duration": 7, "overrides": {"ema_buffer": 210, "ema_decay": 0.85}},
+    {"min_duration": 7, "max_duration": 8, "overrides": {"ema_buffer": 240, "ema_decay": 0.86}},
+    {"min_duration": 8, "max_duration": 9, "overrides": {"ema_buffer": 270, "ema_decay": 0.87}},
+    {"min_duration": 9, "max_duration": 10, "overrides": {"ema_buffer": 300, "ema_decay": 0.88}},
+    {"min_duration": 10, "max_duration": 11, "overrides": {"ema_buffer": 330, "ema_decay": 0.885}},
+    {"min_duration": 11, "max_duration": 12, "overrides": {"ema_buffer": 360, "ema_decay": 0.89}},
+    {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 390, "ema_decay": 0.90}},
+    {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 420, "ema_decay": 0.91}},
+    {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 450, "ema_decay": 0.92}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 480, "ema_decay": 0.93}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 510, "ema_decay": 0.94}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 540, "ema_decay": 0.95}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 570, "ema_decay": 0.97}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 600, "ema_decay": 0.99}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 600, "ema_decay": 0.99}},
+]
+
+# A sixth table, dropdown choice "Grok" -- like "GEMINI AI" and "ChatGPT" above, this
+# one's specific per-second Buffer/Decay curve was supplied by the user, this time
+# from a DIFFERENT AI assistant (Grok), pasted in for real A/B comparison against the
+# other five tables. These values are used verbatim, exactly as given: NOT verified
+# against nunif's own source/docs (unlike Nagadomi_Reference, which is anchored
+# directly to nagadomi's own documented EMAMinMaxScaler presets), and NOT "corrected"
+# or reinterpreted in any way -- included as-is so the user can test it for himself.
+#
+# This table's own character, worth knowing before selecting it: unlike GEMINI AI and
+# ChatGPT (where Buffer and Decay both keep climbing together all the way to 20s+),
+# here Decay saturates very early -- it reaches 0.99 by the 8-9s bucket and then holds
+# flat there for every bucket after, while Buffer keeps climbing linearly the entire
+# way to 480 frames (20 seconds of lookahead at 24fps) at the 20s+ bucket. That means
+# for any scene past roughly 9 seconds, only the lookahead window keeps growing --
+# actual blend strength (Decay) is already maxed out and buys nothing further, while
+# VRAM/startup-latency cost (driven by Buffer, the real future-frame lookahead count --
+# see the Nagadomi_Reference comment above) keeps climbing anyway. Buffer's own 480-
+# frame ceiling matches GEMINI AI's exactly and is smaller than ChatGPT's 600-frame
+# ceiling.
+EMA_BY_DURATION_GROK = [
+    {"min_duration": 0, "max_duration": 1, "overrides": {"ema_buffer": 24, "ema_decay": 0.90}},
+    {"min_duration": 1, "max_duration": 2, "overrides": {"ema_buffer": 48, "ema_decay": 0.95}},
+    {"min_duration": 2, "max_duration": 3, "overrides": {"ema_buffer": 72, "ema_decay": 0.97}},
+    {"min_duration": 3, "max_duration": 4, "overrides": {"ema_buffer": 96, "ema_decay": 0.975}},
+    {"min_duration": 4, "max_duration": 5, "overrides": {"ema_buffer": 120, "ema_decay": 0.98}},
+    {"min_duration": 5, "max_duration": 6, "overrides": {"ema_buffer": 144, "ema_decay": 0.98}},
+    {"min_duration": 6, "max_duration": 7, "overrides": {"ema_buffer": 168, "ema_decay": 0.986}},
+    {"min_duration": 7, "max_duration": 8, "overrides": {"ema_buffer": 192, "ema_decay": 0.988}},
+    {"min_duration": 8, "max_duration": 9, "overrides": {"ema_buffer": 216, "ema_decay": 0.99}},
+    {"min_duration": 9, "max_duration": 10, "overrides": {"ema_buffer": 240, "ema_decay": 0.99}},
+    {"min_duration": 10, "max_duration": 11, "overrides": {"ema_buffer": 264, "ema_decay": 0.99}},
+    {"min_duration": 11, "max_duration": 12, "overrides": {"ema_buffer": 288, "ema_decay": 0.99}},
+    {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 312, "ema_decay": 0.99}},
+    {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 336, "ema_decay": 0.99}},
+    {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 360, "ema_decay": 0.99}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 384, "ema_decay": 0.99}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 408, "ema_decay": 0.99}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 432, "ema_decay": 0.99}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 456, "ema_decay": 0.99}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 480, "ema_decay": 0.99}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 480, "ema_decay": 0.99}},
+]
+
+# Three more tables, dropdown choices "Fast Action"/"Medium Magical"/"Drama Slow
+# Paced" -- like GEMINI AI/ChatGPT/Grok above, these three genre-pacing curves were
+# supplied by the user from a ChatGPT conversation proposing genre-specific
+# Buffer/Decay schedules, for real A/B comparison against the other six tables.
+# Used exactly as given: NOT verified against nunif's own source/docs, NOT
+# "corrected" or reinterpreted.
+#
+# Explicitly capped at 10 seconds, unlike this table's original 20-second version
+# (rejected during design discussion as excessive lookahead for this style of
+# table) -- every bucket from 10-11s through 20s+ holds FLAT at the 9-10s bucket's
+# values instead of continuing to grow, the same "hold flat past the last real
+# anchor point" convention already used above (VDA_L/Any_V3_Mono_01's 15s+ ceiling,
+# Nagadomi_Reference's 4s+ ceiling, GEMINI AI/ChatGPT/Grok's 20s+ ceiling).
+#
+# All three keep Buffer identical bucket-for-bucket (24/48/72/.../240, capping at
+# 240 frames -- half of GEMINI AI's 480-frame ceiling, matching Nagadomi_Reference's
+# real future-frame-lookahead cost concern) and let Decay alone carry each genre's
+# distinct character: Fast Action stays low on Decay (quick to react, minimal
+# smoothing), Drama Slow Paced climbs highest (maximum stability), Medium Magical
+# sits in between.
+EMA_BY_DURATION_FAST_ACTION = [
+    {"min_duration": 0, "max_duration": 1, "overrides": {"ema_buffer": 24, "ema_decay": 0.750}},
+    {"min_duration": 1, "max_duration": 2, "overrides": {"ema_buffer": 48, "ema_decay": 0.753}},
+    {"min_duration": 2, "max_duration": 3, "overrides": {"ema_buffer": 72, "ema_decay": 0.755}},
+    {"min_duration": 3, "max_duration": 4, "overrides": {"ema_buffer": 96, "ema_decay": 0.758}},
+    {"min_duration": 4, "max_duration": 5, "overrides": {"ema_buffer": 120, "ema_decay": 0.761}},
+    {"min_duration": 5, "max_duration": 6, "overrides": {"ema_buffer": 144, "ema_decay": 0.763}},
+    {"min_duration": 6, "max_duration": 7, "overrides": {"ema_buffer": 168, "ema_decay": 0.766}},
+    {"min_duration": 7, "max_duration": 8, "overrides": {"ema_buffer": 192, "ema_decay": 0.768}},
+    {"min_duration": 8, "max_duration": 9, "overrides": {"ema_buffer": 216, "ema_decay": 0.771}},
+    {"min_duration": 9, "max_duration": 10, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 10, "max_duration": 11, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 11, "max_duration": 12, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.774}},
+]
+
+EMA_BY_DURATION_MEDIUM_MAGICAL = [
+    {"min_duration": 0, "max_duration": 1, "overrides": {"ema_buffer": 24, "ema_decay": 0.820}},
+    {"min_duration": 1, "max_duration": 2, "overrides": {"ema_buffer": 48, "ema_decay": 0.823}},
+    {"min_duration": 2, "max_duration": 3, "overrides": {"ema_buffer": 72, "ema_decay": 0.826}},
+    {"min_duration": 3, "max_duration": 4, "overrides": {"ema_buffer": 96, "ema_decay": 0.829}},
+    {"min_duration": 4, "max_duration": 5, "overrides": {"ema_buffer": 120, "ema_decay": 0.832}},
+    {"min_duration": 5, "max_duration": 6, "overrides": {"ema_buffer": 144, "ema_decay": 0.835}},
+    {"min_duration": 6, "max_duration": 7, "overrides": {"ema_buffer": 168, "ema_decay": 0.838}},
+    {"min_duration": 7, "max_duration": 8, "overrides": {"ema_buffer": 192, "ema_decay": 0.841}},
+    {"min_duration": 8, "max_duration": 9, "overrides": {"ema_buffer": 216, "ema_decay": 0.844}},
+    {"min_duration": 9, "max_duration": 10, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 10, "max_duration": 11, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 11, "max_duration": 12, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.847}},
+]
+
+EMA_BY_DURATION_DRAMA_SLOW_PACED = [
+    {"min_duration": 0, "max_duration": 1, "overrides": {"ema_buffer": 24, "ema_decay": 0.900}},
+    {"min_duration": 1, "max_duration": 2, "overrides": {"ema_buffer": 48, "ema_decay": 0.903}},
+    {"min_duration": 2, "max_duration": 3, "overrides": {"ema_buffer": 72, "ema_decay": 0.905}},
+    {"min_duration": 3, "max_duration": 4, "overrides": {"ema_buffer": 96, "ema_decay": 0.908}},
+    {"min_duration": 4, "max_duration": 5, "overrides": {"ema_buffer": 120, "ema_decay": 0.911}},
+    {"min_duration": 5, "max_duration": 6, "overrides": {"ema_buffer": 144, "ema_decay": 0.913}},
+    {"min_duration": 6, "max_duration": 7, "overrides": {"ema_buffer": 168, "ema_decay": 0.916}},
+    {"min_duration": 7, "max_duration": 8, "overrides": {"ema_buffer": 192, "ema_decay": 0.918}},
+    {"min_duration": 8, "max_duration": 9, "overrides": {"ema_buffer": 216, "ema_decay": 0.921}},
+    {"min_duration": 9, "max_duration": 10, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 10, "max_duration": 11, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 11, "max_duration": 12, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 12, "max_duration": 13, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 13, "max_duration": 14, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 14, "max_duration": 15, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 15, "max_duration": 16, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 16, "max_duration": 17, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 17, "max_duration": 18, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 18, "max_duration": 19, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 19, "max_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
+    {"min_duration": 20, "overrides": {"ema_buffer": 240, "ema_decay": 0.924}},
 ]
 
 EMA_BY_DURATION_TABLES = {
-    "VDA_L": EMA_BY_DURATION_VDA_L,
-    "Any_V3_Mono_01": EMA_BY_DURATION_ANY_V3_MONO_01,
+    "3DECKER VDA_L": EMA_BY_DURATION_VDA_L,
+    "3DECKER Any_V3_Mono_01": EMA_BY_DURATION_ANY_V3_MONO_01,
+    "Nagadomi_Reference": EMA_BY_DURATION_NAGADOMI_REFERENCE,
+    "GEMINI AI": EMA_BY_DURATION_GEMINI_AI,
+    "ChatGPT": EMA_BY_DURATION_CHATGPT,
+    "Grok": EMA_BY_DURATION_GROK,
+    "Fast Action": EMA_BY_DURATION_FAST_ACTION,
+    "Medium Magical": EMA_BY_DURATION_MEDIUM_MAGICAL,
+    "Drama Slow Paced": EMA_BY_DURATION_DRAMA_SLOW_PACED,
 }
 
 # Old name kept as an alias (== the VDA_L table) in case anything else still imports it.
 DEFAULT_EMA_BY_DURATION = EMA_BY_DURATION_VDA_L
 
+# User-editable overrides for the Buffer/Decay values above (ADR-057, iw3-gui's Auto
+# EMA by Scene Length "Edit Values..." dialog). This file is entirely optional -- when
+# it doesn't exist (the default/common case) or has no entry for the model currently
+# selected, behavior is byte-for-byte identical to the hardcoded tables above, which
+# ALWAYS remain in the code as the reset target and the safety fallback if this file
+# is missing, unreadable, or shaped wrong. Only ema_buffer/ema_decay are ever read from
+# it -- bucket boundaries (min_duration/max_duration) always come from the matching
+# hardcoded table above and are never stored in or read from this file, so a hand-
+# edited or corrupt override file can never resize/misalign the bucket structure.
+EMA_OVERRIDES_PATH = path.join(
+    ensure_home_dir("iw3", path.join(path.dirname(__file__), "..", "tmp")),
+    "iw3_auto_ema_overrides.json")
 
-def _load_scene_settings(settings_path, auto_ema_by_duration=False, auto_ema_model="VDA_L"):
+
+def load_ema_overrides_file():
+    """Returns the raw parsed override JSON ({model_name: [{"ema_buffer", "ema_decay"}, ...]}),
+    or {} if the file doesn't exist or can't be parsed -- a missing/corrupt file must
+    never break a normal scene batch run, it just means every model falls back to its
+    hardcoded table, same as if this feature had never been used."""
+    if not path.exists(EMA_OVERRIDES_PATH):
+        return {}
+    try:
+        with open(EMA_OVERRIDES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_ema_overrides_file(data):
+    """Atomic write (CS-IO-001): write to a tmp name, then os.replace into place."""
+    tmp_path = EMA_OVERRIDES_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, EMA_OVERRIDES_PATH)
+
+
+def _table_from_override(model_name, base_table):
+    """Builds a full duration-bucket rule list for `model_name` using min_duration/
+    max_duration from `base_table` (the hardcoded default -- bucket boundaries are
+    never user-editable or stored in the override file) and ema_buffer/ema_decay from
+    the user's saved override for that model, if one exists and is shaped correctly
+    (same bucket count as base_table, both values present and individually valid:
+    ema_buffer a positive int, ema_decay strictly between 0 and 1). Returns None --
+    meaning "use base_table as-is, unmodified" -- if there's no override file, no
+    entry for this model, or the stored entry doesn't line up, so a stale or hand-
+    edited override file can only ever be ignored, never corrupt a real run."""
+    overrides = load_ema_overrides_file().get(model_name)
+    if not isinstance(overrides, list) or len(overrides) != len(base_table):
+        return None
+    rules = []
+    for base_rule, override in zip(base_table, overrides):
+        if not isinstance(override, dict):
+            return None
+        buffer = override.get("ema_buffer")
+        decay = override.get("ema_decay")
+        if not isinstance(buffer, int) or isinstance(buffer, bool) or buffer <= 0:
+            return None
+        if not isinstance(decay, (int, float)) or isinstance(decay, bool) or not (0.0 < decay < 1.0):
+            return None
+        rule = {"overrides": {"ema_buffer": buffer, "ema_decay": float(decay)}}
+        if "min_duration" in base_rule:
+            rule["min_duration"] = base_rule["min_duration"]
+        if "max_duration" in base_rule:
+            rule["max_duration"] = base_rule["max_duration"]
+        rules.append(rule)
+    return rules
+
+
+def _load_scene_settings(settings_path, auto_ema_by_duration=False, auto_ema_model="3DECKER VDA_L"):
     """Rules are applied in order with later matches overriding earlier ones, so the
     built-in EMA-by-duration table (if enabled) goes first -- it fills in EMA settings
     for every scene automatically, and anything the user's own JSON file explicitly
     sets (EMA included, if they want to override a specific tier, or anything else
-    like Divergence) is layered on top and wins."""
-    table = EMA_BY_DURATION_TABLES.get(auto_ema_model, EMA_BY_DURATION_VDA_L)
+    like Divergence) is layered on top and wins. The EMA-by-duration table itself is
+    the hardcoded default UNLESS a user override for `auto_ema_model` exists (see
+    `_table_from_override`/ADR-057), in which case its edited Buffer/Decay values are
+    used per bucket instead -- the bucket-matching logic below is identical either way."""
+    base_table = EMA_BY_DURATION_TABLES.get(auto_ema_model, EMA_BY_DURATION_VDA_L)
+    table = _table_from_override(auto_ema_model, base_table) or base_table
     rules = list(table) if auto_ema_by_duration else []
     if settings_path:
         with open(settings_path, "r", encoding="utf-8") as f:
@@ -948,7 +1365,7 @@ def run_scene_batch(args, depth_model, side_model):
     scene_settings = _load_scene_settings(
         getattr(args, "scene_settings", None),
         auto_ema_by_duration=getattr(args, "scene_batch_auto_ema", False),
-        auto_ema_model=getattr(args, "scene_batch_auto_ema_model", None) or "VDA_L",
+        auto_ema_model=getattr(args, "scene_batch_auto_ema_model", None) or "3DECKER VDA_L",
     )
 
     with open(log_path, "a", encoding="utf-8") as log_fp:

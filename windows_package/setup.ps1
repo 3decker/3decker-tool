@@ -98,10 +98,16 @@ Write-Step "3DECKER source (nunif\)"
 # nagadomi/nunif's own convention) -- mirrors nunif\windows_package\update.bat's
 # own `git clone https://github.com/nagadomi/nunif.git "%NUNIF_DIR%"` step,
 # just pointed at this fork's URL/branch instead of upstream's.
-if (Test-Path $nunifDir) {
+if (Test-Path (Join-Path $nunifDir ".git")) {
     Write-Host "  Already present at $nunifDir -- pulling latest instead of cloning."
     & $gitExe -C $nunifDir pull --ff
     if ($LASTEXITCODE -ne 0) { throw "git pull failed in $nunifDir (exit $LASTEXITCODE)" }
+} elseif (Test-Path $nunifDir) {
+    # nunif\ exists but has no .git folder -- e.g. GitHub's "Download ZIP" button
+    # strips git history entirely, so a renamed zip extraction lands here. Use it
+    # as-is; just can't auto-update via git later without a real clone.
+    Write-Host "  Found $nunifDir but it is not a git repository (no .git folder) -- using it as-is."
+    Write-Host "  NOTE: without git history, 'Run Update' and future setup.ps1 re-runs cannot pull updates automatically. Delete this nunif\ folder and re-run setup.ps1 in an empty folder for a real git clone if you want that." -ForegroundColor Yellow
 } else {
     & $gitExe clone -b my-customizations "https://github.com/3decker/3decker-tool.git" $nunifDir
     if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE)" }

@@ -4772,8 +4772,14 @@ def create_parser(required_true=True):
                                  "p1", "p2", "p3", "p4", "p5", "p6", "p7"],
                         help="encoder preset option for video")
     parser.add_argument("--tune", type=str, nargs="+", default=[],
+                        # libx264: film, animation, grain, stillimage, psnr, fastdecode, zerolatency
+                        # libx265: grain, animation, psnr, fastdecode, zerolatency
+                        # NVENC (h264_nvenc/hevc_nvenc): hq, uhq (hevc_nvenc only), ll, ull, lossless
+                        # kept in sync with TUNE_LIBX264/TUNE_LIBX265/TUNE_NVENC_HEVC in
+                        # nunif/gui/video_encoding_box.py, the GUI's Tune dropdown
                         choices=["film", "animation", "grain", "stillimage", "psnr",
-                                 "fastdecode", "zerolatency"],
+                                 "fastdecode", "zerolatency",
+                                 "hq", "uhq", "ll", "ull", "lossless"],
                         help="encoder tunings option for video")
     parser.add_argument("--yes", "-y", action="store_true", default=False,
                         help="overwrite output files")

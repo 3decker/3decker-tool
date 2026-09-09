@@ -123,6 +123,17 @@ def safe_decode(packet, strict=False):
     except av.error.PatchWelcomeError:  # pyAV unimplemented
         frames = []
         print("\n[WARN] Unknown data/frames type (pyAV Unimplemented)! continuing anyway...", file=sys.stderr)
+    except av.error.OSError:
+        # A real, raw OS-level failure surfacing from the underlying hwaccel/codec call
+        # (e.g. a broken CUDA/NVDEC decode path) -- av.error.OSError subclasses both
+        # FFmpegError and the builtin OSError, so this is exactly the "OSError [Errno N]"
+        # class of error, just occurring here (per-packet decode) rather than at hwaccel
+        # device creation, which create_hwaccel()'s allow_software_fallback flag does not
+        # cover. Not caught when strict=True (Software Fallback disabled): the user asked
+        # for hard failure on any real decode problem in that mode.
+        frames = []
+        print("\n[WARN] Hardware-accelerated decode failed for a frame/packet! "
+              "continuing anyway...", file=sys.stderr)
     return frames
 
 

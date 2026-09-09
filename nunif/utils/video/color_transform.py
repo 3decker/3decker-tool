@@ -1,3 +1,4 @@
+import sys
 from fractions import Fraction
 from typing import Any, Dict, List, Set, Tuple
 
@@ -764,20 +765,45 @@ class OutputTransform:
         )
         y_p, uv_p = ColorTransform.to_yuv_planes(y, u, v, out_format=internal_pix_fmt)
 
-        if self.is_cuda_dlpack_supported(x):
+        use_cuda_dlpack = self.is_cuda_dlpack_supported(x)
+        if use_cuda_dlpack:
             # For NVENC
             # Ensure PyTorch has finished writing to y_p and uv_p
             if torch.cuda.default_stream() != torch.cuda.current_stream():
                 torch.cuda.current_stream().synchronize()
 
-            frame = av.VideoFrame.from_dlpack(
-                (y_p, uv_p),
-                format=internal_pix_fmt,
-                primary_ctx=True,
-                cuda_context=self.cuda_context,
-            )
-        else:
-            # For software encoders
+            try:
+                frame = av.VideoFrame.from_dlpack(
+                    (y_p, uv_p),
+                    format=internal_pix_fmt,
+                    primary_ctx=True,
+                    cuda_context=self.cuda_context,
+                )
+            except av.error.OSError as e:
+                # ADR-073: a real, confirmed occurrence -- PyAV's
+                # CudaContext.get_frames_ctx() (invoked internally by from_dlpack()
+                # to acquire a CUDA device reference for this zero-copy NVENC
+                # handoff) raised this exact "OSError [Errno N]" class partway
+                # through a long real job (not at job start), independent of
+                # --hwaccel (decode) and torch.compile -- see
+                # docs/ai/AI_DECISIONS.md ADR-073 for the real captured traceback.
+                # Falls back to the CPU-copy path below (the same one already used
+                # whenever is_cuda_dlpack_supported() is False, e.g. non-NVENC
+                # encoders) -- permanently, for the rest of this OutputTransform
+                # instance's life, by clearing self.cuda_context: a GPU device
+                # reference that failed once mid-job is unlikely to recover on the
+                # very next frame, so retrying it every frame would just repeat the
+                # same failure at encode-frame-rate cost instead of falling back
+                # once. Matches the "an optional zero-copy/acceleration path must
+                # never crash a real conversion" precedent from ADR-070/071.
+                print(f"\n[WARN] NVENC zero-copy CUDA frame handoff failed ({e})! "
+                      "falling back to CPU-copy encode for the rest of this job...",
+                      file=sys.stderr)
+                self.cuda_context = None
+                use_cuda_dlpack = False
+
+        if not use_cuda_dlpack:
+            # For software encoders, and as the fallback above
             y_p = y_p.contiguous().cpu()
             uv_p = uv_p.contiguous().cpu()
             frame = av.VideoFrame.from_dlpack(

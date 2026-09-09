@@ -5741,6 +5741,30 @@ class MainFrame(wx.Frame):
             e_type, e, tb = sys.exc_info()
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
+            # ADR-072 Amendment: under the real GUI (pythonw.exe), nunif/pythonw_fix.py
+            # (imported at the top of this file) reopens sys.stdout/sys.stderr onto
+            # os.devnull -- a real, deliberate, long-standing fix for a separate,
+            # genuine problem (pythonw.exe crashes on any bare write to a console-less
+            # sys.stdout/stderr). A side effect nobody had accounted for: the
+            # traceback.print_tb(tb) call directly above, and every [WARN]/error
+            # print() throughout iw3/utils.py's real conversion pipeline (including
+            # the --preserve-dowi HDR extraction block), write into that same devnull
+            # sys.stderr and are silently discarded under the real GUI -- so a job
+            # crash here has only ever shown str(e) in the popup, never a real
+            # file/line traceback, no matter how many times it happens. This is the
+            # actual, confirmed reason no console log could ever be found for any of
+            # tonight's "Errno 129" reports. Writing the real traceback to a
+            # persistent file, independent of sys.stdout/sys.stderr, closes that gap
+            # for this and every future real conversion-job crash.
+            try:
+                crash_log_path = path.join(CONFIG_DIR, "iw3-gui-crash.log")
+                with open(crash_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n---- {datetime.now().isoformat(timespec='seconds')} ----\n")
+                    f.write("".join(traceback.format_exception(e_type, e, tb)))
+            except Exception:
+                crash_log_path = None
+            if crash_log_path is not None:
+                message = f"{message}\n\n(Full details saved to {crash_log_path})"
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
 
         self.processing = False

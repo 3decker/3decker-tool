@@ -3019,6 +3019,18 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                             print(f"--preserve-dowi: DV RPU extraction failed: "
                                   f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
                             _hdr_rpu_path = None
+                        except OSError as e:
+                            # CS-SUBPROCESS-001: subprocess.run() itself raises a bare
+                            # OSError (not CalledProcessError) if the child process
+                            # never starts at all (e.g. the OS refuses to spawn it) --
+                            # distinct from a process that ran and exited non-zero.
+                            # Never previously caught here, so this optional
+                            # (--preserve-dowi) step could crash a whole real
+                            # conversion job on a transient OS-level spawn failure
+                            # instead of just skipping DV preservation for this run.
+                            print(f"--preserve-dowi: DV RPU extraction failed to start "
+                                  f"({e.__class__.__name__}: {e}).", file=sys.stderr)
+                            _hdr_rpu_path = None
 
                 if hdr_types["hdr10plus"]:
                     _hdr_hdr10plus_bin = _find_hdr10plus_tool()
@@ -3033,10 +3045,26 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                             print(f"--preserve-dowi: HDR10+ extraction failed: "
                                   f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
                             _hdr_h10p_path = None
+                        except OSError as e:
+                            # CS-SUBPROCESS-001: see the matching DV RPU comment above.
+                            print(f"--preserve-dowi: HDR10+ extraction failed to start "
+                                  f"({e.__class__.__name__}: {e}).", file=sys.stderr)
+                            _hdr_h10p_path = None
 
             except subprocess.CalledProcessError as e:
                 print(f"--preserve-dowi: source HEVC extraction failed: "
                       f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+            except OSError as e:
+                # CS-SUBPROCESS-001: subprocess.run() raises a bare OSError (not
+                # CalledProcessError) when the OS itself fails to spawn the child
+                # process (e.g. a transient handle/resource ceiling) rather than when
+                # the process runs and exits non-zero -- previously uncaught here, so
+                # it escaped this whole --preserve-dowi block as a raw crash instead of
+                # just skipping DV/HDR10+ preservation for this run. Matches the
+                # "an optional acceleration/preservation path must never crash a real
+                # conversion" precedent from ADR-070/ADR-071.
+                print(f"--preserve-dowi: source HEVC extraction failed to start "
+                      f"({e.__class__.__name__}: {e}).", file=sys.stderr)
             finally:
                 if path.exists(_hdr_tmp_hevc):
                     try:
@@ -3069,6 +3097,19 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             container_options={"movflags": "+faststart"} if args.video_format == "mp4" else {},
             metadata=extra_meta,
         )
+
+    # ADR-072: process_video_full() (this function) never announced
+    # STAGE_DEPTH_STEREO -- the only other _notify_stage(STAGE_DEPTH_STEREO) call
+    # site is in the separate, simpler process_video() function (used for
+    # keyframe/per-file batch mode), which this function does not go through. Without
+    # this call, the GUI's "Step k/N: <stage>" title/status bar stayed frozen on
+    # whatever stage last fired -- STAGE_HDR_EXTRACT when --preserve-dowi is set, or
+    # STAGE_AUTOCROP/STAGE_SCENE_DETECT otherwise -- for the ENTIRE real depth/stereo
+    # encode below (often the majority of a multi-hour job), mislabeling any crash
+    # that actually happens inside VU.process_video() (e.g. the real input-container
+    # hwaccel-open failure ADR-071 addresses) as if it were still happening in an
+    # earlier, already-finished stage. See docs/ai/AI_DECISIONS.md ADR-072.
+    _notify_stage(args, STAGE_DEPTH_STEREO)
 
     if is_video_depth_anything:
         with depth_model.compile_context(enabled=args.compile), try_compile_context(side_model, enabled=args.compile):
@@ -4865,15 +4906,20 @@ def create_parser(required_true=True):
                               "same continuous video, overriding the fixed --ema-decay/--ema-buffer for "
                               "each scene as it starts. Which table is used depends on "
                               "--scene-batch-auto-ema-model."))
+    from .scene_batch import EMA_BY_DURATION_TABLES
     parser.add_argument("--scene-batch-auto-ema-model", type=str, default="3DECKER VDA_L",
-                        choices=["3DECKER VDA_L", "3DECKER Any_V3_Mono_01"],
+                        choices=list(EMA_BY_DURATION_TABLES.keys()),
                         help=("which built-in EMA-by-duration table --scene-batch-auto-ema uses, "
                               "matched to the Depth Model in use. 3DECKER VDA_L: a real video depth model "
                               "with its own frame-to-frame memory, needs only light smoothing on top. "
                               "3DECKER Any_V3_Mono_01: a stills-only model with no frame-to-frame memory of "
                               "its own (prone to visible 'depth breathing' without help), so this table "
                               "uses double VDA_L's Buffer at every scene length with a correspondingly "
-                              "higher Decay to compensate."))
+                              "higher Decay to compensate. The remaining names (Nagadomi_Reference, "
+                              "GEMINI AI, ChatGPT, Grok, Fast Action, Medium Magical, Drama Slow Paced) are "
+                              "the same tables offered in the GUI's Auto EMA by Scene Length dropdown -- "
+                              "this list is read from the same EMA_BY_DURATION_TABLES source of truth in "
+                              "scene_batch.py so the CLI and GUI never drift apart again."))
     parser.add_argument("--scene-batch-variant", type=str, default=None,
                         help=("optional name for --scene-batch. Reuses the shared, already-done work "
                               "from a prior run of the SAME movie (Dolby Vision RPU extraction, the "

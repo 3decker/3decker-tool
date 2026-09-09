@@ -529,6 +529,42 @@ def _apply_combo_value(combo, value):
         combo.SetValue(text)
 
 
+def _query_nvidia_smi_gpu_names():
+    """Returns a list of CUDA GPU names via `nvidia-smi` (a separate process), or
+    None on any failure. Used to populate the Device/RIFE-GPU dropdowns at window
+    construction time INSTEAD of torch.cuda.get_device_properties().
+
+    Why this matters: before commit a270add1 (2026-09-07), pyav_init_cuda_primary_
+    context() ran unconditionally at process startup, before MainFrame() was ever
+    constructed. That commit deferred it into ensure_cuda_context() (called only on
+    Start/Quick Preview) to stop the window grabbing a CUDA context just from being
+    opened -- but the Device dropdown's own torch.cuda.get_device_properties() calls
+    (present since the GUI's original 2023 commit) were not moved, and still run
+    during MainFrame construction. That reverses the exact ordering
+    pyav_init_cuda_primary_context()'s own docstring requires ("before PyTorch
+    initializes CUDA... otherwise stream synchronization with NVDEC is not
+    possible") -- PyTorch now claims the CUDA primary context first, every single
+    time the window opens, before pyav/NVDEC ever gets a chance to. This is the
+    real, git-history-confirmed explanation for why --hwaccel cuda + --compile
+    crashes on its very first attempt in the GUI, 100% of the time, but never in
+    the CLI (whose __main__.py still calls pyav_init_cuda_primary_context() as the
+    literal first GPU-touching statement). See docs/ai/AI_DECISIONS.md ADR-034/071.
+    nvidia-smi runs as an independent process, so querying it here cannot touch
+    this process's own CUDA state at all -- avoiding the problem entirely instead
+    of just tolerating the crash it causes."""
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0:
+            names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            if names:
+                return names
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 class IW3App(wx.App):
     def OnInit(self):
         set_tooltip_long_hover()
@@ -2491,7 +2527,16 @@ class MainFrame(wx.Frame):
         self.lbl_device = wx.StaticText(self.grp_processor, label=T("Device"))
         self.cbo_device = wx.ComboBox(self.grp_processor, size=self.FromDIP((200, -1)), name="cbo_device")
         self.cbo_device.SetEditable(False)
-        if torch.cuda.is_available():
+        cuda_device_names = _query_nvidia_smi_gpu_names()
+        if cuda_device_names is not None:
+            # See _query_nvidia_smi_gpu_names()'s docstring: deliberately avoids
+            # torch.cuda.* here so this dropdown never initializes PyTorch's CUDA
+            # context before ensure_cuda_context() gets a chance to run pyav's
+            # NVDEC-compatible init first.
+            for i, device_name in enumerate(cuda_device_names):
+                self.cbo_device.Append(f"{i}:{device_name}", i)
+            self.cbo_device.Append(T("All CUDA Device"), -2)
+        elif torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 device_name = torch.cuda.get_device_properties(i).name
                 self.cbo_device.Append(f"{i}:{device_name}", i)
@@ -3823,7 +3868,13 @@ class MainFrame(wx.Frame):
         self.lbl_rife_standalone_gpu = wx.StaticText(self.grp_rife_standalone, label=T("GPU"))
         self.cbo_rife_standalone_gpu = wx.ComboBox(self.grp_rife_standalone, name="cbo_rife_standalone_gpu")
         self.cbo_rife_standalone_gpu.SetEditable(False)
-        if torch.cuda.is_available():
+        cuda_device_names = _query_nvidia_smi_gpu_names()
+        if cuda_device_names is not None:
+            # See _query_nvidia_smi_gpu_names()'s docstring -- same reasoning as
+            # the Device dropdown above.
+            for i, device_name in enumerate(cuda_device_names):
+                self.cbo_rife_standalone_gpu.Append(f"{i}:{device_name}", i)
+        elif torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 device_name = torch.cuda.get_device_properties(i).name
                 self.cbo_rife_standalone_gpu.Append(f"{i}:{device_name}", i)
@@ -8165,6 +8216,51 @@ def _self_test_no_eager_cuda_context():
     print("_self_test_no_eager_cuda_context: PASS")
 
 
+def _self_test_device_dropdown_no_torch_cuda_touch():
+    """Synthetic/mocked test for the real bug behind ADR-034/071's crash (see
+    _query_nvidia_smi_gpu_names()'s docstring): the pre-existing
+    _self_test_no_eager_cuda_context() above only checked that
+    pyav_init_cuda_primary_context()/check_compile_support() don't run during
+    passive window construction -- it never checked whether torch.cuda itself
+    gets touched, which is exactly the gap that let this slip through
+    unnoticed. This test monkeypatches torch.cuda.is_available/device_count/
+    get_device_properties to raise if called at all during MainFrame()
+    construction (they must not be, now that the Device/RIFE-GPU dropdowns
+    query nvidia-smi instead), and mocks _query_nvidia_smi_gpu_names() to
+    return a fixed fake device list so the test needs no real GPU."""
+    import iw3.gui as gui_mod
+
+    def _fail(*a, **kw):
+        raise AssertionError("torch.cuda touched during passive window construction")
+
+    orig_nvidia_smi = gui_mod._query_nvidia_smi_gpu_names
+    orig_is_available = torch.cuda.is_available
+    orig_device_count = torch.cuda.device_count
+    orig_get_device_properties = torch.cuda.get_device_properties
+    gui_mod._query_nvidia_smi_gpu_names = lambda: ["Fake GPU 0"]
+    torch.cuda.is_available = _fail
+    torch.cuda.device_count = _fail
+    torch.cuda.get_device_properties = _fail
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = gui_mod.MainFrame()
+        assert frame.cbo_device.FindString("0:Fake GPU 0") != wx.NOT_FOUND, \
+            "Device dropdown was not populated from the mocked nvidia-smi device list"
+    finally:
+        gui_mod._query_nvidia_smi_gpu_names = orig_nvidia_smi
+        torch.cuda.is_available = orig_is_available
+        torch.cuda.device_count = orig_device_count
+        torch.cuda.get_device_properties = orig_get_device_properties
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_device_dropdown_no_torch_cuda_touch: PASS")
+
+
 def _self_test_compile_probe_crash_handled():
     """Regression test for a real crash: clicking the torch.compile checkbox with a
     specific GPU/CPU selected (not "All CUDA Device") used to throw a raw, uncaught
@@ -10525,6 +10621,7 @@ def _run_self_tests():
     _self_test_run_update_button()
     _self_test_run_update_git_checkpoint()
     _self_test_import_command_round_trip()
+    _self_test_device_dropdown_no_torch_cuda_touch()
     print("All iw3.gui self-tests PASSED")
 
 

@@ -6,9 +6,11 @@ from os import path
 import traceback
 import functools
 import tempfile
+import shutil
 import subprocess
 import copy
 from time import time
+from datetime import datetime
 import threading
 import wx
 from wx.lib.delayedresult import startWorker
@@ -227,6 +229,64 @@ def _find_update_bat():
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))  # nunif/
     nunif_windows_root = path.dirname(nunif_dir)
     return path.join(nunif_windows_root, "update.bat"), nunif_windows_root
+
+
+def _git_checkpoint_before_update(nunif_dir, log_fn):
+    """Safety-commit any uncommitted work in `nunif_dir` before update.bat runs (see
+    docs/ai/AI_DECISIONS.md ADR-069's dated amendment). update.bat's own source-update
+    step runs `git pull --ff`, and if that fails -- which it reliably does whenever
+    there are uncommitted local changes -- it falls back to `git reset --hard`,
+    permanently discarding every uncommitted change in the working tree. This runs
+    first, every time, so that fallback can never destroy real work again the way it
+    nearly did (21 uncommitted files, manually rescued as commit `73adecba`).
+
+    Real, read-only-or-additive git operations only (`status`, `add`, `commit`) --
+    never `push`/`reset`/`checkout`/`merge`/`rebase` -- so this step can only ever
+    ADD safety, never risk it. A real commit is made (not `git stash`), since a
+    stash can be lost/forgotten in a way a real commit on the current branch can't.
+
+    `log_fn(text)` is called with each user-facing progress line -- the caller wires
+    this to the Run Update log window via `wx.CallAfter`; this function itself has
+    no wx dependency so it can be exercised directly in tests against a real,
+    disposable git repo. Raises `RuntimeError` -- never silently swallowed -- if the
+    checkpoint itself fails (e.g. git config user.name/user.email not set), so the
+    caller can stop before update.bat is ever launched, leaving the working tree
+    exactly as the failure left it."""
+    git_bin = update_check._find_git()
+    if git_bin is None:
+        raise RuntimeError(
+            T("Could not locate the bundled git executable (git/cmd/git.exe) -- cannot safety "
+              "check-point uncommitted work before updating. Update was NOT started."))
+
+    def _run(args):
+        return subprocess.run([git_bin, "-C", nunif_dir] + args,
+                              check=True, capture_output=True, text=True)
+
+    try:
+        status = _run(["status", "--porcelain"])
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            T("git status failed -- cannot safety check-point uncommitted work before updating. "
+              "Update was NOT started.") + f"\n{(e.stderr or '').strip()}")
+
+    changed_files = [line for line in status.stdout.splitlines() if line.strip()]
+    if not changed_files:
+        log_fn(T("No uncommitted changes -- nothing to check-point.") + "\n\n")
+        return
+
+    try:
+        _run(["add", "-A"])
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _run(["commit", "-m", f"Auto-checkpoint before update ({timestamp})"])
+        short_hash = _run(["rev-parse", "--short", "HEAD"]).stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            T("Failed to create the safety check-point commit -- update.bat was NOT started, so "
+              "your uncommitted work is untouched. Fix the error below and try again.") +
+            f"\n{(e.stderr or '').strip()}")
+
+    log_fn(T("Committed {} file(s) as a safety checkpoint before updating (commit {}).")
+           .format(len(changed_files), short_hash) + "\n\n")
 
 
 class RunUpdateDialog(wx.Dialog):
@@ -6179,7 +6239,7 @@ class MainFrame(wx.Frame):
     # ADR-069, the direct follow-up to ADR-035's deliberately-deferred "applying an
     # update" scope; the Check for Updates feature just above stays read-only) ---
 
-    def run_update(self, cmd, cwd, dlg):
+    def run_update(self, cmd, cwd, nunif_dir, dlg):
         # Runs on a background thread via startWorker -- never blocks the GUI
         # thread. update.bat can run long enough (package installs, model
         # downloads, a source pull) that its output is streamed line-by-line to
@@ -6192,6 +6252,13 @@ class MainFrame(wx.Frame):
         # subprocess can never provide (CS-SUBPROCESS-001: arg list, never
         # shell=True; cmd.exe /c is the explicit, documented way to run a .bat file
         # via CreateProcess without shell=True's quoting/injection risk).
+        #
+        # ADR-069 dated amendment: the safety check-point runs first, still on this
+        # background thread. If it raises (a real git failure), this propagates out
+        # through startWorker's result and is handled by on_exit_run_update_worker's
+        # existing exception path -- update.bat below is never reached.
+        _git_checkpoint_before_update(nunif_dir, lambda text: wx.CallAfter(dlg.append, text))
+
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -6257,6 +6324,8 @@ class MainFrame(wx.Frame):
                 T("Run Update"), wx.OK | wx.ICON_ERROR)
             return
 
+        nunif_dir = update_check._get_nunif_repo_root()
+
         comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
         cmd = [comspec, "/c", update_bat_path]
 
@@ -6267,10 +6336,12 @@ class MainFrame(wx.Frame):
         self.dlg_run_update = RunUpdateDialog(self)
         self.dlg_run_update.append(
             T("Running update.bat...") + "\n" + T("This can take a while -- please wait.") + "\n\n")
+        self.dlg_run_update.append(
+            T("Checking for uncommitted changes to safety check-point first...") + "\n")
         self.dlg_run_update.Show()
 
         startWorker(self.on_exit_run_update_worker, self.run_update,
-                    wargs=(cmd, cwd, self.dlg_run_update))
+                    wargs=(cmd, cwd, nunif_dir, self.dlg_run_update))
 
     def test_autocrop(self):
         self.txt_autocrop_test.SetValue("")
@@ -9664,13 +9735,14 @@ def _self_test_run_update_button():
         _FakeConfirmDialog.result = wx.ID_YES
         frame.on_click_btn_run_update(None)
         assert "wargs" in captured, "accepting the confirmation must launch update.bat"
-        cmd, cwd, dlg = captured["wargs"]
+        cmd, cwd, nunif_dir, dlg = captured["wargs"]
         expected_bat, expected_root = gui_mod._find_update_bat()
         assert path.exists(expected_bat), expected_bat
         assert cmd[-1] == expected_bat, cmd
         assert cmd[0].lower().endswith("cmd.exe"), cmd
         assert cmd[1] == "/c", cmd
         assert cwd == expected_root, (cwd, expected_root)
+        assert nunif_dir == gui_mod.update_check._get_nunif_repo_root(), nunif_dir
         assert frame.updating
         assert not frame.btn_run_update.IsEnabled(), "must disable while update.bat is 'running'"
         assert not frame.btn_start.IsEnabled(), "Start must be disabled while updating too"
@@ -9710,6 +9782,102 @@ def _self_test_run_update_button():
     print("_self_test_run_update_button: PASS")
 
 
+def _self_test_run_update_git_checkpoint():
+    """ADR-069 dated amendment: `run_update()` must call the safety check-point
+    BEFORE ever launching update.bat, and a real checkpoint failure must stop
+    update.bat from launching at all -- see tests/test_iw3_run_update_git_checkpoint.py
+    for the underlying `_git_checkpoint_before_update` unit coverage (real disposable
+    git repos, never this project's own real repo). This self-test instead covers
+    `run_update()`'s own ordering/integration: a real disposable git repo stands in
+    for `nunif_dir`, and a harmless real subprocess (a Python one-liner) stands in
+    for update.bat itself -- so "update.bat launches" is provable (a real process
+    genuinely ran) without actually invoking the real update.bat's package/model/
+    source-update side effects."""
+    import iw3.gui as gui_mod
+
+    class _FakeDlg:
+        def __init__(self):
+            self.lines = []
+
+        def append(self, text):
+            self.lines.append(text)
+
+    app = wx.App()
+    frame = None
+    tmp = tempfile.mkdtemp(prefix="iw3_run_update_selftest_")
+    try:
+        git_bin = update_check._find_git()
+        assert git_bin is not None, "bundled git binary must resolve for this test to be meaningful"
+
+        def _git(*args):
+            return subprocess.run([git_bin, "-C", tmp] + list(args),
+                                  check=True, capture_output=True, text=True)
+
+        _git("init", "-q")
+        _git("config", "user.name", "test-checkpoint")
+        _git("config", "user.email", "test-checkpoint@local")
+        with open(path.join(tmp, "seed.txt"), "w") as f:
+            f.write("seed\n")
+        _git("add", "-A")
+        _git("commit", "-q", "-m", "seed commit")
+
+        frame = gui_mod.MainFrame()
+        harmless_cmd = [sys.executable, "-c", "print('update.bat stand-in ran')"]
+
+        # Dirty tree: checkpoint commits first, then the stand-in "update.bat"
+        # subprocess still runs afterward.
+        with open(path.join(tmp, "seed.txt"), "a") as f:
+            f.write("modified\n")
+        before_hash = _git("rev-parse", "HEAD").stdout.strip()
+        dlg = _FakeDlg()
+        returncode = frame.run_update(harmless_cmd, tmp, tmp, dlg)
+        wx.Yield()  # flush the wx.CallAfter-queued dlg.append() calls onto dlg.lines
+        assert returncode == 0, "the stand-in update.bat command must actually have run"
+        after_hash = _git("rev-parse", "HEAD").stdout.strip()
+        assert after_hash != before_hash, "run_update must checkpoint before launching update.bat"
+        assert any("Committed" in line for line in dlg.lines), dlg.lines
+        assert any("update.bat stand-in ran" in line for line in dlg.lines), dlg.lines
+        status = _git("status", "--porcelain").stdout
+        assert status.strip() == "", "checkpoint commit must leave the tree clean"
+
+        # A real checkpoint failure must block update.bat from launching at all.
+        with open(path.join(tmp, "seed.txt"), "a") as f:
+            f.write("modified again\n")
+        before_hash = _git("rev-parse", "HEAD").stdout.strip()
+        real_run = subprocess.run
+
+        def _failing_run(cmd, *a, **kw):
+            if len(cmd) >= 4 and cmd[3] == "commit":
+                raise subprocess.CalledProcessError(
+                    1, cmd, output="", stderr="fatal: simulated commit failure\n")
+            return real_run(cmd, *a, **kw)
+
+        dlg2 = _FakeDlg()
+        orig_subprocess_run = gui_mod.subprocess.run
+        gui_mod.subprocess.run = _failing_run
+        raised = False
+        try:
+            try:
+                frame.run_update(harmless_cmd, tmp, tmp, dlg2)
+            except RuntimeError as e:
+                raised = True
+                assert "simulated commit failure" in str(e), str(e)
+        finally:
+            gui_mod.subprocess.run = orig_subprocess_run
+        assert raised, "a real checkpoint failure must propagate, never be swallowed"
+        after_hash = _git("rev-parse", "HEAD").stdout.strip()
+        assert after_hash == before_hash, "a failed checkpoint must never move HEAD"
+        assert not any("stand-in ran" in line for line in dlg2.lines), \
+            "update.bat stand-in must never run after a checkpoint failure"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("_self_test_run_update_git_checkpoint: PASS")
+
+
 def _run_self_tests():
     _self_test_no_eager_cuda_context()
     _self_test_compile_probe_crash_handled()
@@ -9739,6 +9907,7 @@ def _run_self_tests():
     _self_test_rife_standalone_panel()
     _self_test_tool_log_clear_buttons()
     _self_test_run_update_button()
+    _self_test_run_update_git_checkpoint()
     print("All iw3.gui self-tests PASSED")
 
 

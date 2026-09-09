@@ -2778,6 +2778,109 @@ def _scene_ema_report_summary(applied_rows):
     return len(applied_rows), len({r["settings"] for r in applied_rows})
 
 
+def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, source_name):
+    """Human-readable sibling of _write_scene_ema_report's plain CSV (ADR-074):
+    a single self-contained HTML file (no network/CDN dependency -- this is an
+    offline desktop tool) with the same rows as a real, sortable, scrollable
+    table, so the numbers are readable without opening the CSV in a separate
+    spreadsheet program. Written after the CSV, same temp-name + os.replace
+    pattern (CS-IO-001) so a reader never sees a half-written file."""
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace('"', "&quot;"))
+
+    def fmt_hms(sec):
+        sec = float(sec)
+        sign = "-" if sec < 0 else ""
+        sec = abs(sec)
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        if h >= 1:
+            return f"{sign}{int(h)}:{int(m):02d}:{s:06.3f}"
+        return f"{sign}{int(m)}:{s:06.3f}"
+
+    row_html = []
+    for r in rows:
+        row_html.append(
+            "<tr>"
+            f"<td>{esc(r['scene_index'])}</td>"
+            f"<td>{esc(fmt_hms(r['start_time_sec']))}</td>"
+            f"<td>{esc(f'{float(r['duration_sec']):.3f}')}</td>"
+            f"<td>{esc(r['ema_buffer'])}</td>"
+            f"<td>{esc(r['ema_decay'])}</td>"
+            "</tr>"
+        )
+
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Auto EMA by Scene Length Report</title>
+<style>
+  :root {{ --bg:#faf9f7; --fg:#2a2622; --border:#ddd8d1; --head-bg:#efece7; --row-alt:#f4f2ef; --accent:#8a6a4f; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ --bg:#1c1a18; --fg:#e8e4de; --border:#3a352f; --head-bg:#252220; --row-alt:#221f1c; --accent:#c9a37c; }}
+  }}
+  body {{ margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 -apple-system,Segoe UI,sans-serif; }}
+  header {{ padding:16px 20px; border-bottom:1px solid var(--border); }}
+  h1 {{ font-size:16px; margin:0 0 4px; }}
+  .summary {{ color:var(--accent); font-size:13px; }}
+  .wrap {{ max-height:calc(100vh - 90px); overflow:auto; }}
+  table {{ border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }}
+  th, td {{ padding:6px 14px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }}
+  th:first-child, td:first-child {{ text-align:left; }}
+  th {{ position:sticky; top:0; background:var(--head-bg); cursor:pointer; user-select:none; }}
+  th:hover {{ color:var(--accent); }}
+  tbody tr:nth-child(even) {{ background:var(--row-alt); }}
+  th.sorted::after {{ content:" \\25BE"; }}
+  th.sorted.asc::after {{ content:" \\25B4"; }}
+</style></head>
+<body>
+<header>
+  <h1>Auto EMA by Scene Length &mdash; {esc(source_name)}</h1>
+  <div class="summary">{scene_count} scenes &middot; {distinct_count} distinct Buffer/Decay values used &middot; click a column header to sort</div>
+</header>
+<div class="wrap">
+<table id="t">
+<thead><tr>
+  <th data-n>Scene</th><th data-n>Start Time</th><th data-n>Duration (s)</th><th data-n>EMA Buffer</th><th data-n>EMA Decay</th>
+</tr></thead>
+<tbody>
+{"".join(row_html)}
+</tbody>
+</table>
+</div>
+<script>
+(function() {{
+  var table = document.getElementById("t");
+  var ths = table.querySelectorAll("th");
+  ths.forEach(function(th, idx) {{
+    th.addEventListener("click", function() {{
+      var asc = !(th.classList.contains("sorted") && th.classList.contains("asc"));
+      ths.forEach(function(h) {{ h.classList.remove("sorted", "asc"); }});
+      th.classList.add("sorted"); if (asc) th.classList.add("asc");
+      var tbody = table.querySelector("tbody");
+      var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr"));
+      var isNumeric = th.hasAttribute("data-n") && idx !== 1;
+      rows.sort(function(a, b) {{
+        var av = a.children[idx].textContent, bv = b.children[idx].textContent;
+        if (isNumeric) {{ av = parseFloat(av); bv = parseFloat(bv); }}
+        if (av < bv) return asc ? -1 : 1;
+        if (av > bv) return asc ? 1 : -1;
+        return 0;
+      }});
+      rows.forEach(function(r) {{ tbody.appendChild(r); }});
+    }});
+  }});
+}})();
+</script>
+</body></html>"""
+
+    tmp_path = html_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    os.replace(tmp_path, html_path)
+    return html_path
+
+
 def process_video_full(input_filename, output_path, args, depth_model, side_model):
     is_preview = getattr(args, "preview", False)
     scene_cache_max_fps = args.max_fps  # capture before --preview clamps it, so cache key stays stable
@@ -3238,7 +3341,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     applied_ema_rows = [r for r in scene_ema_report_rows if r["settings"] is not None]
     if applied_ema_rows and path.exists(output_filename):
         report_path = output_filename + ".auto_ema_report.csv"
-        _write_scene_ema_report(report_path, [
+        report_rows = [
             {
                 "scene_index": r["scene_index"],
                 "start_time_sec": f"{r['start_sec']:.3f}",
@@ -3247,10 +3350,23 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                 "ema_decay": r["settings"][1],
             }
             for r in applied_ema_rows
-        ])
+        ]
+        _write_scene_ema_report(report_path, report_rows)
         scene_count, distinct_count = _scene_ema_report_summary(applied_ema_rows)
+        # Human-readable sibling of the CSV above (ADR-074) -- a real, sortable
+        # HTML table, so these numbers are readable without opening a separate
+        # spreadsheet program. Best-effort only: never let a report-writing
+        # problem fail an otherwise-successful conversion job.
+        html_path = output_filename + ".auto_ema_report.html"
+        try:
+            _write_scene_ema_report_html(html_path, report_rows, scene_count, distinct_count,
+                                          path.basename(output_filename))
+        except Exception as e:
+            print(f"[auto-ema] could not write HTML report ({e.__class__.__name__}: {e}) -- "
+                  f"the CSV at {report_path} is still complete.", file=sys.stderr)
         print(f"[auto-ema] Auto EMA by Scene Length: {scene_count} scenes, "
-              f"{distinct_count} distinct Buffer/Decay values used (see {report_path})",
+              f"{distinct_count} distinct Buffer/Decay values used (see {report_path} "
+              f"and {html_path})",
               file=sys.stderr)
 
 

@@ -975,9 +975,12 @@ class MainFrame(wx.Frame):
               "basic algorithm, no learned model involved. Fastest, but the roughest edges.\n"
               "forward_splat_fill: same non-AI forward-warp family as forward_fill, but where two pixels "
               "land on the same spot, it smoothly blends them (nearer one weighted more) instead of the "
-              "nearer one fully overwriting the other — softer, less jagged edges than forward_fill, still "
-              "no AI model/extra GPU cost involved. New and not yet extensively tested on real footage — "
-              "try it if forward_fill's edges look too rough for your taste.\n"
+              "nearer one fully overwriting the other — softer, less jagged edges than forward_fill. No "
+              "learned model involved, but NOT free of GPU cost: it holds several full-frame accumulator "
+              "tensors in memory per batch, so its VRAM use scales up directly with Depth Batch Size "
+              "(unlike the inpaint methods, which don't) and can run even a high-VRAM GPU out of memory on "
+              "demanding footage at Depth Batch Size 2 or higher. Confirmed real fix if you hit an "
+              "out-of-memory error here: drop Depth Batch Size to 1 and turn on Low VRAM below.\n"
               "monobw: a simpler, lighter backward-warp method than the mlbw family — a faster middle "
               "ground when mlbw is too slow but forward_fill's quality isn't good enough.\n"
               "Recommended: mlbw_l2_inpaint or forward_inpaint for the best quality on a real GPU; "
@@ -2581,7 +2584,10 @@ class MainFrame(wx.Frame):
         self.chk_low_vram = wx.CheckBox(self.grp_processor, label=T("Low VRAM"), name="chk_low_vram")
         self.chk_low_vram.SetToolTip(
             T("Trades speed for lower memory use, by processing in a way that needs less VRAM at once. "
-              "Only turn this on if you're actually running out of memory — it will make things slower."))
+              "Only turn this on if you're actually running out of memory — it will make things slower.\n"
+              "Confirmed real fix for Method forward_splat_fill's out-of-memory crashes on demanding "
+              "footage, even when Depth Batch Size is already set to 1 — turn this on if that method "
+              "OOMs for you."))
         self.chk_tta = wx.CheckBox(self.grp_processor, label=T("TTA"), name="chk_tta")
         self.chk_tta.SetToolTip(
             T("Use flip augmentation to improve depth quality (slow). Runs the depth model on both the "

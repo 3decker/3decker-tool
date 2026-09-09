@@ -6005,17 +6005,30 @@ class MainFrame(wx.Frame):
             self.cbo_foreground_pop.SetValue("0.5")
             self.SetStatusText(T("Applied preset: Action (strong pop effects)"))
         elif name == "3decker":
-            # ADR-057 Amendment 12: moved here from the Genre Preset dropdown's "My
-            # Preferred Settings" entry (Amendment 11) -- the user's own confirmed-
-            # best combo across many real controls at once, not just Decay/Buffer.
-            # Checking chk_scene_batch_auto_ema here goes through the exact same
+            # ADR-057 Amendment 12 (updated ADR-076): moved here from the Genre Preset
+            # dropdown's "My Preferred Settings" entry (Amendment 11) -- the user's own
+            # confirmed-best combo across many real controls at once, not just
+            # Decay/Buffer. Updated to the full real-world-confirmed command from the
+            # 2026-09-09 ADR-075 verification session (ran a real full-length movie
+            # conversion cleanly with these exact settings). Checking
+            # chk_scene_batch_auto_ema here goes through the exact same
             # on_changed_chk_scene_batch_auto_ema()/update_ema_normalize() chain a
             # real user click would use, so Decay Rate/Buffer/the Genre Preset
             # dropdown grey out exactly like a manual checkbox click (ADR-057
             # Amendment 8/9) -- not bypassed.
+            self.cbo_method.SetStringSelection("mlbw_l2_inpaint")
+            self.chk_preserve_screen_border.SetValue(True)
             self.cbo_depth_model.SetStringSelection("Any_V3_Mono_01")
             self.cbo_divergence.SetValue("2.5")
             self.cbo_convergence.SetValue("0.5")
+            self.cbo_background_pop_coverage.SetValue("0.0")
+            self.cbo_stereo_format.SetStringSelection("Half SBS")
+            self.cbo_resolution.SetValue("512")
+
+            self.cbo_inpaint_model.SetStringSelection("light_inpaint_v1")
+            self.cbo_overlap_frames_pre.SetValue("3")
+            self.cbo_overlap_frames_post.SetValue("3")
+            self.chk_depth_aa.SetValue(True)
 
             self.chk_depth_refine.SetValue(True)
             self.cbo_depth_refine_strength.SetValue("1.0")
@@ -6029,10 +6042,44 @@ class MainFrame(wx.Frame):
             self.update_temporal_stabilize()
 
             self.chk_scene_detect.SetValue(True)
+            self.cbo_autocrop.SetStringSelection("BLACK")
+            self.chk_end_time.SetValue(False)
 
-            self.cbo_scene_batch_auto_ema_model.SetStringSelection("Nagadomi_Reference")
+            self.chk_ema_normalize.SetValue(True)
+            self.cbo_ema_decay.SetValue("0.94")
+            self.cbo_ema_buffer.SetValue("60")
+            self.update_ema_normalize()
+
+            self.cbo_scene_batch_auto_ema_model.SetStringSelection("GEMINI AI")
             self.chk_scene_batch_auto_ema.SetValue(True)
             self.on_changed_chk_scene_batch_auto_ema(None)
+
+            # Video encoding/decoding -- codec set before tune so tune's own
+            # codec-dependent choice list (NVENC vs libx264/265) is already correct
+            # by the time "uhq" is applied (see ADR-075's own --tune fix).
+            self.cbo_max_output_size.SetStringSelection("3840x2160")
+            self.grp_video.cbo_pix_fmt.SetStringSelection("yuv420p10le")
+            self.grp_video.cbo_video_format.SetStringSelection("mkv")
+            if self.grp_video.has_nvenc:
+                self.grp_video.cbo_video_codec.SetStringSelection("hevc_nvenc")
+                self.grp_video.update_video_codec()
+                self.grp_video.cbo_tune.SetValue("uhq")
+            self.grp_video.cbo_fps.SetValue("1000.0")
+            self.grp_video.cbo_crf.SetValue("15")
+            self.grp_video_dec.cbo_hwaccel.SetStringSelection("cuda")
+            self.grp_video_dec.chk_software_fallback.SetValue(False)
+
+            self.cbo_max_workers.SetStringSelection("2")
+            self.chk_metadata.SetValue(True)
+            self.chk_preserve_dowi.SetValue(True)
+            self.chk_stereo_mode_tag.SetValue(True)
+            self.chk_auto_resume.SetValue(True)
+
+            # Sets the checkbox only -- deliberately does NOT probe torch.compile
+            # support live (same ADR-068/034 guard Import Command follows), since a
+            # preset apply is a bulk state change, not a single direct interaction
+            # with the Compile checkbox/Device selector.
+            self.chk_compile.SetValue(True)
 
             self.SetStatusText(T("Applied preset: 3DECKER Preferred"))
 
@@ -9848,16 +9895,19 @@ def _self_test_hdr_reinject_rife_manifest_field():
 
 def _self_test_3decker_quick_preset():
     """Regression test for the "3DECKER Preferred" top-bar quick-preset button
-    (docs/ai/AI_DECISIONS.md ADR-057 Amendment 12) -- moved here from the Genre
-    Preset dropdown's "My Preferred Settings" entry (Amendment 11), now
-    btn_quick_preset_3decker next to btn_quick_preset_movie/btn_quick_preset_action,
+    (docs/ai/AI_DECISIONS.md ADR-057 Amendment 12, updated ADR-076) -- moved here
+    from the Genre Preset dropdown's "My Preferred Settings" entry (Amendment 11),
+    now btn_quick_preset_3decker next to btn_quick_preset_movie/btn_quick_preset_action,
     following their exact apply_quick_preset(name) click-handler pattern. Confirms
-    every one of the 11 real controls lands on the exact right value, that clicking
-    it correctly checks "Auto EMA by Scene Length" and drives the SAME grey-out
-    chain a real click on that checkbox would (Decay Rate/Buffer/the Genre Preset
-    dropdown itself all grey out), that "My Preferred Settings" is gone from the
-    Genre Preset dropdown, and that hand-editing afterward causes no error -- same
-    as the Movie/Action quick presets."""
+    every real control this preset touches lands on the exact right value (the full
+    2026-09-09 ADR-075-verified real-world command, not just the original
+    Decay/Buffer-era subset), that clicking it correctly checks "Auto EMA by Scene
+    Length" and drives the SAME grey-out chain a real click on that checkbox would
+    (Decay Rate/Buffer/the Genre Preset dropdown itself all grey out), that "My
+    Preferred Settings" is gone from the Genre Preset dropdown, that torch.compile
+    is set WITHOUT a live GPU probe (ADR-068/034 guard -- same as Import Command),
+    and that hand-editing afterward causes no error -- same as the Movie/Action
+    quick presets."""
     app = None
     frame = None
     try:
@@ -9872,11 +9922,28 @@ def _self_test_3decker_quick_preset():
         frame.chk_scene_batch_auto_ema.SetValue(False)
         frame.update_ema_normalize()
 
+        compile_probe_calls = []
+        orig_update_compile = frame.update_compile
+        frame.update_compile = lambda *a, **kw: compile_probe_calls.append((a, kw))
+
         frame.apply_quick_preset("3decker")
 
+        frame.update_compile = orig_update_compile
+
+        assert frame.cbo_method.GetValue() == "mlbw_l2_inpaint", frame.cbo_method.GetValue()
+        assert frame.chk_preserve_screen_border.GetValue() is True
         assert frame.cbo_depth_model.GetValue() == "Any_V3_Mono_01", frame.cbo_depth_model.GetValue()
         assert frame.cbo_divergence.GetValue() == "2.5", frame.cbo_divergence.GetValue()
         assert frame.cbo_convergence.GetValue() == "0.5", frame.cbo_convergence.GetValue()
+        assert frame.cbo_background_pop_coverage.GetValue() == "0.0", frame.cbo_background_pop_coverage.GetValue()
+        assert frame.cbo_stereo_format.GetValue() == "Half SBS", frame.cbo_stereo_format.GetValue()
+        assert frame.cbo_resolution.GetValue() == "512", frame.cbo_resolution.GetValue()
+
+        assert frame.cbo_inpaint_model.GetValue() == "light_inpaint_v1", frame.cbo_inpaint_model.GetValue()
+        assert frame.cbo_overlap_frames_pre.GetValue() == "3", frame.cbo_overlap_frames_pre.GetValue()
+        assert frame.cbo_overlap_frames_post.GetValue() == "3", frame.cbo_overlap_frames_post.GetValue()
+        assert frame.chk_depth_aa.GetValue() is True
+
         assert frame.chk_depth_refine.GetValue() is True
         assert frame.cbo_depth_refine_strength.GetValue() == "1.0", frame.cbo_depth_refine_strength.GetValue()
         assert frame.cbo_depth_refine_strength.IsEnabled()
@@ -9891,9 +9958,34 @@ def _self_test_3decker_quick_preset():
             frame.cbo_temporal_stabilize_max_shift.GetValue()
         assert frame.cbo_temporal_stabilize_strength.IsEnabled()
         assert frame.chk_scene_detect.GetValue() is True
+        assert frame.cbo_autocrop.GetValue() == "BLACK", frame.cbo_autocrop.GetValue()
+        assert frame.chk_end_time.GetValue() is False
+
         assert frame.chk_scene_batch_auto_ema.GetValue() is True
-        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "Nagadomi_Reference", \
+        assert frame.cbo_scene_batch_auto_ema_model.GetValue() == "GEMINI AI", \
             frame.cbo_scene_batch_auto_ema_model.GetValue()
+
+        assert frame.cbo_max_output_size.GetValue() == "3840x2160", frame.cbo_max_output_size.GetValue()
+        assert frame.grp_video.cbo_pix_fmt.GetValue() == "yuv420p10le", frame.grp_video.cbo_pix_fmt.GetValue()
+        assert frame.grp_video.cbo_video_format.GetValue() == "mkv", frame.grp_video.cbo_video_format.GetValue()
+        if frame.grp_video.has_nvenc:
+            assert frame.grp_video.cbo_video_codec.GetValue() == "hevc_nvenc", \
+                frame.grp_video.cbo_video_codec.GetValue()
+            assert frame.grp_video.cbo_tune.GetValue() == "uhq", frame.grp_video.cbo_tune.GetValue()
+        assert frame.grp_video.cbo_fps.GetValue() == "1000.0", frame.grp_video.cbo_fps.GetValue()
+        assert frame.grp_video.cbo_crf.GetValue() == "15", frame.grp_video.cbo_crf.GetValue()
+        assert frame.grp_video_dec.cbo_hwaccel.GetValue() == "cuda", frame.grp_video_dec.cbo_hwaccel.GetValue()
+        assert frame.grp_video_dec.chk_software_fallback.GetValue() is False
+
+        assert frame.cbo_max_workers.GetValue() == "2", frame.cbo_max_workers.GetValue()
+        assert frame.chk_metadata.GetValue() is True
+        assert frame.chk_preserve_dowi.GetValue() is True
+        assert frame.chk_stereo_mode_tag.GetValue() is True
+        assert frame.chk_auto_resume.GetValue() is True
+
+        assert frame.chk_compile.GetValue() is True
+        assert not compile_probe_calls, \
+            "applying the preset must not trigger a live torch.compile GPU probe"
 
         # Checking Auto EMA (via this preset) must trigger the exact same grey-out
         # chain a real checkbox click drives (ADR-057 Amendment 8/9): Decay

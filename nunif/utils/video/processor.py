@@ -137,6 +137,62 @@ def safe_decode(packet, strict=False):
     return frames
 
 
+def open_input_container_with_hwaccel(input_path, hwaccel, device, disable_software_fallback=False):
+    """
+    Shared container-open choke point for every input-container entry point
+    (_process_video, hook_frame, sample_frames) -- all three previously duplicated
+    the same create_hwaccel()+av.open() pair inline.
+
+    Falls back to software (no hwaccel) decode if the container itself fails to
+    open when hwaccel is requested -- e.g. a hwaccel device context that fails to
+    initialize (av.error.OSError raised from av.open() at
+    VideoCodecContext._init/HWAccel.create time, BEFORE any packet exists) -- and
+    Software Fallback is allowed (disable_software_fallback=False). This is the
+    same "OSError [Errno N] from a broken hwaccel/codec path -> warn and continue"
+    tolerance safe_decode() already applies per-packet (ADR-070), extended to
+    cover a failure at container/hwaccel-device INITIALIZATION time, which
+    happens before the demux loop starts and so can never reach safe_decode's own
+    try/except (there is no packet yet). Confirmed as a real, deterministic
+    failure mode (not per-packet): a real torch.compile probe
+    (check_compile_support(), called by compile_model() when --compile is set)
+    run earlier in the same process on the same CUDA device reliably leaves this
+    process's CUDA primary context in a state where a subsequent
+    av.open(..., hwaccel=<cuda, primary_ctx=1>) fails immediately with the exact
+    "OSError: [Errno 129] Error number -129 occurred" -- 100% reproducible,
+    independent of output video codec, matching the real-world report of an
+    immediate "Scene Boundary Detection (00:00)" crash whenever torch.compile is
+    checked.
+
+    strict callers (disable_software_fallback=True) get the original raw
+    failure, unchanged -- matches safe_decode's own strict=True precedent
+    ("user asked for a hard failure").
+
+    If hwaccel was already None (no hwaccel requested), any av.open() failure is
+    unrelated to hwaccel and is always re-raised -- retrying the identical call
+    with the same arguments would just reproduce the same error while hiding the
+    real one.
+
+    Returns (input_container, effective_hwaccel) -- effective_hwaccel is the
+    hwaccel value callers must actually use for everything downstream (e.g.
+    VideoPreprocessor(hwaccel=...)); it is None after a software fallback so
+    downstream code doesn't keep assuming hwaccel-decoded (e.g. CUDA tensor)
+    frames that are no longer being produced.
+    """
+    input_hwaccel = create_hwaccel(
+        device=hwaccel, device_id=device.index, disable_software_fallback=disable_software_fallback
+    )
+    try:
+        input_container = av.open(input_path, mode="r", metadata_errors="ignore", hwaccel=input_hwaccel)
+    except av.error.OSError:
+        if disable_software_fallback or hwaccel is None:
+            raise
+        print(f"\n[WARN] Hardware-accelerated decode device ({hwaccel}) failed to initialize! "
+              "falling back to software decode...", file=sys.stderr)
+        input_container = av.open(input_path, mode="r", metadata_errors="ignore", hwaccel=None)
+        hwaccel = None
+    return input_container, hwaccel
+
+
 def fix_frame_color_av17(frame: av.VideoFrame, sw_format: VideoMetadata) -> av.VideoFrame:
     # In av17, VideoFrame color properties are lost when HWAccel(is_hw_owned=False),
     # so restore them from the source properties.
@@ -229,11 +285,10 @@ def _process_video(
 
     sw_format = VideoMetadata.from_file(input_path)
     hwaccel = get_compatible_hwaccel(hwaccel, sw_pix_fmt=sw_format.format.name, device=device)
-    input_hwaccel = create_hwaccel(
-        device=hwaccel, device_id=device.index, disable_software_fallback=disable_software_fallback
-    )
     output_path_tmp = make_temporary_file_path(output_path)
-    input_container = av.open(input_path, mode="r", metadata_errors="ignore", hwaccel=input_hwaccel)
+    input_container, hwaccel = open_input_container_with_hwaccel(
+        input_path, hwaccel, device, disable_software_fallback=disable_software_fallback
+    )
 
     if len(input_container.streams.video) == 0:
         raise ValueError("No video stream")
@@ -615,10 +670,9 @@ def hook_frame(
 
     sw_format = VideoMetadata.from_file(input_path)
     hwaccel = get_compatible_hwaccel(hwaccel, sw_pix_fmt=sw_format.format.name, device=device)
-    input_hwaccel = create_hwaccel(
-        device=hwaccel, device_id=device.index, disable_software_fallback=disable_software_fallback
+    input_container, hwaccel = open_input_container_with_hwaccel(
+        input_path, hwaccel, device, disable_software_fallback=disable_software_fallback
     )
-    input_container = av.open(input_path, mode="r", metadata_errors="ignore", hwaccel=input_hwaccel)
 
     if len(input_container.streams.video) == 0:
         raise ValueError("No video stream")
@@ -738,10 +792,9 @@ def sample_frames(
 
     sw_format = VideoMetadata.from_file(input_path)
     hwaccel = get_compatible_hwaccel(hwaccel, sw_pix_fmt=sw_format.format.name, device=device)
-    input_hwaccel = create_hwaccel(
-        device=hwaccel, device_id=device.index, disable_software_fallback=disable_software_fallback
+    input_container, hwaccel = open_input_container_with_hwaccel(
+        input_path, hwaccel, device, disable_software_fallback=disable_software_fallback
     )
-    input_container = av.open(input_path, mode="r", metadata_errors="ignore", hwaccel=input_hwaccel)
 
     if len(input_container.streams.video) == 0:
         raise ValueError("No video stream")

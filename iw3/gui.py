@@ -1351,7 +1351,22 @@ class MainFrame(wx.Frame):
               "behind a moving object's outline. 0 = no reduction (original behavior)."))
 
         self.grp_depth_blend = wx.StaticBox(self.tab_depth_blend, label=T("Dual-Pass Depth Blend"))
-        self.chk_depth_blend = wx.CheckBox(self.grp_depth_blend, label=T("Dual-Pass Depth Blend"),
+
+        # Guided Light (ADR-102): see cpn_sharpen (ADR-101) for the full pattern
+        # explanation. Reverses ADR-097/098's original "no pane needed here, already
+        # compact" judgment call per explicit user request, once they'd seen the same
+        # treatment applied to Standalone Tools -- every field in this group,
+        # including the master enable checkbox itself, moves into this one pane so
+        # the whole feature (off by default anyway) collapses to a single row until
+        # opened.
+        self.cpn_depth_blend = wx.CollapsiblePane(
+            self.grp_depth_blend, label=T("Settings"), name="cpn_depth_blend")
+        self.cpn_depth_blend.Collapse(True)
+        self.cpn_depth_blend.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                   self.on_toggled_depth_blend_collapsible_pane)
+        self.cpn_depth_blend.GetPane().SetName("cpn_depth_blend_pane")
+
+        self.chk_depth_blend = wx.CheckBox(self.cpn_depth_blend.GetPane(), label=T("Dual-Pass Depth Blend"),
                                            name="chk_depth_blend")
         self.chk_depth_blend.SetValue(False)
         self.chk_depth_blend.SetToolTip(
@@ -1363,7 +1378,7 @@ class MainFrame(wx.Frame):
               "disk space (a full frame dump, kept in a '<output>.depth_blend_work' folder you can delete "
               "afterward). Requires a single video file input; not compatible with Automated Scene Batch."))
 
-        self.cbo_depth_blend_model = wx.ComboBox(self.grp_depth_blend,
+        self.cbo_depth_blend_model = wx.ComboBox(self.cpn_depth_blend.GetPane(),
                                                  choices=self.get_depth_models(),
                                                  name="cbo_depth_blend_model")
         self.cbo_depth_blend_model.SetEditable(False)
@@ -1375,7 +1390,7 @@ class MainFrame(wx.Frame):
         elif self.get_depth_models():
             self.cbo_depth_blend_model.SetSelection(0)
 
-        self.cbo_depth_blend_strength = EditableComboBox(self.grp_depth_blend,
+        self.cbo_depth_blend_strength = EditableComboBox(self.cpn_depth_blend.GetPane(),
                                                          choices=["1.0", "0.75", "0.5", "0.25"],
                                                          name="cbo_depth_blend_strength")
         self.cbo_depth_blend_strength.SetSelection(0)
@@ -1389,9 +1404,9 @@ class MainFrame(wx.Frame):
               "Recommended: 1.0 to start; back off toward 0.5-0.75 if you notice any softness/ghosting at "
               "silhouettes even with Edge Suppression on."))
         self.sld_depth_blend_strength = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_strength, 0.25, 1.0, 100)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_strength, 0.25, 1.0, 100)
 
-        self.cbo_depth_blend_region = wx.ComboBox(self.grp_depth_blend,
+        self.cbo_depth_blend_region = wx.ComboBox(self.cpn_depth_blend.GetPane(),
                                                   choices=["detail", "foreground", "background"],
                                                   name="cbo_depth_blend_region")
         self.cbo_depth_blend_region.SetEditable(False)
@@ -1408,7 +1423,7 @@ class MainFrame(wx.Frame):
               "you specifically want the second model's characteristics applied to a whole depth range "
               "(e.g. a steadier video-native model just for a busy background) rather than detail-seeking."))
 
-        self.cbo_depth_blend_region_percent = EditableComboBox(self.grp_depth_blend,
+        self.cbo_depth_blend_region_percent = EditableComboBox(self.cpn_depth_blend.GetPane(),
                                                                 choices=["10", "25", "40", "50"],
                                                                 name="cbo_depth_blend_region_percent")
         self.cbo_depth_blend_region_percent.SetSelection(1)
@@ -1421,10 +1436,10 @@ class MainFrame(wx.Frame):
               "Recommended: 25 as a starting point; keep it modest unless you have a specific reason to "
               "cover more of the scene."))
         self.sld_depth_blend_region_percent = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_region_percent, 10, 50, 1)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_region_percent, 10, 50, 1)
 
-        self.lbl_depth_blend_feather_blur = wx.StaticText(self.grp_depth_blend, label=T("Feather Blur"))
-        self.cbo_depth_blend_feather_blur = EditableComboBox(self.grp_depth_blend,
+        self.lbl_depth_blend_feather_blur = wx.StaticText(self.cpn_depth_blend.GetPane(), label=T("Feather Blur"))
+        self.cbo_depth_blend_feather_blur = EditableComboBox(self.cpn_depth_blend.GetPane(),
                                                               choices=["0", "5", "15", "25", "35"],
                                                               name="cbo_depth_blend_feather_blur")
         self.cbo_depth_blend_feather_blur.SetSelection(0)
@@ -1437,9 +1452,9 @@ class MainFrame(wx.Frame):
               "Recommended: 0 (off) unless you specifically notice a hard seam where blending starts/stops; "
               "start small (5-15) and increase only if needed."))
         self.sld_depth_blend_feather_blur = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_feather_blur, 0, 35, 1)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_feather_blur, 0, 35, 1)
 
-        self.chk_depth_blend_bilateral = wx.CheckBox(self.grp_depth_blend, label=T("Bilateral Denoise"),
+        self.chk_depth_blend_bilateral = wx.CheckBox(self.cpn_depth_blend.GetPane(), label=T("Bilateral Denoise"),
                                                      name="chk_depth_blend_bilateral")
         self.chk_depth_blend_bilateral.SetValue(False)
         self.chk_depth_blend_bilateral.SetToolTip(
@@ -1449,7 +1464,7 @@ class MainFrame(wx.Frame):
               "Con: a real extra processing pass — some added time cost per frame.\n"
               "Recommended: off by default; turn on if you notice speckle/noise texture in the blended "
               "result that a plain Depth Detail Refinement pass doesn't fully clean up."))
-        self.cbo_depth_blend_bilateral_d = EditableComboBox(self.grp_depth_blend,
+        self.cbo_depth_blend_bilateral_d = EditableComboBox(self.cpn_depth_blend.GetPane(),
                                                              choices=["9", "12", "15"],
                                                              name="cbo_depth_blend_bilateral_d")
         self.cbo_depth_blend_bilateral_d.SetSelection(1)
@@ -1458,9 +1473,9 @@ class MainFrame(wx.Frame):
               "Higher = smooths a wider neighborhood but costs more processing time. Recommended: 12 as a "
               "starting point."))
         self.sld_depth_blend_bilateral_d = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_bilateral_d, 9, 15, 1)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_bilateral_d, 9, 15, 1)
         self.cbo_depth_blend_bilateral_sigma_color = EditableComboBox(
-            self.grp_depth_blend, choices=["50", "75", "100"], name="cbo_depth_blend_bilateral_sigma_color")
+            self.cpn_depth_blend.GetPane(), choices=["50", "75", "100"], name="cbo_depth_blend_bilateral_sigma_color")
         self.cbo_depth_blend_bilateral_sigma_color.SetSelection(1)
         self.cbo_depth_blend_bilateral_sigma_color.SetToolTip(
             T("Bilateral filter's depth-value sensitivity, expressed in familiar 0-255-ish terms (matches "
@@ -1469,18 +1484,18 @@ class MainFrame(wx.Frame):
               "edges, not just noise; lower = only smooths very similar depth values together, safer for "
               "real edges but cleans up less noise. Recommended: 75 as a balanced starting point."))
         self.sld_depth_blend_bilateral_sigma_color = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_bilateral_sigma_color, 50, 100, 1)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_bilateral_sigma_color, 50, 100, 1)
         self.cbo_depth_blend_bilateral_sigma_space = EditableComboBox(
-            self.grp_depth_blend, choices=["50", "75", "100"], name="cbo_depth_blend_bilateral_sigma_space")
+            self.cpn_depth_blend.GetPane(), choices=["50", "75", "100"], name="cbo_depth_blend_bilateral_sigma_space")
         self.cbo_depth_blend_bilateral_sigma_space.SetSelection(1)
         self.cbo_depth_blend_bilateral_sigma_space.SetToolTip(
             T("Bilateral filter's spatial reach, in pixels. Higher = smooths across a physically wider "
               "area of the frame; lower = stays more localized. Recommended: 75 as a balanced starting "
               "point, paired with the diameter/color settings above."))
         self.sld_depth_blend_bilateral_sigma_space = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_bilateral_sigma_space, 50, 100, 1)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_bilateral_sigma_space, 50, 100, 1)
 
-        self.chk_depth_blend_clahe = wx.CheckBox(self.grp_depth_blend, label=T("CLAHE Contrast (experimental)"),
+        self.chk_depth_blend_clahe = wx.CheckBox(self.cpn_depth_blend.GetPane(), label=T("CLAHE Contrast (experimental)"),
                                                  name="chk_depth_blend_clahe")
         self.chk_depth_blend_clahe.SetValue(False)
         self.chk_depth_blend_clahe.SetToolTip(
@@ -1488,7 +1503,7 @@ class MainFrame(wx.Frame):
               "an earlier benchmark on this project's own depth data found CLAHE amplifies whatever local "
               "variation it finds, noise included (see docs/ai/AI_DECISIONS.md ADR-001). Provided as an "
               "explicit opt-in experiment only."))
-        self.cbo_depth_blend_clahe_clip = EditableComboBox(self.grp_depth_blend,
+        self.cbo_depth_blend_clahe_clip = EditableComboBox(self.cpn_depth_blend.GetPane(),
                                                             choices=["1.0", "2.0", "4.0"],
                                                             name="cbo_depth_blend_clahe_clip")
         self.cbo_depth_blend_clahe_clip.SetSelection(1)
@@ -1497,8 +1512,8 @@ class MainFrame(wx.Frame):
               "stronger local contrast, but also amplifies more noise (see the checkbox above's warning). "
               "Only matters if CLAHE Contrast is turned on."))
         self.sld_depth_blend_clahe_clip = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_clahe_clip, 1.0, 4.0, 100)
-        self.cbo_depth_blend_clahe_tile = EditableComboBox(self.grp_depth_blend,
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_clahe_clip, 1.0, 4.0, 100)
+        self.cbo_depth_blend_clahe_tile = EditableComboBox(self.cpn_depth_blend.GetPane(),
                                                             choices=["4", "8", "16"],
                                                             name="cbo_depth_blend_clahe_tile")
         self.cbo_depth_blend_clahe_tile.SetSelection(1)
@@ -1507,9 +1522,9 @@ class MainFrame(wx.Frame):
               "adjustment. More tiles = more localized (small-area) contrast changes; fewer tiles = "
               "smoother, more global adjustment. Only matters if CLAHE Contrast is turned on."))
         self.sld_depth_blend_clahe_tile = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_clahe_tile, 4, 16, 1)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_clahe_tile, 4, 16, 1)
 
-        self.chk_depth_blend_align = wx.CheckBox(self.grp_depth_blend, label=T("Depth Scale Alignment"),
+        self.chk_depth_blend_align = wx.CheckBox(self.cpn_depth_blend.GetPane(), label=T("Depth Scale Alignment"),
                                                  name="chk_depth_blend_align")
         self.chk_depth_blend_align.SetValue(False)
         self.chk_depth_blend_align.SetToolTip(
@@ -1522,7 +1537,7 @@ class MainFrame(wx.Frame):
               "Decay to its right for the smoothing strength."))
 
         self.cbo_depth_blend_align_decay = EditableComboBox(
-            self.grp_depth_blend, choices=["0.95", "0.9", "0.75", "0.5", "0"],
+            self.cpn_depth_blend.GetPane(), choices=["0.95", "0.9", "0.75", "0.5", "0"],
             name="cbo_depth_blend_align_decay")
         self.cbo_depth_blend_align_decay.SetSelection(1)
         self.cbo_depth_blend_align_decay.SetToolTip(
@@ -1538,11 +1553,11 @@ class MainFrame(wx.Frame):
               "point; lower it only if you specifically notice the alignment lagging behind a real, "
               "sudden change between the two models."))
         self.sld_depth_blend_align_decay = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_align_decay, 0.0, 0.95, 100)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_align_decay, 0.0, 0.95, 100)
 
-        self.lbl_depth_blend_edge_suppression = wx.StaticText(self.grp_depth_blend, label=T("Edge Suppression"))
+        self.lbl_depth_blend_edge_suppression = wx.StaticText(self.cpn_depth_blend.GetPane(), label=T("Edge Suppression"))
         self.cbo_depth_blend_edge_suppression = EditableComboBox(
-            self.grp_depth_blend, choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
+            self.cpn_depth_blend.GetPane(), choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
             name="cbo_depth_blend_edge_suppression")
         self.cbo_depth_blend_edge_suppression.SetSelection(2)
         self.cbo_depth_blend_edge_suppression.SetToolTip(
@@ -1554,10 +1569,10 @@ class MainFrame(wx.Frame):
               "narrower protection, more detail blending everywhere but more risk of soft edges. Default "
               "0.5 is a middle ground between two previously-tested extremes."))
         self.sld_depth_blend_edge_suppression = _build_stereo_slider(
-            self.grp_depth_blend, self.cbo_depth_blend_edge_suppression, 0.0, 1.0, 100)
+            self.cpn_depth_blend.GetPane(), self.cbo_depth_blend_edge_suppression, 0.0, 1.0, 100)
 
         self.chk_depth_blend_edge_hard_cutoff = wx.CheckBox(
-            self.grp_depth_blend, label=T("Hard Edge Cutoff"), name="chk_depth_blend_edge_hard_cutoff")
+            self.cpn_depth_blend.GetPane(), label=T("Hard Edge Cutoff"), name="chk_depth_blend_edge_hard_cutoff")
         self.chk_depth_blend_edge_hard_cutoff.SetValue(False)
         self.chk_depth_blend_edge_hard_cutoff.SetToolTip(
             T("What it's for: only matters together with Edge Suppression above ('detail' region only). "
@@ -1584,7 +1599,7 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.sld_depth_blend_region_percent, (j, 2), flag=wx.EXPAND)
 
         layout_depth_blend.Add((0, 6), (j := j + 1, 0))
-        layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout_depth_blend.Add(wx.StaticLine(self.cpn_depth_blend.GetPane()), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.lbl_depth_blend_feather_blur, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_feather_blur, (j, 1), flag=wx.EXPAND)
@@ -1603,21 +1618,29 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.sld_depth_blend_clahe_tile, (j, 2), flag=wx.EXPAND)
 
         layout_depth_blend.Add((0, 6), (j := j + 1, 0))
-        layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout_depth_blend.Add(wx.StaticLine(self.cpn_depth_blend.GetPane()), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.chk_depth_blend_align, (j := j + 1, 0), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_align_decay, (j, 2), flag=wx.EXPAND)
         layout_depth_blend.Add(self.sld_depth_blend_align_decay, (j := j + 1, 2), flag=wx.EXPAND)
 
         layout_depth_blend.Add((0, 6), (j := j + 1, 0))
-        layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout_depth_blend.Add(wx.StaticLine(self.cpn_depth_blend.GetPane()), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.lbl_depth_blend_edge_suppression, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_edge_suppression, (j, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.chk_depth_blend_edge_hard_cutoff, (j, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.sld_depth_blend_edge_suppression, (j := j + 1, 1), flag=wx.EXPAND)
+        self.cpn_depth_blend.GetPane().SetSizer(layout_depth_blend)
+
+        self.pnl_depth_blend_dot = wx.Panel(self.grp_depth_blend, size=self.FromDIP((10, 10)))
+        self.pnl_depth_blend_dot.SetBackgroundColour(wx.Colour(120, 60, 200))
+        pane_header_row_depth_blend = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_depth_blend.Add(self.pnl_depth_blend_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_depth_blend.Add(self.cpn_depth_blend, 1, wx.EXPAND)
+
         sizer_depth_blend = wx.StaticBoxSizer(self.grp_depth_blend, wx.VERTICAL)
-        sizer_depth_blend.Add(layout_depth_blend, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_depth_blend.Add(pane_header_row_depth_blend, 0, wx.ALL | wx.EXPAND, 4)
 
         self.cpn_stereo_pop_divergence = wx.CollapsiblePane(
             self.grp_stereo, label=T("Pop && Divergence"), name="cpn_stereo_pop_divergence")
@@ -5101,6 +5124,8 @@ class MainFrame(wx.Frame):
             self.cpn_stereo_inpainting_depth.GetPane(),
             self.cpn_stereo_stability_flicker.GetPane(),
             self.cpn_video_filter_scene_batch.GetPane(),
+            # ADR-102: the whole Dual-Pass Depth Blend group.
+            self.cpn_depth_blend.GetPane(),
             # ADR-101: one pane per Standalone Tool.
             self.cpn_hdr_reinject.GetPane(),
             self.cpn_subsearch.GetPane(),
@@ -5247,12 +5272,15 @@ class MainFrame(wx.Frame):
 
     def get_depth_blend_sliders_and_panes(self):
         """Same persistence-exclusion purpose as get_stereo_sliders_and_panes(), for
-        the Guided Light sliders added to Dual-Pass Depth Blend. No collapsible pane
-        was added on this tab -- it's compact enough on its own (~14 fields, already
-        organized into checkbox-gated Bilateral/CLAHE/Alignment sub-clusters shown via
-        Enable()-graying, not Show()/Hide() -- confirmed live this doesn't need the
-        same declutter treatment Stereo Generation's ~60 fields did)."""
-        return [getattr(self, slider_attr) for _, slider_attr, *_ in DEPTH_BLEND_SLIDER_FIELDS]
+        the Guided Light sliders added to Dual-Pass Depth Blend plus the one pane
+        added in ADR-102 (see cpn_depth_blend). ADR-097/098 originally judged no pane
+        was needed here (compact enough on its own, ~14 fields already organized into
+        checkbox-gated Bilateral/CLAHE/Alignment sub-clusters shown via
+        Enable()-graying); ADR-102 reverses that per explicit user request, mirroring
+        ADR-101's reversal for Standalone Tools -- the whole group, including the
+        master chk_depth_blend enable checkbox, now collapses to a single row."""
+        sliders = [getattr(self, slider_attr) for _, slider_attr, *_ in DEPTH_BLEND_SLIDER_FIELDS]
+        return sliders + [self.cpn_depth_blend]
 
     def get_processor_sliders_and_panes(self):
         """Same persistence-exclusion purpose as get_stereo_sliders_and_panes(), for
@@ -5312,6 +5340,21 @@ class MainFrame(wx.Frame):
             wrap_sizer = self.tab_wrap_stereo.GetSizer()
             if wrap_sizer is not None:
                 self.tab_wrap_stereo.SetMinSize(wrap_sizer.CalcMin())
+        refresh_layouts(self)
+        self._clamp_frame_to_screen()
+        event.Skip()
+
+    def on_toggled_depth_blend_collapsible_pane(self, event):
+        """Same fix as on_toggled_stereo_collapsible_pane(), for the one Guided Light
+        pane added to Dual-Pass Depth Blend (ADR-102) -- tab_depth_blend/
+        tab_wrap_depth_blend in place of tab_stereo/tab_wrap_stereo."""
+        refresh_layouts(self)
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+        else:
+            wrap_sizer = self.tab_wrap_depth_blend.GetSizer()
+            if wrap_sizer is not None:
+                self.tab_wrap_depth_blend.SetMinSize(wrap_sizer.CalcMin())
         refresh_layouts(self)
         self._clamp_frame_to_screen()
         event.Skip()
@@ -9554,6 +9597,97 @@ def _self_test_standalone_tools_collapsible_sections():
     print("_self_test_standalone_tools_collapsible_sections: PASS")
 
 
+def _self_test_depth_blend_collapsible_section():
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the
+    one Guided Light pane added to Dual-Pass Depth Blend (ADR-102, reverses
+    ADR-097/098's original "no pane needed" call) -- tab_depth_blend/
+    tab_wrap_depth_blend/on_toggled_depth_blend_collapsible_pane in place of the
+    Stereo Generation equivalents. Also checks the pane has a real name, starts
+    collapsed, that the master chk_depth_blend enable checkbox was correctly
+    reparented into it, and that several of the 10 pre-existing sliders (not just
+    one, spanning different sub-clusters: main Strength, Bilateral D, Edge
+    Suppression) still track their combos correctly after reparenting. Exercised in
+    both layout modes, and a switch back to Tabbed. No GPU or real movie file
+    needed."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    try:
+        gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+        frame = gui_mod.MainFrame()
+        panes = frame.get_depth_blend_sliders_and_panes()
+        panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
+        assert len(panes) == 1, f"expected 1 Dual-Pass Depth Blend pane, found {len(panes)}"
+        pane = panes[0]
+        assert pane.GetName() == "cpn_depth_blend", pane.GetName()
+        assert pane.IsCollapsed(), "cpn_depth_blend should start collapsed by default"
+        assert frame.chk_depth_blend.GetParent() is pane.GetPane(), \
+            "chk_depth_blend (master enable checkbox) was not reparented into cpn_depth_blend"
+
+        for combo_attr, slider_attr, expected_value, expected_slider in (
+            ("cbo_depth_blend_strength", "sld_depth_blend_strength", "1.0", 100),
+            ("cbo_depth_blend_bilateral_d", "sld_depth_blend_bilateral_d", "15", 15),
+            ("cbo_depth_blend_edge_suppression", "sld_depth_blend_edge_suppression", "1.0", 100),
+        ):
+            combo = getattr(frame, combo_attr)
+            slider = getattr(frame, slider_attr)
+            combo.SetValue(expected_value)
+            combo.ProcessWindowEvent(wx.CommandEvent(wx.wxEVT_TEXT, combo.GetId()))
+            assert slider.GetValue() == expected_slider, \
+                f"{combo_attr}'s slider lost sync with its combo after reparenting into cpn_depth_blend " \
+                f"(expected {expected_slider}, got {slider.GetValue()})"
+
+        def toggle_and_check(label, check_wrapper_tracks=None):
+            before_expanded = pane.IsExpanded()
+            tab_min_before = frame.tab_depth_blend.GetSizer().CalcMin()
+            if check_wrapper_tracks is not None:
+                wrap_min_before = check_wrapper_tracks()
+
+            pane.Collapse(before_expanded)
+            frame.on_toggled_depth_blend_collapsible_pane(
+                wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+            tab_min_after = frame.tab_depth_blend.GetSizer().CalcMin()
+            assert tab_min_after != tab_min_before, \
+                f"{label}: pane toggle did not change tab_depth_blend's own content size " \
+                f"({tab_min_before} -> {tab_min_after})"
+            w, h = tab_min_after
+            assert w > 50 and h > 50, f"{label}: tab_depth_blend collapsed to near-zero after toggling"
+
+            if check_wrapper_tracks is not None:
+                wrap_min_after = check_wrapper_tracks()
+                assert wrap_min_after != wrap_min_before, \
+                    f"{label}: wrapper did not track the pane's toggle ({wrap_min_before} -> {wrap_min_after})"
+                assert wrap_min_after[1] >= tab_min_after[1], \
+                    f"{label}: wrapper height ({wrap_min_after[1]}) fell below tab_depth_blend's own " \
+                    f"requirement ({tab_min_after[1]}) -- would clip"
+
+            pane.Collapse(before_expanded)
+            frame.on_toggled_depth_blend_collapsible_pane(
+                wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+        toggle_and_check("Tabbed", check_wrapper_tracks=lambda: frame.tab_wrap_depth_blend.GetSizer().CalcMin())
+
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_SINGLE_PAGE)
+        toggle_and_check("Single Page")
+        w, h = frame.pnl_single.GetSizer().CalcMin()
+        assert w > 100 and h > 100, "pnl_single collapsed to near-zero after the Depth Blend pane toggle"
+
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_TABS)
+        toggle_and_check("Tabbed (after switch back)",
+                          check_wrapper_tracks=lambda: frame.tab_wrap_depth_blend.GetSizer().CalcMin())
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_depth_blend_collapsible_section: PASS")
+
+
 def _self_test_zoom_level_persistence():
     """Regression test for UI Zoom's persisted preference: round-trips through the
     real save/load helpers using a scratch file so the user's actual
@@ -11674,6 +11808,7 @@ def _run_self_tests():
     _self_test_stereo_collapsible_sections()
     _self_test_video_filter_collapsible_section()
     _self_test_standalone_tools_collapsible_sections()
+    _self_test_depth_blend_collapsible_section()
     _self_test_zoom_level_persistence()
     _self_test_zoom_startup_restore()
     _self_test_zoom_live_rescale()

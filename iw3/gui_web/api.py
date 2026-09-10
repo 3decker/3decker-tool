@@ -14,6 +14,8 @@ from .worker import ConversionJob
 from .paths_state import (
     get_last_input_dir, get_last_output_dir, set_last_input_dir, set_last_output_dir,
 )
+from . import presets_state
+from .command_line import build_cli_command, parse_cli_command
 
 
 class Api:
@@ -66,10 +68,37 @@ class Api:
         return chosen
 
     def start(self, settings):
+        # Auto-save the session on every Start, matching gui.py's own
+        # CONFIG_PATH auto-save-on-close behavior closely enough (this GUI
+        # has no equivalent "on window close" hook to reuse, but "state as
+        # of the last real run" is the more useful moment to capture anyway).
+        presets_state.save_session(settings)
         if self._job is None:
             self._job = ConversionJob(self._window)
         self._job.start(settings)
         return {"started": True}
+
+    def get_session(self):
+        return presets_state.load_session()
+
+    def list_presets(self):
+        return presets_state.list_presets()
+
+    def save_preset(self, name, settings):
+        return presets_state.save_preset(name, settings)
+
+    def load_preset(self, name):
+        return presets_state.load_preset(name)
+
+    def delete_preset(self, name):
+        return presets_state.delete_preset(name)
+
+    def copy_command(self, settings):
+        return build_cli_command(settings)
+
+    def import_command(self, text):
+        settings, error = parse_cli_command(text)
+        return {"settings": settings, "error": error}
 
     def cancel(self):
         if self._job is not None:

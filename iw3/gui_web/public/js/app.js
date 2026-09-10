@@ -9,9 +9,135 @@
     document.getElementById("btnSuspend").disabled = !running;
   }
 
+  async function refreshPresetList() {
+    var names = await IW3Api.call("list_presets");
+    var list = document.getElementById("presetListOptions");
+    list.innerHTML = "";
+    names.forEach(function (name) {
+      var opt = document.createElement("option");
+      opt.value = name;
+      list.appendChild(opt);
+    });
+  }
+
+  function applySettingsAndPaths(settings) {
+    if (!settings) return;
+    IW3Renderer.setValues(settings);
+    if (settings.input) {
+      inputPath = settings.input;
+      document.getElementById("inputPath").value = settings.input;
+    }
+    if (settings.output) {
+      outputPath = settings.output;
+      document.getElementById("outputPath").value = settings.output;
+    }
+  }
+
   async function boot() {
     var schema = await IW3Api.call("get_schema");
     IW3Renderer.render(schema, document.getElementById("tabRail"), document.getElementById("tabPanels"));
+
+    await refreshPresetList();
+    var session = await IW3Api.call("get_session");
+    applySettingsAndPaths(session);
+
+    document.getElementById("btnPresetMovie").addEventListener("click", function () {
+      IW3Renderer.setValues(window.IW3_QUICK_PRESETS.movie);
+      document.getElementById("statusText").textContent =
+        "Applied preset: " + window.IW3_QUICK_PRESET_LABELS.movie;
+    });
+    document.getElementById("btnPresetAction").addEventListener("click", function () {
+      IW3Renderer.setValues(window.IW3_QUICK_PRESETS.action);
+      document.getElementById("statusText").textContent =
+        "Applied preset: " + window.IW3_QUICK_PRESET_LABELS.action;
+    });
+    document.getElementById("btnPresetDecker").addEventListener("click", function () {
+      IW3Renderer.setValues(window.IW3_QUICK_PRESETS.decker);
+      document.getElementById("statusText").textContent =
+        "Applied preset: " + window.IW3_QUICK_PRESET_LABELS.decker;
+    });
+
+    document.getElementById("btnLoadPreset").addEventListener("click", async function () {
+      var name = document.getElementById("presetSelect").value.trim();
+      if (!name) return;
+      var settings = await IW3Api.call("load_preset", name);
+      if (!settings) {
+        document.getElementById("statusText").textContent = "No preset named \"" + name + "\"";
+        return;
+      }
+      applySettingsAndPaths(settings);
+      document.getElementById("statusText").textContent = "Loaded preset: " + name;
+    });
+
+    document.getElementById("btnSavePreset").addEventListener("click", async function () {
+      var name = document.getElementById("presetSelect").value.trim();
+      if (!name) {
+        document.getElementById("statusText").textContent = "Type a preset name first";
+        return;
+      }
+      var settings = IW3Renderer.getSettings();
+      settings.input = inputPath;
+      settings.output = outputPath;
+      await IW3Api.call("save_preset", name, settings);
+      await refreshPresetList();
+      document.getElementById("statusText").textContent = "Saved preset: " + name;
+    });
+
+    document.getElementById("btnDeletePreset").addEventListener("click", async function () {
+      var name = document.getElementById("presetSelect").value.trim();
+      if (!name) return;
+      await IW3Api.call("delete_preset", name);
+      await refreshPresetList();
+      document.getElementById("statusText").textContent = "Deleted preset: " + name;
+    });
+
+    document.getElementById("btnCopyCommand").addEventListener("click", async function () {
+      var settings = IW3Renderer.getSettings();
+      settings.input = inputPath || "";
+      settings.output = outputPath || "";
+      var cmd = await IW3Api.call("copy_command", settings);
+      var copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(cmd);
+          copied = true;
+        }
+      } catch (e) {
+        copied = false;
+      }
+      if (copied) {
+        document.getElementById("statusText").textContent = "Command copied to clipboard";
+      } else {
+        // Clipboard write isn't guaranteed to work in every webview context --
+        // show it in the Import Command box instead so it's still usable
+        // (select-all + Ctrl+C) rather than silently failing.
+        document.getElementById("importCommandText").value = cmd;
+        document.getElementById("importCommandBox").hidden = false;
+        document.getElementById("statusText").textContent =
+          "Clipboard unavailable -- command shown below, select and copy manually";
+      }
+    });
+
+    document.getElementById("btnImportCommand").addEventListener("click", function () {
+      document.getElementById("importCommandBox").hidden = false;
+      document.getElementById("importCommandText").focus();
+    });
+    document.getElementById("btnImportCommandCancel").addEventListener("click", function () {
+      document.getElementById("importCommandBox").hidden = true;
+      document.getElementById("importCommandError").textContent = "";
+    });
+    document.getElementById("btnImportCommandApply").addEventListener("click", async function () {
+      var text = document.getElementById("importCommandText").value;
+      var result = await IW3Api.call("import_command", text);
+      if (result.error) {
+        document.getElementById("importCommandError").textContent = result.error;
+        return;
+      }
+      applySettingsAndPaths(result.settings);
+      document.getElementById("importCommandBox").hidden = true;
+      document.getElementById("importCommandError").textContent = "";
+      document.getElementById("statusText").textContent = "Imported command";
+    });
 
     document.getElementById("btnBrowseInput").addEventListener("click", async function () {
       var p = await IW3Api.call("browse_input");

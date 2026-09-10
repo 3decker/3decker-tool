@@ -18,6 +18,49 @@
 .app-title { text-shadow: 0 0 10px rgba(79, 216, 255, .5); }
 .app-status { font-family: var(--font-mono); font-size: 11.5px; color: var(--fg-dim); }
 
+.app-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+.toolbar-label { font-size: 12px; margin-right: 2px; }
+.app-toolbar select { min-width: 140px; }
+.toolbar-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.import-command-box {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.import-command-box textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 8px;
+  border-radius: 6px;
+  resize: vertical;
+}
+.import-command-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.import-command-error { color: var(--danger); font-size: 12px; }
+
 .app-iopaths {
   padding: 12px 18px;
   border-bottom: 1px solid var(--border);

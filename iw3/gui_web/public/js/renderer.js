@@ -182,5 +182,30 @@ window.IW3Renderer = (function () {
     return Object.assign({}, values);
   }
 
-  return { render: render, getSettings: getSettings };
+  // Applies a settings object (from a Quick Preset, a loaded named preset,
+  // Import Command, or the restored last session) back onto the real form
+  // controls -- not just the internal `values` map, so what's on screen
+  // always matches what getSettings() would report next. Unknown keys
+  // (e.g. a preset saved before a field existed) and undefined values are
+  // silently skipped rather than raising, since presets/sessions are
+  // expected to drift from the current schema over time.
+  function setValues(obj) {
+    if (!obj) return;
+    Object.keys(obj).forEach(function (name) {
+      var f = fieldsByName[name];
+      var input = document.getElementById("field-" + name);
+      if (!f || !input) return;
+      var value = obj[name];
+      if (value === undefined) return;
+      if (f.widget === "checkbox") {
+        input.checked = !!value;
+      } else {
+        input.value = value == null ? "" : String(value);
+      }
+      values[name] = readValue(f, input);
+    });
+    applyRules();
+  }
+
+  return { render: render, getSettings: getSettings, setValues: setValues };
 })();

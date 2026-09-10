@@ -178,7 +178,7 @@ Write-Host "  Launcher scripts copied to $root."
 # Feature overview / changelog docs -- these live at the nunif repo root (so they
 # also render nicely when browsing the repo on GitHub), copied out here too so a
 # fresh install has them sitting right next to iw3-gui.bat, not buried in nunif\.
-$docFiles = @("3DECKER_README.md", "3DECKER_CHANGELOG.md", "3DECKER_SETTINGS_GUIDE.md")
+$docFiles = @("3DECKER_README.md", "3DECKER_CHANGELOG.md", "3DECKER_SETTINGS_GUIDE.md", "3DECKER_INSTALL.md")
 foreach ($f in $docFiles) {
     $src = Join-Path $nunifDir $f
     if (Test-Path $src) {

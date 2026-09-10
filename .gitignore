@@ -61,6 +61,11 @@ tmp
 /nunif/utils/color_lut
 /tests/data
 
+# New pywebview-based GUI (ADR-081 onward) -- untracked for now, not yet ready
+# for public release (ADR-095). Files remain on disk and fully usable locally;
+# this only keeps them out of what gets pushed to the public repo.
+/iw3/gui_web/
+
 # ----- Python.gitignore
 
 .ruff_cache

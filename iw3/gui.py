@@ -662,6 +662,11 @@ class IW3App(wx.App):
         # row off-screen, and why shrinking is safe here.
         main_frame._clamp_frame_to_screen()
         self.SetTopWindow(main_frame)
+        # ADR-107: silent background check for a 3DECKER update, once per launch --
+        # startWorker schedules this on a background thread and returns immediately, so
+        # it adds no startup delay; see on_exit_startup_check_updates_worker() for why it
+        # stays silent unless there's a real update to report.
+        startWorker(main_frame.on_exit_startup_check_updates_worker, main_frame.run_check_updates)
         return True
 
 
@@ -7373,6 +7378,23 @@ class MainFrame(wx.Frame):
         # Runs on a background thread via startWorker -- this hits the network
         # (git fetch) and must never freeze the GUI thread while waiting on it.
         return update_check.check_for_updates()
+
+    def on_exit_startup_check_updates_worker(self, result):
+        """Completion callback for the automatic startup update check (ADR-107) -- kicked
+        off once from IW3App.OnInit(), NOT wired to the Check for Updates button. Unlike
+        on_exit_check_updates_worker() just below, this must stay completely silent
+        except for the genuine "updates available" case: an offline launch or an
+        already-up-to-date install (the common case) must show nothing at all, not an
+        error dialog or a status-bar change, or opening the app would get noisier for
+        every user on every launch for no reason."""
+        try:
+            check_result = result.get()
+        except: # noqa
+            return
+        if check_result["status"] != "updates_available":
+            return
+        wx.MessageBox(update_check.format_result_message(check_result),
+                      T("3DECKER Update Available"), wx.OK | wx.ICON_INFORMATION)
 
     def on_exit_check_updates_worker(self, result):
         self.btn_check_updates.Enable()

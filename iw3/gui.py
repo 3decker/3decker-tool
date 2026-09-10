@@ -555,6 +555,30 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_ema_buffer", "sld_stereo_ema_buffer", 1, 150, 1, True, None),
 ]
 
+# Guided Light pattern extended to Dual-Pass Depth Blend (grp_depth_blend) -- same
+# shape as STEREO_SLIDER_FIELDS, same _build_stereo_slider/_on_stereo_slider_scroll/
+# _on_stereo_combo_text_sync_slider helpers (already fully generic, not stereo-tab-
+# specific despite the name). No field here needs an extra_sync callback.
+DEPTH_BLEND_SLIDER_FIELDS = [
+    ("cbo_depth_blend_strength", "sld_depth_blend_strength", 0.25, 1.0, 100, False, None),
+    ("cbo_depth_blend_region_percent", "sld_depth_blend_region_percent", 10, 50, 1, True, None),
+    ("cbo_depth_blend_feather_blur", "sld_depth_blend_feather_blur", 0, 35, 1, True, None),
+    ("cbo_depth_blend_bilateral_d", "sld_depth_blend_bilateral_d", 9, 15, 1, True, None),
+    ("cbo_depth_blend_bilateral_sigma_color", "sld_depth_blend_bilateral_sigma_color", 50, 100, 1, True, None),
+    ("cbo_depth_blend_bilateral_sigma_space", "sld_depth_blend_bilateral_sigma_space", 50, 100, 1, True, None),
+    ("cbo_depth_blend_clahe_clip", "sld_depth_blend_clahe_clip", 1.0, 4.0, 100, False, None),
+    ("cbo_depth_blend_clahe_tile", "sld_depth_blend_clahe_tile", 4, 16, 1, True, None),
+    ("cbo_depth_blend_align_decay", "sld_depth_blend_align_decay", 0.0, 0.95, 100, False, None),
+    ("cbo_depth_blend_edge_suppression", "sld_depth_blend_edge_suppression", 0.0, 1.0, 100, False, None),
+]
+
+# Guided Light pattern extended to Processor (grp_processor). Both fields here are
+# plain ints with no blank/"off" sentinel.
+PROCESSOR_SLIDER_FIELDS = [
+    ("cbo_batch_size", "sld_processor_batch_size", 1, 64, 1, True, None),
+    ("cbo_max_workers", "sld_processor_max_workers", 0, 16, 1, True, None),
+]
+
 
 def _build_stereo_slider(parent, combo, min_val, max_val, multiplier):
     """Constructs a wx.Slider for a Guided Light pilot (ADR-097) numeric field,
@@ -1357,6 +1381,8 @@ class MainFrame(wx.Frame):
               "which exists specifically to manage that risk.\n"
               "Recommended: 1.0 to start; back off toward 0.5-0.75 if you notice any softness/ghosting at "
               "silhouettes even with Edge Suppression on."))
+        self.sld_depth_blend_strength = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_strength, 0.25, 1.0, 100)
 
         self.cbo_depth_blend_region = wx.ComboBox(self.grp_depth_blend,
                                                   choices=["detail", "foreground", "background"],
@@ -1387,6 +1413,8 @@ class MainFrame(wx.Frame):
               "midground, where a difference between the two models becomes more likely to be noticeable.\n"
               "Recommended: 25 as a starting point; keep it modest unless you have a specific reason to "
               "cover more of the scene."))
+        self.sld_depth_blend_region_percent = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_region_percent, 10, 50, 1)
 
         self.lbl_depth_blend_feather_blur = wx.StaticText(self.grp_depth_blend, label=T("Feather Blur"))
         self.cbo_depth_blend_feather_blur = EditableComboBox(self.grp_depth_blend,
@@ -1401,6 +1429,8 @@ class MainFrame(wx.Frame):
               "soft band, rather than fixing a hard edge.\n"
               "Recommended: 0 (off) unless you specifically notice a hard seam where blending starts/stops; "
               "start small (5-15) and increase only if needed."))
+        self.sld_depth_blend_feather_blur = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_feather_blur, 0, 35, 1)
 
         self.chk_depth_blend_bilateral = wx.CheckBox(self.grp_depth_blend, label=T("Bilateral Denoise"),
                                                      name="chk_depth_blend_bilateral")
@@ -1420,6 +1450,8 @@ class MainFrame(wx.Frame):
             T("Bilateral filter diameter, in pixels — how large an area around each pixel is considered. "
               "Higher = smooths a wider neighborhood but costs more processing time. Recommended: 12 as a "
               "starting point."))
+        self.sld_depth_blend_bilateral_d = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_bilateral_d, 9, 15, 1)
         self.cbo_depth_blend_bilateral_sigma_color = EditableComboBox(
             self.grp_depth_blend, choices=["50", "75", "100"], name="cbo_depth_blend_bilateral_sigma_color")
         self.cbo_depth_blend_bilateral_sigma_color.SetSelection(1)
@@ -1429,6 +1461,8 @@ class MainFrame(wx.Frame):
               "Higher = willing to smooth across BIGGER depth differences, which risks blurring real depth "
               "edges, not just noise; lower = only smooths very similar depth values together, safer for "
               "real edges but cleans up less noise. Recommended: 75 as a balanced starting point."))
+        self.sld_depth_blend_bilateral_sigma_color = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_bilateral_sigma_color, 50, 100, 1)
         self.cbo_depth_blend_bilateral_sigma_space = EditableComboBox(
             self.grp_depth_blend, choices=["50", "75", "100"], name="cbo_depth_blend_bilateral_sigma_space")
         self.cbo_depth_blend_bilateral_sigma_space.SetSelection(1)
@@ -1436,6 +1470,8 @@ class MainFrame(wx.Frame):
             T("Bilateral filter's spatial reach, in pixels. Higher = smooths across a physically wider "
               "area of the frame; lower = stays more localized. Recommended: 75 as a balanced starting "
               "point, paired with the diameter/color settings above."))
+        self.sld_depth_blend_bilateral_sigma_space = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_bilateral_sigma_space, 50, 100, 1)
 
         self.chk_depth_blend_clahe = wx.CheckBox(self.grp_depth_blend, label=T("CLAHE Contrast (experimental)"),
                                                  name="chk_depth_blend_clahe")
@@ -1453,6 +1489,8 @@ class MainFrame(wx.Frame):
             T("CLAHE contrast clip limit — how aggressively local contrast gets boosted. Higher = "
               "stronger local contrast, but also amplifies more noise (see the checkbox above's warning). "
               "Only matters if CLAHE Contrast is turned on."))
+        self.sld_depth_blend_clahe_clip = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_clahe_clip, 1.0, 4.0, 100)
         self.cbo_depth_blend_clahe_tile = EditableComboBox(self.grp_depth_blend,
                                                             choices=["4", "8", "16"],
                                                             name="cbo_depth_blend_clahe_tile")
@@ -1461,6 +1499,8 @@ class MainFrame(wx.Frame):
             T("CLAHE tile grid size (NxN) — how finely the frame is divided up for LOCAL contrast "
               "adjustment. More tiles = more localized (small-area) contrast changes; fewer tiles = "
               "smoother, more global adjustment. Only matters if CLAHE Contrast is turned on."))
+        self.sld_depth_blend_clahe_tile = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_clahe_tile, 4, 16, 1)
 
         self.chk_depth_blend_align = wx.CheckBox(self.grp_depth_blend, label=T("Depth Scale Alignment"),
                                                  name="chk_depth_blend_align")
@@ -1490,6 +1530,8 @@ class MainFrame(wx.Frame):
               "Recommended: 0.9 (default, matches this feature's original tuning) as a safe starting "
               "point; lower it only if you specifically notice the alignment lagging behind a real, "
               "sudden change between the two models."))
+        self.sld_depth_blend_align_decay = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_align_decay, 0.0, 0.95, 100)
 
         self.lbl_depth_blend_edge_suppression = wx.StaticText(self.grp_depth_blend, label=T("Edge Suppression"))
         self.cbo_depth_blend_edge_suppression = EditableComboBox(
@@ -1504,6 +1546,8 @@ class MainFrame(wx.Frame):
               "doubled-edge look but suppresses a touch more real detail blending near edges too. Lower = "
               "narrower protection, more detail blending everywhere but more risk of soft edges. Default "
               "0.5 is a middle ground between two previously-tested extremes."))
+        self.sld_depth_blend_edge_suppression = _build_stereo_slider(
+            self.grp_depth_blend, self.cbo_depth_blend_edge_suppression, 0.0, 1.0, 100)
 
         self.chk_depth_blend_edge_hard_cutoff = wx.CheckBox(
             self.grp_depth_blend, label=T("Hard Edge Cutoff"), name="chk_depth_blend_edge_hard_cutoff")
@@ -1529,25 +1573,34 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.cbo_depth_blend_strength, (j, 2), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_region, (j := j + 1, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_region_percent, (j, 2), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_strength, (j := j + 1, 1), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_region_percent, (j, 2), flag=wx.EXPAND)
 
         layout_depth_blend.Add((0, 6), (j := j + 1, 0))
         layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.lbl_depth_blend_feather_blur, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_feather_blur, (j, 1), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_feather_blur, (j := j + 1, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.chk_depth_blend_bilateral, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_bilateral_d, (j, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_bilateral_sigma_color, (j, 2), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_bilateral_d, (j := j + 1, 1), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_bilateral_sigma_color, (j, 2), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_bilateral_sigma_space, (j := j + 1, 1), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_bilateral_sigma_space, (j := j + 1, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.chk_depth_blend_clahe, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_clahe_clip, (j, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.cbo_depth_blend_clahe_tile, (j, 2), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_clahe_clip, (j := j + 1, 1), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_clahe_tile, (j, 2), flag=wx.EXPAND)
 
         layout_depth_blend.Add((0, 6), (j := j + 1, 0))
         layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout_depth_blend.Add((0, 4), (j := j + 1, 0))
         layout_depth_blend.Add(self.chk_depth_blend_align, (j := j + 1, 0), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_align_decay, (j, 2), flag=wx.EXPAND)
+        layout_depth_blend.Add(self.sld_depth_blend_align_decay, (j := j + 1, 2), flag=wx.EXPAND)
 
         layout_depth_blend.Add((0, 6), (j := j + 1, 0))
         layout_depth_blend.Add(wx.StaticLine(self.grp_depth_blend), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -1555,6 +1608,7 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.lbl_depth_blend_edge_suppression, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout_depth_blend.Add(self.cbo_depth_blend_edge_suppression, (j, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.chk_depth_blend_edge_hard_cutoff, (j, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_depth_blend.Add(self.sld_depth_blend_edge_suppression, (j := j + 1, 1), flag=wx.EXPAND)
         sizer_depth_blend = wx.StaticBoxSizer(self.grp_depth_blend, wx.VERTICAL)
         sizer_depth_blend.Add(layout_depth_blend, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -2726,6 +2780,7 @@ class MainFrame(wx.Frame):
               "but uses more VRAM. Lower it if you run out of memory; raise it if you have VRAM to spare "
               "and want faster processing."))
         self.cbo_batch_size.SetSelection(12)  # "2"
+        self.sld_processor_batch_size = _build_stereo_slider(self.grp_processor, self.cbo_batch_size, 1, 64, 1)
 
         self.lbl_max_workers = wx.StaticText(self.grp_processor, label=T("Worker Threads"))
         self.cbo_max_workers = wx.ComboBox(self.grp_processor,
@@ -2737,6 +2792,7 @@ class MainFrame(wx.Frame):
               "parallel. Higher can speed things up on a multi-core CPU, but uses more RAM/VRAM. "
               "Lower it if you run into memory issues or system slowdowns while converting."))
         self.cbo_max_workers.SetSelection(13)  # "0"
+        self.sld_processor_max_workers = _build_stereo_slider(self.grp_processor, self.cbo_max_workers, 0, 16, 1)
 
         self.chk_low_vram = wx.CheckBox(self.grp_processor, label=T("Low VRAM"), name="chk_low_vram")
         self.chk_low_vram.SetToolTip(
@@ -2803,8 +2859,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_device, (k, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_batch_size, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_batch_size, (k, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.sld_processor_batch_size, (k := k + 1, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_max_workers, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_workers, (k, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.sld_processor_max_workers, (k := k + 1, 1), (0, 3), flag=wx.EXPAND)
 
         layout.Add((0, 6), (k := k + 1, 0))
         layout.Add(wx.StaticLine(self.grp_processor), (k := k + 1, 0), (0, 4), flag=wx.EXPAND)
@@ -4468,6 +4526,21 @@ class MainFrame(wx.Frame):
                 _combo.Bind(wx.EVT_TEXT, functools.partial(
                     self._on_stereo_combo_text_sync_slider, combo=_combo, slider=_slider,
                     min_val=_lo, max_val=_hi, multiplier=_mult))
+
+        # Same two-way sync, extended to Dual-Pass Depth Blend and Processor -- none
+        # of these combos have any pre-existing EVT_TEXT handler to preserve (checked
+        # directly against every Bind() call in this file before assuming so), so the
+        # plain functools.partial branch is safe for all of them, no combined-wrapper
+        # case needed the way cbo_divergence required above.
+        for _combo_name, _slider_name, _lo, _hi, _mult, _is_int, _extra in DEPTH_BLEND_SLIDER_FIELDS + PROCESSOR_SLIDER_FIELDS:
+            _combo = getattr(self, _combo_name)
+            _slider = getattr(self, _slider_name)
+            _slider.Bind(wx.EVT_SLIDER, functools.partial(
+                self._on_stereo_slider_scroll, combo=_combo, slider=_slider,
+                min_val=_lo, max_val=_hi, multiplier=_mult, is_int=_is_int, extra_sync=_extra))
+            _combo.Bind(wx.EVT_TEXT, functools.partial(
+                self._on_stereo_combo_text_sync_slider, combo=_combo, slider=_slider,
+                min_val=_lo, max_val=_hi, multiplier=_mult))
         self.cbo_synthetic_view.Bind(wx.EVT_TEXT, self.update_divergence_warning)
         self.cbo_method.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_method)
         self.lbl_divergence_warning.Bind(wx.EVT_LEFT_DOWN, self.on_click_divergence_warning)
@@ -5006,6 +5079,23 @@ class MainFrame(wx.Frame):
                       "cpn_stereo_inpainting_depth", "cpn_stereo_advanced")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return sliders + panes
+
+    def get_depth_blend_sliders_and_panes(self):
+        """Same persistence-exclusion purpose as get_stereo_sliders_and_panes(), for
+        the Guided Light sliders added to Dual-Pass Depth Blend. No collapsible pane
+        was added on this tab -- it's compact enough on its own (~14 fields, already
+        organized into checkbox-gated Bilateral/CLAHE/Alignment sub-clusters shown via
+        Enable()-graying, not Show()/Hide() -- confirmed live this doesn't need the
+        same declutter treatment Stereo Generation's ~60 fields did)."""
+        return [getattr(self, slider_attr) for _, slider_attr, *_ in DEPTH_BLEND_SLIDER_FIELDS]
+
+    def get_processor_sliders_and_panes(self):
+        """Same persistence-exclusion purpose as get_stereo_sliders_and_panes(), for
+        the 2 Guided Light sliders added to Processor (Depth Batch Size, Worker
+        Threads). No collapsible pane here either -- this tab is small (2 slider
+        fields + a handful of checkboxes plus the separate Post-Processing sub-group),
+        nowhere near the field count that motivated panes on Stereo Generation."""
+        return [getattr(self, slider_attr) for _, slider_attr, *_ in PROCESSOR_SLIDER_FIELDS]
 
     def on_toggled_stereo_collapsible_pane(self, event):
         """Guided Light pilot (ADR-097): a collapsible pane toggling changes
@@ -6376,6 +6466,10 @@ class MainFrame(wx.Frame):
                 persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
             for control in self.get_stereo_sliders_and_panes():
                 manager.Unregister(control)
+            for control in self.get_depth_blend_sliders_and_panes():
+                manager.Unregister(control)
+            for control in self.get_processor_sliders_and_panes():
+                manager.Unregister(control)
             manager.SaveAndUnregister()
             self.reload_preset()
         finally:
@@ -6422,6 +6516,10 @@ class MainFrame(wx.Frame):
             for control in self.get_editable_comboboxes():
                 persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
             for control in self.get_stereo_sliders_and_panes():
+                manager.Unregister(control)
+            for control in self.get_depth_blend_sliders_and_panes():
+                manager.Unregister(control)
+            for control in self.get_processor_sliders_and_panes():
                 manager.Unregister(control)
             persistent_manager_restore_all(manager, exclude_names)
             persistent_manager_unregister_all(manager)
@@ -7340,6 +7438,10 @@ class MainFrame(wx.Frame):
             persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
         for control in self.get_stereo_sliders_and_panes():
             manager.Unregister(control)
+        for control in self.get_depth_blend_sliders_and_panes():
+            manager.Unregister(control)
+        for control in self.get_processor_sliders_and_panes():
+            manager.Unregister(control)
         manager.SaveAndUnregister()
         return snapshot_path
 
@@ -7351,6 +7453,10 @@ class MainFrame(wx.Frame):
         for control in self.get_editable_comboboxes():
             persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
         for control in self.get_stereo_sliders_and_panes():
+            manager.Unregister(control)
+        for control in self.get_depth_blend_sliders_and_panes():
+            manager.Unregister(control)
+        for control in self.get_processor_sliders_and_panes():
             manager.Unregister(control)
         persistent_manager_restore_all(manager, {"cbo_language", "cbo_layout"})
         persistent_manager_unregister_all(manager)
@@ -8912,6 +9018,46 @@ def _self_test_stereo_sliders_sync():
         app.Destroy()
 
     print("_self_test_stereo_sliders_sync: PASS")
+
+
+def _self_test_depth_blend_and_processor_sliders_sync():
+    """Same regression coverage as _self_test_stereo_sliders_sync, extended to the
+    Guided Light sliders added to Dual-Pass Depth Blend (DEPTH_BLEND_SLIDER_FIELDS)
+    and Processor (PROCESSOR_SLIDER_FIELDS). No field in either table has an
+    extra_sync callback, so this omits that half of the original test. No GPU or real
+    movie file needed."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+
+        for combo_name, slider_name, lo, hi, multiplier, is_int, extra_sync in (
+                gui_mod.DEPTH_BLEND_SLIDER_FIELDS + gui_mod.PROCESSOR_SLIDER_FIELDS):
+            combo = getattr(frame, combo_name)
+            slider = getattr(frame, slider_name)
+
+            mid = (lo + hi) / 2
+            thumb = round(mid * multiplier)
+            slider.SetValue(thumb)
+            slider.ProcessWindowEvent(wx.CommandEvent(wx.wxEVT_SLIDER, slider.GetId()))
+            resolved = thumb / multiplier
+            expected = str(int(resolved)) if is_int else str(round(resolved, 2))
+            assert combo.GetValue() == expected, \
+                f"{combo_name}: slider->combo sync failed (slider={mid}, combo={combo.GetValue()!r}, expected={expected!r})"
+
+            _apply_combo_value(combo, str(lo))
+            combo.ProcessWindowEvent(wx.CommandEvent(wx.wxEVT_TEXT, combo.GetId()))
+            assert slider.GetValue() == round(lo * multiplier), \
+                f"{combo_name}: combo->slider sync failed (combo={lo}, slider={slider.GetValue()}, expected={round(lo * multiplier)})"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()  # see _self_test_stereo_sliders_sync's finally block for why
+        app.Destroy()
+
+    print("_self_test_depth_blend_and_processor_sliders_sync: PASS")
 
 
 def _self_test_stereo_collapsible_sections():
@@ -11125,6 +11271,7 @@ def _run_self_tests():
     _self_test_layout_mode_live_switch()
     _self_test_tabbed_scrolling()
     _self_test_stereo_sliders_sync()
+    _self_test_depth_blend_and_processor_sliders_sync()
     _self_test_stereo_collapsible_sections()
     _self_test_zoom_level_persistence()
     _self_test_zoom_startup_restore()

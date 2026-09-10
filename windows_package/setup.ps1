@@ -344,6 +344,7 @@ if ($SkipModels) {
 Write-Step "Done"
 Write-Host "Setup complete. Launch iw3-gui.bat or waifu2x-gui.bat to get started." -ForegroundColor Green
 Write-Host "If you plan to use torch.compile, see nunif\windows_package\docs\torch_compile.md for the additional one-time setup it needs." -ForegroundColor Green
+exit 0
 
 } catch {
     Write-Host ""
@@ -351,7 +352,16 @@ Write-Host "If you plan to use torch.compile, see nunif\windows_package\docs\tor
     Write-Host $_.Exception.Message -ForegroundColor Red
     Write-Host ""
     Write-Host "Setup did not complete. Fix the issue above and just run this script again -- it skips anything already finished and only retries what's missing." -ForegroundColor Yellow
-} finally {
-    Write-Host ""
-    Read-Host "Press Enter to close this window"
+    exit 1
 }
+
+# NOTE: this script deliberately does NOT pause/Read-Host for its own keypress
+# before closing -- setup.bat (the recommended entry point) owns that via a
+# single `pause`, matching this project's existing update.bat/install.bat
+# convention exactly. Stacking a second, separate interactive prompt here
+# caused a real, confirmed bug: leftover console input from this prompt
+# collided with cmd.exe's own next line once control returned to it,
+# producing a bogus "'e' is not recognized..." error and a false failure
+# report even on a fully successful run. If you run this .ps1 directly
+# (not via setup.bat) from an already-open terminal, the window does not
+# close on its own anyway, so no pause is needed there either.

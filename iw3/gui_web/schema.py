@@ -88,6 +88,7 @@ class Field:
 
 
 TABS = [
+    ("general", "General"),
     ("stereo_generation", "Stereo Generation"),
     ("dual_pass_depth_blend", "Dual-Pass Depth Blend"),
     ("video_filter", "Video Filter"),
@@ -95,6 +96,12 @@ TABS = [
     ("video_encoding", "Video Encoding"),
     ("processor", "Processor"),
 ]
+
+# Real choice list for --method values that support inpaint sub-settings,
+# copied from gui.py's own on_selected_index_changed_cbo_method dependency
+# logic (the same "which methods enable which sub-controls" source used for
+# the splat_blend_temperature enabled_if rule above).
+INPAINT_METHODS = ["forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"]
 
 # Real choice list, copied verbatim from iw3.utils.create_parser()'s own
 # --method registration (utils.py ~line 4861) -- kept here as a literal so
@@ -138,6 +145,45 @@ DEPTH_MODEL_CHOICES = [
 ]
 
 FIELDS: List[Field] = [
+    # ---------------- General ----------------
+    # Batch/file options -- shown above the tabs entirely in the wx GUI
+    # (pnl_file_option), given their own small tab here instead since this
+    # renderer doesn't have a separate above-the-tabs region.
+    Field(
+        name="resume", cli_arg="--resume", label="Resume",
+        widget="checkbox", tab="general", value_type="bool", default=True,
+        tooltip="Skip processing when the output file already exists. "
+                "Matches this GUI's own default (checked) rather than the "
+                "bare CLI default (off), since that's what users of this "
+                "tool actually expect on by default.",
+    ),
+    Field(
+        name="recursive", cli_arg="--recursive", label="Process all subfolders",
+        widget="checkbox", tab="general", value_type="bool", default=False,
+        tooltip="When Input is a folder, also processes every subfolder "
+                "inside it.",
+    ),
+    Field(
+        name="skip_error", cli_arg="--skip-error", label="Skip Error",
+        widget="checkbox", tab="general", value_type="bool", default=False,
+        tooltip="Continue processing the rest of a batch even if a "
+                "specific file fails.",
+    ),
+    Field(
+        name="exif_transpose", cli_arg=None, label="EXIF Transpose",
+        widget="checkbox", tab="general", value_type="bool", default=True,
+        tooltip="Rotates an image according to its own EXIF orientation "
+                "tag before processing. The real flag is "
+                "--disable-exif-transpose (inverted) -- handled specially "
+                "in worker.py, same pattern as Stereo Format.",
+    ),
+    Field(
+        name="format", cli_arg="--format", label="Image Format",
+        widget="select", tab="general", value_type="str",
+        choices=["png", "webp", "jpeg"], default="png",
+        tooltip="Output image format, for image (not video) conversions.",
+    ),
+
     # ---------------- Stereo Generation ----------------
     Field(
         name="divergence", cli_arg="--divergence", label="3D Strength",
@@ -164,6 +210,42 @@ FIELDS: List[Field] = [
                 "depth-weighted blend favors the nearer of two colliding "
                 "pixels. Higher = sharper cutoff. Default (50.0) matches the "
                 "method's original behavior.",
+    ),
+    Field(
+        name="inpaint_model", cli_arg="--inpaint-model", label="Inpainting Model",
+        widget="select", tab="stereo_generation", value_type="str",
+        choices=[], dynamic_choices="inpaint_models", default=None,
+        enabled_if=Rule(field="method", op="in", value=INPAINT_METHODS),
+        tooltip="Which inpaint model fills in the disoccluded (revealed) "
+                "regions. Only used by inpaint-family Methods.",
+    ),
+    Field(
+        name="inpaint_overlap_frames", cli_arg="--inpaint-overlap-frames",
+        label="Inpaint Overlap Frames", widget="combo_editable", tab="stereo_generation",
+        value_type="int_list", default=None,
+        enabled_if=Rule(field="method", op="in", value=INPAINT_METHODS),
+        tooltip="Overlap/padding frames for the video inpaint model, as "
+                "\"<frames>\" or \"<pre frames> <post frames>\".",
+    ),
+    Field(
+        name="mask_inner_dilation", cli_arg="--mask-inner-dilation",
+        label="Inpaint Mask Inner Dilation", widget="combo_editable", tab="stereo_generation",
+        value_type="int", default=0,
+        enabled_if=Rule(field="method", op="in", value=INPAINT_METHODS),
+        tooltip="Loop count of inner mask dilation for inpaint methods.",
+    ),
+    Field(
+        name="mask_outer_dilation", cli_arg="--mask-outer-dilation",
+        label="Inpaint Mask Outer Dilation", widget="combo_editable", tab="stereo_generation",
+        value_type="int", default=0,
+        enabled_if=Rule(field="method", op="in", value=INPAINT_METHODS),
+        tooltip="Loop count of outer mask dilation for inpaint methods.",
+    ),
+    Field(
+        name="inpaint_max_width", cli_arg="--inpaint-max-width", label="Inpaint Max Width",
+        widget="combo_editable", tab="stereo_generation", value_type="int", default=None,
+        enabled_if=Rule(field="method", op="in", value=INPAINT_METHODS),
+        tooltip="Max width of the inpaint result. Leave blank for no limit.",
     ),
     Field(
         name="synthetic_view", cli_arg="--synthetic-view", label="Synthetic View",
@@ -707,6 +789,22 @@ FIELDS: List[Field] = [
     ),
 
     # ---------------- Processor ----------------
+    Field(
+        name="device", cli_arg="--gpu", label="Device",
+        widget="select", tab="processor", value_type="gpu_id",
+        choices=[], dynamic_choices="gpu_devices", default=None,
+        tooltip="Which GPU (or CPU) does the work. Populated via nvidia-smi "
+                "as a separate process, never torch.cuda.*, so opening this "
+                "GUI can never claim a CUDA context before it's needed "
+                "(see ADR-034/071/075).",
+    ),
+    Field(
+        name="fp16", cli_arg=None, label="FP16",
+        widget="checkbox", tab="processor", value_type="bool", default=True,
+        tooltip="Uses half-precision math for faster/lower-VRAM inference. "
+                "The real flag is --disable-amp (inverted) -- handled "
+                "specially in worker.py, same pattern as Stereo Format.",
+    ),
     Field(
         name="low_vram", cli_arg="--low-vram", label="Low VRAM",
         widget="checkbox", tab="processor", value_type="bool", default=False,

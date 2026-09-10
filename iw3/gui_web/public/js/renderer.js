@@ -111,7 +111,6 @@ window.IW3Renderer = (function () {
 
     schema.fields.forEach(function (f) {
       fieldsByName[f.name] = f;
-      values[f.name] = f.default;
 
       var row = document.createElement("div");
       row.className = "field-row";
@@ -129,6 +128,15 @@ window.IW3Renderer = (function () {
       controlWrap.appendChild(input);
       if (input._datalist) controlWrap.appendChild(input._datalist);
       row.appendChild(controlWrap);
+
+      // Read the REAL initial DOM value, not f.default directly -- for a
+      // "select" with no explicit default, the browser auto-selects the
+      // first <option> (e.g. Device defaulting to the first real GPU), and
+      // values must track what's actually shown or getSettings() silently
+      // disagrees with the visible UI (a real bug caught via live testing:
+      // the Device dropdown visually showed a GPU selected but
+      // getSettings() returned null for it until the user touched it).
+      values[f.name] = readValue(f, input);
 
       input.addEventListener("change", function () {
         values[f.name] = readValue(f, input);

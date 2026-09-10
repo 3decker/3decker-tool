@@ -31,9 +31,23 @@ def _scene_batch_ema_model_choices():
     return list(EMA_BY_DURATION_TABLES.keys())
 
 
+def _inpaint_model_choices():
+    from iw3.inpaint_utils import INPAINT_MODELS
+    return list(INPAINT_MODELS.keys())
+
+
+def _gpu_device_choices():
+    # Deliberately NOT torch.cuda.* -- see gui_web/gpu_query.py's own
+    # docstring (ADR-034/071/075).
+    from .gpu_query import device_choices
+    return device_choices()
+
+
 _DYNAMIC_CHOICE_PROVIDERS = {
     "hw_devices": _hw_device_choices,
     "scene_batch_ema_models": _scene_batch_ema_model_choices,
+    "inpaint_models": _inpaint_model_choices,
+    "gpu_devices": _gpu_device_choices,
 }
 
 
@@ -101,7 +115,7 @@ def _self_test_special_cased_fields_have_no_cli_arg():
     metadata -- see schema.py's own docstring for why) -- if any of these
     ever trips, either that field grew a real 1:1 CLI arg (update worker.py's
     special-casing away) or someone accidentally gave it one by mistake."""
-    special_cased = {"stereo_format", "anaglyph_method", "metadata"}
+    special_cased = {"stereo_format", "anaglyph_method", "metadata", "exif_transpose", "fp16"}
     for f in FIELDS:
         if f.name in special_cased:
             assert f.cli_arg is None, (

@@ -27,6 +27,7 @@ from nunif.utils.video import pyav_init_cuda_primary_context
 
 from .schema import FIELDS
 from .crash_log import log_exception
+from .gpu_query import device_choice_to_gpu_id
 
 _cuda_context_initialized = False
 _cuda_context_lock = threading.Lock()
@@ -121,6 +122,13 @@ def _coerce(value_type, raw):
         # nargs="+" shape.
         parts = str(raw).replace(",", " ").split()
         return parts
+    if value_type == "gpu_id":
+        # "0:NVIDIA GeForce RTX 5090" -> [0], "CPU" -> [-1], "All CUDA
+        # Device" -> [0, 1, ...]. Always a list -- set_state_args() does
+        # args.gpu[0] and `for gpu_id in args.gpu` unconditionally, so a
+        # bare scalar breaks it (confirmed by direct test). Matches
+        # gui.py's own real convention exactly (gui.py:5586-5591).
+        return device_choice_to_gpu_id(raw)
     return raw
 
 
@@ -138,7 +146,7 @@ def build_args(settings):
 
     for f in FIELDS:
         if f.cli_arg is None:
-            continue  # stereo_format / anaglyph_method / metadata, applied below
+            continue  # special-cased fields, applied below
         dest = f.cli_arg.lstrip("-").replace("-", "_")
         raw = settings.get(f.name, f.default)
         if raw is None or raw == "":
@@ -151,6 +159,13 @@ def build_args(settings):
     # not a plain boolean -- the schema models it as a checkbox and this
     # turns that back into the real flag's shape.
     args.metadata = "filename" if settings.get("metadata") else None
+    # exif_transpose/fp16 are both modeled as their natural on/off sense in
+    # the schema, but the real flags are their inverses (matches gui.py's
+    # own disable_exif_transpose=not chk_exif_transpose.GetValue() and
+    # disable_amp=not chk_fp16.GetValue()). Default True if the field is
+    # somehow absent from settings, matching this GUI's own field defaults.
+    args.disable_exif_transpose = not settings.get("exif_transpose", True)
+    args.disable_amp = not settings.get("fp16", True)
     return args
 
 

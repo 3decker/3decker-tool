@@ -51,6 +51,13 @@ function Get-File($url, $destination) {
     Start-BitsTransfer -Source $url -Destination $destination
 }
 
+# Everything below runs inside try/catch/finally so this window ALWAYS pauses
+# before closing, whether setup succeeds or fails -- otherwise double-clicking
+# or "Run with PowerShell" closes the window the instant the script finishes,
+# giving no chance to read a success message or an error (a real, confirmed
+# issue: see docs/ai/AI_DECISIONS.md).
+try {
+
 # ---------------------------------------------------------------------------
 Write-Step "Torch variant"
 
@@ -337,3 +344,14 @@ if ($SkipModels) {
 Write-Step "Done"
 Write-Host "Setup complete. Launch iw3-gui.bat or waifu2x-gui.bat to get started." -ForegroundColor Green
 Write-Host "If you plan to use torch.compile, see nunif\windows_package\docs\torch_compile.md for the additional one-time setup it needs." -ForegroundColor Green
+
+} catch {
+    Write-Host ""
+    Write-Host "==> Error!" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Setup did not complete. Fix the issue above and just run this script again -- it skips anything already finished and only retries what's missing." -ForegroundColor Yellow
+} finally {
+    Write-Host ""
+    Read-Host "Press Enter to close this window"
+}

@@ -77,6 +77,13 @@ class Field:
             "label": self.label,
             "widget": self.widget,
             "tab": self.tab,
+            # Sub-heading within the tab (e.g. "Post-Processing" inside
+            # Processor) -- looked up from FIELD_GROUPS below rather than
+            # stored per-Field, so grouping ~100 fields doesn't mean editing
+            # ~100 individual Field(...) call sites. A field with no entry
+            # falls back to the tab's own label (renderer.js's default),
+            # rendering as today: one box per tab.
+            "group": FIELD_GROUPS.get(self.name),
             "cli_arg": self.cli_arg,
             "value_type": self.value_type,
             "choices": self.choices,
@@ -86,6 +93,71 @@ class Field:
             "enabled_if": self.enabled_if.to_dict() if self.enabled_if else None,
         }
 
+
+# Sub-groups within a tab, matching the wx GUI's own visual clustering
+# where one exists (Processor/Post-Processing is a real, separate StaticBox
+# pair in gui.py -- not invented here) and reasonable semantic clusters
+# elsewhere, following the same blank-line groupings visible in the wx
+# GUI's own Single Page layout. A tab with no entries for its fields here
+# renders as a single box (General, Dual-Pass Depth Blend, Video Decoding
+# -- all small enough that sub-grouping would add clutter, not clarity).
+FIELD_GROUPS = {
+    # Stereo Generation
+    "divergence": "Core", "method": "Core", "splat_blend_temperature": "Core",
+    "synthetic_view": "Core", "convergence_mode": "Core", "convergence": "Core",
+    "convergence_smoothing": "Core", "ipd_offset": "Core",
+    "inpaint_model": "Inpainting", "inpaint_overlap_frames": "Inpainting",
+    "mask_inner_dilation": "Inpainting", "mask_outer_dilation": "Inpainting",
+    "inpaint_max_width": "Inpainting",
+    "stereo_width": "Depth & Resolution", "depth_model": "Depth & Resolution",
+    "resolution": "Depth & Resolution", "limit_resolution": "Depth & Resolution",
+    "foreground_scale": "Edge & Detail", "edge_dilation": "Edge & Detail",
+    "depth_aa": "Edge & Detail", "depth_refine": "Edge & Detail",
+    "depth_refine_strength": "Edge & Detail", "temporal_stabilize": "Edge & Detail",
+    "temporal_stabilize_strength": "Edge & Detail",
+    "foreground_pop": "Pop & Divergence Tuning", "foreground_divergence": "Pop & Divergence Tuning",
+    "background_pop": "Pop & Divergence Tuning", "background_pop_coverage": "Pop & Divergence Tuning",
+    "background_divergence": "Pop & Divergence Tuning", "edge_repair_strength": "Pop & Divergence Tuning",
+    "sharpen": "Pop & Divergence Tuning", "sharpen_strength": "Pop & Divergence Tuning",
+    "ema_normalize": "Flicker Reduction & Scene Detection",
+    "ema_decay": "Flicker Reduction & Scene Detection",
+    "ema_buffer": "Flicker Reduction & Scene Detection",
+    "ema_motion_adaptive": "Flicker Reduction & Scene Detection",
+    "scene_batch_auto_ema": "Flicker Reduction & Scene Detection",
+    "scene_batch_auto_ema_model": "Flicker Reduction & Scene Detection",
+    "scene_detect": "Flicker Reduction & Scene Detection",
+    "disable_scene_cache": "Flicker Reduction & Scene Detection",
+    "preserve_screen_border": "Flicker Reduction & Scene Detection",
+    "stereo_format": "Output", "anaglyph_method": "Output", "stereo_mode_tag": "Output",
+
+    # Video Filter
+    "start_time": "Trim & Filters", "end_time": "Trim & Filters", "vf": "Trim & Filters",
+    "rotate_left": "Trim & Filters", "rotate_right": "Trim & Filters", "autocrop": "Trim & Filters",
+    "pad": "Trim & Filters", "pad_mode": "Trim & Filters",
+    "max_output_width": "Output Sizing", "max_output_height": "Output Sizing",
+    "keep_aspect_ratio": "Output Sizing",
+    "preserve_dowi": "HDR & Bit Depth", "hdr_to_sdr": "HDR & Bit Depth",
+    "upgrade_pix_fmt": "HDR & Bit Depth",
+    "auto_resume": "Resume & Quality", "resume_chunk_duration": "Resume & Quality",
+    "denoise": "Resume & Quality", "preview": "Resume & Quality", "metadata": "Resume & Quality",
+    "scene_batch": "Automated Scene Batch", "scene_batch_crop": "Automated Scene Batch",
+    "scene_settings": "Automated Scene Batch", "scene_batch_variant": "Automated Scene Batch",
+
+    # Video Encoding
+    "video_format": "Format & Codec", "video_codec": "Format & Codec", "max_fps": "Format & Codec",
+    "pix_fmt": "Format & Codec", "colorspace": "Format & Codec",
+    "crf": "Rate Control", "video_bitrate": "Rate Control",
+    "preset": "Tuning", "tune": "Tuning", "profile_level": "Tuning",
+
+    # Processor -- the one real, confirmed wx-GUI precedent for sub-boxes:
+    # grp_processor and grp_postprocess are two separate StaticBoxes there.
+    "device": "Processor", "fp16": "Processor", "low_vram": "Processor",
+    "batch_size": "Processor", "max_workers": "Processor", "tta": "Processor",
+    "cuda_stream": "Processor", "pause_frees_vram": "Processor", "compile": "Processor",
+    "waifu2x_upscale": "Post-Processing", "waifu2x_upscale_target": "Post-Processing",
+    "rife_interpolate": "Post-Processing", "rife_model": "Post-Processing",
+    "rife_multiplier": "Post-Processing", "rife_target_fps": "Post-Processing",
+}
 
 TABS = [
     ("general", "General"),

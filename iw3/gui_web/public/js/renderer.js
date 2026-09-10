@@ -88,6 +88,7 @@ window.IW3Renderer = (function () {
     panelsEl.innerHTML = "";
 
     var panelByTab = {};
+    var tabLabelByKey = {};
     schema.tabs.forEach(function (tab, i) {
       var tabBtn = document.createElement("div");
       tabBtn.className = "tab-item" + (i === 0 ? " active" : "");
@@ -99,15 +100,29 @@ window.IW3Renderer = (function () {
       var panel = document.createElement("div");
       panel.className = "tab-panel" + (i === 0 ? " active" : "");
       panel.dataset.tab = tab.key;
+      panelsEl.appendChild(panel);
+      panelByTab[tab.key] = panel;
+      tabLabelByKey[tab.key] = tab.label;
+    });
+
+    // One card per (tab, group) -- e.g. Processor's real "Processor" +
+    // "Post-Processing" StaticBox split, or Stereo Generation's "Core" /
+    // "Inpainting" / etc. clusters. A field with no group (schema.py's
+    // FIELD_GROUPS has no entry for it) falls back to the tab's own label,
+    // so a tab nobody grouped still renders as today: one box.
+    var cardByTabGroup = {};
+    function cardFor(tabKey, groupLabel) {
+      var key = tabKey + "::" + groupLabel;
+      if (cardByTabGroup[key]) return cardByTabGroup[key];
       var card = document.createElement("div");
       card.className = "card";
       var h3 = document.createElement("h3");
-      h3.textContent = tab.label;
+      h3.textContent = groupLabel;
       card.appendChild(h3);
-      panel.appendChild(card);
-      panelsEl.appendChild(panel);
-      panelByTab[tab.key] = card;
-    });
+      panelByTab[tabKey].appendChild(card);
+      cardByTabGroup[key] = card;
+      return card;
+    }
 
     schema.fields.forEach(function (f) {
       fieldsByName[f.name] = f;
@@ -146,8 +161,9 @@ window.IW3Renderer = (function () {
         values[f.name] = readValue(f, input);
       });
 
-      var targetCard = panelByTab[f.tab];
-      if (targetCard) targetCard.appendChild(row);
+      var groupLabel = f.group || tabLabelByKey[f.tab];
+      var targetCard = cardFor(f.tab, groupLabel);
+      targetCard.appendChild(row);
     });
 
     applyRules();

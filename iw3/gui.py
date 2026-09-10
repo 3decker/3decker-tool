@@ -582,6 +582,57 @@ def _apply_lightbox_theme(window):
     window.Refresh()
 
 
+# "Depth Scan" visual theme (ADR-080): dark sci-fi HUD look -- near-black
+# ground, glowing cyan accent -- meant to evoke a depth-map/stereo scan
+# readout, the second real concept the user picked from a five-way mockup
+# comparison (Anaglyph / Projection Room / Phosphor / Grading Suite / Depth
+# Scan). Replaces Lightbox (ADR-079) as the theme actually applied by
+# IW3App.OnInit; _apply_lightbox_theme() itself is left defined and working
+# in case Lightbox is wanted again later (same "keep it, just unused"
+# precedent as the CSV/HTML Auto EMA report writers in ADR-077).
+DEPTHSCAN_BG = wx.Colour(6, 10, 16)         # #060a10 -- page/window ground
+DEPTHSCAN_SURFACE = wx.Colour(13, 24, 38)   # #0d1826 -- card/field surfaces
+DEPTHSCAN_BORDER = wx.Colour(23, 48, 74)    # #17304a
+DEPTHSCAN_FG = wx.Colour(216, 243, 255)     # #d8f3ff -- primary text
+DEPTHSCAN_FG_DIM = wx.Colour(95, 138, 168)  # #5f8aa8 -- secondary text
+DEPTHSCAN_ACCENT = wx.Colour(79, 216, 255)  # #4fd8ff -- HUD cyan
+DEPTHSCAN_ACCENT_FG = wx.Colour(6, 18, 26)  # #06121a -- dark text on the cyan accent
+
+
+def _apply_depth_scan_theme(window):
+    """Applies the Depth Scan theme across the WHOLE window, same centralized
+    recursive-widget-walk approach as _apply_lightbox_theme() (see that
+    function's own docstring for the reasoning this shares: reaching
+    video_encoding_box.py/video_decoding_box.py content without editing those
+    files, the real wx-on-Windows native-chrome limitation, and why only
+    self.btn_start gets the accent fill instead of every wx.Button)."""
+    def walk(w):
+        if isinstance(w, wx.StaticBox):
+            w.SetForegroundColour(DEPTHSCAN_ACCENT)
+            w.SetBackgroundColour(DEPTHSCAN_BG)
+        elif isinstance(w, wx.StaticText):
+            w.SetForegroundColour(DEPTHSCAN_FG)
+            w.SetBackgroundColour(DEPTHSCAN_BG)
+        elif isinstance(w, (wx.TextCtrl, wx.ComboBox, wx.Choice, wx.SpinCtrl, wx.SpinCtrlDouble)):
+            w.SetBackgroundColour(DEPTHSCAN_SURFACE)
+            w.SetForegroundColour(DEPTHSCAN_FG)
+        elif isinstance(w, wx.CheckBox):
+            w.SetForegroundColour(DEPTHSCAN_FG)
+            w.SetBackgroundColour(DEPTHSCAN_BG)
+        elif isinstance(w, (wx.Panel, wx.ScrolledWindow)):
+            w.SetBackgroundColour(DEPTHSCAN_BG)
+            w.SetForegroundColour(DEPTHSCAN_FG)
+        for child in w.GetChildren():
+            walk(child)
+
+    window.SetBackgroundColour(DEPTHSCAN_BG)
+    walk(window)
+    if getattr(window, "btn_start", None) is not None:
+        window.btn_start.SetBackgroundColour(DEPTHSCAN_ACCENT)
+        window.btn_start.SetForegroundColour(DEPTHSCAN_ACCENT_FG)
+    window.Refresh()
+
+
 def _apply_combo_value(combo, value):
     """Sets a wx.ComboBox/EditableComboBox to `value`, preferring an exact choice
     match (SetStringSelection) and falling back to typing the raw text
@@ -652,8 +703,8 @@ class IW3App(wx.App):
         # called after MainFrame() returned, did not when called as the last
         # line inside __init__ itself). Runs after apply_accent_theme() (via
         # refresh_layouts above) so it wins as the true last-applied theme,
-        # matching that function's own "runs last" convention. See ADR-079.
-        _apply_lightbox_theme(main_frame)
+        # matching that function's own "runs last" convention. See ADR-079/080.
+        _apply_depth_scan_theme(main_frame)
         main_frame.Show()
         main_frame.Layout()
         main_frame.Fit()
@@ -8427,6 +8478,39 @@ def _self_test_lightbox_theme():
     print("_self_test_lightbox_theme: PASS")
 
 
+def _self_test_depth_scan_theme():
+    """Regression test for the Depth Scan visual theme (ADR-080), mirroring
+    _self_test_lightbox_theme(): confirms _apply_depth_scan_theme() reaches
+    real widgets through the same call sequence IW3App.OnInit actually uses
+    (MainFrame() -> refresh_layouts() -> _apply_depth_scan_theme()), and
+    checks the frame, a Panel, a StaticBox label, and the one accented
+    button (btn_start)."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        refresh_layouts(frame)
+        _apply_depth_scan_theme(frame)
+
+        assert frame.GetBackgroundColour() == DEPTHSCAN_BG, frame.GetBackgroundColour()
+        assert frame.pnl_file_option.GetBackgroundColour() == DEPTHSCAN_BG, \
+            frame.pnl_file_option.GetBackgroundColour()
+        assert frame.grp_processor.GetForegroundColour() == DEPTHSCAN_ACCENT, \
+            frame.grp_processor.GetForegroundColour()
+        assert frame.btn_start.GetBackgroundColour() == DEPTHSCAN_ACCENT, \
+            frame.btn_start.GetBackgroundColour()
+        assert frame.btn_start.GetForegroundColour() == DEPTHSCAN_ACCENT_FG, \
+            frame.btn_start.GetForegroundColour()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_depth_scan_theme: PASS")
+
+
 def _self_test_compile_probe_crash_handled():
     """Regression test for a real crash: clicking the torch.compile checkbox with a
     specific GPU/CPU selected (not "All CUDA Device") used to throw a raw, uncaught
@@ -10834,6 +10918,7 @@ def _run_self_tests():
     _self_test_import_command_round_trip()
     _self_test_device_dropdown_no_torch_cuda_touch()
     _self_test_lightbox_theme()
+    _self_test_depth_scan_theme()
     print("All iw3.gui self-tests PASSED")
 
 

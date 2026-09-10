@@ -1051,8 +1051,22 @@ class MainFrame(wx.Frame):
         self.sld_stereo_splat_blend_temperature = _build_stereo_slider(
             self.grp_stereo, self.cbo_splat_blend_temperature, 10.0, 85.0, 1)
 
-        self.lbl_inpaint_model = wx.StaticText(self.grp_stereo, label=T("Inpainting Model"))
-        self.cbo_inpaint_model = wx.ComboBox(self.grp_stereo,
+
+        self.cpn_stereo_inpainting_depth = wx.CollapsiblePane(
+            self.grp_stereo, label=T("Inpainting && Depth Source"), name="cpn_stereo_inpainting_depth")
+        self.cpn_stereo_inpainting_depth.Collapse(True)
+        self.cpn_stereo_inpainting_depth.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                              self.on_toggled_stereo_collapsible_pane)
+        # Every wx.CollapsiblePane's content pane shares the same default internal
+        # name ("wxCollapsiblePanePane") -- harmless with only one pane in the whole
+        # frame, but a real crash once there's more than one: wx.lib.agw.persist's
+        # Register() keys on (class, name) and raises on the second/third collision
+        # during the full-tree walk, before get_stereo_sliders_and_panes()'s own
+        # Unregister() step ever runs. Found live via the self-test suite immediately
+        # after adding the 2nd/3rd pane -- give each a real, unique name.
+        self.cpn_stereo_inpainting_depth.GetPane().SetName("cpn_stereo_inpainting_depth_pane")
+        self.lbl_inpaint_model = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Inpainting Model"))
+        self.cbo_inpaint_model = wx.ComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                              choices=list(INPAINT_MODELS.keys()),
                                              name="cbo_inpaint_model")
         self.cbo_inpaint_model.SetEditable(False)
@@ -1067,8 +1081,8 @@ class MainFrame(wx.Frame):
               "Recommended: leave on light_inpaint_v1 unless you've specifically installed an alternative "
               "model and know why you want it."))
 
-        self.lbl_overlap_frames = wx.StaticText(self.grp_stereo, label=T("Inpaint Overlap Frames"))
-        self.cbo_overlap_frames_pre = EditableComboBox(self.grp_stereo,
+        self.lbl_overlap_frames = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Inpaint Overlap Frames"))
+        self.cbo_overlap_frames_pre = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                                        choices=["0", "3"],
                                                        name="cbo_overlap_frames_pre")
         self.cbo_overlap_frames_pre.SetSelection(1)
@@ -1082,7 +1096,7 @@ class MainFrame(wx.Frame):
               "returns past a few frames.\n"
               "Recommended: default (3); raise only if you actually see a flicker at chunk boundaries."))
 
-        self.cbo_overlap_frames_post = EditableComboBox(self.grp_stereo,
+        self.cbo_overlap_frames_post = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                                         choices=["0", "3"],
                                                         name="cbo_overlap_frames_post")
         self.cbo_overlap_frames_post.SetSelection(1)
@@ -1091,8 +1105,8 @@ class MainFrame(wx.Frame):
               "chunk instead of before. Same values/tradeoff apply.\n"
               "Recommended: default (3)."))
 
-        self.lbl_mask_dilation = wx.StaticText(self.grp_stereo, label=T("Inpaint Mask Dilation"))
-        self.cbo_mask_inner_dilation = EditableComboBox(self.grp_stereo,
+        self.lbl_mask_dilation = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Inpaint Mask Dilation"))
+        self.cbo_mask_inner_dilation = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                                         choices=["0", "1", "2"],
                                                         name="cbo_mask_inner_dilation")
         self.cbo_mask_inner_dilation.SetSelection(0)
@@ -1104,7 +1118,7 @@ class MainFrame(wx.Frame):
               "Recommended: 0 (default); raise to 1-2 only if you see a thin, obviously wrong-colored halo "
               "clinging to the outline of foreground objects."))
 
-        self.cbo_mask_outer_dilation = EditableComboBox(self.grp_stereo,
+        self.cbo_mask_outer_dilation = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                                         choices=["0", "1", "2"],
                                                         name="cbo_mask_outer_dilation")
         self.cbo_mask_outer_dilation.SetSelection(0)
@@ -1117,8 +1131,8 @@ class MainFrame(wx.Frame):
               "Recommended: 0 (default); raise to 1-2 only if you still see leftover smearing/stretching "
               "right behind foreground objects after trying Inner dilation."))
 
-        self.lbl_inpaint_max_width = wx.StaticText(self.grp_stereo, label=T("Inpaint Max Width"))
-        self.cbo_inpaint_max_width = EditableComboBox(self.grp_stereo,
+        self.lbl_inpaint_max_width = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Inpaint Max Width"))
+        self.cbo_inpaint_max_width = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                                       choices=["", "1920"],
                                                       name="cbo_inpaint_max_width")
         self.cbo_inpaint_max_width.SetSelection(0)
@@ -1130,8 +1144,8 @@ class MainFrame(wx.Frame):
               "Recommended: leave blank (no limit, best quality) unless you're running out of GPU memory "
               "or need to speed up a very high-resolution job — then try 1920 first."))
 
-        self.lbl_stereo_width = wx.StaticText(self.grp_stereo, label=T("Stereo Processing Width"))
-        self.cbo_stereo_width = EditableComboBox(self.grp_stereo,
+        self.lbl_stereo_width = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Stereo Processing Width"))
+        self.cbo_stereo_width = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                                  choices=["Default", "1920", "1280", "640"],
                                                  name="cbo_stereo_width")
         self.cbo_stereo_width.SetSelection(0)
@@ -1144,8 +1158,8 @@ class MainFrame(wx.Frame):
               "Recommended: Default (uses the source width, best quality). Try 1920 or 1280 only if you "
               "need more speed and can accept a small quality tradeoff."))
 
-        self.lbl_depth_model = wx.StaticText(self.grp_stereo, label=T("Depth Model"))
-        self.cbo_depth_model = wx.ComboBox(self.grp_stereo,
+        self.lbl_depth_model = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Depth Model"))
+        self.cbo_depth_model = wx.ComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                            choices=self.get_depth_models(),
                                            name="cbo_depth_model")
         self.cbo_depth_model.SetEditable(False)
@@ -1168,8 +1182,8 @@ class MainFrame(wx.Frame):
               "Any_V3_* model for single images or when you want maximum per-frame detail on video and are "
               "willing to tune EMA/Object Stability yourself."))
 
-        self.lbl_resolution = wx.StaticText(self.grp_stereo, label=T("Depth") + " " + T("Resolution"))
-        self.cbo_resolution = EditableComboBox(self.grp_stereo,
+        self.lbl_resolution = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Depth") + " " + T("Resolution"))
+        self.cbo_resolution = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
                                                choices=["Default", "512"],
                                                name="cbo_zoed_resolution")
         self.cbo_resolution.SetSelection(0)
@@ -1179,15 +1193,22 @@ class MainFrame(wx.Frame):
               "squares the cost as you increase it. Recommended: Default for most content; try 448-512 "
               "if you have VRAM to spare and want finer depth detail."))
 
-        self.chk_limit_resolution = wx.CheckBox(self.grp_stereo, label=T("Limit to source"),
+        self.chk_limit_resolution = wx.CheckBox(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Limit to source"),
                                                 name="chk_limit_resolution")
         self.chk_limit_resolution.SetToolTip(
             T("Safety cap only: if your typed Depth Resolution is HIGHER than the source video's own "
               "resolution, this brings it back down to match the source instead of wasting time asking "
               "for detail that doesn't exist. It never raises a lower value up. Recommended: on."))
 
-        self.lbl_foreground_scale = wx.StaticText(self.grp_stereo, label=T("Foreground Scale"))
-        self.cbo_foreground_scale = EditableComboBox(self.grp_stereo,
+
+        self.cpn_stereo_stability_flicker = wx.CollapsiblePane(
+            self.grp_stereo, label=T("Stability && Flicker"), name="cpn_stereo_stability_flicker")
+        self.cpn_stereo_stability_flicker.Collapse(True)
+        self.cpn_stereo_stability_flicker.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                                self.on_toggled_stereo_collapsible_pane)
+        self.cpn_stereo_stability_flicker.GetPane().SetName("cpn_stereo_stability_flicker_pane")
+        self.lbl_foreground_scale = wx.StaticText(self.cpn_stereo_stability_flicker.GetPane(), label=T("Foreground Scale"))
+        self.cbo_foreground_scale = EditableComboBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                      choices=["-3", "-2", "-1", "0", "1", "2", "3"],
                                                      name="cbo_foreground_scale")
         self.cbo_foreground_scale.SetSelection(3)
@@ -1208,14 +1229,14 @@ class MainFrame(wx.Frame):
               "once instead of trading one for the other, raise 3D Strength (Divergence) instead — it "
               "scales both ends up together rather than redistributing between them."))
 
-        self.chk_depth_aa = wx.CheckBox(self.grp_stereo, label=T("Depth Anti-aliasing"), name="chk_depth_aa")
+        self.chk_depth_aa = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Depth Anti-aliasing"), name="chk_depth_aa")
         self.chk_depth_aa.SetValue(False)
         self.chk_depth_aa.SetToolTip(
             T("Smooths small jagged/staircase artifacts in the depth map using a dedicated AI model, "
               "without changing the actual depth values much. Only available for certain depth models "
               "(grayed out otherwise). Recommended: on, when available — minor cost, generally cleaner result."))
 
-        self.chk_depth_refine = wx.CheckBox(self.grp_stereo, label=T("Depth Detail Refinement"),
+        self.chk_depth_refine = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Depth Detail Refinement"),
                                             name="chk_depth_refine")
         self.chk_depth_refine.SetValue(False)
         self.chk_depth_refine.SetToolTip(
@@ -1230,7 +1251,7 @@ class MainFrame(wx.Frame):
               "control how much."))
 
         self.cbo_depth_refine_strength = EditableComboBox(
-            self.grp_stereo, choices=["1.5", "1.25", "1.0", "0.75", "0.5", "0.25"],
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["1.5", "1.25", "1.0", "0.75", "0.5", "0.25"],
             name="cbo_depth_refine_strength")
         self.cbo_depth_refine_strength.SetSelection(2)
         self.cbo_depth_refine_strength.SetToolTip(
@@ -1240,9 +1261,9 @@ class MainFrame(wx.Frame):
               "nothing. Recommended: 1.0 as a safe starting point; try 1.25-1.5 if you want a bit more of "
               "the \"cleaner/more solid 3D\" effect this setting gives."))
         self.sld_stereo_depth_refine_strength = _build_stereo_slider(
-            self.grp_stereo, self.cbo_depth_refine_strength, 0.25, 1.5, 100)
+            self.cpn_stereo_stability_flicker.GetPane(), self.cbo_depth_refine_strength, 0.25, 1.5, 100)
 
-        self.chk_temporal_stabilize = wx.CheckBox(self.grp_stereo, label=T("Object Stability (experimental)"),
+        self.chk_temporal_stabilize = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Object Stability (experimental)"),
                                                   name="chk_temporal_stabilize")
         self.chk_temporal_stabilize.SetValue(False)
         self.chk_temporal_stabilize.SetToolTip(
@@ -1254,7 +1275,7 @@ class MainFrame(wx.Frame):
               "already active for --low-vram, --debug-depth, VDA streaming models, and inpaint methods "
               "(e.g. mlbw_l2_inpaint); has no effect otherwise."))
 
-        self.cbo_temporal_stabilize_strength = EditableComboBox(self.grp_stereo,
+        self.cbo_temporal_stabilize_strength = EditableComboBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                                  choices=["0.9", "0.7", "0.5", "0.3"],
                                                                  name="cbo_temporal_stabilize_strength")
         self.cbo_temporal_stabilize_strength.SetSelection(1)
@@ -1262,11 +1283,11 @@ class MainFrame(wx.Frame):
             T("How strongly to trust the motion-warped previous frame vs the fresh per-frame depth (0-1). "
               "Automatically tapers down during fast/unreliable motion regardless of this setting."))
         self.sld_stereo_temporal_stabilize_strength = _build_stereo_slider(
-            self.grp_stereo, self.cbo_temporal_stabilize_strength, 0.3, 0.9, 100)
+            self.cpn_stereo_stability_flicker.GetPane(), self.cbo_temporal_stabilize_strength, 0.3, 0.9, 100)
 
-        self.lbl_temporal_stabilize_max_shift = wx.StaticText(self.grp_stereo, label=T("Max Shift"))
+        self.lbl_temporal_stabilize_max_shift = wx.StaticText(self.cpn_stereo_stability_flicker.GetPane(), label=T("Max Shift"))
         self.cbo_temporal_stabilize_max_shift = EditableComboBox(
-            self.grp_stereo,
+            self.cpn_stereo_stability_flicker.GetPane(),
             choices=["", "0.01", "0.02", "0.05"],
             name="cbo_temporal_stabilize_max_shift")
         self.cbo_temporal_stabilize_max_shift.SetSelection(0)
@@ -1276,9 +1297,9 @@ class MainFrame(wx.Frame):
               "single-frame spike from ever \"popping\", no matter how strong the raw model's disagreement "
               "is. Leave blank to disable (no cap, original behavior)."))
 
-        self.lbl_temporal_stabilize_flat_boost = wx.StaticText(self.grp_stereo, label=T("Flat-Area Boost"))
+        self.lbl_temporal_stabilize_flat_boost = wx.StaticText(self.cpn_stereo_stability_flicker.GetPane(), label=T("Flat-Area Boost"))
         self.cbo_temporal_stabilize_flat_boost = EditableComboBox(
-            self.grp_stereo,
+            self.cpn_stereo_stability_flicker.GetPane(),
             choices=["0.0", "0.3", "0.5", "0.7"],
             name="cbo_temporal_stabilize_flat_boost")
         self.cbo_temporal_stabilize_flat_boost.SetSelection(0)
@@ -1287,9 +1308,9 @@ class MainFrame(wx.Frame):
               "flat (sky, walls, floors) -- these are exactly the areas where flicker is most visible and "
               "least likely to be real motion. 0 = no extra smoothing (original behavior)."))
 
-        self.lbl_temporal_stabilize_edge_protect = wx.StaticText(self.grp_stereo, label=T("Edge Protection"))
+        self.lbl_temporal_stabilize_edge_protect = wx.StaticText(self.cpn_stereo_stability_flicker.GetPane(), label=T("Edge Protection"))
         self.cbo_temporal_stabilize_edge_protect = EditableComboBox(
-            self.grp_stereo,
+            self.cpn_stereo_stability_flicker.GetPane(),
             choices=["0.0", "0.3", "0.5", "0.7"],
             name="cbo_temporal_stabilize_edge_protect")
         self.cbo_temporal_stabilize_edge_protect.SetSelection(0)
@@ -1542,6 +1563,7 @@ class MainFrame(wx.Frame):
         self.cpn_stereo_pop_divergence.Collapse(True)
         self.cpn_stereo_pop_divergence.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
                                             self.on_toggled_stereo_collapsible_pane)
+        self.cpn_stereo_pop_divergence.GetPane().SetName("cpn_stereo_pop_divergence_pane")
         self.lbl_foreground_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Pop"))
         self.cbo_foreground_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                    choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
@@ -1665,12 +1687,12 @@ class MainFrame(wx.Frame):
               "compression artifacts. Recommended: 0.5 (default) as a safe starting point."))
         self.sld_stereo_sharpen_strength = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_sharpen_strength, 0.25, 1.0, 100)
 
-        self.lbl_edge_dilation = wx.StaticText(self.grp_stereo, label=T("Edge Fix"))
-        self.cbo_edge_dilation = EditableComboBox(self.grp_stereo,
+        self.lbl_edge_dilation = wx.StaticText(self.cpn_stereo_stability_flicker.GetPane(), label=T("Edge Fix"))
+        self.cbo_edge_dilation = EditableComboBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                   choices=["0", "1", "2", "3", "4"],
                                                   size=self.FromDIP((90, -1)),
                                                   name="cbo_edge_dilation")
-        self.cbo_edge_dilation_y = EditableComboBox(self.grp_stereo,
+        self.cbo_edge_dilation_y = EditableComboBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                     choices=["", "0", "1", "2"],
                                                     name="cbo_edge_dilation_y")
         self.cbo_edge_dilation.SetSelection(2)
@@ -1699,7 +1721,7 @@ class MainFrame(wx.Frame):
               "fully symmetric). Vertical seams usually matter less for a left/right eye shift, so this is "
               "typically kept lower than X. Recommended: 1 as a starting point (paired with X=2)."))
 
-        self.chk_ema_normalize = wx.CheckBox(self.grp_stereo,
+        self.chk_ema_normalize = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                              label=T("Flicker Reduction"),
                                              name="chk_ema_normalize")
         self.chk_ema_normalize.SetToolTip(
@@ -1712,7 +1734,7 @@ class MainFrame(wx.Frame):
               "Recommended: on for essentially all video, paired with Scene Boundary Detection so the "
               "smoothing resets cleanly at real cuts instead of blending across them."))
 
-        self.cbo_ema_decay = EditableComboBox(self.grp_stereo, choices=["0.99", "0.95", "0.9", "0.75", "0.5", "0"],
+        self.cbo_ema_decay = EditableComboBox(self.cpn_stereo_stability_flicker.GetPane(), choices=["0.99", "0.95", "0.9", "0.75", "0.5", "0"],
                                               name="cbo_ema_decay")
         self.cbo_ema_decay.SetSelection(2)
         self.cbo_ema_decay.SetToolTip(
@@ -1735,9 +1757,9 @@ class MainFrame(wx.Frame):
               "Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own "
               "per-scene Decay/Buffer instead — this value is still kept and still used as the fallback "
               "before the first detected scene boundary."))
-        self.sld_stereo_ema_decay = _build_stereo_slider(self.grp_stereo, self.cbo_ema_decay, 0.0, 0.99, 100)
+        self.sld_stereo_ema_decay = _build_stereo_slider(self.cpn_stereo_stability_flicker.GetPane(), self.cbo_ema_decay, 0.0, 0.99, 100)
 
-        self.cbo_ema_buffer = EditableComboBox(self.grp_stereo, choices=["150", "60", "30", "1"],
+        self.cbo_ema_buffer = EditableComboBox(self.cpn_stereo_stability_flicker.GetPane(), choices=["150", "60", "30", "1"],
                                                name="cbo_ema_buffer")
         self.cbo_ema_buffer.SetSelection(2)
         self.cbo_ema_buffer.SetToolTip(
@@ -1761,14 +1783,14 @@ class MainFrame(wx.Frame):
               "Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own "
               "per-scene Decay/Buffer instead — this value is still kept and still used as the fallback "
               "before the first detected scene boundary."))
-        self.sld_stereo_ema_buffer = _build_stereo_slider(self.grp_stereo, self.cbo_ema_buffer, 1, 150, 1)
+        self.sld_stereo_ema_buffer = _build_stereo_slider(self.cpn_stereo_stability_flicker.GetPane(), self.cbo_ema_buffer, 1, 150, 1)
 
         # Parented to grp_stereo (Flicker Reduction's own StaticBox) and laid out
         # directly under the Decay Rate/Buffer row above, not grp_video_filter, so it
         # sits visually next to the fixed values it overrides -- see
         # docs/ai/AI_DECISIONS.md ADR-057 amendment (2026-09-08, relocation +
         # Decay/Buffer disable-when-checked).
-        self.chk_scene_batch_auto_ema = wx.CheckBox(self.grp_stereo,
+        self.chk_scene_batch_auto_ema = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                     label=T("Auto EMA by Scene Length"),
                                                     name="chk_scene_batch_auto_ema")
         self.chk_scene_batch_auto_ema.SetValue(False)
@@ -1795,7 +1817,7 @@ class MainFrame(wx.Frame):
               "greyed out, since this picks per-scene values instead -- their typed-in values are kept, "
               "not cleared, and come right back (still editable) the moment you uncheck this."))
 
-        self.cbo_scene_batch_auto_ema_model = wx.ComboBox(self.grp_stereo,
+        self.cbo_scene_batch_auto_ema_model = wx.ComboBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                           choices=["3DECKER VDA_L", "3DECKER Any_V3_Mono_01",
                                                                    "Nagadomi_Reference",
                                                                    "GEMINI AI", "ChatGPT", "Grok",
@@ -1926,7 +1948,7 @@ class MainFrame(wx.Frame):
               "4-5s: 120/0.911, 5-6s: 144/0.913, 6-7s: 168/0.916, 7-8s: 192/0.918, 8-9s: 216/0.921, "
               "9-10s: 240/0.924, 10-11s through 20s+: 240/0.924 (flat)."))
 
-        self.btn_scene_batch_auto_ema_edit = wx.Button(self.grp_stereo,
+        self.btn_scene_batch_auto_ema_edit = wx.Button(self.cpn_stereo_stability_flicker.GetPane(),
                                                         label=T("Edit Values..."),
                                                         name="btn_scene_batch_auto_ema_edit")
         self.btn_scene_batch_auto_ema_edit.SetToolTip(
@@ -1952,8 +1974,8 @@ class MainFrame(wx.Frame):
         # it for the same reason Amendment 8 moved Auto EMA here -- both are ways to
         # arrive at Flicker Reduction's Decay/Buffer values, so both live next to
         # those fields.
-        self.lbl_genre_preset = wx.StaticText(self.grp_stereo, label=T("Genre Preset"))
-        self.cbo_genre_preset = wx.ComboBox(self.grp_stereo,
+        self.lbl_genre_preset = wx.StaticText(self.cpn_stereo_stability_flicker.GetPane(), label=T("Genre Preset"))
+        self.cbo_genre_preset = wx.ComboBox(self.cpn_stereo_stability_flicker.GetPane(),
                                             choices=GENRE_PRESET_CHOICES,
                                             name="cbo_genre_preset")
         self.cbo_genre_preset.SetEditable(False)
@@ -1986,7 +2008,7 @@ class MainFrame(wx.Frame):
         self.lbl_genre_preset.SetToolTip(genre_preset_tooltip)
         self.cbo_genre_preset.SetToolTip(genre_preset_tooltip)
 
-        self.chk_ema_motion_adaptive = wx.CheckBox(self.grp_stereo,
+        self.chk_ema_motion_adaptive = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                    label=T("Motion-Adaptive Smoothing"),
                                                    name="chk_ema_motion_adaptive")
         self.chk_ema_motion_adaptive.SetToolTip(
@@ -1999,7 +2021,7 @@ class MainFrame(wx.Frame):
               "choosing a sensible Decay Rate.\n"
               "Recommended: on, if your content mixes calm and fast-motion scenes (most movies do)."))
 
-        self.chk_scene_detect = wx.CheckBox(self.grp_stereo,
+        self.chk_scene_detect = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                             label=T("Scene Boundary Detection"),
                                             name="chk_scene_detect")
         self.chk_scene_detect.SetValue(False)
@@ -2015,7 +2037,7 @@ class MainFrame(wx.Frame):
               "Recommended: on for essentially all movie/TV content, especially when Flicker Reduction or "
               "Resume is also on."))
 
-        self.chk_scene_detect_cache = wx.CheckBox(self.grp_stereo,
+        self.chk_scene_detect_cache = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                   label=T("Use scene boundary cache"),
                                                   name="chk_scene_detect_cache")
         self.chk_scene_detect_cache.SetValue(True)
@@ -2026,7 +2048,7 @@ class MainFrame(wx.Frame):
               "Recommended: on. It auto-invalidates if the source file actually changes (different size "
               "or modified date), so there's no real downside for normal use."))
 
-        self.chk_preserve_screen_border = wx.CheckBox(self.grp_stereo,
+        self.chk_preserve_screen_border = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                                       label=T("Preserve Screen Border"),
                                                       name="chk_preserve_screen_border")
         self.chk_preserve_screen_border.SetValue(False)
@@ -2164,49 +2186,106 @@ class MainFrame(wx.Frame):
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 6), (i := i + 1, 0))
-        layout.Add(self.lbl_inpaint_model, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_inpaint_model, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_overlap_frames, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_overlap_frames_pre, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_overlap_frames_post, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_mask_dilation, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_mask_inner_dilation, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_mask_outer_dilation, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_inpaint_max_width, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_inpaint_max_width, (i, 1), (1, 2), flag=wx.EXPAND)
+
+        # Guided Light pilot (ADR-097): "Inpainting & Depth Source" collapsed into its
+        # own wx.CollapsiblePane, same pattern as Pop & Divergence below -- merges what
+        # used to be two separate StaticLine-divided blocks (method-conditional inpaint
+        # fields, and Stereo Processing Width/Depth Model/Depth Resolution) into one
+        # pane, since both are about what generates/sources the depth map rather than
+        # the core conversion settings above.
+        self.pnl_stereo_inpainting_depth_dot = wx.Panel(self.grp_stereo, size=self.FromDIP((10, 10)))
+        self.pnl_stereo_inpainting_depth_dot.SetBackgroundColour(wx.Colour(255, 184, 79))
+        pane_header_row = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row.Add(self.pnl_stereo_inpainting_depth_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row.Add(self.cpn_stereo_inpainting_depth, 1, wx.EXPAND)
+        layout.Add(pane_header_row, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
+
+        pane_layout_inpaint = wx.GridBagSizer(vgap=4, hgap=4)
+        pane_layout_inpaint.SetEmptyCellSize((0, 0))
+        k = 0
+        pane_layout_inpaint.Add(self.lbl_inpaint_model, (k, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_inpaint_model, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.lbl_overlap_frames, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_overlap_frames_pre, (k, 1), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.cbo_overlap_frames_post, (k, 2), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.lbl_mask_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_mask_inner_dilation, (k, 1), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.cbo_mask_outer_dilation, (k, 2), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.lbl_inpaint_max_width, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_inpaint_max_width, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_inpaint.Add((0, 8), (k := k + 1, 0))
+        pane_layout_inpaint.Add(wx.StaticLine(self.cpn_stereo_inpainting_depth.GetPane()),
+                                (k := k + 1, 0), (0, 3), flag=wx.EXPAND)
+        pane_layout_inpaint.Add((0, 6), (k := k + 1, 0))
+        pane_layout_inpaint.Add(self.lbl_stereo_width, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_stereo_width, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.lbl_depth_model, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_depth_model, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.lbl_resolution, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_resolution, (k, 1), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.chk_limit_resolution, (k, 2), flag=wx.EXPAND)
+        self.cpn_stereo_inpainting_depth.GetPane().SetSizer(pane_layout_inpaint)
 
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 6), (i := i + 1, 0))
-        layout.Add(self.lbl_stereo_width, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_stereo_width, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_depth_model, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_depth_model, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_resolution, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_resolution, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_limit_resolution, (i, 2), flag=wx.EXPAND)
 
-        layout.Add((0, 8), (i := i + 1, 0))
-        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add((0, 6), (i := i + 1, 0))
-        layout.Add(self.lbl_foreground_scale, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_foreground_scale, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_edge_dilation, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_edge_dilation, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_edge_dilation_y, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_depth_aa, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.chk_depth_refine, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_depth_refine_strength, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.sld_stereo_depth_refine_strength, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_temporal_stabilize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_temporal_stabilize_strength, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.sld_stereo_temporal_stabilize_strength, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_temporal_stabilize_max_shift, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
-        layout.Add(self.cbo_temporal_stabilize_max_shift, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_temporal_stabilize_flat_boost, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
-        layout.Add(self.cbo_temporal_stabilize_flat_boost, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_temporal_stabilize_edge_protect, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
-        layout.Add(self.cbo_temporal_stabilize_edge_protect, (i, 1), flag=wx.EXPAND)
+        # Guided Light pilot (ADR-097): "Stability & Flicker" collapsed into its own
+        # wx.CollapsiblePane -- merges what used to be two separate StaticLine-divided
+        # blocks (per-frame depth refinement/Object Stability, and cross-frame Flicker
+        # Reduction/EMA/Scene Detection) into one pane, since both are about keeping
+        # the depth map steady over time rather than the core conversion settings above.
+        self.pnl_stereo_stability_flicker_dot = wx.Panel(self.grp_stereo, size=self.FromDIP((10, 10)))
+        self.pnl_stereo_stability_flicker_dot.SetBackgroundColour(wx.Colour(154, 230, 132))
+        pane_header_row = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row.Add(self.pnl_stereo_stability_flicker_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row.Add(self.cpn_stereo_stability_flicker, 1, wx.EXPAND)
+        layout.Add(pane_header_row, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
+
+        pane_layout_stability = wx.GridBagSizer(vgap=4, hgap=4)
+        pane_layout_stability.SetEmptyCellSize((0, 0))
+        k = 0
+        pane_layout_stability.Add(self.lbl_foreground_scale, (k, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_edge_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_edge_dilation, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.cbo_edge_dilation_y, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.chk_depth_aa, (k := k + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.chk_depth_refine, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_depth_refine_strength, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.sld_stereo_depth_refine_strength, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.chk_temporal_stabilize, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_temporal_stabilize_strength, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.sld_stereo_temporal_stabilize_strength, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_temporal_stabilize_max_shift,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        pane_layout_stability.Add(self.cbo_temporal_stabilize_max_shift, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_temporal_stabilize_flat_boost,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        pane_layout_stability.Add(self.cbo_temporal_stabilize_flat_boost, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_temporal_stabilize_edge_protect,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        pane_layout_stability.Add(self.cbo_temporal_stabilize_edge_protect, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add((0, 8), (k := k + 1, 0))
+        pane_layout_stability.Add(wx.StaticLine(self.cpn_stereo_stability_flicker.GetPane()),
+                                  (k := k + 1, 0), (0, 3), flag=wx.EXPAND)
+        pane_layout_stability.Add((0, 6), (k := k + 1, 0))
+        pane_layout_stability.Add(self.chk_ema_normalize, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_ema_decay, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.cbo_ema_buffer, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.sld_stereo_ema_decay, (k := k + 1, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.sld_stereo_ema_buffer, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.chk_scene_batch_auto_ema, (k := k + 1, 1), (0, 1),
+                                  flag=wx.EXPAND | wx.LEFT, border=14)
+        pane_layout_stability.Add(self.cbo_scene_batch_auto_ema_model, (k, 2), (0, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_genre_preset, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_genre_preset, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.btn_scene_batch_auto_ema_edit, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.chk_ema_motion_adaptive, (k := k + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.chk_scene_detect, (k := k + 1, 0), (0, 1), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.chk_scene_detect_cache, (k, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.chk_preserve_screen_border, (k := k + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        self.cpn_stereo_stability_flicker.GetPane().SetSizer(pane_layout_stability)
 
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -2248,24 +2327,6 @@ class MainFrame(wx.Frame):
         pane_layout.Add(self.cbo_sharpen_strength, (k, 1), flag=wx.EXPAND)
         pane_layout.Add(self.sld_stereo_sharpen_strength, (k, 2), flag=wx.EXPAND)
         self.cpn_stereo_pop_divergence.GetPane().SetSizer(pane_layout)
-
-        layout.Add((0, 8), (i := i + 1, 0))
-        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add((0, 6), (i := i + 1, 0))
-        layout.Add(self.chk_ema_normalize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_ema_decay, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.cbo_ema_buffer, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.sld_stereo_ema_decay, (i := i + 1, 1), flag=wx.EXPAND)
-        layout.Add(self.sld_stereo_ema_buffer, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_scene_batch_auto_ema, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
-        layout.Add(self.cbo_scene_batch_auto_ema_model, (i, 2), (0, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_genre_preset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_genre_preset, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.btn_scene_batch_auto_ema_edit, (i, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_ema_motion_adaptive, (i := i + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.chk_scene_detect, (i := i + 1, 0), (0, 1), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.chk_scene_detect_cache, (i, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.chk_preserve_screen_border, (i := i + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
 
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -4808,6 +4869,8 @@ class MainFrame(wx.Frame):
             # The colored indicator square deliberately keeps its own accent color,
             # not panel_bg.
             self.cpn_stereo_pop_divergence.GetPane(),
+            self.cpn_stereo_inpainting_depth.GetPane(),
+            self.cpn_stereo_stability_flicker.GetPane(),
         ):
             panel.SetBackgroundColour(panel_bg)
 

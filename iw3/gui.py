@@ -1538,7 +1538,7 @@ class MainFrame(wx.Frame):
         sizer_depth_blend.Add(layout_depth_blend, 1, wx.ALL | wx.EXPAND, 4)
 
         self.cpn_stereo_pop_divergence = wx.CollapsiblePane(
-            self.grp_stereo, label=T("Pop & Divergence"), name="cpn_stereo_pop_divergence")
+            self.grp_stereo, label=T("Pop && Divergence"), name="cpn_stereo_pop_divergence")
         self.cpn_stereo_pop_divergence.Collapse(True)
         self.cpn_stereo_pop_divergence.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
                                             self.on_toggled_stereo_collapsible_pane)

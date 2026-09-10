@@ -40,48 +40,51 @@ copy you launch with `iw3-gui.bat`.
 
 ### Option 1: Fresh install
 
-One file downloads and sets up everything: Python, the source code, the video
-tools (ffmpeg, MKVToolNix, dovi_tool, hdr10plus_tool), and the AI models.
+Two small files download and set up everything: Python, the source code, the
+video tools (ffmpeg, MKVToolNix, dovi_tool, hdr10plus_tool), and the AI models.
 
-1. Go to [`windows_package/setup.ps1`](https://github.com/3decker/3decker-tool/blob/my-customizations/windows_package/setup.ps1)
-   in the repo, open it, then use the download button (or the **Raw** button →
-   Save As) to save just that one file.
-2. Put it by itself in an empty folder — this becomes your install folder.
-3. Right-click the file → **Properties** → if you see an **Unblock** checkbox,
-   check it → **OK**. (Windows flags anything downloaded from a browser this
-   way; unblocking lets it run.)
-4. Run it: right-click the file → **Run with PowerShell** — or open a terminal
-   in that folder and run:
-   ```
-   powershell -ExecutionPolicy Bypass -File .\setup.ps1
-   ```
-5. It automatically detects your GPU and installs the matching PyTorch build
+1. Go to the [`windows_package`](https://github.com/3decker/3decker-tool/tree/my-customizations/windows_package)
+   folder in the repo and download **both** `setup.bat` and `setup.ps1` (open
+   each file, then use the download button or the **Raw** button → Save As).
+   Put them together, by themselves, in an empty folder — this becomes your
+   install folder.
+2. Right-click **each** file → **Properties** → if you see an **Unblock**
+   checkbox, check it → **OK**. (Windows flags anything downloaded from a
+   browser this way; unblocking lets it run.)
+3. Double-click **`setup.bat`** to run it. (Use this one, not `setup.ps1`
+   directly — `setup.bat` sidesteps a real Windows quirk where PowerShell's
+   own security settings can silently block `setup.ps1` from running at all
+   when launched directly, with the window just closing instantly and no
+   clear error. `setup.bat` isn't affected by that, and its window always
+   stays open to show you what happened, success or failure.)
+4. It automatically detects your GPU and installs the matching PyTorch build
    (works for RTX 50-series/Blackwell cards and older NVIDIA generations alike
    — you don't need to know which one you need). If you have an AMD or Intel
-   GPU instead, add `-TorchVariant rocm` or `-TorchVariant xpu` to the command
-   above.
-6. This downloads several GB (Python packages + AI models), so it takes a
+   GPU instead, run it from a terminal instead with `setup.bat -TorchVariant
+   rocm` or `setup.bat -TorchVariant xpu`.
+5. This downloads several GB (Python packages + AI models), so it takes a
    while depending on your connection — the script prints its progress at each
-   step. When it prints **"Setup complete,"** launch `iw3-gui.bat` from that
-   same folder.
+   step. When it prints **"Setup complete,"** press Enter to close the window,
+   then launch `iw3-gui.bat` from that same folder.
 
 **If you'd rather download the whole repository as a ZIP** (GitHub's green
-"Code" → "Download ZIP" button) instead of just `setup.ps1`:
+"Code" → "Download ZIP" button) instead of just those two files:
 1. Extract the ZIP. You'll get a folder named something like
    `3decker-tool-my-customizations`.
 2. Rename that folder to `nunif`.
 3. Create a new empty folder (this becomes your install folder) and move the
    renamed `nunif` folder inside it.
-4. Copy `nunif\windows_package\setup.ps1` up one level, next to (not inside)
-   the `nunif` folder.
-5. Run `setup.ps1` from there — same as step 4 above. It'll detect the source
+4. Copy both `nunif\windows_package\setup.bat` and
+   `nunif\windows_package\setup.ps1` up one level, next to (not inside) the
+   `nunif` folder.
+5. Run `setup.bat` from there — same as step 3 above. It'll detect the source
    is already present and skip straight to installing everything around it.
    One tradeoff: a ZIP download has no git history, so later updates and the
    in-app "Run Update" button won't be able to auto-pull new versions — if you
-   want that, use the direct `setup.ps1`-only method instead.
+   want that, use the direct two-file method instead.
 
 If something fails partway through (a download hiccup, etc.), it's safe to just
-re-run `setup.ps1` — it skips anything already done and only retries what's
+run `setup.bat` again — it skips anything already done and only retries what's
 missing.
 
 ### Option 2: You already have a working iw3/nunif install

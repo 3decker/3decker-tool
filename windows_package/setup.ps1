@@ -171,7 +171,7 @@ Write-Step "Launcher scripts"
 $launcherFiles = @(
     "install.bat", "update.bat", "update-installer.bat", "setenv.bat",
     "nunif-prompt.bat", "iw3-gui.bat", "iw3-desktop-gui.bat", "iw3-player-gui.bat",
-    "waifu2x-gui.bat", "waifu2x-web.bat"
+    "waifu2x-gui.bat", "waifu2x-web.bat", "setup.bat"
 )
 $windowsPackageDir = Join-Path $nunifDir "windows_package"
 foreach ($f in $launcherFiles) {

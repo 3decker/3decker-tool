@@ -1,6 +1,15 @@
 import os
 from os import path
 
+# Must happen before any subprocess call this package (or iw3_main() itself)
+# ever makes -- on Windows, torch.compile shells out to the C++ compiler
+# (cl.exe), and each invocation flashes a console window unless every
+# subprocess.Popen call carries CREATE_NO_WINDOW. Every existing GUI in this
+# project (iw3/gui.py, waifu2x/gui.py) imports this as its own first real
+# import for the same reason -- gui_web needs the identical fix, applied
+# this early since it's a package-wide monkeypatch, not a per-call flag.
+import nunif.gui.subprocess_patch  # noqa: E402,F401
+
 from nunif.utils.home_dir import ensure_home_dir
 
 # Same resolution as iw3/gui.py's own CONFIG_DIR (same "iw3" app name, same

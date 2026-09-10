@@ -7,10 +7,14 @@ window.IW3Progress = (function () {
   var onDone = null;
   var onUpdateLog = null;
   var onUpdateDone = null;
+  var onToolLog = null;
+  var onToolDone = null;
 
   function setOnDone(fn) { onDone = fn; }
   function setOnUpdateLog(fn) { onUpdateLog = fn; }
   function setOnUpdateDone(fn) { onUpdateDone = fn; }
+  function setOnToolLog(fn) { onToolLog = fn; }
+  function setOnToolDone(fn) { onToolDone = fn; }
 
   function fillEl() { return document.getElementById("progressFill"); }
   function pctEl() { return document.getElementById("progressPct"); }
@@ -43,6 +47,10 @@ window.IW3Progress = (function () {
       if (onUpdateLog) onUpdateLog(payload.line);
     } else if (channel === "update_done") {
       if (onUpdateDone) onUpdateDone(payload);
+    } else if (channel === "tool_log") {
+      if (onToolLog) onToolLog(payload.tool, payload.line);
+    } else if (channel === "tool_done") {
+      if (onToolDone) onToolDone(payload.tool, payload);
     }
   }
 
@@ -52,5 +60,7 @@ window.IW3Progress = (function () {
     setOnDone: setOnDone,
     setOnUpdateLog: setOnUpdateLog,
     setOnUpdateDone: setOnUpdateDone,
+    setOnToolLog: setOnToolLog,
+    setOnToolDone: setOnToolDone,
   };
 })();

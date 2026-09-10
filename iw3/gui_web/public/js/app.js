@@ -36,6 +36,7 @@
   async function boot() {
     var schema = await IW3Api.call("get_schema");
     IW3Renderer.render(schema, document.getElementById("tabRail"), document.getElementById("tabPanels"));
+    await IW3Standalone.render(document.getElementById("tabRail"), document.getElementById("tabPanels"));
 
     await refreshPresetList();
     var session = await IW3Api.call("get_session");

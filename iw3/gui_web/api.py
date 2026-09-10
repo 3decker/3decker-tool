@@ -17,6 +17,7 @@ from .paths_state import (
 from . import presets_state
 from .command_line import build_cli_command, parse_cli_command
 from .update_manager import check_for_updates, format_result_message, UpdateJob
+from .standalone_tools import TOOLS, tool_schema, StandaloneToolJob
 
 
 class Api:
@@ -27,6 +28,7 @@ class Api:
         self._window_getter = window_getter
         self._job = None
         self._update_job = None
+        self._tool_jobs = {}
 
     @property
     def _window(self):
@@ -148,3 +150,33 @@ class Api:
 
     def is_updating(self):
         return bool(self._update_job is not None and self._update_job.running)
+
+    def get_tool_schemas(self):
+        return {t["key"]: tool_schema(t["key"]) for t in TOOLS}
+
+    def run_tool(self, tool_key, values):
+        job = self._tool_jobs.get(tool_key)
+        if job is not None and job.running:
+            raise RuntimeError(f"{tool_key} is already running")
+        job = StandaloneToolJob(self._window, tool_key)
+        self._tool_jobs[tool_key] = job
+        job.start(values)
+        return {"started": True}
+
+    def is_tool_running(self, tool_key):
+        job = self._tool_jobs.get(tool_key)
+        return bool(job is not None and job.running)
+
+    def browse_open_file(self, directory=None):
+        result = self._window.create_file_dialog(webview.FileDialog.OPEN, directory=directory or "")
+        return result[0] if result else None
+
+    def browse_save_file(self, directory=None, default_name=""):
+        # Same fix as browse_output (ADR-082): a starting file name is
+        # required or pressing Save on an empty name is a silent no-op that
+        # looks like a freeze.
+        result = self._window.create_file_dialog(
+            webview.FileDialog.SAVE, directory=directory or "", save_filename=default_name or "")
+        if not result:
+            return None
+        return result[0] if isinstance(result, (list, tuple)) else result

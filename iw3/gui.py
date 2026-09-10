@@ -517,6 +517,71 @@ def _split_windows_command_line(command_line):
         ctypes.windll.kernel32.LocalFree(argv_p)
 
 
+# "Lightbox" visual theme (ADR-079): bright editorial photo-lab look, using a
+# red/cyan anaglyph duotone as the accent -- the one color pairing that's
+# genuinely on-theme for a stereoscopic 3D tool, instead of a generic default.
+# Chosen by the user from three real concept mockups compared side by side.
+LIGHTBOX_BG = wx.Colour(243, 241, 236)        # #f3f1ec -- page/window ground
+LIGHTBOX_SURFACE = wx.Colour(255, 255, 255)   # #ffffff -- card/group surfaces
+LIGHTBOX_BORDER = wx.Colour(220, 216, 207)    # #dcd8cf
+LIGHTBOX_FG = wx.Colour(34, 31, 26)           # #221f1a -- primary text
+LIGHTBOX_FG_DIM = wx.Colour(113, 108, 98)     # #716c62 -- secondary text
+LIGHTBOX_ACCENT = wx.Colour(216, 73, 60)      # #d8493d -- anaglyph red
+LIGHTBOX_ACCENT2 = wx.Colour(42, 168, 194)    # #2aa8c2 -- anaglyph cyan
+LIGHTBOX_ACCENT_FG = wx.Colour(255, 246, 244) # near-white text on the red accent
+
+
+def _apply_lightbox_theme(window):
+    """Applies the Lightbox theme across the WHOLE window in one centralized
+    pass, walking the real wx widget tree after full construction, rather
+    than hand-editing every individual widget's own creation call across
+    gui.py and the shared nunif/gui/video_encoding_box.py|video_decoding_box.py
+    boxes -- their widgets are still real wx children of this same window
+    hierarchy (added as sub-panels of MainFrame), so a recursive walk from the
+    top reaches them too without touching those two files at all.
+
+    Real wx-on-Windows limitation, not a bug: native controls (buttons, combo
+    boxes, checkboxes) are drawn by the OS's own visual-styles engine
+    (uxtheme), which ignores most custom colors for the control's own chrome
+    (border, dropdown arrow, checkbox glyph) -- a themed ComboBox still looks
+    like a standard Windows dropdown, just with the background/text color
+    this function sets where the OS actually honors an override. Panel/
+    StaticBox/StaticText backgrounds and text colors, which the OS does
+    honor, change for real. See ADR-079.
+
+    The accent color is intentionally NOT applied to every wx.Button (that
+    would recolor dozens of small secondary buttons -- Load/Save/Delete
+    preset, every Standalone Tool's own Run button, etc. -- all red at once,
+    which is not what "spend your boldness in one place" means); only
+    self.btn_start (the one true primary action) gets the accent treatment,
+    set separately by the caller."""
+    def walk(w):
+        if isinstance(w, wx.StaticBox):
+            w.SetForegroundColour(LIGHTBOX_ACCENT)
+            w.SetBackgroundColour(LIGHTBOX_BG)
+        elif isinstance(w, wx.StaticText):
+            w.SetForegroundColour(LIGHTBOX_FG)
+            w.SetBackgroundColour(LIGHTBOX_BG)
+        elif isinstance(w, (wx.TextCtrl, wx.ComboBox, wx.Choice, wx.SpinCtrl, wx.SpinCtrlDouble)):
+            w.SetBackgroundColour(LIGHTBOX_SURFACE)
+            w.SetForegroundColour(LIGHTBOX_FG)
+        elif isinstance(w, wx.CheckBox):
+            w.SetForegroundColour(LIGHTBOX_FG)
+            w.SetBackgroundColour(LIGHTBOX_BG)
+        elif isinstance(w, (wx.Panel, wx.ScrolledWindow)):
+            w.SetBackgroundColour(LIGHTBOX_BG)
+            w.SetForegroundColour(LIGHTBOX_FG)
+        for child in w.GetChildren():
+            walk(child)
+
+    window.SetBackgroundColour(LIGHTBOX_BG)
+    walk(window)
+    if getattr(window, "btn_start", None) is not None:
+        window.btn_start.SetBackgroundColour(LIGHTBOX_ACCENT)
+        window.btn_start.SetForegroundColour(LIGHTBOX_ACCENT_FG)
+    window.Refresh()
+
+
 def _apply_combo_value(combo, value):
     """Sets a wx.ComboBox/EditableComboBox to `value`, preferring an exact choice
     match (SetStringSelection) and falling back to typing the raw text
@@ -581,6 +646,14 @@ class IW3App(wx.App):
         set_icon_ex(main_frame, path.join(path.dirname(__file__), "icon.ico"), main_frame.GetTitle())
         self.SetAppName(main_frame.GetTitle())
         refresh_layouts(main_frame)
+        # Applied here, not at the end of MainFrame.__init__ -- colors set on
+        # deeply nested child controls before the window hierarchy is fully
+        # realized don't reliably stick on wx/Windows (confirmed: worked when
+        # called after MainFrame() returned, did not when called as the last
+        # line inside __init__ itself). Runs after apply_accent_theme() (via
+        # refresh_layouts above) so it wins as the true last-applied theme,
+        # matching that function's own "runs last" convention. See ADR-079.
+        _apply_lightbox_theme(main_frame)
         main_frame.Show()
         main_frame.Layout()
         main_frame.Fit()
@@ -8314,6 +8387,46 @@ def _self_test_device_dropdown_no_torch_cuda_touch():
     print("_self_test_device_dropdown_no_torch_cuda_touch: PASS")
 
 
+def _self_test_lightbox_theme():
+    """Regression test for the Lightbox visual theme (ADR-079). Confirms
+    _apply_lightbox_theme() actually reaches real widgets through the same
+    call sequence IW3App.OnInit uses (MainFrame() -> refresh_layouts() ->
+    _apply_lightbox_theme()) -- NOT calling it from inside MainFrame.__init__
+    itself, which a real, confirmed bug during development showed does not
+    reliably stick for deeply nested child controls on wx/Windows (colors set
+    before the window hierarchy is fully realized get silently lost). Checks
+    one widget of each themed type: the Frame itself, a Panel
+    (pnl_file_option), a StaticBox (grp_processor, themed via the accent
+    color like the pre-existing apply_accent_theme() it must win over), and
+    the one deliberately-accented button (btn_start) -- see
+    _apply_lightbox_theme()'s own docstring for why only that one button, not
+    every wx.Button, gets the accent."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        refresh_layouts(frame)
+        _apply_lightbox_theme(frame)
+
+        assert frame.GetBackgroundColour() == LIGHTBOX_BG, frame.GetBackgroundColour()
+        assert frame.pnl_file_option.GetBackgroundColour() == LIGHTBOX_BG, \
+            frame.pnl_file_option.GetBackgroundColour()
+        assert frame.grp_processor.GetForegroundColour() == LIGHTBOX_ACCENT, \
+            frame.grp_processor.GetForegroundColour()
+        assert frame.btn_start.GetBackgroundColour() == LIGHTBOX_ACCENT, \
+            frame.btn_start.GetBackgroundColour()
+        assert frame.btn_start.GetForegroundColour() == LIGHTBOX_ACCENT_FG, \
+            frame.btn_start.GetForegroundColour()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_lightbox_theme: PASS")
+
+
 def _self_test_compile_probe_crash_handled():
     """Regression test for a real crash: clicking the torch.compile checkbox with a
     specific GPU/CPU selected (not "All CUDA Device") used to throw a raw, uncaught
@@ -10720,6 +10833,7 @@ def _run_self_tests():
     _self_test_run_update_git_checkpoint()
     _self_test_import_command_round_trip()
     _self_test_device_dropdown_no_torch_cuda_touch()
+    _self_test_lightbox_theme()
     print("All iw3.gui self-tests PASSED")
 
 

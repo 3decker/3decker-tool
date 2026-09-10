@@ -300,7 +300,7 @@ FIELDS: List[Field] = [
     Field(
         name="inpaint_overlap_frames", cli_arg="--inpaint-overlap-frames",
         label="Inpaint Overlap Frames", widget="combo_editable", tab="stereo_generation",
-        value_type="int_list", default=None,
+        value_type="int_list", default="3 3",
         enabled_if=Rule(field="method", op="in", value=INPAINT_METHODS),
         tooltip="Overlap/padding frames for the video inpaint model, as "
                 "\"<frames>\" or \"<pre frames> <post frames>\".",
@@ -597,6 +597,7 @@ FIELDS: List[Field] = [
     Field(
         name="depth_blend_model", cli_arg="--depth-blend-model", label="Secondary Depth Model",
         widget="combo_editable", tab="dual_pass_depth_blend", value_type="str", default="VDA_L",
+        choices=DEPTH_MODEL_CHOICES,
         enabled_if=Rule(field="depth_blend", op="eq", value=True),
         tooltip="The secondary depth model blended in by Dual-Pass Depth "
                 "Blend.",

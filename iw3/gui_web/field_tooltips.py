@@ -178,4 +178,32 @@ FIELD_CHOICES = {
                        "5.0", "5.1", "5.2", "6.0", "6.1", "6.2", "8.5"],
     "batch_size": ["64", "32", "16", "14", "13", "12", "11", "10", "9", "8", "4", "3", "2", "1"],
     "max_workers": ["16", "14", "12", "11", "9", "8", "7", "6", "5", "4", "3", "2", "1", "0"],
+
+    # ---- Second pass (ADR-089): the remaining fields a first extraction
+    # pass missed or under-covered, found via a more targeted follow-up. ----
+    "inpaint_overlap_frames": ["3 3", "0 0"],  # real cbo_overlap_frames_pre/post choices ["0","3"], default "3"/"3"
+    "mask_inner_dilation": ["0", "1", "2"],
+    "mask_outer_dilation": ["0", "1", "2"],
+    "inpaint_max_width": ["", "1920"],
+    "edge_dilation": ["2 1", "0 0", "3 2", "4 2"],  # real default pairing (2, 1) kept first
+    "depth_blend_strength": ["1.0", "0.75", "0.5", "0.25"],
+    # Real unit is PERCENT (0-100), confirmed directly against
+    # --depth-blend-region-percent's own create_parser() help text ("e.g. 25
+    # = nearest 25%") -- unlike background_pop_coverage above, this one is
+    # genuinely NOT a 0.0-1.0 fraction. Kept as whole-percent numbers to
+    # match, consistent with the field's own real default=25.0.
+    "depth_blend_region_percent": ["10", "25", "40", "50"],
+    # Real GUI combines width+height into one "WxH" preset dropdown
+    # (cbo_max_output_size); this GUI splits them into two fields, so the
+    # combined presets are offered split -- e.g. picking 3840 here and 2160
+    # there together reproduce the real "3840x2160" preset.
+    "max_output_width": ["7680", "3840", "1920", "1280", "640", "1080", "720", "360"],
+    "max_output_height": ["2160", "1608", "1080", "720", "360", "3200", "1920", "1280", "640"],
+    "max_fps": ["1000", "60", "59.94", "30", "29.97", "24", "23.976", "15", "1", "0.25"],
+    # ipd_offset/start_time/end_time/vf/scene_batch_crop/scene_settings/
+    # scene_batch_variant/resume_chunk_duration/rife_target_fps deliberately
+    # have NO entry here -- confirmed directly against gui.py that each is a
+    # real free-text/SpinCtrl/TimeCtrl control (or, for resume_chunk_duration,
+    # has no wx control at all) with no discrete choices list to match. An
+    # empty choices list for these is the accurate state, not a gap.
 }

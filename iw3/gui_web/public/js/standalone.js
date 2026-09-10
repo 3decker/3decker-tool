@@ -28,9 +28,27 @@ window.IW3Standalone = (function () {
       });
       if (f.default != null) input.value = f.default;
     } else {
+      // combo_editable equivalent -- a free-typed field with suggested
+      // values via a <datalist>, same pattern as renderer.js's own
+      // combo_editable widget (a real gap fixed in ADR-089: this builder
+      // previously built a plain text input with no datalist at all, so
+      // TOOL_FIELD_CHOICES entries added on the backend had nowhere to
+      // show up on screen).
       input = document.createElement("input");
       input.type = "text";
       input.value = f.default != null ? String(f.default) : "";
+      if (f.choices && f.choices.length) {
+        var listId = "tool-list-" + toolKey + "-" + f.name;
+        var list = document.createElement("datalist");
+        list.id = listId;
+        f.choices.forEach(function (c) {
+          var opt = document.createElement("option");
+          opt.value = c;
+          list.appendChild(opt);
+        });
+        input.setAttribute("list", listId);
+        input._datalist = list;
+      }
     }
     input.id = "tool-" + toolKey + "-" + f.name;
     input.title = f.help || "";
@@ -73,6 +91,7 @@ window.IW3Standalone = (function () {
       controlWrap.className = "field-control tool-field-control";
       var input = buildFieldInput(toolKey, f);
       controlWrap.appendChild(input);
+      if (input._datalist) controlWrap.appendChild(input._datalist);
 
       if (OPEN_PATH_FIELDS.has(f.name) || SAVE_PATH_FIELDS.has(f.name)) {
         var browseBtn = document.createElement("button");

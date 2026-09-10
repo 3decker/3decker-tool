@@ -22,6 +22,40 @@ import threading
 
 from .worker import _push
 from .crash_log import log_exception
+from .gpu_query import query_nvidia_smi_gpu_names, device_choice_to_gpu_id
+
+# Real suggested values for tool fields create_parser() alone can't tell us
+# (a free-typed str/int field with no argparse choices= restriction, but a
+# real EditableComboBox in gui.py still offers real suggestions) -- found by
+# reading each tool's actual wx control (ADR-089, a second, more targeted
+# pass after ADR-088's main-schema-focused one). Keyed by (tool_key, field
+# name); deliberately small and inline here rather than a separate file
+# like field_tooltips.py, given its size.
+TOOL_FIELD_CHOICES = {
+    ("audiomux", "language"): ["en", "es", "fr", "de", "it", "pt", "ru", "ja",
+                                "ko", "zh", "nl", "sv", "no", "da", "pl", "tr", "ar", "hi"],
+    ("sharpen", "sharpen_strength"): ["0.25", "0.5", "0.75", "1.0"],
+    # gui.py presents this as label->value pairs ("H.264 (default)"->None,
+    # "H.265/HEVC -- libx265 (CPU)"->"libx265", "...hevc_nvenc (GPU)"->
+    # "hevc_nvenc") via wx.ComboBox.Append(label, clientData) -- this
+    # schema's select widget only supports same-string value/label pairs, so
+    # "" (meaning "don't pass --video-codec at all", i.e. rife_cli's own
+    # default) stands in for the "H.264 (default)" entry.
+    ("rife_standalone", "video_codec"): ["", "libx265", "hevc_nvenc"],
+}
+
+
+def _rife_standalone_gpu_choices():
+    # Real wx control (gui.py's RIFE standalone GPU dropdown) offers each
+    # real device plus CPU, but deliberately NOT "All CUDA Device" -- this
+    # tool runs as a single subprocess against rife_cli.py's own --gpu,
+    # which takes one plain int (no nargs="+" list, unlike the main iw3
+    # CLI's --gpu), so there's no multi-GPU split to offer here. Reuses the
+    # same nvidia-smi-subprocess query the main Device field's dynamic
+    # choices already use (never torch.cuda.*, ADR-034/071/075).
+    names = query_nvidia_smi_gpu_names() or []
+    return [f"{i}:{name}" for i, name in enumerate(names)] + ["CPU"]
+
 
 TOOLS = [
     {"key": "reinject", "module": "iw3.reinject_hdr_cli", "label": "Retroactive HDR/DV Reinjection"},
@@ -55,12 +89,20 @@ def tool_schema(tool_key):
         else:
             widget = "combo_editable"
             value_type = "float" if action.type is float else "int" if action.type is int else "str"
+        choices = [str(c) for c in action.choices] if action.choices else []
+        if tool_key == "rife_standalone" and action.dest == "gpu":
+            widget = "select"
+            choices = _rife_standalone_gpu_choices()
+        else:
+            override = TOOL_FIELD_CHOICES.get((tool_key, action.dest))
+            if override:
+                choices = override
         fields.append({
             "name": action.dest,
             "label": action.dest.replace("_", " ").title(),
             "widget": widget,
             "value_type": value_type,
-            "choices": [str(c) for c in action.choices] if action.choices else [],
+            "choices": choices,
             "default": action.default if not isinstance(action.default, bool) else None,
             "required": bool(action.required),
             "help": action.help or "",
@@ -87,6 +129,13 @@ def build_tool_command(tool_key, values):
         value = values[dest]
         if value is None or value == "":
             continue
+        if tool_key == "rife_standalone" and dest == "gpu" and isinstance(value, str) and (":" in value or value == "CPU"):
+            # Convert the dropdown's "0:NVIDIA GeForce RTX 5090"/"CPU" value
+            # back into the plain int rife_cli.py's own --gpu expects (no
+            # nargs="+" list, unlike the main iw3 CLI) -- device_choice_to_
+            # gpu_id() returns a single-element list ([0], [-1]) since this
+            # tool's own choices never include "All CUDA Device".
+            value = device_choice_to_gpu_id(value)[0]
         flag = next((o for o in action.option_strings if o.startswith("--")), action.option_strings[0])
         if isinstance(action, argparse._StoreTrueAction):
             if value:

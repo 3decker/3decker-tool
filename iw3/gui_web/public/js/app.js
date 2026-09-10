@@ -22,7 +22,7 @@
     });
 
     document.getElementById("btnBrowseOutput").addEventListener("click", async function () {
-      var p = await IW3Api.call("browse_output");
+      var p = await IW3Api.call("browse_output", inputPath);
       if (p) {
         outputPath = p;
         document.getElementById("outputPath").value = p;

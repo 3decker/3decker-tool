@@ -5,6 +5,8 @@ returns a JSON-serializable value back through a Promise (confirmed working
 in the Phase 0 spike, including error propagation -- an exception raised
 here reaches JS as a rejected Promise, so methods can just raise normally).
 """
+from os import path
+
 import webview
 
 from .schema_export import build_schema_dict
@@ -33,8 +35,17 @@ class Api:
         result = self._window.create_file_dialog(webview.FileDialog.OPEN)
         return result[0] if result else None
 
-    def browse_output(self):
-        result = self._window.create_file_dialog(webview.FileDialog.SAVE)
+    def browse_output(self, input_path=None):
+        # A native Save dialog with no starting file name leaves its "File
+        # name" box empty -- pressing Save on an empty name is a no-op in
+        # Windows (the dialog just stays open), which looks exactly like a
+        # freeze. Pre-filling it with the input file's own name means
+        # pressing Save immediately reuses that name, as intended -- also
+        # matches iw3's own default output naming (same name, output dir).
+        default_name = path.basename(input_path) if input_path else ""
+        default_dir = path.dirname(input_path) if input_path else ""
+        result = self._window.create_file_dialog(
+            webview.FileDialog.SAVE, directory=default_dir, save_filename=default_name)
         if not result:
             return None
         return result[0] if isinstance(result, (list, tuple)) else result

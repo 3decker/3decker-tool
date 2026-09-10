@@ -3083,8 +3083,16 @@ class MainFrame(wx.Frame):
         self.grp_hdr_reinject = wx.StaticBox(
             self.tab_tools, label=T("Retroactive HDR/DV Reinjection (Standalone Tool)"))
 
-        self.lbl_reinject_source = wx.StaticText(self.grp_hdr_reinject, label=T("Original Source File (DV/HDR)"))
-        self.txt_reinject_source = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_source")
+        # Guided Light (ADR-101): see cpn_sharpen for the full pattern explanation.
+        self.cpn_hdr_reinject = wx.CollapsiblePane(
+            self.grp_hdr_reinject, label=T("Settings"), name="cpn_hdr_reinject")
+        self.cpn_hdr_reinject.Collapse(True)
+        self.cpn_hdr_reinject.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                    self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_hdr_reinject.GetPane().SetName("cpn_hdr_reinject_pane")
+
+        self.lbl_reinject_source = wx.StaticText(self.cpn_hdr_reinject.GetPane(), label=T("Original Source File (DV/HDR)"))
+        self.txt_reinject_source = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), name="txt_reinject_source")
         self.txt_reinject_source.SetToolTip(
             T("What it's for: the ORIGINAL video file that still has real Dolby Vision / HDR10+ metadata "
               "-- the same file iw3 converted FROM when it made the already-converted 3D output below, "
@@ -3093,10 +3101,10 @@ class MainFrame(wx.Frame):
               "all -- point this at your actual master/source file.\n"
               "Recommended: the exact same file (or an identical remux of it) you originally fed into "
               "iw3 for this conversion."))
-        self.btn_reinject_source = wx.Button(self.grp_hdr_reinject, label=T("..."))
+        self.btn_reinject_source = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("..."))
 
-        self.lbl_reinject_converted = wx.StaticText(self.grp_hdr_reinject, label=T("Already-Converted 3D File"))
-        self.txt_reinject_converted = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_converted")
+        self.lbl_reinject_converted = wx.StaticText(self.cpn_hdr_reinject.GetPane(), label=T("Already-Converted 3D File"))
+        self.txt_reinject_converted = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), name="txt_reinject_converted")
         self.txt_reinject_converted.SetToolTip(
             T("What it's for: the iw3 3D output you already made from the source above -- currently SDR "
               "because Preserve Dolby Vision wasn't enabled for that conversion. Read-only: this tool "
@@ -3105,17 +3113,17 @@ class MainFrame(wx.Frame):
               "the frame count, so it can never line back up with the source's original timing (this tool "
               "will detect and refuse that case).\n"
               "Recommended: the direct, unmodified iw3 output file -- not a re-encode or upscale of it."))
-        self.btn_reinject_converted = wx.Button(self.grp_hdr_reinject, label=T("..."))
+        self.btn_reinject_converted = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("..."))
 
-        self.lbl_reinject_output = wx.StaticText(self.grp_hdr_reinject, label=T("Output File"))
-        self.txt_reinject_output = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_output")
+        self.lbl_reinject_output = wx.StaticText(self.cpn_hdr_reinject.GetPane(), label=T("Output File"))
+        self.txt_reinject_output = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), name="txt_reinject_output")
         self.txt_reinject_output.SetToolTip(
             T("Where to write the new HDR-reinjected copy. Auto-filled with '<converted file "
               "name>_hdr_reinjected<ext>' in the same folder once you pick the converted file above -- "
               "change it if you want it saved somewhere else.\n"
               "How it's safe: this tool never overwrites the source or converted file, only ever writes "
               "here."))
-        self.btn_reinject_output = wx.Button(self.grp_hdr_reinject, label=T("..."))
+        self.btn_reinject_output = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("..."))
 
         # RIFE Manifest (optional) -- wires the existing, already-real
         # reinject_hdr_cli.py --rife-manifest flag (ADR-051) into this panel (ADR-064
@@ -3123,8 +3131,8 @@ class MainFrame(wx.Frame):
         # (--rife-manifest is simply never passed). The .rife_manifest.json sidecar
         # this points at is written by the RIFE Frame Interpolation (Standalone Tool)
         # panel below, never by this tool itself.
-        self.lbl_reinject_rife_manifest = wx.StaticText(self.grp_hdr_reinject, label=T("RIFE Manifest (optional)"))
-        self.txt_reinject_rife_manifest = wx.TextCtrl(self.grp_hdr_reinject, name="txt_reinject_rife_manifest")
+        self.lbl_reinject_rife_manifest = wx.StaticText(self.cpn_hdr_reinject.GetPane(), label=T("RIFE Manifest (optional)"))
+        self.txt_reinject_rife_manifest = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), name="txt_reinject_rife_manifest")
         self.txt_reinject_rife_manifest.SetToolTip(
             T("What it's for: only needed when the 'Already-Converted 3D File' above was ALSO run "
               "through the RIFE Frame Interpolation (Standalone Tool) panel below. RIFE changes the "
@@ -3140,9 +3148,9 @@ class MainFrame(wx.Frame):
               "afterward.\n"
               "Recommended: leave blank unless your converted file came out of the RIFE panel; if it "
               "did, point this at the '.rife_manifest.json' that panel wrote next to its output."))
-        self.btn_reinject_rife_manifest = wx.Button(self.grp_hdr_reinject, label=T("..."))
+        self.btn_reinject_rife_manifest = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("..."))
 
-        self.chk_reinject_start_time = wx.CheckBox(self.grp_hdr_reinject, label=T("Start"),
+        self.chk_reinject_start_time = wx.CheckBox(self.cpn_hdr_reinject.GetPane(), label=T("Start"),
                                                     name="chk_reinject_start_time")
         self.chk_reinject_start_time.SetToolTip(
             T("What it's for: which point in the ORIGINAL SOURCE file the converted file's first frame "
@@ -3152,17 +3160,17 @@ class MainFrame(wx.Frame):
               "was actually converted. If it's wrong, the tool refuses to proceed (an exact decoded "
               "frame-count check) rather than silently producing misaligned HDR metadata.\n"
               "Recommended: the exact --start-time you used for the original iw3 conversion, if any."))
-        self.txt_reinject_start_time = TimeCtrl(self.grp_hdr_reinject, value="00:00:00", fmt24hr=True,
+        self.txt_reinject_start_time = TimeCtrl(self.cpn_hdr_reinject.GetPane(), value="00:00:00", fmt24hr=True,
                                                  name="txt_reinject_start_time")
-        self.chk_reinject_end_time = wx.CheckBox(self.grp_hdr_reinject, label=T("End"),
+        self.chk_reinject_end_time = wx.CheckBox(self.cpn_hdr_reinject.GetPane(), label=T("End"),
                                                   name="chk_reinject_end_time")
         self.chk_reinject_end_time.SetToolTip(
             T("Same idea as Start Time, but for where the converted file's last frame ends within the "
               "original source. Leave unchecked to use the end of the source."))
-        self.txt_reinject_end_time = TimeCtrl(self.grp_hdr_reinject, value="00:00:00", fmt24hr=True,
+        self.txt_reinject_end_time = TimeCtrl(self.cpn_hdr_reinject.GetPane(), value="00:00:00", fmt24hr=True,
                                                name="txt_reinject_end_time")
 
-        self.btn_reinject_run = wx.Button(self.grp_hdr_reinject, label=T("Run"))
+        self.btn_reinject_run = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("Run"))
         self.btn_reinject_run.SetToolTip(
             T("What it's for: runs the reinjection as a separate background process (python -m "
               "iw3.reinject_hdr_cli) -- this app's own GPU/model state is never touched, and neither "
@@ -3175,13 +3183,13 @@ class MainFrame(wx.Frame):
               "Recommended: run once per conversion you want retroactively HDR-corrected; always check "
               "the log box below afterward to confirm it actually succeeded rather than refused."))
 
-        self.txt_reinject_log = wx.TextCtrl(self.grp_hdr_reinject, style=wx.TE_MULTILINE | wx.TE_READONLY,
+        self.txt_reinject_log = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                              size=self.FromDIP((-1, 60)), name="txt_reinject_log")
         self.txt_reinject_log.SetToolTip(
             T("Shows this tool's own output: pre-flight frame-count/duration numbers, and the exact "
               "reason if it refuses to proceed (e.g. a frame-count mismatch or detected RIFE "
               "interpolation) -- not just a generic pass/fail."))
-        self.btn_reinject_clear = wx.Button(self.grp_hdr_reinject, label=T("Clear"))
+        self.btn_reinject_clear = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("Clear"))
         self.btn_reinject_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
               "while a job is running so it can't wipe output you may still be reading mid-run; "
@@ -3219,8 +3227,16 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_reinject_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_hdr_reinject.GetPane().SetSizer(layout)
+
+        self.pnl_hdr_reinject_dot = wx.Panel(self.grp_hdr_reinject, size=self.FromDIP((10, 10)))
+        self.pnl_hdr_reinject_dot.SetBackgroundColour(wx.Colour(255, 200, 40))
+        pane_header_row_hdr_reinject = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_hdr_reinject.Add(self.pnl_hdr_reinject_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_hdr_reinject.Add(self.cpn_hdr_reinject, 1, wx.EXPAND)
+
         sizer_hdr_reinject = wx.StaticBoxSizer(self.grp_hdr_reinject, wx.VERTICAL)
-        sizer_hdr_reinject.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_hdr_reinject.Add(pane_header_row_hdr_reinject, 0, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: search/download subtitles from OpenSubtitles (ADR-039) ---
         # NOT part of the main conversion pipeline -- searches OpenSubtitles' REST API for
@@ -3234,8 +3250,16 @@ class MainFrame(wx.Frame):
         self.grp_subsearch = wx.StaticBox(
             self.tab_tools, label=T("Search Subtitles (OpenSubtitles) (Standalone Tool)"))
 
-        self.lbl_subsearch_source = wx.StaticText(self.grp_subsearch, label=T("Original Source File (optional)"))
-        self.txt_subsearch_source = wx.TextCtrl(self.grp_subsearch, name="txt_subsearch_source")
+        # Guided Light (ADR-101): see cpn_sharpen for the full pattern explanation.
+        self.cpn_subsearch = wx.CollapsiblePane(
+            self.grp_subsearch, label=T("Settings"), name="cpn_subsearch")
+        self.cpn_subsearch.Collapse(True)
+        self.cpn_subsearch.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                 self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_subsearch.GetPane().SetName("cpn_subsearch_pane")
+
+        self.lbl_subsearch_source = wx.StaticText(self.cpn_subsearch.GetPane(), label=T("Original Source File (optional)"))
+        self.txt_subsearch_source = wx.TextCtrl(self.cpn_subsearch.GetPane(), name="txt_subsearch_source")
         self.txt_subsearch_source.SetToolTip(
             T("What it's for: the ORIGINAL, pre-conversion source video file -- optional. When given "
               "and at least 128KB, its OpenSubtitles moviehash (file size plus a checksum of only the "
@@ -3249,10 +3273,10 @@ class MainFrame(wx.Frame):
               "automatically in that case, noted in the log below.\n"
               "Recommended: point this at the original file you converted from, if you still have "
               "it, for the most exact match; otherwise leave blank and use Title/IMDb ID instead."))
-        self.btn_subsearch_source = wx.Button(self.grp_subsearch, label=T("..."))
+        self.btn_subsearch_source = wx.Button(self.cpn_subsearch.GetPane(), label=T("..."))
 
-        self.lbl_subsearch_title = wx.StaticText(self.grp_subsearch, label=T("Title"))
-        self.txt_subsearch_title = wx.TextCtrl(self.grp_subsearch, name="txt_subsearch_title")
+        self.lbl_subsearch_title = wx.StaticText(self.cpn_subsearch.GetPane(), label=T("Title"))
+        self.txt_subsearch_title = wx.TextCtrl(self.cpn_subsearch.GetPane(), name="txt_subsearch_title")
         self.txt_subsearch_title.SetToolTip(
             T("What it's for: movie/show title to search by -- optional fallback text search, used "
               "when Original Source File isn't given or its moviehash didn't match anything.\n"
@@ -3261,17 +3285,17 @@ class MainFrame(wx.Frame):
               "Recommended: the exact title, optionally with year (e.g. 'Interstellar 2014') for a "
               "more precise match."))
 
-        self.lbl_subsearch_imdb = wx.StaticText(self.grp_subsearch, label=T("IMDb ID"))
-        self.txt_subsearch_imdb = wx.TextCtrl(self.grp_subsearch, name="txt_subsearch_imdb")
+        self.lbl_subsearch_imdb = wx.StaticText(self.cpn_subsearch.GetPane(), label=T("IMDb ID"))
+        self.txt_subsearch_imdb = wx.TextCtrl(self.cpn_subsearch.GetPane(), name="txt_subsearch_imdb")
         self.txt_subsearch_imdb.SetToolTip(
             T("What it's for: search by IMDb ID (e.g. tt0111161 or 111161) instead of a text title -- "
               "optional, more precise than Title when you have it.\n"
               "Recommended: leave blank unless you already know the exact IMDb ID; Title search "
               "works fine for most movies."))
 
-        self.lbl_subsearch_language = wx.StaticText(self.grp_subsearch, label=T("Language"))
+        self.lbl_subsearch_language = wx.StaticText(self.cpn_subsearch.GetPane(), label=T("Language"))
         self.cbo_subsearch_language = wx.ComboBox(
-            self.grp_subsearch, value="en", name="cbo_subsearch_language",
+            self.cpn_subsearch.GetPane(), value="en", name="cbo_subsearch_language",
             choices=["en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko",
                      "zh", "nl", "sv", "no", "da", "pl", "tr", "ar", "hi"])
         self.cbo_subsearch_language.SetToolTip(
@@ -3285,7 +3309,7 @@ class MainFrame(wx.Frame):
               "Recommended: match the language you want the subtitle text to actually be in; "
               "default 'en' if unsure."))
 
-        self.btn_subsearch_search = wx.Button(self.grp_subsearch, label=T("Search"))
+        self.btn_subsearch_search = wx.Button(self.cpn_subsearch.GetPane(), label=T("Search"))
         self.btn_subsearch_search.SetToolTip(
             T("What it's for: searches OpenSubtitles' API for candidate subtitles matching whatever "
               "criteria above are filled in -- runs in the background so the app stays responsive "
@@ -3298,7 +3322,7 @@ class MainFrame(wx.Frame):
               "then click Search and review the results list before downloading anything."))
 
         self.lst_subsearch_results = wx.ListCtrl(
-            self.grp_subsearch, style=wx.LC_REPORT | wx.LC_SINGLE_SEL,
+            self.cpn_subsearch.GetPane(), style=wx.LC_REPORT | wx.LC_SINGLE_SEL,
             size=self.FromDIP((-1, 140)), name="lst_subsearch_results")
         self.lst_subsearch_results.InsertColumn(0, T("Release"), width=self.FromDIP(220))
         self.lst_subsearch_results.InsertColumn(1, T("Lang"), width=self.FromDIP(45))
@@ -3317,7 +3341,7 @@ class MainFrame(wx.Frame):
               "one candidate looks right for your movie."))
         self.subsearch_results = []
 
-        self.btn_subsearch_download = wx.Button(self.grp_subsearch, label=T("Download Selected"))
+        self.btn_subsearch_download = wx.Button(self.cpn_subsearch.GetPane(), label=T("Download Selected"))
         self.btn_subsearch_download.Disable()
         self.btn_subsearch_download.SetToolTip(
             T("What it's for: downloads the selected result's .srt file -- disabled until a result "
@@ -3330,14 +3354,14 @@ class MainFrame(wx.Frame):
               "Recommended: check the log below afterward for the saved file path and your "
               "remaining download quota for today."))
 
-        self.txt_subsearch_log = wx.TextCtrl(self.grp_subsearch, style=wx.TE_MULTILINE | wx.TE_READONLY,
+        self.txt_subsearch_log = wx.TextCtrl(self.cpn_subsearch.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                               size=self.FromDIP((-1, 60)), name="txt_subsearch_log")
         self.txt_subsearch_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact actionable message if no "
               "OpenSubtitles API key is configured yet, and the server-reported download quota "
               "(remaining/requests/reset time) after every download -- not just a generic pass/"
               "fail."))
-        self.btn_subsearch_clear = wx.Button(self.grp_subsearch, label=T("Clear"))
+        self.btn_subsearch_clear = wx.Button(self.cpn_subsearch.GetPane(), label=T("Clear"))
         self.btn_subsearch_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
               "while a search or download is running so it can't wipe output you may still be reading "
@@ -3367,8 +3391,16 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_subsearch_download, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_subsearch_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_subsearch_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_subsearch.GetPane().SetSizer(layout)
+
+        self.pnl_subsearch_dot = wx.Panel(self.grp_subsearch, size=self.FromDIP((10, 10)))
+        self.pnl_subsearch_dot.SetBackgroundColour(wx.Colour(255, 92, 200))
+        pane_header_row_subsearch = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_subsearch.Add(self.pnl_subsearch_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_subsearch.Add(self.cpn_subsearch, 1, wx.EXPAND)
+
         sizer_subsearch = wx.StaticBoxSizer(self.grp_subsearch, wx.VERTICAL)
-        sizer_subsearch.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_subsearch.Add(pane_header_row_subsearch, 0, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: add an SRT subtitle track (ADR-032) ---
         # NOT part of the main conversion pipeline -- takes an already-converted 3D
@@ -3382,8 +3414,16 @@ class MainFrame(wx.Frame):
         self.grp_submux = wx.StaticBox(
             self.tab_tools, label=T("Add Subtitle Track (Standalone Tool)"))
 
-        self.lbl_submux_input = wx.StaticText(self.grp_submux, label=T("Converted 3D Video (.mkv)"))
-        self.txt_submux_input = wx.TextCtrl(self.grp_submux, name="txt_submux_input")
+        # Guided Light (ADR-101): see cpn_sharpen for the full pattern explanation.
+        self.cpn_submux = wx.CollapsiblePane(
+            self.grp_submux, label=T("Settings"), name="cpn_submux")
+        self.cpn_submux.Collapse(True)
+        self.cpn_submux.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                              self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_submux.GetPane().SetName("cpn_submux_pane")
+
+        self.lbl_submux_input = wx.StaticText(self.cpn_submux.GetPane(), label=T("Converted 3D Video (.mkv)"))
+        self.txt_submux_input = wx.TextCtrl(self.cpn_submux.GetPane(), name="txt_submux_input")
         self.txt_submux_input.SetToolTip(
             T("What it's for: the already-converted 3D video to add a subtitle track to. Must be "
               "an .mkv file -- this tool does not convert containers, so an .mp4 output must first "
@@ -3391,10 +3431,10 @@ class MainFrame(wx.Frame):
               "Con: read-only -- never modified. A new file is always written to Output File below.\n"
               "Recommended: the direct iw3 output file, with its normal SBS/TB filename tag intact "
               "(e.g. '..._LR.mkv') so Format below can auto-detect."))
-        self.btn_submux_input = wx.Button(self.grp_submux, label=T("..."))
+        self.btn_submux_input = wx.Button(self.cpn_submux.GetPane(), label=T("..."))
 
-        self.lbl_submux_srt = wx.StaticText(self.grp_submux, label=T("Subtitle File (.srt)"))
-        self.txt_submux_srt = wx.TextCtrl(self.grp_submux, name="txt_submux_srt")
+        self.lbl_submux_srt = wx.StaticText(self.cpn_submux.GetPane(), label=T("Subtitle File (.srt)"))
+        self.txt_submux_srt = wx.TextCtrl(self.cpn_submux.GetPane(), name="txt_submux_srt")
         self.txt_submux_srt.SetToolTip(
             T("What it's for: the SRT subtitle file to add as a new track. Validated with pysubs2 "
               "before muxing, so a malformed SRT is caught here with a clear error rather than an "
@@ -3403,20 +3443,20 @@ class MainFrame(wx.Frame):
               "each additional language.\n"
               "Recommended: a plain, ordinary SRT -- no special stereo formatting needed or wanted "
               "(iw3-player already renders subtitles in 3D itself, per-eye, at playback time)."))
-        self.btn_submux_srt = wx.Button(self.grp_submux, label=T("..."))
+        self.btn_submux_srt = wx.Button(self.cpn_submux.GetPane(), label=T("..."))
 
-        self.lbl_submux_output = wx.StaticText(self.grp_submux, label=T("Output File"))
-        self.txt_submux_output = wx.TextCtrl(self.grp_submux, name="txt_submux_output")
+        self.lbl_submux_output = wx.StaticText(self.cpn_submux.GetPane(), label=T("Output File"))
+        self.txt_submux_output = wx.TextCtrl(self.cpn_submux.GetPane(), name="txt_submux_output")
         self.txt_submux_output.SetToolTip(
             T("Where to write the new file with the subtitle track added. Auto-filled with "
               "'<converted file name>_subbed.mkv' in the same folder once you pick the converted "
               "video above -- change it if you want it saved somewhere else.\n"
               "How it's safe: this tool never overwrites the input video, only ever writes here."))
-        self.btn_submux_output = wx.Button(self.grp_submux, label=T("..."))
+        self.btn_submux_output = wx.Button(self.cpn_submux.GetPane(), label=T("..."))
 
-        self.lbl_submux_format = wx.StaticText(self.grp_submux, label=T("Format"))
+        self.lbl_submux_format = wx.StaticText(self.cpn_submux.GetPane(), label=T("Format"))
         self.cbo_submux_format = wx.ComboBox(
-            self.grp_submux, name="cbo_submux_format",
+            self.cpn_submux.GetPane(), name="cbo_submux_format",
             choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb",
                      "cross_eyed", "vr90", "rgbd", "half_rgbd", "anaglyph"])
         self.cbo_submux_format.SetEditable(False)
@@ -3437,8 +3477,8 @@ class MainFrame(wx.Frame):
               "Recommended: leave on 'auto' unless the tool's log below reports it couldn't detect "
               "the format."))
 
-        self.lbl_submux_language = wx.StaticText(self.grp_submux, label=T("Language"))
-        self.txt_submux_language = wx.TextCtrl(self.grp_submux, value="en", name="txt_submux_language")
+        self.lbl_submux_language = wx.StaticText(self.cpn_submux.GetPane(), label=T("Language"))
+        self.txt_submux_language = wx.TextCtrl(self.cpn_submux.GetPane(), value="en", name="txt_submux_language")
         self.txt_submux_language.SetToolTip(
             T("What it's for: the language stored as metadata on the new subtitle track (e.g. en, "
               "ja, fr, de, es), shown by players in their subtitle track menu -- as an ISO 639-1 "
@@ -3452,15 +3492,15 @@ class MainFrame(wx.Frame):
               "language.\n"
               "Recommended: match the SRT file's actual language; default 'en' if unsure."))
 
-        self.lbl_submux_track_name = wx.StaticText(self.grp_submux, label=T("Track Name"))
-        self.txt_submux_track_name = wx.TextCtrl(self.grp_submux, name="txt_submux_track_name")
+        self.lbl_submux_track_name = wx.StaticText(self.cpn_submux.GetPane(), label=T("Track Name"))
+        self.txt_submux_track_name = wx.TextCtrl(self.cpn_submux.GetPane(), name="txt_submux_track_name")
         self.txt_submux_track_name.SetToolTip(
             T("What it's for: an optional display name for the new subtitle track (shown in "
               "player track menus, e.g. 'English (Forced)'). Leave blank to default to the SRT "
               "file's own name."))
 
         self.chk_submux_dual_eye = wx.CheckBox(
-            self.grp_submux, name="chk_submux_dual_eye",
+            self.cpn_submux.GetPane(), name="chk_submux_dual_eye",
             label=T("Position for external players (dual-eye)"))
         self.chk_submux_dual_eye.SetValue(True)
         self.chk_submux_dual_eye.SetToolTip(
@@ -3488,8 +3528,8 @@ class MainFrame(wx.Frame):
               "common case. Uncheck ONLY if you'll specifically watch the result in iw3-player."))
 
         # --- ADR-055: optional Font Size override for the dual-eye ASS track above ---
-        self.lbl_submux_font_size = wx.StaticText(self.grp_submux, label=T("Font Size"))
-        self.txt_submux_font_size = wx.TextCtrl(self.grp_submux, name="txt_submux_font_size")
+        self.lbl_submux_font_size = wx.StaticText(self.cpn_submux.GetPane(), label=T("Font Size"))
+        self.txt_submux_font_size = wx.TextCtrl(self.cpn_submux.GetPane(), name="txt_submux_font_size")
         self.txt_submux_font_size.SetToolTip(
             T("What it's for: fixes a real bug -- subtitles added with Position for external "
               "players (dual-eye) checked above used to render TINY, because the underlying "
@@ -3530,7 +3570,7 @@ class MainFrame(wx.Frame):
         # Reinjection's own Start/End Time controls just above (same underlying
         # --start-time/--end-time flag names, same "position within the full source
         # that the trimmed/converted file starts/ends at" idea).
-        self.chk_submux_start_time = wx.CheckBox(self.grp_submux, label=T("Start Time"),
+        self.chk_submux_start_time = wx.CheckBox(self.cpn_submux.GetPane(), label=T("Start Time"),
                                                   name="chk_submux_start_time")
         self.chk_submux_start_time.SetToolTip(
             T("What it's for: the real problem this solves -- you converted only a TRIMMED "
@@ -3550,9 +3590,9 @@ class MainFrame(wx.Frame):
               "video's own timeline (e.g. it was made/downloaded specifically for this clip). "
               "Check it and match iw3's own Start Time exactly when Subtitle File is for the "
               "full source instead."))
-        self.txt_submux_start_time = TimeCtrl(self.grp_submux, value="00:00:00", fmt24hr=True,
+        self.txt_submux_start_time = TimeCtrl(self.cpn_submux.GetPane(), value="00:00:00", fmt24hr=True,
                                                name="txt_submux_start_time")
-        self.chk_submux_end_time = wx.CheckBox(self.grp_submux, label=T("End Time"),
+        self.chk_submux_end_time = wx.CheckBox(self.cpn_submux.GetPane(), label=T("End Time"),
                                                 name="chk_submux_end_time")
         self.chk_submux_end_time.SetToolTip(
             T("Same idea as Start Time, but for where the trimmed clip ends within the "
@@ -3566,10 +3606,10 @@ class MainFrame(wx.Frame):
               "Recommended: leave unchecked to keep everything through the end of Subtitle "
               "File; check it and match iw3's own End Time when the clip ends before the "
               "full movie does."))
-        self.txt_submux_end_time = TimeCtrl(self.grp_submux, value="00:00:00", fmt24hr=True,
+        self.txt_submux_end_time = TimeCtrl(self.cpn_submux.GetPane(), value="00:00:00", fmt24hr=True,
                                              name="txt_submux_end_time")
 
-        self.btn_submux_run = wx.Button(self.grp_submux, label=T("Run"))
+        self.btn_submux_run = wx.Button(self.cpn_submux.GetPane(), label=T("Run"))
         self.btn_submux_run.SetToolTip(
             T("What it's for: runs the mux as a separate background process (python -m "
               "iw3.subtitle_mux_cli) -- this app's own GPU/model state is never touched, and the "
@@ -3582,13 +3622,13 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded "
               "rather than refused."))
 
-        self.txt_submux_log = wx.TextCtrl(self.grp_submux, style=wx.TE_MULTILINE | wx.TE_READONLY,
+        self.txt_submux_log = wx.TextCtrl(self.cpn_submux.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                            size=self.FromDIP((-1, 60)), name="txt_submux_log")
         self.txt_submux_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact hard-refusal message "
               "if Format detection fails or the SRT file fails validation -- not just a generic "
               "pass/fail toast."))
-        self.btn_submux_clear = wx.Button(self.grp_submux, label=T("Clear"))
+        self.btn_submux_clear = wx.Button(self.cpn_submux.GetPane(), label=T("Clear"))
         self.btn_submux_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
               "while a job is running so it can't wipe output you may still be reading mid-run; "
@@ -3633,8 +3673,16 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_submux_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_submux_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_submux_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_submux.GetPane().SetSizer(layout)
+
+        self.pnl_submux_dot = wx.Panel(self.grp_submux, size=self.FromDIP((10, 10)))
+        self.pnl_submux_dot.SetBackgroundColour(wx.Colour(45, 212, 191))
+        pane_header_row_submux = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_submux.Add(self.pnl_submux_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_submux.Add(self.cpn_submux, 1, wx.EXPAND)
+
         sizer_submux = wx.StaticBoxSizer(self.grp_submux, wx.VERTICAL)
-        sizer_submux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_submux.Add(pane_header_row_submux, 0, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: add an audio track / dub (ADR-042) ---
         # NOT part of the main conversion pipeline -- takes an already-converted 3D
@@ -3651,8 +3699,16 @@ class MainFrame(wx.Frame):
         self.grp_audiomux = wx.StaticBox(
             self.tab_tools, label=T("Add Audio Track (Standalone Tool)"))
 
-        self.lbl_audiomux_input = wx.StaticText(self.grp_audiomux, label=T("Converted 3D Video (.mkv)"))
-        self.txt_audiomux_input = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_input")
+        # Guided Light (ADR-101): see cpn_sharpen for the full pattern explanation.
+        self.cpn_audiomux = wx.CollapsiblePane(
+            self.grp_audiomux, label=T("Settings"), name="cpn_audiomux")
+        self.cpn_audiomux.Collapse(True)
+        self.cpn_audiomux.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_audiomux.GetPane().SetName("cpn_audiomux_pane")
+
+        self.lbl_audiomux_input = wx.StaticText(self.cpn_audiomux.GetPane(), label=T("Converted 3D Video (.mkv)"))
+        self.txt_audiomux_input = wx.TextCtrl(self.cpn_audiomux.GetPane(), name="txt_audiomux_input")
         self.txt_audiomux_input.SetToolTip(
             T("What it's for: the already-converted 3D video to add an audio track to. Must be "
               "an .mkv file -- this tool does not convert containers, so an .mp4 output must "
@@ -3660,10 +3716,10 @@ class MainFrame(wx.Frame):
               "Con: read-only -- never modified. A new file is always written to Output File "
               "below.\n"
               "Recommended: the direct iw3 output file."))
-        self.btn_audiomux_input = wx.Button(self.grp_audiomux, label=T("..."))
+        self.btn_audiomux_input = wx.Button(self.cpn_audiomux.GetPane(), label=T("..."))
 
-        self.lbl_audiomux_audio = wx.StaticText(self.grp_audiomux, label=T("Audio File (dub)"))
-        self.txt_audiomux_audio = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_audio")
+        self.lbl_audiomux_audio = wx.StaticText(self.cpn_audiomux.GetPane(), label=T("Audio File (dub)"))
+        self.txt_audiomux_audio = wx.TextCtrl(self.cpn_audiomux.GetPane(), name="txt_audiomux_audio")
         self.txt_audiomux_audio.SetToolTip(
             T("What it's for: the audio file to add as a new track -- e.g. a different-language "
               "dub. Common formats mkvmerge/ffmpeg already read directly work here: AAC, AC3, "
@@ -3673,21 +3729,21 @@ class MainFrame(wx.Frame):
               "automatically rather than pre-cutting it by hand.\n"
               "Recommended: match the audio's actual length/content to the video above as "
               "closely as you can -- Source Start/End Time handles the rest."))
-        self.btn_audiomux_audio = wx.Button(self.grp_audiomux, label=T("..."))
+        self.btn_audiomux_audio = wx.Button(self.cpn_audiomux.GetPane(), label=T("..."))
 
-        self.lbl_audiomux_output = wx.StaticText(self.grp_audiomux, label=T("Output File"))
-        self.txt_audiomux_output = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_output")
+        self.lbl_audiomux_output = wx.StaticText(self.cpn_audiomux.GetPane(), label=T("Output File"))
+        self.txt_audiomux_output = wx.TextCtrl(self.cpn_audiomux.GetPane(), name="txt_audiomux_output")
         self.txt_audiomux_output.SetToolTip(
             T("Where to write the new file with the audio track added. Auto-filled with "
               "'<converted file name>_dubbed.mkv' in the same folder once you pick the "
               "converted video above -- change it if you want it saved somewhere else.\n"
               "How it's safe: this tool never overwrites the input video or the audio file, "
               "only ever writes here."))
-        self.btn_audiomux_output = wx.Button(self.grp_audiomux, label=T("..."))
+        self.btn_audiomux_output = wx.Button(self.cpn_audiomux.GetPane(), label=T("..."))
 
-        self.lbl_audiomux_language = wx.StaticText(self.grp_audiomux, label=T("Language"))
+        self.lbl_audiomux_language = wx.StaticText(self.cpn_audiomux.GetPane(), label=T("Language"))
         self.cbo_audiomux_language = wx.ComboBox(
-            self.grp_audiomux, value="en", name="cbo_audiomux_language",
+            self.cpn_audiomux.GetPane(), value="en", name="cbo_audiomux_language",
             choices=["en", "es", "fr", "de", "it", "pt", "ru", "ja", "ko",
                      "zh", "nl", "sv", "no", "da", "pl", "tr", "ar", "hi"])
         self.cbo_audiomux_language.SetToolTip(
@@ -3700,14 +3756,14 @@ class MainFrame(wx.Frame):
               "is passed straight through to mkvmerge.\n"
               "Recommended: match the audio file's actual language; default 'en' if unsure."))
 
-        self.lbl_audiomux_track_name = wx.StaticText(self.grp_audiomux, label=T("Track Name"))
-        self.txt_audiomux_track_name = wx.TextCtrl(self.grp_audiomux, name="txt_audiomux_track_name")
+        self.lbl_audiomux_track_name = wx.StaticText(self.cpn_audiomux.GetPane(), label=T("Track Name"))
+        self.txt_audiomux_track_name = wx.TextCtrl(self.cpn_audiomux.GetPane(), name="txt_audiomux_track_name")
         self.txt_audiomux_track_name.SetToolTip(
             T("What it's for: an optional display name for the new audio track (shown in "
               "player track menus, e.g. 'Spanish Dub'). Leave blank to default to the audio "
               "file's own name."))
 
-        self.chk_audiomux_default = wx.CheckBox(self.grp_audiomux, label=T("Set as default track"),
+        self.chk_audiomux_default = wx.CheckBox(self.cpn_audiomux.GetPane(), label=T("Set as default track"),
                                                  name="chk_audiomux_default")
         self.chk_audiomux_default.SetValue(False)
         self.chk_audiomux_default.SetToolTip(
@@ -3721,7 +3777,7 @@ class MainFrame(wx.Frame):
               "not replacing the primary audio. Turn on only when you specifically want this new "
               "track to play automatically."))
 
-        self.chk_audiomux_start_time = wx.CheckBox(self.grp_audiomux, label=T("Source Start"),
+        self.chk_audiomux_start_time = wx.CheckBox(self.cpn_audiomux.GetPane(), label=T("Source Start"),
                                                     name="chk_audiomux_start_time")
         self.chk_audiomux_start_time.SetToolTip(
             T("What it's for: trims Audio File to start at this point, for when the audio "
@@ -3732,17 +3788,17 @@ class MainFrame(wx.Frame):
               "as-is.\n"
               "Con: there is no auto-detection of this -- you must know and enter the exact "
               "range within the audio file that matches the video above."))
-        self.txt_audiomux_start_time = TimeCtrl(self.grp_audiomux, value="00:00:00", fmt24hr=True,
+        self.txt_audiomux_start_time = TimeCtrl(self.cpn_audiomux.GetPane(), value="00:00:00", fmt24hr=True,
                                                  name="txt_audiomux_start_time")
-        self.chk_audiomux_end_time = wx.CheckBox(self.grp_audiomux, label=T("Source End"),
+        self.chk_audiomux_end_time = wx.CheckBox(self.cpn_audiomux.GetPane(), label=T("Source End"),
                                                   name="chk_audiomux_end_time")
         self.chk_audiomux_end_time.SetToolTip(
             T("Same idea as Source Start, but for where the trimmed audio should end. Leave "
               "unchecked to use the end of the audio file."))
-        self.txt_audiomux_end_time = TimeCtrl(self.grp_audiomux, value="00:00:00", fmt24hr=True,
+        self.txt_audiomux_end_time = TimeCtrl(self.cpn_audiomux.GetPane(), value="00:00:00", fmt24hr=True,
                                                name="txt_audiomux_end_time")
 
-        self.btn_audiomux_run = wx.Button(self.grp_audiomux, label=T("Run"))
+        self.btn_audiomux_run = wx.Button(self.cpn_audiomux.GetPane(), label=T("Run"))
         self.btn_audiomux_run.SetToolTip(
             T("What it's for: runs the mux as a separate background process (python -m "
               "iw3.audio_mux_cli) -- this app's own GPU/model state is never touched, and "
@@ -3755,13 +3811,13 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded "
               "rather than refused."))
 
-        self.txt_audiomux_log = wx.TextCtrl(self.grp_audiomux, style=wx.TE_MULTILINE | wx.TE_READONLY,
+        self.txt_audiomux_log = wx.TextCtrl(self.cpn_audiomux.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                              size=self.FromDIP((-1, 60)), name="txt_audiomux_log")
         self.txt_audiomux_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact ffmpeg trim "
               "command(s) when Source Start/End Time is used, and the exact refusal reason "
               "if anything fails -- not just a generic pass/fail toast."))
-        self.btn_audiomux_clear = wx.Button(self.grp_audiomux, label=T("Clear"))
+        self.btn_audiomux_clear = wx.Button(self.cpn_audiomux.GetPane(), label=T("Clear"))
         self.btn_audiomux_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
               "while a job is running so it can't wipe output you may still be reading mid-run; "
@@ -3801,8 +3857,16 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_audiomux_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_audiomux_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_audiomux_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_audiomux.GetPane().SetSizer(layout)
+
+        self.pnl_audiomux_dot = wx.Panel(self.grp_audiomux, size=self.FromDIP((10, 10)))
+        self.pnl_audiomux_dot.SetBackgroundColour(wx.Colour(190, 224, 64))
+        pane_header_row_audiomux = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_audiomux.Add(self.pnl_audiomux_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_audiomux.Add(self.cpn_audiomux, 1, wx.EXPAND)
+
         sizer_audiomux = wx.StaticBoxSizer(self.grp_audiomux, wx.VERTICAL)
-        sizer_audiomux.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_audiomux.Add(pane_header_row_audiomux, 0, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: retroactive MKV StereoMode tagging (ADR-033) ---
         # NOT part of the main conversion pipeline -- takes an already-converted iw3
@@ -3817,8 +3881,16 @@ class MainFrame(wx.Frame):
         self.grp_stereotag = wx.StaticBox(
             self.tab_tools, label=T("Retroactively Tag MKV as 3D (Standalone Tool)"))
 
-        self.lbl_stereotag_input = wx.StaticText(self.grp_stereotag, label=T("Converted 3D Video (.mkv)"))
-        self.txt_stereotag_input = wx.TextCtrl(self.grp_stereotag, name="txt_stereotag_input")
+        # Guided Light (ADR-101): see cpn_sharpen for the full pattern explanation.
+        self.cpn_stereotag = wx.CollapsiblePane(
+            self.grp_stereotag, label=T("Settings"), name="cpn_stereotag")
+        self.cpn_stereotag.Collapse(True)
+        self.cpn_stereotag.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                 self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_stereotag.GetPane().SetName("cpn_stereotag_pane")
+
+        self.lbl_stereotag_input = wx.StaticText(self.cpn_stereotag.GetPane(), label=T("Converted 3D Video (.mkv)"))
+        self.txt_stereotag_input = wx.TextCtrl(self.cpn_stereotag.GetPane(), name="txt_stereotag_input")
         self.txt_stereotag_input.SetToolTip(
             T("What it's for: the already-converted 3D video to tag. Must be an .mkv file -- "
               "StereoMode is a Matroska-only property.\n"
@@ -3828,11 +3900,11 @@ class MainFrame(wx.Frame):
               "from a full copy first. Use Backup below if you still want a safety copy.\n"
               "Recommended: the direct iw3 output file, with its normal SBS/TB filename tag intact "
               "(e.g. '..._LR.mkv') so Format below can auto-detect."))
-        self.btn_stereotag_input = wx.Button(self.grp_stereotag, label=T("..."))
+        self.btn_stereotag_input = wx.Button(self.cpn_stereotag.GetPane(), label=T("..."))
 
-        self.lbl_stereotag_format = wx.StaticText(self.grp_stereotag, label=T("Format"))
+        self.lbl_stereotag_format = wx.StaticText(self.cpn_stereotag.GetPane(), label=T("Format"))
         self.cbo_stereotag_format = wx.ComboBox(
-            self.grp_stereotag, name="cbo_stereotag_format",
+            self.cpn_stereotag.GetPane(), name="cbo_stereotag_format",
             choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb",
                      "cross_eyed", "vr90", "rgbd", "half_rgbd", "anaglyph"])
         self.cbo_stereotag_format.SetEditable(False)
@@ -3847,7 +3919,7 @@ class MainFrame(wx.Frame):
               "Recommended: leave on 'auto' unless the tool's log below reports it couldn't detect "
               "the format."))
 
-        self.chk_stereotag_backup = wx.CheckBox(self.grp_stereotag, label=T("Backup before editing"),
+        self.chk_stereotag_backup = wx.CheckBox(self.cpn_stereotag.GetPane(), label=T("Backup before editing"),
                                                 name="chk_stereotag_backup")
         self.chk_stereotag_backup.SetValue(False)
         self.chk_stereotag_backup.SetToolTip(
@@ -3859,7 +3931,7 @@ class MainFrame(wx.Frame):
               "metadata, never the actual video/audio. Turn on if you'd rather have a copy just in "
               "case."))
 
-        self.btn_stereotag_run = wx.Button(self.grp_stereotag, label=T("Run"))
+        self.btn_stereotag_run = wx.Button(self.cpn_stereotag.GetPane(), label=T("Run"))
         self.btn_stereotag_run.SetToolTip(
             T("What it's for: runs the tagging as a separate background process (python -m "
               "iw3.stereo_mode_tag_cli) -- this app's own GPU/model state is never touched.\n"
@@ -3867,12 +3939,12 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded "
               "rather than refused."))
 
-        self.txt_stereotag_log = wx.TextCtrl(self.grp_stereotag, style=wx.TE_MULTILINE | wx.TE_READONLY,
+        self.txt_stereotag_log = wx.TextCtrl(self.cpn_stereotag.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                              size=self.FromDIP((-1, 60)), name="txt_stereotag_log")
         self.txt_stereotag_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact refusal reason if Format "
               "detection fails or the resolved format isn't taggable -- not just a generic pass/fail."))
-        self.btn_stereotag_clear = wx.Button(self.grp_stereotag, label=T("Clear"))
+        self.btn_stereotag_clear = wx.Button(self.cpn_stereotag.GetPane(), label=T("Clear"))
         self.btn_stereotag_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
               "while a job is running so it can't wipe output you may still be reading mid-run; "
@@ -3894,8 +3966,16 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_stereotag_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_stereotag_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_stereotag_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_stereotag.GetPane().SetSizer(layout)
+
+        self.pnl_stereotag_dot = wx.Panel(self.grp_stereotag, size=self.FromDIP((10, 10)))
+        self.pnl_stereotag_dot.SetBackgroundColour(wx.Colour(99, 102, 241))
+        pane_header_row_stereotag = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_stereotag.Add(self.pnl_stereotag_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_stereotag.Add(self.cpn_stereotag, 1, wx.EXPAND)
+
         sizer_stereotag = wx.StaticBoxSizer(self.grp_stereotag, wx.VERTICAL)
-        sizer_stereotag.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_stereotag.Add(pane_header_row_stereotag, 0, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: apply the Sharpen filter to an already-converted
         # video (ADR-063) ---
@@ -3912,8 +3992,19 @@ class MainFrame(wx.Frame):
         self.grp_sharpen = wx.StaticBox(
             self.tab_tools, label=T("Sharpen (Standalone Tool)"))
 
-        self.lbl_sharpen_input = wx.StaticText(self.grp_sharpen, label=T("Converted 3D Video (.mkv)"))
-        self.txt_sharpen_input = wx.TextCtrl(self.grp_sharpen, name="txt_sharpen_input")
+        # Guided Light (ADR-101): the whole group's fields live inside one
+        # collapsible pane, collapsed by default, so only the tool actually being
+        # used needs to be expanded -- see get_standalone_tools_sliders_and_panes()
+        # and on_toggled_standalone_tools_collapsible_pane().
+        self.cpn_sharpen = wx.CollapsiblePane(
+            self.grp_sharpen, label=T("Settings"), name="cpn_sharpen")
+        self.cpn_sharpen.Collapse(True)
+        self.cpn_sharpen.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                               self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_sharpen.GetPane().SetName("cpn_sharpen_pane")
+
+        self.lbl_sharpen_input = wx.StaticText(self.cpn_sharpen.GetPane(), label=T("Converted 3D Video (.mkv)"))
+        self.txt_sharpen_input = wx.TextCtrl(self.cpn_sharpen.GetPane(), name="txt_sharpen_input")
         self.txt_sharpen_input.SetToolTip(
             T("What it's for: the already-converted 3D video to sharpen. Must be an .mkv "
               "file -- mkvmerge is what guarantees every other track (audio, subtitles, "
@@ -3924,21 +4015,21 @@ class MainFrame(wx.Frame):
               "Recommended: the direct iw3 output file, with its normal SBS/TB/RGBD/"
               "Anaglyph filename tag intact (e.g. '..._LR.mkv') so Format below can "
               "auto-detect."))
-        self.btn_sharpen_input = wx.Button(self.grp_sharpen, label=T("..."))
+        self.btn_sharpen_input = wx.Button(self.cpn_sharpen.GetPane(), label=T("..."))
 
-        self.lbl_sharpen_output = wx.StaticText(self.grp_sharpen, label=T("Output File"))
-        self.txt_sharpen_output = wx.TextCtrl(self.grp_sharpen, name="txt_sharpen_output")
+        self.lbl_sharpen_output = wx.StaticText(self.cpn_sharpen.GetPane(), label=T("Output File"))
+        self.txt_sharpen_output = wx.TextCtrl(self.cpn_sharpen.GetPane(), name="txt_sharpen_output")
         self.txt_sharpen_output.SetToolTip(
             T("Where to write the new sharpened copy. Auto-filled with '<converted file "
               "name>_sharpened.mkv' in the same folder once you pick the converted video "
               "above -- change it if you want it saved somewhere else.\n"
               "How it's safe: this tool never overwrites the input video, only ever writes "
               "here."))
-        self.btn_sharpen_output = wx.Button(self.grp_sharpen, label=T("..."))
+        self.btn_sharpen_output = wx.Button(self.cpn_sharpen.GetPane(), label=T("..."))
 
-        self.lbl_sharpen_format = wx.StaticText(self.grp_sharpen, label=T("Format"))
+        self.lbl_sharpen_format = wx.StaticText(self.cpn_sharpen.GetPane(), label=T("Format"))
         self.cbo_sharpen_format = wx.ComboBox(
-            self.grp_sharpen, name="cbo_sharpen_format",
+            self.cpn_sharpen.GetPane(), name="cbo_sharpen_format",
             choices=["auto", "half_sbs", "full_sbs", "half_tb", "full_tb",
                      "cross_eyed", "vr90", "rgbd", "half_rgbd", "anaglyph"])
         self.cbo_sharpen_format.SetEditable(False)
@@ -3959,9 +4050,9 @@ class MainFrame(wx.Frame):
               "Recommended: leave on 'auto' unless the tool's log below reports it "
               "couldn't detect the format."))
 
-        self.lbl_sharpen_strength = wx.StaticText(self.grp_sharpen, label=T("Strength"))
+        self.lbl_sharpen_strength = wx.StaticText(self.cpn_sharpen.GetPane(), label=T("Strength"))
         self.cbo_sharpen_strength_standalone = EditableComboBox(
-            self.grp_sharpen, choices=["0.25", "0.5", "0.75", "1.0"],
+            self.cpn_sharpen.GetPane(), choices=["0.25", "0.5", "0.75", "1.0"],
             name="cbo_sharpen_strength_standalone")
         self.cbo_sharpen_strength_standalone.SetSelection(1)
         self.cbo_sharpen_strength_standalone.SetToolTip(
@@ -3976,9 +4067,9 @@ class MainFrame(wx.Frame):
               "Recommended: 0.5 (default) as a safe starting point, same as the "
               "in-pipeline control."))
         self.sld_sharpen_strength_standalone = _build_stereo_slider(
-            self.grp_sharpen, self.cbo_sharpen_strength_standalone, 0.25, 1.0, 100)
+            self.cpn_sharpen.GetPane(), self.cbo_sharpen_strength_standalone, 0.25, 1.0, 100)
 
-        self.btn_sharpen_run = wx.Button(self.grp_sharpen, label=T("Run"))
+        self.btn_sharpen_run = wx.Button(self.cpn_sharpen.GetPane(), label=T("Run"))
         self.btn_sharpen_run.SetToolTip(
             T("What it's for: runs the sharpen pass as a separate background process "
               "(python -m iw3.sharpen_cli) -- this app's own GPU/model state is never "
@@ -3993,12 +4084,12 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually "
               "succeeded rather than refused."))
 
-        self.txt_sharpen_log = wx.TextCtrl(self.grp_sharpen, style=wx.TE_MULTILINE | wx.TE_READONLY,
+        self.txt_sharpen_log = wx.TextCtrl(self.cpn_sharpen.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                             size=self.FromDIP((-1, 60)), name="txt_sharpen_log")
         self.txt_sharpen_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact hard-refusal "
               "message if Format detection fails -- not just a generic pass/fail toast."))
-        self.btn_sharpen_clear = wx.Button(self.grp_sharpen, label=T("Clear"))
+        self.btn_sharpen_clear = wx.Button(self.cpn_sharpen.GetPane(), label=T("Clear"))
         self.btn_sharpen_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
               "while a job is running so it can't wipe output you may still be reading mid-run; "
@@ -4026,8 +4117,16 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_sharpen_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_sharpen_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_sharpen_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_sharpen.GetPane().SetSizer(layout)
+
+        self.pnl_sharpen_dot = wx.Panel(self.grp_sharpen, size=self.FromDIP((10, 10)))
+        self.pnl_sharpen_dot.SetBackgroundColour(wx.Colour(255, 99, 71))
+        pane_header_row_sharpen = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_sharpen.Add(self.pnl_sharpen_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_sharpen.Add(self.cpn_sharpen, 1, wx.EXPAND)
+
         sizer_sharpen = wx.StaticBoxSizer(self.grp_sharpen, wx.VERTICAL)
-        sizer_sharpen.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_sharpen.Add(pane_header_row_sharpen, 0, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone utility: RIFE frame interpolation on an already-converted
         # video (ADR-029/ADR-049/ADR-051's own CLI tool, iw3/rife_cli.py, previously
@@ -4046,9 +4145,17 @@ class MainFrame(wx.Frame):
         self.grp_rife_standalone = wx.StaticBox(
             self.tab_tools, label=T("RIFE Frame Interpolation (Standalone Tool)"))
 
-        self.lbl_rife_standalone_input = wx.StaticText(self.grp_rife_standalone,
+        # Guided Light (ADR-101): see cpn_sharpen for the full pattern explanation.
+        self.cpn_rife_standalone = wx.CollapsiblePane(
+            self.grp_rife_standalone, label=T("Settings"), name="cpn_rife_standalone")
+        self.cpn_rife_standalone.Collapse(True)
+        self.cpn_rife_standalone.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                       self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_rife_standalone.GetPane().SetName("cpn_rife_standalone_pane")
+
+        self.lbl_rife_standalone_input = wx.StaticText(self.cpn_rife_standalone.GetPane(),
                                                          label=T("Converted 3D Video"))
-        self.txt_rife_standalone_input = wx.TextCtrl(self.grp_rife_standalone,
+        self.txt_rife_standalone_input = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
                                                        name="txt_rife_standalone_input")
         self.txt_rife_standalone_input.SetToolTip(
             T("What it's for: an already-converted 3D video to smooth the motion of. RIFE is a separate "
@@ -4062,10 +4169,10 @@ class MainFrame(wx.Frame):
               "though in practice both eyes move together so this doesn't cause left/right desync (same "
               "accepted tradeoff as the in-pipeline RIFE step above).\n"
               "Recommended: the direct iw3 output file you already made."))
-        self.btn_rife_standalone_input = wx.Button(self.grp_rife_standalone, label=T("..."))
+        self.btn_rife_standalone_input = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("..."))
 
-        self.lbl_rife_standalone_output = wx.StaticText(self.grp_rife_standalone, label=T("Output File"))
-        self.txt_rife_standalone_output = wx.TextCtrl(self.grp_rife_standalone,
+        self.lbl_rife_standalone_output = wx.StaticText(self.cpn_rife_standalone.GetPane(), label=T("Output File"))
+        self.txt_rife_standalone_output = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
                                                         name="txt_rife_standalone_output")
         self.txt_rife_standalone_output.SetToolTip(
             T("Where to write the new, motion-smoothed copy. Auto-filled with '<converted file "
@@ -4074,10 +4181,10 @@ class MainFrame(wx.Frame):
               "How it's safe: this tool never overwrites the input video, only ever writes here. It also "
               "always writes a small '<output>.rife_manifest.json' file next to it, recording which "
               "output frames are real and which are RIFE-synthetic -- see Run below for what that's for."))
-        self.btn_rife_standalone_output = wx.Button(self.grp_rife_standalone, label=T("..."))
+        self.btn_rife_standalone_output = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("..."))
 
-        self.lbl_rife_standalone_model = wx.StaticText(self.grp_rife_standalone, label=T("RIFE Model"))
-        self.cbo_rife_standalone_model = wx.ComboBox(self.grp_rife_standalone,
+        self.lbl_rife_standalone_model = wx.StaticText(self.cpn_rife_standalone.GetPane(), label=T("RIFE Model"))
+        self.cbo_rife_standalone_model = wx.ComboBox(self.cpn_rife_standalone.GetPane(),
                                                        choices=["rife_425", "rife_425_lite"],
                                                        name="cbo_rife_standalone_model")
         self.cbo_rife_standalone_model.SetEditable(False)
@@ -4093,8 +4200,8 @@ class MainFrame(wx.Frame):
               "the app).\n"
               "Recommended: rife_425 unless interpolation time is a real bottleneck for you."))
 
-        self.lbl_rife_standalone_mode = wx.StaticText(self.grp_rife_standalone, label=T("Rate"))
-        self.cbo_rife_standalone_mode = wx.ComboBox(self.grp_rife_standalone,
+        self.lbl_rife_standalone_mode = wx.StaticText(self.cpn_rife_standalone.GetPane(), label=T("Rate"))
+        self.cbo_rife_standalone_mode = wx.ComboBox(self.cpn_rife_standalone.GetPane(),
                                                       choices=["2x", "3x", "4x", "Custom FPS..."],
                                                       name="cbo_rife_standalone_mode")
         self.cbo_rife_standalone_mode.SetEditable(False)
@@ -4115,7 +4222,7 @@ class MainFrame(wx.Frame):
               "spacing of the clean 2x/3x/4x multipliers.\n"
               "Recommended: 2x for most uses; Custom FPS if you need to match a specific display or "
               "editing timeline's exact frame rate."))
-        self.txt_rife_standalone_target_fps = wx.TextCtrl(self.grp_rife_standalone,
+        self.txt_rife_standalone_target_fps = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
                                                             name="txt_rife_standalone_target_fps")
         self.txt_rife_standalone_target_fps.SetToolTip(
             T("What it's for: the exact output frame rate to interpolate to, used only when Rate above is "
@@ -4126,8 +4233,8 @@ class MainFrame(wx.Frame):
               "Recommended: 60 for standard smooth-motion displays, or match your target display/editing "
               "timeline's exact refresh rate."))
 
-        self.lbl_rife_standalone_gpu = wx.StaticText(self.grp_rife_standalone, label=T("GPU"))
-        self.cbo_rife_standalone_gpu = wx.ComboBox(self.grp_rife_standalone, name="cbo_rife_standalone_gpu")
+        self.lbl_rife_standalone_gpu = wx.StaticText(self.cpn_rife_standalone.GetPane(), label=T("GPU"))
+        self.cbo_rife_standalone_gpu = wx.ComboBox(self.cpn_rife_standalone.GetPane(), name="cbo_rife_standalone_gpu")
         self.cbo_rife_standalone_gpu.SetEditable(False)
         cuda_device_names = _query_nvidia_smi_gpu_names()
         if cuda_device_names is not None:
@@ -4158,8 +4265,8 @@ class MainFrame(wx.Frame):
               "Recommended: your main GPU (the first entry) unless you're deliberately running this "
               "alongside another GPU job and want to keep them on separate devices."))
 
-        self.lbl_rife_standalone_codec = wx.StaticText(self.grp_rife_standalone, label=T("Output Codec"))
-        self.cbo_rife_standalone_codec = wx.ComboBox(self.grp_rife_standalone,
+        self.lbl_rife_standalone_codec = wx.StaticText(self.cpn_rife_standalone.GetPane(), label=T("Output Codec"))
+        self.cbo_rife_standalone_codec = wx.ComboBox(self.cpn_rife_standalone.GetPane(),
                                                        name="cbo_rife_standalone_codec")
         self.cbo_rife_standalone_codec.SetEditable(False)
         # ClientData carries the real --video-codec value each choice maps to (None
@@ -4190,7 +4297,7 @@ class MainFrame(wx.Frame):
               "Retroactive HDR/DV Reinjection tool afterward -- then pick libx265 (works everywhere) or "
               "hevc_nvenc (faster, if your GPU supports it)."))
 
-        self.btn_rife_standalone_run = wx.Button(self.grp_rife_standalone, label=T("Run"))
+        self.btn_rife_standalone_run = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Run"))
         self.btn_rife_standalone_run.SetToolTip(
             T("What it's for: runs RIFE interpolation as a separate background process (python -m "
               "iw3.rife_cli) -- this app's own GPU/model state is never touched, and the input video is "
@@ -4209,14 +4316,14 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded rather "
               "than refused, and note the printed manifest file path if you'll need it for Dolby Vision."))
 
-        self.txt_rife_standalone_log = wx.TextCtrl(self.grp_rife_standalone,
+        self.txt_rife_standalone_log = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
                                                      style=wx.TE_MULTILINE | wx.TE_READONLY,
                                                      size=self.FromDIP((-1, 60)), name="txt_rife_standalone_log")
         self.txt_rife_standalone_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact refusal message if Custom FPS "
               "isn't genuinely higher than the source's own frame rate, and the manifest file path it "
               "wrote on success."))
-        self.btn_rife_standalone_clear = wx.Button(self.grp_rife_standalone, label=T("Clear"))
+        self.btn_rife_standalone_clear = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Clear"))
         self.btn_rife_standalone_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
               "while a job is running so it can't wipe output you may still be reading mid-run; "
@@ -4250,8 +4357,16 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_rife_standalone_run, (h, 3), flag=wx.EXPAND)
         layout.Add(self.txt_rife_standalone_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_rife_standalone.GetPane().SetSizer(layout)
+
+        self.pnl_rife_standalone_dot = wx.Panel(self.grp_rife_standalone, size=self.FromDIP((10, 10)))
+        self.pnl_rife_standalone_dot.SetBackgroundColour(wx.Colour(96, 165, 250))
+        pane_header_row_rife_standalone = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_rife_standalone.Add(self.pnl_rife_standalone_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_rife_standalone.Add(self.cpn_rife_standalone, 1, wx.EXPAND)
+
         sizer_rife_standalone = wx.StaticBoxSizer(self.grp_rife_standalone, wx.VERTICAL)
-        sizer_rife_standalone.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_rife_standalone.Add(pane_header_row_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
 
         # Each category below is its own panel (a Notebook tab, or a Single Page
         # section -- see ADR-037) instead of one big 4-column grid -- every sizer_*
@@ -4986,6 +5101,14 @@ class MainFrame(wx.Frame):
             self.cpn_stereo_inpainting_depth.GetPane(),
             self.cpn_stereo_stability_flicker.GetPane(),
             self.cpn_video_filter_scene_batch.GetPane(),
+            # ADR-101: one pane per Standalone Tool.
+            self.cpn_hdr_reinject.GetPane(),
+            self.cpn_subsearch.GetPane(),
+            self.cpn_submux.GetPane(),
+            self.cpn_audiomux.GetPane(),
+            self.cpn_stereotag.GetPane(),
+            self.cpn_sharpen.GetPane(),
+            self.cpn_rife_standalone.GetPane(),
         ):
             panel.SetBackgroundColour(panel_bg)
 
@@ -5151,17 +5274,17 @@ class MainFrame(wx.Frame):
 
     def get_standalone_tools_sliders_and_panes(self):
         """Same persistence-exclusion purpose as get_stereo_sliders_and_panes(), for
-        the one Guided Light slider added to Standalone Tools (Sharpen's Strength
-        field). No collapsible panes were added on this tab -- see docs/ai/AI_DECISIONS.md
-        ADR-100 for the judgment call: wrapping each of the 7 standalone utilities
-        (HDR/DV Reinjection, Subtitle Search, Subtitle Mux, Audio Mux, StereoMode
-        Tagging, Sharpen, RIFE Interpolation) in its own pane was considered, since
-        each is already a small, self-contained group -- but each group is already
-        small enough on its own (3-8 fields) that a pane adds a click to reach the one
-        tool actually being used without meaningfully reducing what's on screen,
-        unlike Stereo Generation's ~60 interdependent fields where panes had a real
-        decluttering effect. Not built."""
-        return [self.sld_sharpen_strength_standalone]
+        the Guided Light slider (Sharpen's Strength field) and the 7 Guided Light
+        panes added to Standalone Tools. ADR-100 originally judged per-tool panes not
+        worth it (each group already small); ADR-101 reverses that per explicit user
+        request -- one collapsed-by-default pane per tool (HDR/DV Reinjection,
+        Subtitle Search, Add Subtitle Track, Add Audio Track, Retroactively Tag MKV as
+        3D, Sharpen, RIFE Frame Interpolation) so only the tool actually in use needs
+        to be expanded."""
+        pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
+                      "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone")
+        panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
+        return [self.sld_sharpen_strength_standalone] + panes
 
     def on_toggled_stereo_collapsible_pane(self, event):
         """Guided Light pilot (ADR-097): a collapsible pane toggling changes
@@ -5207,6 +5330,25 @@ class MainFrame(wx.Frame):
             wrap_sizer = self.tab_wrap_video_filter.GetSizer()
             if wrap_sizer is not None:
                 self.tab_wrap_video_filter.SetMinSize(wrap_sizer.CalcMin())
+        refresh_layouts(self)
+        self._clamp_frame_to_screen()
+        event.Skip()
+
+    def on_toggled_standalone_tools_collapsible_pane(self, event):
+        """Same fix as on_toggled_stereo_collapsible_pane(), for the 7 Guided Light
+        panes added to Standalone Tools (ADR-101, one per tool -- HDR/DV Reinjection,
+        Subtitle Search, Add Subtitle Track, Add Audio Track, Retroactively Tag MKV as
+        3D, Sharpen, RIFE Frame Interpolation) -- tab_tools/tab_wrap_tools in place of
+        tab_stereo/tab_wrap_stereo. One shared handler for all 7 (unlike the
+        one-per-tab convention elsewhere in this file) since they all live on the same
+        tab and need the exact same tab_tools/tab_wrap_tools targets."""
+        refresh_layouts(self)
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+        else:
+            wrap_sizer = self.tab_wrap_tools.GetSizer()
+            if wrap_sizer is not None:
+                self.tab_wrap_tools.SetMinSize(wrap_sizer.CalcMin())
         refresh_layouts(self)
         self._clamp_frame_to_screen()
         event.Skip()
@@ -9328,6 +9470,90 @@ def _self_test_video_filter_collapsible_section():
     print("_self_test_video_filter_collapsible_section: PASS")
 
 
+def _self_test_standalone_tools_collapsible_sections():
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 7
+    Guided Light panes added to Standalone Tools (ADR-101, one per tool) --
+    tab_tools/tab_wrap_tools/on_toggled_standalone_tools_collapsible_pane in place of
+    the Stereo Generation equivalents. Also checks each pane has a real, unique
+    name (the exact bug class this pattern already broke once with 2+ panes sharing
+    a default name) and that Sharpen's pre-existing slider (built in an earlier
+    round) still tracks its combo correctly after being reparented into cpn_sharpen.
+    Exercised in both layout modes, and a switch back to Tabbed, same reasoning as
+    the Stereo Generation test. No GPU or real movie file needed."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    try:
+        gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+        frame = gui_mod.MainFrame()
+        panes = frame.get_standalone_tools_sliders_and_panes()
+        panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
+        assert len(panes) == 7, f"expected 7 Standalone Tools panes, found {len(panes)}"
+        names = [p.GetName() for p in panes]
+        assert len(set(names)) == 7, f"pane names are not all unique: {names}"
+        for p in panes:
+            assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
+
+        frame.cbo_sharpen_strength_standalone.SetValue("1.0")
+        frame.cbo_sharpen_strength_standalone.ProcessWindowEvent(
+            wx.CommandEvent(wx.wxEVT_TEXT, frame.cbo_sharpen_strength_standalone.GetId()))
+        assert frame.sld_sharpen_strength_standalone.GetValue() == 100, \
+            "Sharpen's slider lost sync with its combo after reparenting into cpn_sharpen"
+
+        def toggle_and_check(label, check_wrapper_tracks=None):
+            for pane in panes:
+                before_expanded = pane.IsExpanded()
+                tab_min_before = frame.tab_tools.GetSizer().CalcMin()
+                if check_wrapper_tracks is not None:
+                    wrap_min_before = check_wrapper_tracks()
+
+                pane.Collapse(before_expanded)
+                frame.on_toggled_standalone_tools_collapsible_pane(
+                    wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+                tab_min_after = frame.tab_tools.GetSizer().CalcMin()
+                assert tab_min_after != tab_min_before, \
+                    f"{label}: {pane.GetName()} toggle did not change tab_tools's own content size " \
+                    f"({tab_min_before} -> {tab_min_after})"
+                w, h = tab_min_after
+                assert w > 50 and h > 50, \
+                    f"{label}: tab_tools collapsed to near-zero after toggling {pane.GetName()}"
+
+                if check_wrapper_tracks is not None:
+                    wrap_min_after = check_wrapper_tracks()
+                    assert wrap_min_after != wrap_min_before, \
+                        f"{label}: wrapper did not track {pane.GetName()}'s toggle " \
+                        f"({wrap_min_before} -> {wrap_min_after})"
+                    assert wrap_min_after[1] >= tab_min_after[1], \
+                        f"{label}: wrapper height ({wrap_min_after[1]}) fell below tab_tools's own " \
+                        f"requirement ({tab_min_after[1]}) after toggling {pane.GetName()} -- would clip"
+
+                pane.Collapse(before_expanded)
+                frame.on_toggled_standalone_tools_collapsible_pane(
+                    wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+        toggle_and_check("Tabbed", check_wrapper_tracks=lambda: frame.tab_wrap_tools.GetSizer().CalcMin())
+
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_SINGLE_PAGE)
+        toggle_and_check("Single Page")
+        w, h = frame.pnl_single.GetSizer().CalcMin()
+        assert w > 100 and h > 100, "pnl_single collapsed to near-zero after a Standalone Tools pane toggle"
+
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_TABS)
+        toggle_and_check("Tabbed (after switch back)",
+                          check_wrapper_tracks=lambda: frame.tab_wrap_tools.GetSizer().CalcMin())
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_standalone_tools_collapsible_sections: PASS")
+
+
 def _self_test_zoom_level_persistence():
     """Regression test for UI Zoom's persisted preference: round-trips through the
     real save/load helpers using a scratch file so the user's actual
@@ -11447,6 +11673,7 @@ def _run_self_tests():
     _self_test_depth_blend_and_processor_sliders_sync()
     _self_test_stereo_collapsible_sections()
     _self_test_video_filter_collapsible_section()
+    _self_test_standalone_tools_collapsible_sections()
     _self_test_zoom_level_persistence()
     _self_test_zoom_startup_restore()
     _self_test_zoom_live_rescale()

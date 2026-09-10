@@ -153,25 +153,33 @@ FIELD_CHOICES = {
     "splat_blend_temperature": ["10.0", "25.0", "50.0", "75.0", "85.0"],
     "convergence": ["0.0", "0.25", "0.5", "1.0"],
     "convergence_smoothing": ["0.95", "0.9", "0.75", "0.5", "0.25", "0"],
-    "stereo_width": ["1920", "1280", "640"],
-    "resolution": ["512"],
+    # "Default" is a real suggested value in gui.py's own cbo_stereo_width/
+    # cbo_resolution (ADR-090) -- worker.py's build_args() treats it as
+    # equivalent to blank/unset, same as the real GUI's own handling.
+    "stereo_width": ["Default", "1920", "1280", "640"],
+    "resolution": ["Default", "512"],
     "foreground_scale": ["-3", "-2", "-1", "0", "1", "2", "3"],
     "depth_refine_strength": ["1.5", "1.25", "1.0", "0.75", "0.5", "0.25"],
     "temporal_stabilize_strength": ["0.9", "0.7", "0.5", "0.3"],
     "foreground_pop": ["0.0", "0.25", "0.5", "0.75", "1.0"],
-    "foreground_divergence": ["2.0", "2.5", "3.0", "3.5", "4.0"],
+    "foreground_divergence": ["", "2.0", "2.5", "3.0", "3.5", "4.0"],
     "background_pop": ["0.0", "0.25", "0.5", "0.75", "1.0"],
-    # Real unit is a 0.0-1.0 fraction (confirmed directly against
-    # --background-pop-coverage's own create_parser() help text), NOT the
-    # 0-100-style percent numbers the wx GUI's tooltip prose describes them
-    # by -- given here as fractions to match the field's real value_type.
-    "background_pop_coverage": ["0.15", "0.20", "0.25", "0.30", "0.40"],
-    "background_divergence": ["2.0", "2.5", "3.0", "3.5", "4.0"],
+    # Real unit shown to the user is WHOLE PERCENT ("15", "20", ...), not a
+    # fraction -- the real wx control divides by 100 itself before sending
+    # to the CLI (confirmed both in gui.py's own code and independently
+    # against --background-pop-coverage's create_parser() definition,
+    # ADR-090). The field's own value_type (percent_to_fraction) does that
+    # same conversion here now, so these choices match what a user would
+    # actually type into the real app, not the raw CLI unit.
+    "background_pop_coverage": ["15", "20", "25", "30", "40"],
+    "background_divergence": ["", "2.0", "2.5", "3.0", "3.5", "4.0"],
     "edge_repair_strength": ["0.0", "0.25", "0.5", "0.75", "1.0"],
     "sharpen_strength": ["0.25", "0.5", "0.75", "1.0"],
     "ema_decay": ["0.99", "0.95", "0.9", "0.75", "0.5", "0"],
     "ema_buffer": ["150", "60", "30", "1"],
-    "pad": ["0.01", "0.05", "0.5", "1"],
+    "pad": ["", "0.01", "0.05", "0.5", "1"],
+    "tune": ["", "film", "animation", "grain", "stillimage", "psnr",
+              "fastdecode", "zerolatency", "hq", "uhq", "ll", "ull", "lossless"],
     "crf": [str(n) for n in range(16, 28)],
     "video_bitrate": ["160M", "50M", "16M", "12M", "8M", "4M"],
     "profile_level": ["auto", "3.0", "3.1", "3.2", "4.0", "4.1", "4.2",

@@ -132,6 +132,12 @@ def _coerce(value_type, raw):
         # bare scalar breaks it (confirmed by direct test). Matches
         # gui.py's own real convention exactly (gui.py:5586-5591).
         return device_choice_to_gpu_id(raw)
+    if value_type == "percent_to_fraction":
+        # background_pop_coverage only (ADR-090): the real wx control shows
+        # whole-percent numbers ("15") and divides by 100 itself before
+        # sending to the CLI, which genuinely wants a 0.0-1.0 fraction --
+        # reproduces that same on-screen-vs-CLI split here.
+        return float(raw) / 100.0
     return raw
 
 
@@ -152,7 +158,12 @@ def build_args(settings):
             continue  # special-cased fields, applied below
         dest = f.cli_arg.lstrip("-").replace("-", "_")
         raw = settings.get(f.name, f.default)
-        if raw is None or raw == "":
+        # "Default" is a real suggested value in stereo_width/resolution's
+        # own dropdowns (matching gui.py's own cbo_stereo_width/
+        # cbo_resolution choices, ADR-090) meaning "use the model's own
+        # default" -- same as leaving the field blank, not a literal string
+        # to send to the CLI.
+        if raw is None or raw == "" or raw == "Default":
             continue
         setattr(args, dest, _coerce(f.value_type, raw))
 

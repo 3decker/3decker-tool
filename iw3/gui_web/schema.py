@@ -344,7 +344,13 @@ FIELDS: List[Field] = [
     Field(
         name="convergence", cli_arg="--convergence", label="Convergence Plane",
         widget="combo_editable", tab="stereo_generation", value_type="float",
-        default=0.5,
+        # Matches the real wx control's own on-screen default (0.25, gui.py
+        # cbo_convergence SetSelection(1) on ["0.0","0.25","0.5","1.0"]) --
+        # NOT create_parser()'s own --convergence default (0.5). The two
+        # disagree in the real app itself; matching what a user actually
+        # sees when they open the real GUI is the more useful "default" to
+        # duplicate here (ADR-090).
+        default=0.25,
         tooltip="Normalized depth position (0-1) that appears at screen "
                 "distance, with nothing feeling like it's popping out or "
                 "sinking in at that point.",
@@ -461,9 +467,15 @@ FIELDS: List[Field] = [
     Field(
         name="background_pop_coverage", cli_arg="--background-pop-coverage",
         label="Background Pop Coverage %", widget="combo_editable", tab="stereo_generation",
-        value_type="float", default=0.15,
+        # The real wx control (cbo_background_pop_coverage) shows and takes
+        # whole-percent numbers ("15", "20", ...) and divides by 100 itself
+        # before sending to the CLI (real CLI value is a 0.0-1.0 fraction --
+        # confirmed both ways, ADR-090) -- "percent_to_fraction" reproduces
+        # that same on-screen-vs-CLI conversion here, so what a user types
+        # matches what they'd type into the real app, not the raw CLI unit.
+        value_type="percent_to_fraction", default=15,
         tooltip="How much of the scene Background Pop treats as \"background\" "
-                "(0.0-1.0). Default 0.15 = farthest 15%.",
+                "(0-100%). Default 15 = farthest 15%.",
     ),
     Field(
         name="background_divergence", cli_arg="--background-divergence",
@@ -498,7 +510,13 @@ FIELDS: List[Field] = [
     ),
     Field(
         name="ema_decay", cli_arg="--ema-decay", label="EMA Decay",
-        widget="combo_editable", tab="stereo_generation", value_type="float", default=0.75,
+        widget="combo_editable", tab="stereo_generation", value_type="float",
+        # Matches the real wx control's own on-screen default (0.9, gui.py
+        # cbo_ema_decay SetSelection(2) on ["0.99","0.95","0.9","0.75",
+        # "0.5","0"]) -- NOT create_parser()'s own --ema-decay default
+        # (0.75). Same kind of pre-existing divergence as convergence
+        # above; matching what's actually shown on screen (ADR-090).
+        default=0.9,
         enabled_if=Rule(field="ema_normalize", op="eq", value=True),
         tooltip="Smoothing strength for Flicker Reduction (0-1). Larger = "
                 "smoother.",
@@ -805,7 +823,7 @@ FIELDS: List[Field] = [
     Field(
         name="video_codec", cli_arg="--video-codec", label="Video Codec",
         widget="combo_editable", tab="video_encoding", value_type="str", default=None,
-        choices=["libx264", "libx265", "libopenh264", "utvideo", "ffv1",
+        choices=["libx264", "libopenh264", "libx265", "utvideo", "ffv1",
                  "h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv"],
         tooltip="Video codec to encode with. Availability depends on Video "
                 "Format and this machine's hardware encoders.",

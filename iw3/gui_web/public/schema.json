@@ -363,7 +363,7 @@
         "0.5",
         "1.0"
       ],
-      "default": 0.5,
+      "default": 0.25,
       "tooltip": "Also called Convergence Plane. Where the \"screen depth\" sits, from 0 (everything pops out toward you) to 1 (everything sits behind the screen). Only used directly when mode is \"constant\" -- for sod_v1 it acts as a relative offset within the detected subject's depth range. Recommended: 0.5 as a balanced starting point.",
       "visible_if": null,
       "enabled_if": null
@@ -419,6 +419,7 @@
       "cli_arg": "--stereo-width",
       "value_type": "int",
       "choices": [
+        "Default",
         "1920",
         "1280",
         "640"
@@ -492,6 +493,7 @@
       "cli_arg": "--resolution",
       "value_type": "int",
       "choices": [
+        "Default",
         "512"
       ],
       "default": null,
@@ -673,6 +675,7 @@
       "cli_arg": "--foreground-divergence",
       "value_type": "float",
       "choices": [
+        "",
         "2.0",
         "2.5",
         "3.0",
@@ -711,15 +714,15 @@
       "tab": "stereo_generation",
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--background-pop-coverage",
-      "value_type": "float",
+      "value_type": "percent_to_fraction",
       "choices": [
-        "0.15",
-        "0.20",
-        "0.25",
-        "0.30",
-        "0.40"
+        "15",
+        "20",
+        "25",
+        "30",
+        "40"
       ],
-      "default": 0.15,
+      "default": 15,
       "tooltip": "What it's for: how much of the scene Background Pop treats as \"background\" (0.0-1.0 fraction, e.g. 0.25 = farthest 25%; default 0.15 = farthest 15%).\nCon: larger values affect more of the scene, but push the transition line further into the midground, where a sudden change in how much a subject recedes is more likely to be noticeable as an odd \"step\" in the depth.\nRecommended: 0.15 (default) for a subtle, hard-to-notice effect; raise to 0.20-0.30 only if you want the effect to reach further into the scene and don't mind it becoming more visible.",
       "visible_if": null,
       "enabled_if": null
@@ -733,6 +736,7 @@
       "cli_arg": "--background-divergence",
       "value_type": "float",
       "choices": [
+        "",
         "2.0",
         "2.5",
         "3.0",
@@ -831,7 +835,7 @@
         "0.5",
         "0"
       ],
-      "default": 0.75,
+      "default": 0.9,
       "tooltip": "Decay Rate: how much weight past frames keep vs. the newest frame when tracking the depth-map scale. Updates every single frame, not periodically.\nValues: higher (0.9-0.99) = more resistant to momentary spikes but slower to follow a genuine intentional depth change. Lower (0.5-0.75) = reacts faster to real change, but more exposed to the AI's own per-frame noise. 0 = no smoothing at all.\nRecommended: pair with Buffer below rather than tuning alone (e.g. Decay 0.98 pairs with Buffer 120 for scenes with real smearing/bleeding artifacts). Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own per-scene Decay/Buffer instead.",
       "visible_if": null,
       "enabled_if": {
@@ -1276,6 +1280,7 @@
       "cli_arg": "--pad",
       "value_type": "float",
       "choices": [
+        "",
         "0.01",
         "0.05",
         "0.5",
@@ -1626,8 +1631,8 @@
       "value_type": "str",
       "choices": [
         "libx264",
-        "libx265",
         "libopenh264",
+        "libx265",
         "utvideo",
         "ffv1",
         "h264_nvenc",
@@ -1805,6 +1810,7 @@
       "cli_arg": "--tune",
       "value_type": "str_list",
       "choices": [
+        "",
         "film",
         "animation",
         "grain",

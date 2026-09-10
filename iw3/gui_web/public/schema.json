@@ -5,6 +5,22 @@
       "label": "Stereo Generation"
     },
     {
+      "key": "dual_pass_depth_blend",
+      "label": "Dual-Pass Depth Blend"
+    },
+    {
+      "key": "video_filter",
+      "label": "Video Filter"
+    },
+    {
+      "key": "video_decoding",
+      "label": "Video Decoding"
+    },
+    {
+      "key": "video_encoding",
+      "label": "Video Encoding"
+    },
+    {
       "key": "processor",
       "label": "Processor"
     }
@@ -65,6 +81,57 @@
       "enabled_if": null
     },
     {
+      "name": "splat_blend_temperature",
+      "label": "Splat Blend Temperature",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--splat-blend-temperature",
+      "value_type": "float",
+      "choices": [],
+      "default": 50.0,
+      "tooltip": "Only used by Method=forward_splat_fill: how sharply the depth-weighted blend favors the nearer of two colliding pixels. Higher = sharper cutoff. Default (50.0) matches the method's original behavior.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "method",
+        "op": "eq",
+        "value": "forward_splat_fill"
+      }
+    },
+    {
+      "name": "synthetic_view",
+      "label": "Synthetic View",
+      "widget": "select",
+      "tab": "stereo_generation",
+      "cli_arg": "--synthetic-view",
+      "value_type": "str",
+      "choices": [
+        "both",
+        "right",
+        "left"
+      ],
+      "default": "both",
+      "tooltip": "Which side generates the synthesized view. 'both' warps both eyes from the source; 'right'/'left' keeps the original image as one eye and only synthesizes the other.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "convergence_mode",
+      "label": "Convergence Mode",
+      "widget": "select",
+      "tab": "stereo_generation",
+      "cli_arg": "--convergence-mode",
+      "value_type": "str",
+      "choices": [
+        "constant",
+        "sod_v1",
+        "face_detect"
+      ],
+      "default": "constant",
+      "tooltip": "How the convergence plane (screen-distance point) is chosen. 'constant' uses the Convergence Plane value directly; sod_v1/face_detect track it automatically per frame.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
       "name": "convergence",
       "label": "Convergence Plane",
       "widget": "combo_editable",
@@ -74,6 +141,486 @@
       "choices": [],
       "default": 0.5,
       "tooltip": "Normalized depth position (0-1) that appears at screen distance, with nothing feeling like it's popping out or sinking in at that point.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "convergence_smoothing",
+      "label": "Convergence Smoothing",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--convergence-smoothing",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.9,
+      "tooltip": "EMA decay for the auto convergence modes (sod_v1/face_detect). Higher = smoother but slower to react; 0 = no smoothing.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "convergence_mode",
+        "op": "in",
+        "value": [
+          "sod_v1",
+          "face_detect"
+        ]
+      }
+    },
+    {
+      "name": "ipd_offset",
+      "label": "Your Own Size",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--ipd-offset",
+      "value_type": "float",
+      "choices": [],
+      "default": 0,
+      "tooltip": "IPD offset as a width-scale percent. 0-10 is a reasonable value for Full SBS output.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "stereo_width",
+      "label": "Stereo Processing Width",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--stereo-width",
+      "value_type": "int",
+      "choices": [],
+      "default": null,
+      "tooltip": "Input width for row_flow_v3/row_flow_v2. Leave blank for the model's default.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "depth_model",
+      "label": "Depth Model",
+      "widget": "select",
+      "tab": "stereo_generation",
+      "cli_arg": "--depth-model",
+      "value_type": "str",
+      "choices": [
+        "ZoeD_N",
+        "ZoeD_K",
+        "ZoeD_NK",
+        "Any_S",
+        "Any_B",
+        "Any_L",
+        "ZoeD_Any_N",
+        "ZoeD_Any_K",
+        "Any_V2_S",
+        "Any_V2_B",
+        "Any_V2_L",
+        "Any_V2_N",
+        "Any_V2_K",
+        "Any_V2_N_S",
+        "Any_V2_N_B",
+        "Any_V2_N_L",
+        "Any_V2_K_S",
+        "Any_V2_K_B",
+        "Any_V2_K_L",
+        "Distill_Any_S",
+        "Distill_Any_B",
+        "Distill_Any_L",
+        "Any_V3_Mono",
+        "Any_V3_Mono_01",
+        "DepthPro",
+        "DepthPro_S",
+        "VDA_S",
+        "VDA_B",
+        "VDA_L",
+        "VDA_Metric",
+        "VDA_Metric_S",
+        "VDA_Metric_B",
+        "VDA_Metric_L",
+        "VDA_Stream_S",
+        "VDA_Stream_B",
+        "VDA_Stream_L",
+        "VDA_Stream_Metric_S",
+        "VDA_Stream_Metric_B",
+        "VDA_Stream_Metric_L",
+        "NULL"
+      ],
+      "default": "ZoeD_Any_N",
+      "tooltip": "Which neural network estimates depth from the source image. Different models trade off speed, video-temporal stability, and fine detail.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "resolution",
+      "label": "Depth Resolution",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--resolution",
+      "value_type": "int",
+      "choices": [],
+      "default": null,
+      "tooltip": "Input resolution (short side) fed to the depth model. Leave blank for the model's default.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "limit_resolution",
+      "label": "Limit to source",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--limit-resolution",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "If the source resolution is lower than Depth Resolution, cap the depth resolution at the source's own resolution instead of upscaling first.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "foreground_scale",
+      "label": "Foreground Scale",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--foreground-scale",
+      "value_type": "float",
+      "choices": [],
+      "default": 0,
+      "tooltip": "Foreground scaling level, -3.0 to 3.0. 0 is disabled.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "edge_dilation",
+      "label": "Edge Fix",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--edge-dilation",
+      "value_type": "int_list",
+      "choices": [],
+      "default": "2 1",
+      "tooltip": "Loop count of edge dilation, as \"<x> <y>\" or a single shared value. Space-separated.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "depth_aa",
+      "label": "Depth Anti-aliasing",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--depth-aa",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Applies depth antialiasing. Ignored for models that don't support it.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "depth_refine",
+      "label": "Depth Detail Refinement",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--depth-refine",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Cleans up each depth frame's own internal noise with edge-preserving smoothing, within that single frame (a different axis from EMA, which smooths ACROSS frames).",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "depth_refine_strength",
+      "label": "Depth Refine Strength",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--depth-refine-strength",
+      "value_type": "float",
+      "choices": [],
+      "default": 1.0,
+      "tooltip": "How strong the Depth Detail Refinement pass is. 1.0 matches the feature's original fixed behavior.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_refine",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "temporal_stabilize",
+      "label": "Object Stability",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--temporal-stabilize",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Approximates a video-aware model's frame-to-frame stability for a single-frame model, using optical flow to reduce object depth flickering EMA alone can't fix.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "temporal_stabilize_strength",
+      "label": "Object Stability Strength",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--temporal-stabilize-strength",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.7,
+      "tooltip": "How strongly to trust the motion-warped previous frame vs. the fresh per-frame depth (0-1). Tapers down automatically during fast motion.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "temporal_stabilize",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "foreground_pop",
+      "label": "Foreground Pop",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--foreground-pop",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.0,
+      "tooltip": "Pushes the nearest pixels even further toward the audience (0.0=off, 0.5=medium, 1.0=strong).",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "foreground_divergence",
+      "label": "Foreground Divergence",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--foreground-divergence",
+      "value_type": "float",
+      "choices": [],
+      "default": null,
+      "tooltip": "A separate 3D Strength for the nearest ~15% of pixels only. Leave blank to use the same value as the rest of the scene.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "background_pop",
+      "label": "Background Pop",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--background-pop",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.0,
+      "tooltip": "Pushes the farthest pixels even further from the audience (0.0=off, 0.5=medium, 1.0=strong).",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "background_pop_coverage",
+      "label": "Background Pop Coverage %",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--background-pop-coverage",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.15,
+      "tooltip": "How much of the scene Background Pop treats as \"background\" (0.0-1.0). Default 0.15 = farthest 15%.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "background_divergence",
+      "label": "Background Divergence",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--background-divergence",
+      "value_type": "float",
+      "choices": [],
+      "default": null,
+      "tooltip": "A separate 3D Strength for the farthest ~15% of pixels only. Leave blank to use the same value as the rest of the scene.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "edge_repair_strength",
+      "label": "Edge Repair",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--edge-repair-strength",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.0,
+      "tooltip": "Final cleanup pass smoothing a thin band right around real depth edges to reduce hairline fringing. 0.0=off.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "sharpen",
+      "label": "Sharpen",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--sharpen",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Final edge-aware unsharp-mask pass on the rendered stereo output. Off by default.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "sharpen_strength",
+      "label": "Sharpen Strength",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--sharpen-strength",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.5,
+      "tooltip": "How strong the Sharpen pass is (0.0=no effect, 1.0=strongest).",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "sharpen",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "ema_normalize",
+      "label": "Flicker Reduction",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--ema-normalize",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Uses a moving min/max average to normalize video depth over time, reducing frame-to-frame flicker.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "ema_decay",
+      "label": "EMA Decay",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--ema-decay",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.75,
+      "tooltip": "Smoothing strength for Flicker Reduction (0-1). Larger = smoother.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "ema_normalize",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "ema_buffer",
+      "label": "EMA Buffer",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--ema-buffer",
+      "value_type": "int",
+      "choices": [],
+      "default": 30,
+      "tooltip": "Frame buffer size for Flicker Reduction's moving average.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "ema_normalize",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "ema_motion_adaptive",
+      "label": "Motion-Adaptive Smoothing",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--ema-motion-adaptive",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Automatically eases EMA Decay off during fast motion instead of one fixed strength for the whole clip. Never smooths more than EMA Decay itself, only less.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "ema_normalize",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "scene_detect",
+      "label": "Scene Boundary Detection",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--scene-detect",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Splits processing at real scene cuts (shot boundary detection); EMA and other running state resets at each cut.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "disable_scene_cache",
+      "label": "Disable Scene Boundary Cache",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--disable-scene-cache",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Disables the cache Scene Boundary Detection normally reuses on a re-run of the same file.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "scene_detect",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "scene_batch_auto_ema",
+      "label": "Auto EMA by Scene Length",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--scene-batch-auto-ema",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Automatically picks EMA Decay/Buffer per scene based on that scene's own length, using a built-in table. Requires Scene Boundary Detection (or Automated Scene Batch, on the Video Filter tab).",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "scene_batch_auto_ema_model",
+      "label": "Auto EMA Model",
+      "widget": "select",
+      "tab": "stereo_generation",
+      "cli_arg": "--scene-batch-auto-ema-model",
+      "value_type": "str",
+      "choices": [
+        "3DECKER VDA_L",
+        "3DECKER Any_V3_Mono_01",
+        "Nagadomi_Reference",
+        "GEMINI AI",
+        "ChatGPT",
+        "Grok",
+        "Fast Action",
+        "Medium Magical",
+        "Drama Slow Paced"
+      ],
+      "default": "3DECKER VDA_L",
+      "tooltip": "Which built-in EMA-by-duration table to use, matched to the Depth Model in use.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "scene_batch_auto_ema",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "preserve_screen_border",
+      "label": "Preserve Screen Border",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--preserve-screen-border",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Forces screen-border parallax to zero.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -125,6 +672,677 @@
       "enabled_if": null
     },
     {
+      "name": "stereo_mode_tag",
+      "label": "Tag MKV as 3D",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "cli_arg": "--stereo-mode-tag",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Tags the finished .mkv's video track with the Matroska StereoMode property so 3D-aware players/TVs auto-detect the 3D packing instead of the viewer picking it manually.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "depth_blend",
+      "label": "Dual-Pass Depth Blend",
+      "widget": "checkbox",
+      "tab": "dual_pass_depth_blend",
+      "cli_arg": "--depth-blend",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Blends depth from a second model into the primary Depth Model's output, favoring the second model in areas with dense fine detail (foliage, hair, close-up texture). Runs as three full passes over the clip; costs real extra time and disk space. Requires a single video file input.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "depth_blend_model",
+      "label": "Secondary Depth Model",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "cli_arg": "--depth-blend-model",
+      "value_type": "str",
+      "choices": [],
+      "default": "VDA_L",
+      "tooltip": "The secondary depth model blended in by Dual-Pass Depth Blend.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_strength",
+      "label": "Blend Strength",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "cli_arg": "--depth-blend-strength",
+      "value_type": "float",
+      "choices": [],
+      "default": 1.0,
+      "tooltip": "How strongly to favor the secondary model in the selected region (0-1). 1.0 = fully trust it there.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_region",
+      "label": "Blend Region",
+      "widget": "select",
+      "tab": "dual_pass_depth_blend",
+      "cli_arg": "--depth-blend-region",
+      "value_type": "str",
+      "choices": [
+        "detail",
+        "foreground",
+        "background"
+      ],
+      "default": "detail",
+      "tooltip": "What decides WHERE the secondary model gets blended in: 'detail' (dense fine visual detail), 'foreground' (nearest X% of the scene), or 'background' (farthest X%).",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_region_percent",
+      "label": "Blend Region %",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "cli_arg": "--depth-blend-region-percent",
+      "value_type": "float",
+      "choices": [],
+      "default": 25.0,
+      "tooltip": "For Blend Region foreground/background: what percent of the scene (by depth) to blend the secondary model into.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend_region",
+        "op": "in",
+        "value": [
+          "foreground",
+          "background"
+        ]
+      }
+    },
+    {
+      "name": "start_time",
+      "label": "Start Time",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--start-time",
+      "value_type": "str",
+      "choices": [],
+      "default": null,
+      "tooltip": "Start time offset for video, hh:mm:ss or mm:ss format.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "end_time",
+      "label": "End Time",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--end-time",
+      "value_type": "str",
+      "choices": [],
+      "default": null,
+      "tooltip": "End time offset for video, hh:mm:ss or mm:ss format.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "vf",
+      "label": "-vf (raw ffmpeg filter)",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--vf",
+      "value_type": "str",
+      "choices": [],
+      "default": "",
+      "tooltip": "Raw ffmpeg -vf filter string, applied as-is. Advanced use.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "rotate_left",
+      "label": "Rotate Left",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--rotate-left",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Rotate 90 degrees counterclockwise.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "rotate_right",
+      "label": "Rotate Right",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--rotate-right",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Rotate 90 degrees clockwise.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "autocrop",
+      "label": "AutoCrop",
+      "widget": "select",
+      "tab": "video_filter",
+      "cli_arg": "--autocrop",
+      "value_type": "str",
+      "choices": [
+        "",
+        "BLACK_TB",
+        "BLACK",
+        "FLAT_TB",
+        "FLAT"
+      ],
+      "default": "",
+      "tooltip": "Automatically removes black/flat-color bars. BLACK_TB/FLAT_TB: top and bottom only. BLACK/FLAT: all sides. Blank = off.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "pad",
+      "label": "Padding",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--pad",
+      "value_type": "float",
+      "choices": [],
+      "default": null,
+      "tooltip": "Pad size = round(width * this) // 2. Leave blank for no padding.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "pad_mode",
+      "label": "Padding Mode",
+      "widget": "select",
+      "tab": "video_filter",
+      "cli_arg": "--pad-mode",
+      "value_type": "str",
+      "choices": [
+        "tblr",
+        "tb",
+        "lr",
+        "16:9",
+        "top"
+      ],
+      "default": "tblr",
+      "tooltip": "Which sides Padding is applied to.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "pad",
+        "op": "ne",
+        "value": null
+      }
+    },
+    {
+      "name": "max_output_width",
+      "label": "Max Output Width",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--max-output-width",
+      "value_type": "int",
+      "choices": [],
+      "default": null,
+      "tooltip": "Limits output width, e.g. for cardboard players. Leave blank for no limit.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "max_output_height",
+      "label": "Max Output Height",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--max-output-height",
+      "value_type": "int",
+      "choices": [],
+      "default": null,
+      "tooltip": "Limits output height, e.g. for cardboard players. Leave blank for no limit.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "keep_aspect_ratio",
+      "label": "Keep Aspect Ratio",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--keep-aspect-ratio",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Keeps the source aspect ratio when Max Output Width/Height resize the output.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "max_output_width",
+        "op": "ne",
+        "value": null
+      }
+    },
+    {
+      "name": "preserve_dowi",
+      "label": "Preserve Dolby Vision",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--preserve-dowi",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Preserves Dolby Vision RPU metadata in HEVC output (requires dovi_tool, bundled with this app).",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "hdr_to_sdr",
+      "label": "HDR to SDR",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--hdr-to-sdr",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Tone-maps a PQ/HLG HDR source down to SDR (10-bit retained) before conversion.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "auto_resume",
+      "label": "Auto Resume",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--auto-resume",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Splits video into chunks and resumes from a checkpoint if the conversion is interrupted.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "resume_chunk_duration",
+      "label": "Resume Chunk Duration (sec)",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--resume-chunk-duration",
+      "value_type": "int",
+      "choices": [],
+      "default": 300,
+      "tooltip": "Chunk duration in seconds for Auto Resume.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "auto_resume",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "denoise",
+      "label": "Denoise",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--denoise",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Applies temporal denoising (hqdn3d, a one-time ffmpeg pre-pass) before depth estimation, to reduce film grain artifacts.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "preview",
+      "label": "Preview Mode",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--preview",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Generates a quick 1fps/256p preview of the first 60 seconds to check 3D settings before a full run.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "upgrade_pix_fmt",
+      "label": "Bit Depth Upgrade",
+      "widget": "select",
+      "tab": "video_filter",
+      "cli_arg": "--upgrade-pix-fmt",
+      "value_type": "int",
+      "choices": [
+        "",
+        "10",
+        "12"
+      ],
+      "default": null,
+      "tooltip": "Upgrades an 8-bit source to 10-bit or 12-bit output pixel format. Blank = no upgrade.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "metadata",
+      "label": "Add Metadata to Filename",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Adds a metadata suffix to the output filename. The real --metadata flag takes an optional value (\"filename\"); this checkbox is the on/off case, handled specially in worker.py.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "scene_batch",
+      "label": "Automated Scene Batch",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "cli_arg": "--scene-batch",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Fully automated whole-movie pipeline: removes letterbox bars once, detects scene cuts once, converts each scene independently, then joins the results back into one seamless video. Input must be a single video file.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "scene_batch_crop",
+      "label": "Scene Batch Crop",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--scene-batch-crop",
+      "value_type": "str",
+      "choices": [],
+      "default": null,
+      "tooltip": "Explicit crop for Automated Scene Batch, as WxH or WxH:X:Y. If blank, letterbox bars are auto-detected once from the whole movie.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "scene_batch",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "scene_settings",
+      "label": "Scene Settings File",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--scene-settings",
+      "value_type": "str",
+      "choices": [],
+      "default": null,
+      "tooltip": "JSON file giving per-scene setting overrides for Automated Scene Batch.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "scene_batch",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "scene_batch_variant",
+      "label": "Scene Batch Variant",
+      "widget": "combo_editable",
+      "tab": "video_filter",
+      "cli_arg": "--scene-batch-variant",
+      "value_type": "str",
+      "choices": [],
+      "default": null,
+      "tooltip": "Optional name for this Automated Scene Batch run -- reuses already-done shared work from a prior run of the same movie, but writes its own output as <name>_<variant>.<ext> so trying different settings never overwrites an earlier attempt.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "scene_batch",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "hwaccel",
+      "label": "HWAccel",
+      "widget": "select",
+      "tab": "video_decoding",
+      "cli_arg": "--hwaccel",
+      "value_type": "str",
+      "choices": [
+        "cuda",
+        "cuda_hwdownload",
+        "d3d12va",
+        "d3d11va",
+        "dxva2",
+        "amf"
+      ],
+      "default": null,
+      "tooltip": "Hardware-accelerated video decode.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "disable_software_fallback",
+      "label": "Disable Software Fallback",
+      "widget": "checkbox",
+      "tab": "video_decoding",
+      "cli_arg": "--disable-software-fallback",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Disables falling back to software (CPU) decoding if hardware decode fails partway through.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "video_format",
+      "label": "Video Format",
+      "widget": "select",
+      "tab": "video_encoding",
+      "cli_arg": "--video-format",
+      "value_type": "str",
+      "choices": [
+        "mp4",
+        "mkv",
+        "avi"
+      ],
+      "default": "mp4",
+      "tooltip": "Output video container format.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "video_codec",
+      "label": "Video Codec",
+      "widget": "combo_editable",
+      "tab": "video_encoding",
+      "cli_arg": "--video-codec",
+      "value_type": "str",
+      "choices": [
+        "libx264",
+        "libx265",
+        "libopenh264",
+        "utvideo",
+        "ffv1",
+        "h264_nvenc",
+        "hevc_nvenc",
+        "h264_qsv",
+        "hevc_qsv"
+      ],
+      "default": null,
+      "tooltip": "Video codec to encode with. Availability depends on Video Format and this machine's hardware encoders.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "max_fps",
+      "label": "Max FPS",
+      "widget": "combo_editable",
+      "tab": "video_encoding",
+      "cli_arg": "--max-fps",
+      "value_type": "float",
+      "choices": [],
+      "default": 30,
+      "tooltip": "Output fps = min(source fps, this value).",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "pix_fmt",
+      "label": "Pixel Format",
+      "widget": "select",
+      "tab": "video_encoding",
+      "cli_arg": "--pix-fmt",
+      "value_type": "str",
+      "choices": [
+        "yuv420p",
+        "yuv444p",
+        "yuv420p10le",
+        "rgb24",
+        "gbrp",
+        "gbrp10le",
+        "gbrp16le"
+      ],
+      "default": "yuv420p",
+      "tooltip": "Pixel format for video output.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "colorspace",
+      "label": "Colorspace",
+      "widget": "select",
+      "tab": "video_encoding",
+      "cli_arg": "--colorspace",
+      "value_type": "str",
+      "choices": [
+        "unspecified",
+        "auto",
+        "bt709",
+        "bt709-pc",
+        "bt709-tv",
+        "bt601",
+        "bt601-pc",
+        "bt601-tv",
+        "bt2020-tv",
+        "bt2020-pq-tv"
+      ],
+      "default": "auto",
+      "tooltip": "Video colorspace tag written to the output.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "crf",
+      "label": "CRF",
+      "widget": "combo_editable",
+      "tab": "video_encoding",
+      "cli_arg": "--crf",
+      "value_type": "int",
+      "choices": [],
+      "default": 20,
+      "tooltip": "Constant quality value. Smaller = higher quality/larger file.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "video_bitrate",
+      "label": "Bitrate",
+      "widget": "combo_editable",
+      "tab": "video_encoding",
+      "cli_arg": "--video-bitrate",
+      "value_type": "str",
+      "choices": [],
+      "default": "8M",
+      "tooltip": "Bitrate option, only used by the libopenh264 codec.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "video_codec",
+        "op": "eq",
+        "value": "libopenh264"
+      }
+    },
+    {
+      "name": "preset",
+      "label": "Preset",
+      "widget": "select",
+      "tab": "video_encoding",
+      "cli_arg": "--preset",
+      "value_type": "str",
+      "choices": [
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+        "placebo",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p7"
+      ],
+      "default": "medium",
+      "tooltip": "Encoder speed/quality preset.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "tune",
+      "label": "Tune",
+      "widget": "combo_editable",
+      "tab": "video_encoding",
+      "cli_arg": "--tune",
+      "value_type": "str_list",
+      "choices": [
+        "film",
+        "animation",
+        "grain",
+        "stillimage",
+        "psnr",
+        "fastdecode",
+        "zerolatency",
+        "hq",
+        "uhq",
+        "ll",
+        "ull",
+        "lossless"
+      ],
+      "default": "",
+      "tooltip": "Encoder tuning(s), space or comma separated. Which values are valid depends on the chosen codec (this simplified picker does not filter the list by codec the way the desktop GUI does).",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "profile_level",
+      "label": "Profile Level",
+      "widget": "combo_editable",
+      "tab": "video_encoding",
+      "cli_arg": "--profile-level",
+      "value_type": "str",
+      "choices": [],
+      "default": null,
+      "tooltip": "H.264 profile level, e.g. 4.1. Advanced use.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
       "name": "low_vram",
       "label": "Low VRAM",
       "widget": "checkbox",
@@ -151,24 +1369,187 @@
       "enabled_if": null
     },
     {
-      "name": "hwaccel",
-      "label": "HWAccel",
+      "name": "batch_size",
+      "label": "Depth Batch Size",
+      "widget": "combo_editable",
+      "tab": "processor",
+      "cli_arg": "--batch-size",
+      "value_type": "int",
+      "choices": [],
+      "default": 2,
+      "tooltip": "How many frames are processed together per depth-model pass. Ignored when Low VRAM is on.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "low_vram",
+        "op": "eq",
+        "value": false
+      }
+    },
+    {
+      "name": "max_workers",
+      "label": "Worker Threads",
       "widget": "select",
       "tab": "processor",
-      "cli_arg": "--hwaccel",
-      "value_type": "str",
+      "cli_arg": "--max-workers",
+      "value_type": "int",
       "choices": [
-        "cuda",
-        "cuda_hwdownload",
-        "d3d12va",
-        "d3d11va",
-        "dxva2",
-        "amf"
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "8",
+        "16"
       ],
-      "default": null,
-      "tooltip": "Hardware-accelerated video decode. Included in this slice specifically to exercise the hwaccel+compile regression test (ADR-034/071/075) end-to-end through the new GUI.",
+      "default": 0,
+      "tooltip": "Max inference worker threads for video processing. 0 = disabled.",
       "visible_if": null,
       "enabled_if": null
+    },
+    {
+      "name": "tta",
+      "label": "TTA",
+      "widget": "checkbox",
+      "tab": "processor",
+      "cli_arg": "--tta",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Uses flip augmentation on the depth model for slightly higher quality, at extra compute cost.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "cuda_stream",
+      "label": "Stream",
+      "widget": "checkbox",
+      "tab": "processor",
+      "cli_arg": "--cuda-stream",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Uses a separate CUDA stream per worker thread/device.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "pause_frees_vram",
+      "label": "Free GPU memory while paused",
+      "widget": "checkbox",
+      "tab": "processor",
+      "cli_arg": "--pause-frees-vram",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "When Suspend/Resume is used, also moves every loaded model off the GPU and frees VRAM while paused, reloading on Resume. Off by default (models stay resident for an instant Resume). Has no effect with multiple GPUs selected.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "waifu2x_upscale",
+      "label": "Upscale with waifu2x after conversion",
+      "widget": "checkbox",
+      "tab": "processor",
+      "cli_arg": "--waifu2x-upscale",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "After conversion finishes, runs the output through waifu2x (a separate bundled AI upscaler) as one extra step, written to a separate '<name>_w2x<ext>' file.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "waifu2x_upscale_target",
+      "label": "Upscale Target",
+      "widget": "select",
+      "tab": "processor",
+      "cli_arg": "--waifu2x-upscale-target",
+      "value_type": "str",
+      "choices": [
+        "auto",
+        "4k",
+        "8k"
+      ],
+      "default": "auto",
+      "tooltip": "'auto' uses waifu2x-upscale's plain whole-frame behavior. '4k'/'8k' use a stereo-aware path that upscales each eye of a packed 3D output independently.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "waifu2x_upscale",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "rife_interpolate",
+      "label": "Interpolate frames with RIFE after conversion",
+      "widget": "checkbox",
+      "tab": "processor",
+      "cli_arg": "--rife-interpolate",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "After conversion finishes, runs the finished packed stereo output through RIFE frame interpolation, raising the effective frame rate. Written to a separate '<name>_rife<ext>' file. Cannot be combined with Preserve Dolby Vision.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "rife_model",
+      "label": "RIFE Model",
+      "widget": "select",
+      "tab": "processor",
+      "cli_arg": "--rife-model",
+      "value_type": "str",
+      "choices": [
+        "rife_425",
+        "rife_425_lite"
+      ],
+      "default": "rife_425",
+      "tooltip": "rife_425 is the recommended full-quality model; rife_425_lite is a lower-compute-cost variant.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "rife_interpolate",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "rife_multiplier",
+      "label": "RIFE Multiplier",
+      "widget": "select",
+      "tab": "processor",
+      "cli_arg": "--rife-multiplier",
+      "value_type": "int",
+      "choices": [
+        "",
+        "2",
+        "3",
+        "4"
+      ],
+      "default": null,
+      "tooltip": "Frame-rate multiplier: N=2 doubles the frame rate, N=3/4 triple/quadruple it. Mutually exclusive with RIFE Target FPS. Defaults to 2 if both are left blank.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "rife_interpolate",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "rife_target_fps",
+      "label": "RIFE Target FPS",
+      "widget": "combo_editable",
+      "tab": "processor",
+      "cli_arg": "--rife-target-fps",
+      "value_type": "float",
+      "choices": [],
+      "default": null,
+      "tooltip": "Interpolates to this exact frame rate instead of a simple multiplier. Must be higher than the source's own frame rate. Mutually exclusive with RIFE Multiplier.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "rife_interpolate",
+        "op": "eq",
+        "value": true
+      }
     }
   ]
 }

@@ -104,12 +104,32 @@ def _apply_stereo_format(args, stereo_format, anaglyph_method):
     # else (unrecognized/empty): leave every flag False -- iw3's own default.
 
 
+def _coerce(value_type, raw):
+    if value_type == "float":
+        return float(raw)
+    if value_type == "int":
+        return int(float(raw))  # tolerates a select value arriving as "2.0"-ish text
+    if value_type == "bool":
+        return bool(raw)
+    if value_type == "int_list":
+        # "2 1" or "2,1" -> [2, 1] -- the real --edge-dilation/--inpaint-
+        # overlap-frames style args (nargs="+") take 1+ ints this way.
+        parts = str(raw).replace(",", " ").split()
+        return [int(p) for p in parts]
+    if value_type == "str_list":
+        # "film, grain" or "film grain" -> ["film", "grain"] -- --tune's
+        # nargs="+" shape.
+        parts = str(raw).replace(",", " ").split()
+        return parts
+    return raw
+
+
 def build_args(settings):
     """settings: dict from JS (schema field name -> raw JSON value), plus
-    "input"/"output" path strings. Real string->float/bool coercion per
-    field's value_type, since e.g. divergence is a free-typed field on the
-    JS side, not a native numeric widget -- mirrors how the wx GUI's own
-    EditableComboBox fields get parsed before being placed on the Namespace."""
+    "input"/"output" path strings. Real coercion per field's value_type,
+    since e.g. divergence is a free-typed field on the JS side, not a
+    native numeric widget -- mirrors how the wx GUI's own EditableComboBox
+    fields get parsed before being placed on the Namespace."""
     parser = create_parser(required_true=False)
     args = parser.parse_args([])
 
@@ -118,21 +138,19 @@ def build_args(settings):
 
     for f in FIELDS:
         if f.cli_arg is None:
-            continue  # stereo_format / anaglyph_method, applied below
+            continue  # stereo_format / anaglyph_method / metadata, applied below
         dest = f.cli_arg.lstrip("-").replace("-", "_")
         raw = settings.get(f.name, f.default)
         if raw is None or raw == "":
             continue
-        if f.value_type == "float":
-            value = float(raw)
-        elif f.value_type == "bool":
-            value = bool(raw)
-        else:
-            value = raw
-        setattr(args, dest, value)
+        setattr(args, dest, _coerce(f.value_type, raw))
 
     _apply_stereo_format(
         args, settings.get("stereo_format", "half_sbs"), settings.get("anaglyph_method"))
+    # --metadata is an optional-value flag (nargs="?", const="filename"),
+    # not a plain boolean -- the schema models it as a checkbox and this
+    # turns that back into the real flag's shape.
+    args.metadata = "filename" if settings.get("metadata") else None
     return args
 
 

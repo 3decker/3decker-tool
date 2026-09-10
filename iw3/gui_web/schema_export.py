@@ -23,8 +23,17 @@ def _hw_device_choices():
     return list(HW_DEVICES)
 
 
+def _scene_batch_ema_model_choices():
+    # Same reasoning as hwaccel -- read from the one real source of truth
+    # (iw3.scene_batch) instead of a copy that could go stale, exactly like
+    # create_parser() itself does for --scene-batch-auto-ema-model.
+    from iw3.scene_batch import EMA_BY_DURATION_TABLES
+    return list(EMA_BY_DURATION_TABLES.keys())
+
+
 _DYNAMIC_CHOICE_PROVIDERS = {
     "hw_devices": _hw_device_choices,
+    "scene_batch_ema_models": _scene_batch_ema_model_choices,
 }
 
 
@@ -70,29 +79,60 @@ def _self_test_schema_fields_exist_on_real_parser():
             f"exist on create_parser() -- has the real CLI flag been renamed/removed?"
         action = actions_by_flag[f.cli_arg]
         if action.choices and f.choices and not f.dynamic_choices:
-            assert set(f.choices) <= set(action.choices), (
+            # Compared as strings, not raw values: HTML <select> options are
+            # always strings even when the real parser choice is an int
+            # (e.g. --max-workers' [0, 1, 2, ...]) -- a type mismatch here
+            # would be a false positive, not a real drift. "" is schema-only
+            # UI sugar for "leave this blank/unset" and isn't expected to be
+            # a real parser choice, so it's excluded from the comparison.
+            schema_choices = {str(c) for c in f.choices if c != ""}
+            parser_choices = {str(c) for c in action.choices}
+            assert schema_choices <= parser_choices, (
                 f"schema field {f.name!r} has choices not present in the real "
-                f"parser action's choices: {set(f.choices) - set(action.choices)}"
+                f"parser action's choices: {schema_choices - parser_choices}"
             )
 
     print("_self_test_schema_fields_exist_on_real_parser: PASS")
 
 
-def _self_test_stereo_format_field_has_no_cli_arg():
-    """Documents/guards the one deliberate special case -- if this ever
-    trips, either stereo_format grew a real 1:1 CLI arg (update worker.py's
+def _self_test_special_cased_fields_have_no_cli_arg():
+    """Documents/guards the fields worker.py deliberately special-cases
+    instead of mapping 1:1 to a parser arg (stereo_format, anaglyph_method,
+    metadata -- see schema.py's own docstring for why) -- if any of these
+    ever trips, either that field grew a real 1:1 CLI arg (update worker.py's
     special-casing away) or someone accidentally gave it one by mistake."""
-    stereo_format = next(f for f in FIELDS if f.name == "stereo_format")
-    assert stereo_format.cli_arg is None, \
-        "stereo_format is expected to be the one schema field worker.py " \
-        "special-cases via _apply_stereo_format() -- if it now has a real " \
-        "cli_arg, that special-casing needs to be reconciled, not left stale."
-    print("_self_test_stereo_format_field_has_no_cli_arg: PASS")
+    special_cased = {"stereo_format", "anaglyph_method", "metadata"}
+    for f in FIELDS:
+        if f.name in special_cased:
+            assert f.cli_arg is None, (
+                f"schema field {f.name!r} is expected to be special-cased in "
+                f"worker.py (no 1:1 cli_arg) -- if it now has a real cli_arg, "
+                f"that special-casing needs to be reconciled, not left stale."
+            )
+    print("_self_test_special_cased_fields_have_no_cli_arg: PASS")
+
+
+def _self_test_dynamic_choice_providers_resolve():
+    """Every dynamic_choices name a Field references must have a real
+    provider, and that provider must actually return something -- catches a
+    typo'd dynamic_choices string or a provider that silently returns
+    nothing useful."""
+    for f in FIELDS:
+        if not f.dynamic_choices:
+            continue
+        assert f.dynamic_choices in _DYNAMIC_CHOICE_PROVIDERS, (
+            f"schema field {f.name!r} references dynamic_choices="
+            f"{f.dynamic_choices!r}, which has no registered provider"
+        )
+        result = _DYNAMIC_CHOICE_PROVIDERS[f.dynamic_choices]()
+        assert result, f"dynamic_choices provider {f.dynamic_choices!r} (for field {f.name!r}) returned nothing"
+    print("_self_test_dynamic_choice_providers_resolve: PASS")
 
 
 def _run_self_tests():
     _self_test_schema_fields_exist_on_real_parser()
-    _self_test_stereo_format_field_has_no_cli_arg()
+    _self_test_special_cased_fields_have_no_cli_arg()
+    _self_test_dynamic_choice_providers_resolve()
     print("All iw3.gui_web.schema_export self-tests PASSED")
 
 

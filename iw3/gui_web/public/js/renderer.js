@@ -8,10 +8,17 @@ window.IW3Renderer = (function () {
   var values = {};
   var fieldsByName = {};
 
+  // "" (an untouched/cleared text field) and null (an unset schema default)
+  // are treated as the same "nothing here" value for eq/ne comparisons --
+  // matches how worker.py's build_args() treats an empty string the same
+  // as an omitted/None field.
+  function normalize(v) { return v === "" ? null : v; }
+
   function ruleMatches(rule) {
     if (!rule) return true;
-    var current = values[rule.field];
-    if (rule.op === "eq") return current === rule.value;
+    var current = normalize(values[rule.field]);
+    if (rule.op === "eq") return current === normalize(rule.value);
+    if (rule.op === "ne") return current !== normalize(rule.value);
     if (rule.op === "in") return Array.isArray(rule.value) && rule.value.indexOf(current) !== -1;
     return true;
   }

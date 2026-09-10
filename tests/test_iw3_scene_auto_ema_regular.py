@@ -896,15 +896,18 @@ def _test_end_to_end_real_conversion_report_log_and_summary():
     # real per-scene rows. Only a plain-text report is written now (ADR-077 --
     # the earlier CSV/HTML siblings were dropped by request), so this parses
     # the fixed-width TXT format instead of csv.DictReader: data rows start
-    # after the title/summary/blank/header/separator lines (5 lines), each
-    # optionally prefixed with a "|" same-settings-group marker (ADR-077)
-    # stripped off before splitting on whitespace.
+    # right after the dashes-only separator row (located dynamically, not by a
+    # hardcoded line index, so this doesn't break again if a future line is
+    # added above it -- see ADR-078's averages line), each optionally prefixed
+    # with a "|" same-settings-group marker (ADR-077) stripped off before
+    # splitting on whitespace.
     report_path = output_path + ".auto_ema_report.txt"
     assert path.exists(output_path), "conversion did not produce its real output file"
     assert path.exists(report_path), "no auto_ema_report.txt written"
     with open(report_path, "r", encoding="utf-8") as f:
         text_lines = f.read().splitlines()
-    data_lines = text_lines[5:5 + len(expected_applied)]
+    sep_idx = next(i for i, ln in enumerate(text_lines) if ln.strip() and set(ln.strip()) <= {"-", " "})
+    data_lines = text_lines[sep_idx + 1:sep_idx + 1 + len(expected_applied)]
     assert len(data_lines) == len(expected_applied), (data_lines, expected_applied)
     for line, expected in zip(data_lines, expected_applied):
         stripped = line.lstrip()

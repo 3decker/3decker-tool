@@ -2812,6 +2812,21 @@ def _scene_ema_report_group_parity(rows):
     return out
 
 
+def _scene_ema_report_averages(rows):
+    """(avg_buffer, avg_decay, avg_duration_sec) across every scene row -- plain
+    arithmetic mean, each scene weighted equally regardless of its own length
+    (ADR-078). Returns (0.0, 0.0, 0.0) for an empty report rather than raising,
+    since a caller already guards on non-empty rows but this stays safe either
+    way."""
+    if not rows:
+        return 0.0, 0.0, 0.0
+    n = len(rows)
+    avg_buffer = sum(float(r["ema_buffer"]) for r in rows) / n
+    avg_decay = sum(float(r["ema_decay"]) for r in rows) / n
+    avg_duration = sum(float(r["duration_sec"]) for r in rows) / n
+    return avg_buffer, avg_decay, avg_duration
+
+
 def _write_scene_ema_report_txt(txt_path, rows, scene_count, distinct_count, source_name):
     """Plain-text sibling of _write_scene_ema_report's CSV (ADR-075/ADR-077),
     readable in Notepad or any plain text viewer with no HTML rendering: a
@@ -2843,9 +2858,11 @@ def _write_scene_ema_report_txt(txt_path, rows, scene_count, distinct_count, sou
         parts += [values[i].rjust(widths[i]) for i in range(1, 5)]
         return marker + " " + "  ".join(parts)
 
+    avg_buffer, avg_decay, avg_duration = _scene_ema_report_averages(rows)
     lines = [
         f"Auto EMA by Scene Length -- {source_name}",
         f"{scene_count} scenes -- {distinct_count} distinct Buffer/Decay values used",
+        f"Average across all scenes -- Buffer {avg_buffer:.1f} -- Decay {avg_decay:.3f} -- Duration {avg_duration:.3f}s",
         "",
         fmt_row(headers),
         "  " + "  ".join("-" * w for w in widths),
@@ -2878,6 +2895,7 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
 
     fmt_hms = _fmt_hms_report
     groups = _scene_ema_report_group_parity(rows)
+    avg_buffer, avg_decay, avg_duration = _scene_ema_report_averages(rows)
 
     row_html = []
     for i, r in enumerate(rows):
@@ -2956,6 +2974,9 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
   <div class="stats">
     <span class="stat">{scene_count} scenes</span>
     <span class="stat">{distinct_count} distinct Buffer/Decay values</span>
+    <span class="stat">avg Buffer {avg_buffer:.1f}</span>
+    <span class="stat">avg Decay {avg_decay:.3f}</span>
+    <span class="stat">avg Duration {avg_duration:.3f}s</span>
   </div>
   <div class="hint">Click a column header to sort. Shaded bands mark consecutive scenes sharing the same Buffer/Decay.</div>
 </header>

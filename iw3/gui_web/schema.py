@@ -40,6 +40,8 @@ deferred.
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, List, Optional
 
+from .field_tooltips import FIELD_TOOLTIPS, FIELD_CHOICES
+
 
 @dataclass
 class Rule:
@@ -86,9 +88,13 @@ class Field:
             "group": FIELD_GROUPS.get(self.name),
             "cli_arg": self.cli_arg,
             "value_type": self.value_type,
-            "choices": self.choices,
+            # FIELD_CHOICES/FIELD_TOOLTIPS (field_tooltips.py, ADR-088) hold
+            # the real suggested values / tooltip text extracted directly
+            # from iw3/gui.py's own controls -- preferred over this Field's
+            # own short, hand-written fallback when a real one exists.
+            "choices": FIELD_CHOICES.get(self.name, self.choices),
             "default": self.default,
-            "tooltip": self.tooltip,
+            "tooltip": FIELD_TOOLTIPS.get(self.name, self.tooltip),
             "visible_if": self.visible_if.to_dict() if self.visible_if else None,
             "enabled_if": self.enabled_if.to_dict() if self.enabled_if else None,
         }
@@ -194,7 +200,7 @@ METHOD_CHOICES = [
 ANAGLYPH_METHOD_CHOICES = ["dubois", "dubois2", "color", "gray", "half-color", "wimmer", "wimmer2"]
 
 STEREO_FORMAT_CHOICES = [
-    "half_sbs", "full_tb", "half_tb", "cross_eyed", "rgbd", "half_rgbd", "vr180", "anaglyph",
+    "full_sbs", "half_sbs", "full_tb", "half_tb", "cross_eyed", "rgbd", "half_rgbd", "vr180", "anaglyph",
 ]
 
 # Copied verbatim from create_parser()'s --depth-model choices (utils.py ~4934-4949).
@@ -855,7 +861,7 @@ FIELDS: List[Field] = [
                 "desktop GUI does).",
     ),
     Field(
-        name="profile_level", cli_arg="--profile-level", label="Profile Level",
+        name="profile_level", cli_arg="--profile-level", label="Level",
         widget="combo_editable", tab="video_encoding", value_type="str", default=None,
         tooltip="H.264 profile level, e.g. 4.1. Advanced use.",
     ),

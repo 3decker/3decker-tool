@@ -40,7 +40,7 @@
       "value_type": "bool",
       "choices": [],
       "default": true,
-      "tooltip": "Skip processing when the output file already exists. Matches this GUI's own default (checked) rather than the bare CLI default (off), since that's what users of this tool actually expect on by default.",
+      "tooltip": "What it's for: skips a file entirely if the output it would create already exists.\nHow it helps: lets you stop a big batch job partway (or have it crash/get interrupted) and restart later without wasting time redoing files you already finished.\nCon: only checks whether a file with the expected NAME exists, not whether it's actually complete or correct -- a partial/corrupted leftover file gets treated as \"done\" too.\nRecommended: on for batch folders and long jobs. Turn off only if you specifically want to force-redo everything.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -54,7 +54,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "When Input is a folder, also processes every subfolder inside it.",
+      "tooltip": "What it's for: when the input is a folder, also reaches into its subfolders instead of only converting files sitting directly inside it.\nCon: if unrelated files (extras, samples, trailers) live in subfolders you didn't mean to include, they'll get converted too -- there's no per-folder include/exclude list.\nRecommended: on if you organize your movies into subfolders; off if your input folder mixes in stuff you don't want touched.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -68,7 +68,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Continue processing the rest of a batch even if a specific file fails.",
+      "tooltip": "What it's for: if a file causes an error during batch processing, note it and move on to the next file instead of stopping the whole batch. Also skips files that errored on a previous run, so they aren't retried every time.\nCon: a genuinely broken/corrupt file just gets silently skipped rather than fixed -- check the log if a file seems to be missing from your results.\nRecommended: on for large batches, so one bad file doesn't halt an overnight job. Off if you'd rather the job stop immediately so you notice a problem right away.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -82,7 +82,7 @@
       "value_type": "bool",
       "choices": [],
       "default": true,
-      "tooltip": "Rotates an image according to its own EXIF orientation tag before processing. The real flag is --disable-exif-transpose (inverted) -- handled specially in worker.py, same pattern as Stereo Format.",
+      "tooltip": "What it's for: some cameras/phones save a photo already correctly oriented for viewing but store the actual pixel data sideways/upside-down, with a hidden tag telling viewers how to rotate it for display. This applies that rotation before conversion so the 3D effect is built for the image the way you actually see it, not the raw sideways file.\nRecommended: on (default) for virtually all real photos. Only turn off if you've confirmed your specific images have no EXIF tag or it's already wrong, since that's an unusual case.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -96,11 +96,11 @@
       "value_type": "str",
       "choices": [
         "png",
-        "webp",
-        "jpeg"
+        "jpeg",
+        "webp"
       ],
       "default": "png",
-      "tooltip": "Output image format, for image (not video) conversions.",
+      "tooltip": "What it's for: the file format used when converting still images (has no effect on video jobs, which always use your Video Format setting instead).\nValues: png = lossless, larger files, no quality loss ever -- best if you'll edit/reprocess the result later. jpeg = lossy compression, much smaller files, a small amount of quality loss (usually invisible at normal viewing sizes) -- best for sharing/storage space. webp = modern format, similar quality to jpeg at a smaller file size, but less universally supported by older software/devices.\nRecommended: png if disk space isn't a concern or you might reprocess the image later; jpeg for everyday viewing/sharing where file size matters.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -121,7 +121,7 @@
         "1.0"
       ],
       "default": 2.0,
-      "tooltip": "Strength of the 3D effect. 0-2 is a reasonable range for most content; higher values push more depth but can increase artifacts near edges.",
+      "tooltip": "Also called Divergence. The master strength of the whole 3D effect -- how far things shift between the left/right eye. Higher = more dramatic depth, but more edge artifacts. Lower = subtler, cleaner. Recommended: 2.0-3.0 for most movies.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -156,7 +156,7 @@
         "NULL"
       ],
       "default": "row_flow",
-      "tooltip": "The stereo-generation algorithm used to synthesize the second eye's view from the depth map. row_flow_v3 is the modern default for most content.",
+      "tooltip": "What it's for: which AI model/technique actually builds the second eye view from your depth map. This is one of the biggest single quality/speed decisions in the whole app.\nrow_flow_v3: fast, AI-based, a solid all-rounder -- the default.\nrow_flow_v3_sym: same family, but shifts BOTH eyes symmetrically outward from the original center image instead of keeping one eye as the unwarped original -- can look more balanced across both eyes.\nrow_flow_v2: an older generation of the row_flow model, kept for compatibility/comparison; row_flow_v3 generally looks better at the same speed.\nmlbw_l2 / mlbw_l4: a more advanced, multi-layer AI warp. l4 is the deeper/more capable version of l2 -- handles stronger 3D strength and complex scenes with fewer artifacts, at extra GPU time/memory cost.\nmlbw_l2s: a smaller/lighter version of mlbw_l2 -- faster and lower VRAM, at some quality cost versus the full mlbw_l2. Useful on lower-VRAM GPUs.\nmlbw_l2_inpaint / forward_inpaint / monobw_inpaint: any of the above families, PLUS an AI inpainting pass that fills in the hidden area behind objects instead of stretching/smearing it -- real extra time cost, but noticeably cleaner edges around foreground objects.\nforward_fill: a simple, non-AI method -- just warps pixels forward and fills gaps with a basic algorithm, no learned model involved. Fastest, but the roughest edges.\nforward_splat_fill: same non-AI forward-warp family as forward_fill, but where two pixels land on the same spot, it smoothly blends them (nearer one weighted more) instead of the nearer one fully overwriting the other -- softer, less jagged edges than forward_fill. No learned model involved, but NOT free of GPU cost: it holds several full-frame accumulator tensors in memory per batch, so its VRAM use scales up directly with Depth Batch Size (unlike the inpaint methods, which don't) and can run even a high-VRAM GPU out of memory on demanding footage at Depth Batch Size 2 or higher. Confirmed real fix if you hit an out-of-memory error here: drop Depth Batch Size to 1 and turn on Low VRAM below.\nmonobw: a simpler, lighter backward-warp method than the mlbw family -- a faster middle ground when mlbw is too slow but forward_fill's quality isn't good enough.\nRecommended: mlbw_l2_inpaint or forward_inpaint for the best quality on a real GPU; row_flow_v3_sym or mlbw_l2s if you need more speed or have limited VRAM.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -168,9 +168,15 @@
       "group": "Core",
       "cli_arg": "--splat-blend-temperature",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "10.0",
+        "25.0",
+        "50.0",
+        "75.0",
+        "85.0"
+      ],
       "default": 50.0,
-      "tooltip": "Only used by Method=forward_splat_fill: how sharply the depth-weighted blend favors the nearer of two colliding pixels. Higher = sharper cutoff. Default (50.0) matches the method's original behavior.",
+      "tooltip": "What it's for: only matters for Method forward_splat_fill -- how sharply that method's depth-weighted blend decides which of two colliding pixels wins.\nValues: higher = sharper cutoff, closer to forward_fill's old hard-overwrite behavior (whichever pixel is nearer the camera wins almost completely); lower = smoother, more even blending between the two competing pixels.\nCon: brand new, and not yet tuned against real footage -- unlike most other numeric settings in this app, there isn't yet a body of real-world testing behind these numbers.\nRecommended: start at the default (50.0) and only adjust it if forward_splat_fill's results look wrong to you at that default.",
       "visible_if": null,
       "enabled_if": {
         "field": "method",
@@ -193,7 +199,7 @@
         "Video_Medium_Aether_v2"
       ],
       "default": null,
-      "tooltip": "Which inpaint model fills in the disoccluded (revealed) regions. Only used by inpaint-family Methods.",
+      "tooltip": "What it's for: only matters for the *_inpaint Method variants (forward_inpaint, mlbw_l2_inpaint, monobw_inpaint) -- picks which AI model fills in the hidden area behind objects that the 3D shift reveals.\nlight_inpaint_v1 is the only model included out of the box, and is what this stays on for almost everyone. Extra models only appear here if you've manually added entries to iw3/inpaint_models.yml (an advanced/optional customization, not needed for normal use).\nRecommended: leave on light_inpaint_v1 unless you've specifically installed an alternative model and know why you want it.",
       "visible_if": null,
       "enabled_if": {
         "field": "method",
@@ -215,7 +221,7 @@
       "value_type": "int_list",
       "choices": [],
       "default": null,
-      "tooltip": "Overlap/padding frames for the video inpaint model, as \"<frames>\" or \"<pre frames> <post frames>\".",
+      "tooltip": "Overlap Pre/Post: only matters for the video inpainting methods. How many extra frames before/after each processed chunk get fed to the inpainting model purely for context, so the filled-in background doesn't flicker or change texture at chunk boundaries. Type as \"<pre> <post>\" or a single shared value.\nValues: 0 = no overlap (fastest, but a visible seam/flicker can appear where chunks join). 3 (default for both) = a small buffer that's usually enough to hide the seam.\nCon: higher values cost real extra processing time per chunk boundary, with diminishing returns past a few frames.\nRecommended: default (3 3); raise only if you actually see a flicker at chunk boundaries.",
       "visible_if": null,
       "enabled_if": {
         "field": "method",
@@ -237,7 +243,7 @@
       "value_type": "int",
       "choices": [],
       "default": 0,
-      "tooltip": "Loop count of inner mask dilation for inpaint methods.",
+      "tooltip": "Inner: only matters for *_inpaint methods. Grows the \"needs filling in\" mask slightly INTO the foreground object's own edge, trimming a thin sliver off the object so the inpainted background blends in more smoothly instead of stopping at a hard line.\nCon: too high a value visibly shrinks/erodes foreground objects at their edges.\nRecommended: 0 (default); raise to 1-2 only if you see a thin, obviously wrong-colored halo clinging to the outline of foreground objects.",
       "visible_if": null,
       "enabled_if": {
         "field": "method",
@@ -259,7 +265,7 @@
       "value_type": "int",
       "choices": [],
       "default": 0,
-      "tooltip": "Loop count of outer mask dilation for inpaint methods.",
+      "tooltip": "Outer: only matters for *_inpaint methods. Grows the \"needs filling in\" mask outward INTO the background, giving the inpainting model a wider area to work with around each object.\nCon: too high a value makes the model regenerate more background than it needs to, which costs a little quality/consistency versus the small sliver of real original background right at the object edge.\nRecommended: 0 (default); raise to 1-2 only if you still see leftover smearing/stretching right behind foreground objects after trying Inner dilation.",
       "visible_if": null,
       "enabled_if": {
         "field": "method",
@@ -281,7 +287,7 @@
       "value_type": "int",
       "choices": [],
       "default": null,
-      "tooltip": "Max width of the inpaint result. Leave blank for no limit.",
+      "tooltip": "What it's for: caps the width the inpainting model processes at, downscaling internally if the source is wider than this, to save VRAM/time on large/4K video.\nCon: lowering it can make the inpainted (filled-in) areas slightly softer/less detailed than the rest of the frame, since that step ran at a lower resolution.\nRecommended: leave blank (no limit, best quality) unless you're running out of GPU memory or need to speed up a very high-resolution job -- then try 1920 first.",
       "visible_if": null,
       "enabled_if": {
         "field": "method",
@@ -307,7 +313,7 @@
         "left"
       ],
       "default": "both",
-      "tooltip": "Which side generates the synthesized view. 'both' warps both eyes from the source; 'right'/'left' keeps the original image as one eye and only synthesizes the other.",
+      "tooltip": "What it's for: decides which eye view(s) the AI actually generates from your original flat image.\nboth: generates BOTH left and right eyes fresh from the center image -- most natural, since neither eye is just the untouched original.\nright / left: keeps the original image exactly as one eye, and only generates the other -- faster (half the warping work), but can look slightly less balanced since one eye is \"real\" and the other is synthesized.\nRecommended: both, for the best-looking result. right/left mainly useful if you're very tight on processing time.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -325,7 +331,7 @@
         "face_detect"
       ],
       "default": "constant",
-      "tooltip": "How the convergence plane (screen-distance point) is chosen. 'constant' uses the Convergence Plane value directly; sod_v1/face_detect track it automatically per frame.",
+      "tooltip": "What it's for: how the \"screen depth\" (the point that looks like it's exactly at the screen surface, with everything else popping toward or receding from it) is chosen.\nconstant: you set one fixed position with the value box, and it never moves for the whole video.\nsod_v1: an AI model automatically re-picks a focus point every frame, based on the most visually important subject.\nface_detect: same idea, but automatically centers on detected faces specifically, ignoring the value box.\nCon of sod_v1/face_detect: every time the convergence point moves -- even smoothed -- your eyes have to physically readjust their focus angle to keep the image comfortable to view. Real testing on this project found constant produced steadier, more comfortable results on most typical film content for exactly this reason.\nWhen sod_v1/face_detect genuinely help: a push/pull \"reveal\" shot where the camera moves from a tight close-up to a wide shot within one continuous take.\nRecommended: constant for most content -- steadier and closer to real stereographer practice. Reserve sod_v1/face_detect for content dominated by continuous push/pull reveal shots.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -337,9 +343,14 @@
       "group": "Core",
       "cli_arg": "--convergence",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.0",
+        "0.25",
+        "0.5",
+        "1.0"
+      ],
       "default": 0.5,
-      "tooltip": "Normalized depth position (0-1) that appears at screen distance, with nothing feeling like it's popping out or sinking in at that point.",
+      "tooltip": "Also called Convergence Plane. Where the \"screen depth\" sits, from 0 (everything pops out toward you) to 1 (everything sits behind the screen). Only used directly when mode is \"constant\" -- for sod_v1 it acts as a relative offset within the detected subject's depth range. Recommended: 0.5 as a balanced starting point.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -351,9 +362,16 @@
       "group": "Core",
       "cli_arg": "--convergence-smoothing",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.95",
+        "0.9",
+        "0.75",
+        "0.5",
+        "0.25",
+        "0"
+      ],
       "default": 0.9,
-      "tooltip": "EMA decay for the auto convergence modes (sod_v1/face_detect). Higher = smoother but slower to react; 0 = no smoothing.",
+      "tooltip": "Only affects sod_v1 / Face Detect convergence modes. Controls how quickly the automatic convergence point reacts to scene changes. Higher = smoother but slower to react. Lower = more aggressive/dynamic, reacts faster but may jitter more. 0 = no smoothing at all.",
       "visible_if": null,
       "enabled_if": {
         "field": "convergence_mode",
@@ -374,7 +392,7 @@
       "value_type": "float",
       "choices": [],
       "default": 0,
-      "tooltip": "IPD offset as a width-scale percent. 0-10 is a reasonable value for Full SBS output.",
+      "tooltip": "Also called IPD Offset (interpupillary distance -- the gap between your own eyes). Widens or narrows the simulated eye spacing used to build the 3D effect, separate from the main 3D Strength slider.\nValues: 0 = average adult spacing (the default assumption). Positive values simulate wider-set eyes, which slightly increases the 3D pop for people with a wider-than-average IPD. Range is -10 to 20.\nCon: this is a minor personal-comfort tweak, not a real substitute for 3D Strength -- pushing it far from 0 can make the depth feel physically \"wrong\" even if stronger.\nRecommended: leave at 0 unless you specifically know your own IPD differs a lot from average and have noticed a comfort difference.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -386,9 +404,13 @@
       "group": "Depth & Resolution",
       "cli_arg": "--stereo-width",
       "value_type": "int",
-      "choices": [],
+      "choices": [
+        "1920",
+        "1280",
+        "640"
+      ],
       "default": null,
-      "tooltip": "Input width for row_flow_v3/row_flow_v2. Leave blank for the model's default.",
+      "tooltip": "What it's for: only used by the row_flow_v3/row_flow_v3_sym/row_flow_v2 methods. Resizes the image to this width specifically for the eye-generation step -- separate from Depth Model's own internal resolution and separate from your final output resolution.\nCon: lowering it trades away fine detail in the warp itself for speed; the final output is still your source resolution, but the 3D shift calculation behind it was done coarser.\nRecommended: leave blank (uses the source width, best quality). Try 1920 or 1280 only if you need more speed and can accept a small quality tradeoff.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -443,7 +465,7 @@
         "NULL"
       ],
       "default": "ZoeD_Any_N",
-      "tooltip": "Which neural network estimates depth from the source image. Different models trade off speed, video-temporal stability, and fine detail.",
+      "tooltip": "What it's for: which AI model looks at your image/video and estimates what's near vs far. This is the foundation everything else builds on -- probably the single most important choice in the whole app.\nVDA_* (Video Depth Anything): built specifically for video -- has real memory across frames, so depth stays steady/flicker-free without needing extra smoothing settings. Best choice for movies/video by default.\nAny_V2_* / Any_V3_* / Distill_Any_*: single-image models -- often sharper/more detailed on a single photo, but have NO memory between frames, so used on video they can flicker unless you also turn on EMA smoothing and/or Object Stability.\n*_Metric variants: estimate real-world distances (meters) instead of a relative near/far scale -- a specialized option, not needed for normal stereo conversion.\nSize suffix (_S/_B/_L, small/base/large): bigger = noticeably better quality, but slower and more VRAM -- roughly proportional to size, not free.\nRecommended: a VDA_* model for video (steadiest results with the least fiddling); an Any_V3_* model for single images or when you want maximum per-frame detail on video and are willing to tune EMA/Object Stability yourself.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -455,9 +477,11 @@
       "group": "Depth & Resolution",
       "cli_arg": "--resolution",
       "value_type": "int",
-      "choices": [],
+      "choices": [
+        "512"
+      ],
       "default": null,
-      "tooltip": "Input resolution (short side) fed to the depth model. Leave blank for the model's default.",
+      "tooltip": "How much detail the depth model works with internally (its short-side resolution in pixels). Leave blank to use the model's own default (~392). Higher = finer depth detail but more VRAM/time -- roughly squares the cost as you increase it. Recommended: leave blank for most content; try 448-512 if you have VRAM to spare and want finer depth detail.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -471,7 +495,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "If the source resolution is lower than Depth Resolution, cap the depth resolution at the source's own resolution instead of upscaling first.",
+      "tooltip": "Safety cap only: if your typed Depth Resolution is HIGHER than the source video's own resolution, this brings it back down to match the source instead of wasting time asking for detail that doesn't exist. It never raises a lower value up. Recommended: on.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -483,9 +507,17 @@
       "group": "Edge & Detail",
       "cli_arg": "--foreground-scale",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "-3",
+        "-2",
+        "-1",
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
       "default": 0,
-      "tooltip": "Foreground scaling level, -3.0 to 3.0. 0 is disabled.",
+      "tooltip": "What it's for: reshapes the depth curve for the WHOLE image (-3 to 3) -- but as a redistribution, not a simple push. It's a trade-off dial, not a \"both ends get better\" dial: whichever end you push toward gains separation/detail, the OTHER end gets flattened. It cannot give a punchier foreground and a deeper background at the same time.\nValues: 0 = the depth model's own natural curve, unchanged. Positive values sharpen/spread out the FOREGROUND (more roundness/separation among near objects) while flattening the background. Negative values do the reverse -- sharpen/spread out the BACKGROUND (more sense of depth into the distance) while flattening the foreground.\nCon: pushed to an extreme in either direction, the opposite end of the scene will look noticeably flat/compressed -- this is inherent to how the curve works, not a bug.\nRecommended: 0 for natural, unexaggerated depth. Try a modest negative value (-0.5 to -1.0) if you want a more immersive/deep-feeling background; a modest positive value (+0.5 to +1.5) for a more sculpted, punchy foreground. If you want MORE separation on both ends at once instead of trading one for the other, raise 3D Strength (Divergence) instead.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -499,7 +531,7 @@
       "value_type": "int_list",
       "choices": [],
       "default": "2 1",
-      "tooltip": "Loop count of edge dilation, as \"<x> <y>\" or a single shared value. Space-separated.",
+      "tooltip": "What it's for: smooths the depth map right at object silhouettes BEFORE the 3D shift is applied, reducing the halo/distortion artifacts that show up around foreground edges. Type as \"<x> <y>\" (Y left blank = same as X).\nImportant interaction #1: this runs BEFORE 3D Strength (Divergence) sees the depth map, and does a FIXED amount of smoothing regardless of Divergence. Raise this when you raise 3D Strength to keep the same level of edge protection (roughly: Divergence ~2.0-2.25 pairs with 2/1, Divergence ~3.0-3.5 pairs with 3/2).\nImportant interaction #2: this also runs BEFORE Depth Resolution's upscale, using a fixed-pixel-size brush on the smaller, not-yet-upscaled depth map -- re-check this any time you change Depth Resolution too.\nCon: too high smooths away real fine depth detail near edges, not just artifacts.\nRecommended: 2 1 as a starting point (X=2 horizontal, Y=1 additional vertical).",
       "visible_if": null,
       "enabled_if": null
     },
@@ -513,7 +545,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Applies depth antialiasing. Ignored for models that don't support it.",
+      "tooltip": "Smooths small jagged/staircase artifacts in the depth map using a dedicated AI model, without changing the actual depth values much. Only available for certain depth models (grayed out otherwise). Recommended: on, when available -- minor cost, generally cleaner result.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -527,7 +559,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Cleans up each depth frame's own internal noise with edge-preserving smoothing, within that single frame (a different axis from EMA, which smooths ACROSS frames).",
+      "tooltip": "What it's for: cleans up noise WITHIN each depth frame using edge-preserving smoothing (won't blur across real edges the way a plain blur would). Different from Flicker Reduction, which smooths ACROSS frames over time -- this works on a single frame at a time. Cheap: no extra passes, no extra models.\nSide note some users notice: cleaner depth boundaries here can make the finished 3D effect FEEL a bit stronger/more solid even though the actual depth range doesn't change.\nRecommended: on, safe to leave on for most content. Use the Strength box to its right to control how much.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -539,9 +571,16 @@
       "group": "Edge & Detail",
       "cli_arg": "--depth-refine-strength",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "1.5",
+        "1.25",
+        "1.0",
+        "0.75",
+        "0.5",
+        "0.25"
+      ],
       "default": 1.0,
-      "tooltip": "How strong the Depth Detail Refinement pass is. 1.0 matches the feature's original fixed behavior.",
+      "tooltip": "How strong Depth Detail Refinement's cleanup is. 1.0 = the original fixed strength this feature always used. Higher = more smoothing reach (cleaner depth boundaries, but risks softening genuinely fine depth detail if pushed too far); lower = gentler, closer to doing nothing. Recommended: 1.0 as a safe starting point; try 1.25-1.5 if you want a bit more of the \"cleaner/more solid 3D\" effect this setting gives.",
       "visible_if": null,
       "enabled_if": {
         "field": "depth_refine",
@@ -559,7 +598,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Approximates a video-aware model's frame-to-frame stability for a single-frame model, using optical flow to reduce object depth flickering EMA alone can't fix.",
+      "tooltip": "Gives a single-frame depth model (like Any_V3_Mono_01) some of the same per-pixel steadiness over time that a video-native model (VDA_*) has built in. Tracks real motion (optical flow) and blends each frame's depth with the PREVIOUS frame's depth warped to where that content actually moved to, reducing a specific object's depth flickering that Flicker Reduction's overall-range smoothing can't touch. Only works on the single-frame processing path -- already active for Low VRAM, VDA streaming models, and inpaint methods (e.g. mlbw_l2_inpaint); has no effect otherwise.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -571,9 +610,14 @@
       "group": "Edge & Detail",
       "cli_arg": "--temporal-stabilize-strength",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.9",
+        "0.7",
+        "0.5",
+        "0.3"
+      ],
       "default": 0.7,
-      "tooltip": "How strongly to trust the motion-warped previous frame vs. the fresh per-frame depth (0-1). Tapers down automatically during fast motion.",
+      "tooltip": "How strongly to trust the motion-warped previous frame vs the fresh per-frame depth (0-1). Automatically tapers down during fast/unreliable motion regardless of this setting.",
       "visible_if": null,
       "enabled_if": {
         "field": "temporal_stabilize",
@@ -589,9 +633,15 @@
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--foreground-pop",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.0",
+        "0.25",
+        "0.5",
+        "0.75",
+        "1.0"
+      ],
       "default": 0.0,
-      "tooltip": "Pushes the nearest pixels even further toward the audience (0.0=off, 0.5=medium, 1.0=strong).",
+      "tooltip": "What it's for: pushes ONLY the nearest pixels further toward the audience (0=off, 1=strong), leaving the rest of the scene (midground/background) completely untouched. Different from Foreground Scale, which redistributes the WHOLE depth curve and always trades foreground against background.\nCon: pushed too high, the very closest objects can pop hard enough to feel uncomfortable or clash with the frame edges (pair with Preserve Screen Border to reduce that risk).\nRecommended: 0 (off) for a restrained, professional look; 0.25-0.5 for deliberate \"poke at the audience\" moments; reserve 0.75-1.0 for a genuinely gimmicky effect.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -603,9 +653,15 @@
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--foreground-divergence",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "2.0",
+        "2.5",
+        "3.0",
+        "3.5",
+        "4.0"
+      ],
       "default": null,
-      "tooltip": "A separate 3D Strength for the nearest ~15% of pixels only. Leave blank to use the same value as the rest of the scene.",
+      "tooltip": "What it's for: uses a SEPARATE 3D Strength (Divergence) value for only the nearest 15% of pixels, independent of the main 3D Strength slider above -- lets you dial the foreground up or down without touching the rest of the scene.\nValues: leave blank to disable (nearest pixels just use the same 3D Strength as everything else, the default). Set higher than your main 3D Strength for an extra-punchy foreground; lower for a gentler one.\nRecommended: leave blank unless you've specifically noticed the foreground needs its own strength independent of the rest of the scene.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -617,9 +673,15 @@
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--background-pop",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.0",
+        "0.25",
+        "0.5",
+        "0.75",
+        "1.0"
+      ],
       "default": 0.0,
-      "tooltip": "Pushes the farthest pixels even further from the audience (0.0=off, 0.5=medium, 1.0=strong).",
+      "tooltip": "What it's for: pushes ONLY the farthest pixels further away from the audience (0=off, 1=strong), leaving the foreground/midground completely untouched. Mirror image of Foreground Pop, aimed at the opposite end of the scene.\nHow it helps: gives a deeper-feeling background without needing to redistribute the whole depth curve.\nRecommended: 0.15-0.25 for a modestly more immersive background on most content; go higher for content with a genuinely deep, expansive background you want to emphasize (landscapes, wide establishing shots).",
       "visible_if": null,
       "enabled_if": null
     },
@@ -631,9 +693,15 @@
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--background-pop-coverage",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.15",
+        "0.20",
+        "0.25",
+        "0.30",
+        "0.40"
+      ],
       "default": 0.15,
-      "tooltip": "How much of the scene Background Pop treats as \"background\" (0.0-1.0). Default 0.15 = farthest 15%.",
+      "tooltip": "What it's for: how much of the scene Background Pop treats as \"background\" (0.0-1.0 fraction, e.g. 0.25 = farthest 25%; default 0.15 = farthest 15%).\nCon: larger values affect more of the scene, but push the transition line further into the midground, where a sudden change in how much a subject recedes is more likely to be noticeable as an odd \"step\" in the depth.\nRecommended: 0.15 (default) for a subtle, hard-to-notice effect; raise to 0.20-0.30 only if you want the effect to reach further into the scene and don't mind it becoming more visible.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -645,9 +713,15 @@
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--background-divergence",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "2.0",
+        "2.5",
+        "3.0",
+        "3.5",
+        "4.0"
+      ],
       "default": null,
-      "tooltip": "A separate 3D Strength for the farthest ~15% of pixels only. Leave blank to use the same value as the rest of the scene.",
+      "tooltip": "What it's for: uses a SEPARATE 3D Strength (Divergence) value for only the farthest 15% of pixels, independent of the main 3D Strength slider above.\nValues: leave blank to disable (farthest pixels just use the same 3D Strength as everything else, the default). Set lower than your main 3D Strength to keep a busy/detailed background calmer and less prone to edge artifacts; set higher for a deeper-feeling background.\nRecommended: leave blank unless you've specifically noticed the background needs its own strength independent of the rest of the scene.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -659,9 +733,15 @@
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--edge-repair-strength",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.0",
+        "0.25",
+        "0.5",
+        "0.75",
+        "1.0"
+      ],
       "default": 0.0,
-      "tooltip": "Final cleanup pass smoothing a thin band right around real depth edges to reduce hairline fringing. 0.0=off.",
+      "tooltip": "Final cleanup pass on the finished 3D image (applies no matter which Stereo Method made it). Gently smooths a thin hairline right around real depth edges to reduce fringing/ghosting residue left over from the 3D warp. Cannot affect flat areas or anywhere without a depth edge. 0.0=off (default), 1.0=strongest.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -675,7 +755,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Final edge-aware unsharp-mask pass on the rendered stereo output. Off by default.",
+      "tooltip": "What it's for: enhances fine detail/sharpness in the FINISHED, fully-rendered 3D picture itself (after Edge Repair, if that's also on) -- different from every other sharpness-adjacent setting in this app, which all work on the DEPTH MAP instead.\nHow it avoids amplifying film grain: measures how much real local detail/edge structure is actually at each spot first and only applies the boost where that's genuinely high -- real edges and texture get sharpened, flat or grain-only areas are left close to untouched.\nRecommended: off (default) unless the finished 3D output looks a little soft to you; start at the default 0.5 Strength and raise only if you still want more.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -687,9 +767,14 @@
       "group": "Pop & Divergence Tuning",
       "cli_arg": "--sharpen-strength",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.25",
+        "0.5",
+        "0.75",
+        "1.0"
+      ],
       "default": 0.5,
-      "tooltip": "How strong the Sharpen pass is (0.0=no effect, 1.0=strongest).",
+      "tooltip": "How strong the Sharpen effect is (0.0-1.0). Higher = more pronounced detail boost at real edges/texture, but also more risk of an over-crisp/harsh look or exaggerating real compression artifacts. Recommended: 0.5 (default) as a safe starting point.",
       "visible_if": null,
       "enabled_if": {
         "field": "sharpen",
@@ -707,7 +792,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Uses a moving min/max average to normalize video depth over time, reducing frame-to-frame flicker.",
+      "tooltip": "What it's for (video only): smooths the depth map's overall near/far SCALE over time, so the whole image's depth intensity doesn't subtly pulse/breathe from frame to frame due to the AI model's own frame-to-frame noise. Uses the Decay Rate and Buffer settings below together.\nRecommended: on for essentially all video, paired with Scene Boundary Detection so the smoothing resets cleanly at real cuts instead of blending across them.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -719,9 +804,16 @@
       "group": "Flicker Reduction & Scene Detection",
       "cli_arg": "--ema-decay",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.99",
+        "0.95",
+        "0.9",
+        "0.75",
+        "0.5",
+        "0"
+      ],
       "default": 0.75,
-      "tooltip": "Smoothing strength for Flicker Reduction (0-1). Larger = smoother.",
+      "tooltip": "Decay Rate: how much weight past frames keep vs. the newest frame when tracking the depth-map scale. Updates every single frame, not periodically.\nValues: higher (0.9-0.99) = more resistant to momentary spikes but slower to follow a genuine intentional depth change. Lower (0.5-0.75) = reacts faster to real change, but more exposed to the AI's own per-frame noise. 0 = no smoothing at all.\nRecommended: pair with Buffer below rather than tuning alone (e.g. Decay 0.98 pairs with Buffer 120 for scenes with real smearing/bleeding artifacts). Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own per-scene Decay/Buffer instead.",
       "visible_if": null,
       "enabled_if": {
         "field": "ema_normalize",
@@ -737,9 +829,14 @@
       "group": "Flicker Reduction & Scene Detection",
       "cli_arg": "--ema-buffer",
       "value_type": "int",
-      "choices": [],
+      "choices": [
+        "150",
+        "60",
+        "30",
+        "1"
+      ],
       "default": 30,
-      "tooltip": "Frame buffer size for Flicker Reduction's moving average.",
+      "tooltip": "Buffer Size (in frames): how many recent frames contribute to judging the current near/far depth range, together with Decay Rate above.\nCon of too small: a single outlier frame (something briefly very close to the lens) can yank the whole normalization range around by itself, which reads as sudden smearing/swimming/bleeding in the 3D effect.\nCon of too large: slower to adapt to a genuine intentional depth change within one continuous shot.\nRecommended: 30 as a reasonable middle default; try 120 (paired with Decay 0.98) if you see smearing/bleeding artifacts. Greyed out when \"Auto EMA by Scene Length\" below is checked.",
       "visible_if": null,
       "enabled_if": {
         "field": "ema_normalize",
@@ -757,7 +854,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Automatically eases EMA Decay off during fast motion instead of one fixed strength for the whole clip. Never smooths more than EMA Decay itself, only less.",
+      "tooltip": "What it's for: automatically eases Flicker Reduction's Decay Rate DOWN during fast motion, instead of using one fixed smoothing strength for the whole clip.\nSafety note: this can only ever REDUCE smoothing below your Decay Rate setting during fast motion, never increase it above what you set.\nRecommended: on, if your content mixes calm and fast-motion scenes (most movies do).",
       "visible_if": null,
       "enabled_if": {
         "field": "ema_normalize",
@@ -775,7 +872,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Splits processing at real scene cuts (shot boundary detection); EMA and other running state resets at each cut.",
+      "tooltip": "What it's for: detects real scene/shot cuts using a trained AI model (not just a simple brightness-difference trick) and resets Flicker Reduction's smoothing exactly at those points, instead of letting it bleed depth-scale information across two completely unrelated shots.\nRecommended: on for essentially all movie/TV content, especially when Flicker Reduction or Resume is also on.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -789,7 +886,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Disables the cache Scene Boundary Detection normally reuses on a re-run of the same file.",
+      "tooltip": "What it's for: saves detected scene cuts to disk (keyed to the source file's path, size, and modification time), so re-running the same video later -- after a crash, or while testing different 3D settings -- doesn't need to re-scan for cuts from scratch every time.\nRecommended: on. It auto-invalidates if the source file actually changes, so there's no real downside for normal use.",
       "visible_if": null,
       "enabled_if": {
         "field": "scene_detect",
@@ -807,7 +904,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Automatically picks EMA Decay/Buffer per scene based on that scene's own length, using a built-in table. Requires Scene Boundary Detection (or Automated Scene Batch, on the Video Filter tab).",
+      "tooltip": "Automatically picks EMA Decay/Buffer per scene based on that scene's own length, using a default table -- a short scene gets a smaller Buffer so the smoothing actually finishes settling before the scene ends. Works with either Automated Scene Batch or plain Scene Boundary Detection (one of the two must be on, or Start will explain this is missing). Pick the matching table in the dropdown to its right. While this is checked, Flicker Reduction's own Decay Rate/Buffer fields above are greyed out -- their typed-in values are kept, not cleared.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -831,7 +928,7 @@
         "Drama Slow Paced"
       ],
       "default": "3DECKER VDA_L",
-      "tooltip": "Which built-in EMA-by-duration table to use, matched to the Depth Model in use.",
+      "tooltip": "Which Auto EMA by Scene Length table to use, matched to the Depth Model in use. 3DECKER VDA_L / 3DECKER Any_V3_Mono_01 are this project's own tables, tuned for those specific models. Nagadomi_Reference stays within the original tool author's own documented preset range. GEMINI AI / ChatGPT / Grok / Fast Action / Medium Magical / Drama Slow Paced are additional tables added for A/B comparison -- their curves came from AI suggestions and were not independently verified against nunif's own source, included as-is for comparison rather than as confirmed-correct defaults. Use \"Edit Values...\" to see or change the exact per-second numbers for whichever table is selected.",
       "visible_if": null,
       "enabled_if": {
         "field": "scene_batch_auto_ema",
@@ -849,7 +946,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Forces screen-border parallax to zero.",
+      "tooltip": "What it's for: tapers the 3D shift down to zero right at the left/right frame edges, instead of applying full strength all the way to the border -- an automated version of the \"floating window\" technique real stereographers use, avoiding a conflict where a strongly-popped object gets cut off by the frame edge.\nCon: very slightly reduces 3D strength right at the extreme edges of the frame.\nRecommended: on for most content, especially anything with strong 3D Strength or objects that move near frame edges.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -862,6 +959,7 @@
       "cli_arg": null,
       "value_type": "str",
       "choices": [
+        "full_sbs",
         "half_sbs",
         "full_tb",
         "half_tb",
@@ -872,7 +970,7 @@
         "anaglyph"
       ],
       "default": "half_sbs",
-      "tooltip": "The output layout. Maps to several mutually-exclusive iw3 CLI flags under the hood (--half-sbs/--tb/--half-tb/--vr180/--cross-eyed/--rgbd/--half-rgbd/--anaglyph) -- handled specially in worker.py, not a direct 1:1 CLI arg.",
+      "tooltip": "The final output layout. Full/Half SBS (side-by-side) and Full/Half TB (top-bottom) are the standard formats most 3D TVs and players expect -- Full keeps both eyes at full resolution (bigger file), Half squeezes both into the original frame size (smaller file, common for streaming/playback compatibility). VR180 is for VR headsets. Cross Eyed is for viewing without any equipment. Anaglyph is the red/cyan glasses look. RGB-D saves the depth data itself instead of a finished 3D image. Recommended: Half SBS for most TVs and 3D players, unless you know you need a different format.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -894,7 +992,7 @@
         "wimmer2"
       ],
       "default": "dubois",
-      "tooltip": "Which anaglyph color-filter recipe to use. Only meaningful when Stereo Format is Anaglyph.",
+      "tooltip": "Only used when Stereo Format is Anaglyph. The color-filtering recipe used for red/cyan glasses viewing. dubois/dubois2 give the most natural, least color-distorted result for most red/cyan glasses. gray avoids color distortion entirely but loses color in the image. Recommended: dubois2.",
       "visible_if": {
         "field": "stereo_format",
         "op": "eq",
@@ -912,7 +1010,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Tags the finished .mkv's video track with the Matroska StereoMode property so 3D-aware players/TVs auto-detect the 3D packing instead of the viewer picking it manually.",
+      "tooltip": "What it's for: writes the standard Matroska \"StereoMode\" property into the finished .mkv's video track, describing the 3D layout and which eye comes first, so 3D-aware players/TVs (VLC, Kodi, some smart TVs) auto-detect the correct display mode.\nOnly applies to: .mkv output, and only genuine two-eye layouts (SBS/TB/Cross Eyed) -- RGB-D and Anaglyph are skipped automatically with a printed note, not a silent no-op.\nCon: none for a normal 3D TV/player -- this is a pure metadata edit, no re-encoding.\nRecommended: on if your output goes to a 3D TV or a 3D-aware player like VLC/Kodi.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -926,7 +1024,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Blends depth from a second model into the primary Depth Model's output, favoring the second model in areas with dense fine detail (foliage, hair, close-up texture). Runs as three full passes over the clip; costs real extra time and disk space. Requires a single video file input.",
+      "tooltip": "Brings in a SECOND depth model and blends it into Depth Model's result, favoring the second model specifically where the image has dense fine detail (foliage, hair, close-up texture) that a single-frame model often gets wrong. Runs as 3 full passes over the clip, fully releasing each model before the next loads so both are never in GPU memory at once. Costs roughly 3x the time and real extra disk space (kept in a '<output>.depth_blend_work' folder you can delete afterward). Requires a single video file input; not compatible with Automated Scene Batch.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -940,7 +1038,7 @@
       "value_type": "str",
       "choices": [],
       "default": "VDA_L",
-      "tooltip": "The secondary depth model blended in by Dual-Pass Depth Blend.",
+      "tooltip": "The SECOND depth model for Dual-Pass Depth Blend. Pick one with strengths your main Depth Model lacks -- e.g. a VDA_* model for its steadier handling of foliage/close-up detail.",
       "visible_if": null,
       "enabled_if": {
         "field": "depth_blend",
@@ -958,7 +1056,7 @@
       "value_type": "float",
       "choices": [],
       "default": 1.0,
-      "tooltip": "How strongly to favor the secondary model in the selected region (0-1). 1.0 = fully trust it there.",
+      "tooltip": "What it's for: how strongly to favor the SECOND model within the region selected below (0-1). 1.0 = fully trust the second model there; lower values blend it in more gently.\nRecommended: 1.0 to start; back off toward 0.5-0.75 if you notice any softness/ghosting at silhouettes.",
       "visible_if": null,
       "enabled_if": {
         "field": "depth_blend",
@@ -980,7 +1078,7 @@
         "background"
       ],
       "default": "detail",
-      "tooltip": "What decides WHERE the secondary model gets blended in: 'detail' (dense fine visual detail), 'foreground' (nearest X% of the scene), or 'background' (farthest X%).",
+      "tooltip": "What it's for: WHERE the second model gets blended in.\ndetail: wherever the image itself shows dense fine visual detail (foliage, hair, close-up texture) -- the original use case this feature was built for.\nforeground / background: a straight percentage slice of the scene BY DEPTH (nearest or farthest X%, set below), regardless of how much visual detail is actually there.\nRecommended: detail for the original foliage/hair use case; foreground/background only if you specifically want the second model's characteristics applied to a whole depth range instead.",
       "visible_if": null,
       "enabled_if": {
         "field": "depth_blend",
@@ -998,7 +1096,7 @@
       "value_type": "float",
       "choices": [],
       "default": 25.0,
-      "tooltip": "For Blend Region foreground/background: what percent of the scene (by depth) to blend the secondary model into.",
+      "tooltip": "For \"foreground\"/\"background\" region only (ignored for \"detail\"): what percent of the scene, by depth, to blend the second model into -- e.g. 25 = nearest (or farthest) 25% of the scene.\nRecommended: 25 as a starting point; keep it modest unless you have a specific reason to cover more of the scene.",
       "visible_if": null,
       "enabled_if": {
         "field": "depth_blend_region",
@@ -1019,7 +1117,7 @@
       "value_type": "str",
       "choices": [],
       "default": null,
-      "tooltip": "Start time offset for video, hh:mm:ss or mm:ss format.",
+      "tooltip": "Only process the video from this timestamp onward, instead of from the beginning. Useful for testing settings on a specific scene, or trimming unwanted intro footage.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1033,7 +1131,7 @@
       "value_type": "str",
       "choices": [],
       "default": null,
-      "tooltip": "End time offset for video, hh:mm:ss or mm:ss format.",
+      "tooltip": "Stop processing at this timestamp instead of the end of the video.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1047,7 +1145,7 @@
       "value_type": "str",
       "choices": [],
       "default": "",
-      "tooltip": "Raw ffmpeg -vf filter string, applied as-is. Advanced use.",
+      "tooltip": "Advanced: a raw ffmpeg video filter string applied to the source before 3D conversion. Leave blank unless you specifically need this -- most common needs (crop, rotate, pad, resize) already have their own simpler controls.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1061,7 +1159,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Rotate 90 degrees counterclockwise.",
+      "tooltip": "Rotate the source video 90 degrees counterclockwise before 3D conversion, e.g. for footage shot sideways on a phone.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1075,7 +1173,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Rotate 90 degrees clockwise.",
+      "tooltip": "Rotate the source video 90 degrees clockwise before 3D conversion, e.g. for footage shot sideways on a phone.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1095,7 +1193,7 @@
         "FLAT"
       ],
       "default": "",
-      "tooltip": "Automatically removes black/flat-color bars. BLACK_TB/FLAT_TB: top and bottom only. BLACK/FLAT: all sides. Blank = off.",
+      "tooltip": "Automatically detects and removes black bars or plain/flat borders before 3D conversion (so they don't waste depth detail or get distorted). _TB variants only crop top/bottom bars; the non-TB variants crop on all sides.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1107,9 +1205,14 @@
       "group": "Trim & Filters",
       "cli_arg": "--pad",
       "value_type": "float",
-      "choices": [],
+      "choices": [
+        "0.01",
+        "0.05",
+        "0.5",
+        "1"
+      ],
       "default": null,
-      "tooltip": "Pad size = round(width * this) // 2. Leave blank for no padding.",
+      "tooltip": "How much padding to add, as a ratio of frame size (only applies if Padding Mode is also set). Con: larger values waste more of the frame on empty border instead of picture content. Recommended: start small (0.01-0.05).",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1129,7 +1232,7 @@
         "top"
       ],
       "default": "tblr",
-      "tooltip": "Which sides Padding is applied to.",
+      "tooltip": "What it's for: adds solid padding/border area around the frame before the 3D shift is applied, giving objects near the edges more room to shift into without hitting the frame boundary.\ntblr = all sides (default). tb = top and bottom only. lr = left and right only. top = top only. 16:9 = pads to a 16:9 aspect ratio specifically.\nRecommended: leave at default unless you're seeing objects clipped by the frame edge even with Preserve Screen Border on.",
       "visible_if": null,
       "enabled_if": {
         "field": "pad",
@@ -1147,7 +1250,7 @@
       "value_type": "int",
       "choices": [],
       "default": null,
-      "tooltip": "Limits output width, e.g. for cardboard players. Leave blank for no limit.",
+      "tooltip": "What it's for: caps the FINAL PACKED FRAME's resolution (the whole SBS/TB image, after both eyes are already combined -- not a per-eye limit). Leave blank to keep the source's native size, uncapped.\nImportant: Full SBS builds a canvas DOUBLE your source's width. If you cap this at your target delivery resolution with Keep Aspect Ratio off, Full SBS can end up pixel-for-pixel identical to Half SBS. For true Full SBS, set this to double your target width/height, or leave it blank.\nRecommended: match this to whichever Stereo Format you picked so the numbers actually make sense together.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1161,7 +1264,7 @@
       "value_type": "int",
       "choices": [],
       "default": null,
-      "tooltip": "Limits output height, e.g. for cardboard players. Leave blank for no limit.",
+      "tooltip": "See Max Output Width's tooltip -- the two work together as one output size cap.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1175,7 +1278,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Keeps the source aspect ratio when Max Output Width/Height resize the output.",
+      "tooltip": "What it's for: when Output Size is capped, proportionally shrinks to fit inside it instead of crushing width and height independently to exactly match the cap.\nRecommended: turn on if you're not carefully matching the size cap to double/single width for your Stereo Format choice, so an undersized cap shrinks proportionally instead of distorting the image.",
       "visible_if": null,
       "enabled_if": {
         "field": "max_output_width",
@@ -1193,7 +1296,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Preserves Dolby Vision RPU metadata in HEVC output (requires dovi_tool, bundled with this app).",
+      "tooltip": "What it's for: detects Dolby Vision RPU and/or HDR10+ dynamic metadata on the source and re-attaches it to the finished 3D video, so the HDR grading survives conversion instead of being silently dropped.\nRequires: HEVC output and MKVToolNix installed for MKV output.\nRecommended: on for any Dolby Vision or HDR10+ source you want to keep looking correct on an HDR display after conversion.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1207,7 +1310,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Tone-maps a PQ/HLG HDR source down to SDR (10-bit retained) before conversion.",
+      "tooltip": "Properly tone-maps a PQ/HDR10/HDR10+ or HLG source down to normal SDR brightness before conversion, while keeping 10-bit color precision. Automatically does nothing if the source isn't actually HDR. Turns off Preserve Dolby Vision, since the two are contradictory. Recommended: on for HDR sources being watched on a non-HDR display.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1221,7 +1324,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Splits video into chunks and resumes from a checkpoint if the conversion is interrupted.",
+      "tooltip": "Lets a long conversion pick back up exactly where it left off if it's interrupted (crash, power loss, or clicking Cancel), instead of starting over from the beginning. A normal, uninterrupted run has zero seams, identical to not using this option at all -- a seam only appears at the exact point an interruption actually happened. Recommended: on for any long/overnight conversion.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1253,7 +1356,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Applies temporal denoising (hqdn3d, a one-time ffmpeg pre-pass) before depth estimation, to reduce film grain artifacts.",
+      "tooltip": "What it's for: applies temporal (across-frame) denoising to the SOURCE before depth estimation even sees it. Reduces film grain/sensor noise that can otherwise confuse the depth model into reading noise as fake texture/detail.\nCon: real extra time up front (a full separate pass over the whole video), and always risks softening some genuine fine detail along with the grain.\nRecommended: on for visibly grainy/old sources; off for clean, modern digital sources.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1267,7 +1370,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Generates a quick 1fps/256p preview of the first 60 seconds to check 3D settings before a full run.",
+      "tooltip": "What it's for: quickly renders just the first 60 seconds at 1fps and low resolution instead of a full conversion, so you can check your settings look right before committing to a full-length run.\nRecommended: on whenever you're testing new settings on a file for the first time; off for your actual final conversion run.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1285,7 +1388,7 @@
         "12"
       ],
       "default": null,
-      "tooltip": "Upgrades an 8-bit source to 10-bit or 12-bit output pixel format. Blank = no upgrade.",
+      "tooltip": "Gives the internal depth/3D math more color precision to work with, reducing banding (visible color \"steps\" in skies/shadows) -- it doesn't add detail that wasn't in the source. Recommended: 10 for most sources, a real, visible improvement over 8-bit with low cost. 12 adds little you can actually see on a normal screen, for extra file size and slower encoding.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1299,7 +1402,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Adds a metadata suffix to the output filename. The real --metadata flag takes an optional value (\"filename\"); this checkbox is the on/off case, handled specially in worker.py.",
+      "tooltip": "What it's for: encodes your current settings (depth model, 3D strength, convergence, edge options, etc.) into the output filename as short abbreviated tags, and also writes them into the video's own comment metadata.\nHow it helps: lets you tell which settings made which file just by looking at the filename later, and lets Resume correctly match an in-progress job back up after an interruption.\nCon: filenames get noticeably longer and less readable at a glance.\nRecommended: on, unless you strongly prefer short/clean filenames.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1313,7 +1416,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Fully automated whole-movie pipeline: removes letterbox bars once, detects scene cuts once, converts each scene independently, then joins the results back into one seamless video. Input must be a single video file.",
+      "tooltip": "Fully automated whole-movie pipeline: removes letterbox bars once, detects scene cuts once, splits into per-scene clips with exact keyframe-accurate boundaries, converts each scene independently (a true fresh start per scene), then joins the results back into one seamless video and reattaches the original audio. Input must be a single video file, not a folder.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1327,7 +1430,7 @@
       "value_type": "str",
       "choices": [],
       "default": null,
-      "tooltip": "Explicit crop for Automated Scene Batch, as WxH or WxH:X:Y. If blank, letterbox bars are auto-detected once from the whole movie.",
+      "tooltip": "Optional, for Automated Scene Batch. Explicit crop as WxH or WxH:X:Y. Leave blank to auto-detect letterbox bars once from the whole movie.",
       "visible_if": null,
       "enabled_if": {
         "field": "scene_batch",
@@ -1345,7 +1448,7 @@
       "value_type": "str",
       "choices": [],
       "default": null,
-      "tooltip": "JSON file giving per-scene setting overrides for Automated Scene Batch.",
+      "tooltip": "Optional, for Automated Scene Batch. JSON file giving per-scene setting overrides (e.g. a different Divergence for different stretches of the movie). Leave blank to use the same settings for every scene.",
       "visible_if": null,
       "enabled_if": {
         "field": "scene_batch",
@@ -1363,7 +1466,7 @@
       "value_type": "str",
       "choices": [],
       "default": null,
-      "tooltip": "Optional name for this Automated Scene Batch run -- reuses already-done shared work from a prior run of the same movie, but writes its own output as <name>_<variant>.<ext> so trying different settings never overwrites an earlier attempt.",
+      "tooltip": "Optional, for Automated Scene Batch. Reuses the shared, already-done work from a prior run of the SAME movie (RPU, crop+keyframe pass, split scene clips) but writes its own converted scenes and final output under this name, so trying different settings here never overwrites an earlier attempt. Output becomes <name>_<variant>.<ext>.",
       "visible_if": null,
       "enabled_if": {
         "field": "scene_batch",
@@ -1388,7 +1491,7 @@
         "amf"
       ],
       "default": null,
-      "tooltip": "Hardware-accelerated video decode.",
+      "tooltip": "Use your GPU to decode (read) the source video instead of the CPU -- much faster, and frees up CPU time for other work, with no quality difference. Leave blank to always use CPU decoding. Recommended: select your GPU's option (e.g. cuda for NVIDIA) if available.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1402,7 +1505,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Disables falling back to software (CPU) decoding if hardware decode fails partway through.",
+      "tooltip": "Use software (CPU) decoder if hardware acceleration fails or is unsupported for a particular file, instead of stopping with an error. Recommended: leave off (fallback enabled) for reliability.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1420,7 +1523,7 @@
         "avi"
       ],
       "default": "mp4",
-      "tooltip": "Output video container format.",
+      "tooltip": "The output container/file type. mp4 is the most universally compatible. mkv supports more advanced features (like Dolby Vision/HDR10+ metadata and lossless codecs). avi is mainly for the lossless utvideo codec. Recommended: mkv if you need HDR/Dolby Vision or lossless output, mp4 otherwise.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1444,7 +1547,7 @@
         "hevc_qsv"
       ],
       "default": null,
-      "tooltip": "Video codec to encode with. Availability depends on Video Format and this machine's hardware encoders.",
+      "tooltip": "The compression format used to encode the output video. libx264/libx265 (CPU-based, h264/HEVC) give the best quality-per-file-size and work everywhere. h264_nvenc/hevc_nvenc use your NVIDIA GPU's hardware encoder -- much faster, slightly lower quality-per-file-size. utvideo/ffv1 are lossless (huge files, no quality loss) for archival/further editing. Recommended: libx265 for best quality, hevc_nvenc if encoding speed matters and you have an NVIDIA GPU.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1458,7 +1561,7 @@
       "value_type": "float",
       "choices": [],
       "default": 30,
-      "tooltip": "Output fps = min(source fps, this value).",
+      "tooltip": "Caps the output frame rate. If the source is already at or below this, nothing changes. Lowering it reduces processing time roughly proportionally, at the cost of less smooth motion. Recommended: leave high (e.g. 1000) to just keep the source's own frame rate.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1480,7 +1583,7 @@
         "gbrp16le"
       ],
       "default": "yuv420p",
-      "tooltip": "Pixel format for video output.",
+      "tooltip": "The color sampling/precision the encoder stores internally. yuv420p (8-bit) is the most compatible default. yuv420p10le adds precision that reduces banding. yuv444p/rgb24/gbrp* avoid color-detail loss around sharp red/edge areas, at a larger file size. Recommended: yuv420p10le for most uses.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1505,7 +1608,7 @@
         "bt2020-pq-tv"
       ],
       "default": "auto",
-      "tooltip": "Video colorspace tag written to the output.",
+      "tooltip": "How color values are tagged/interpreted (affects color accuracy on playback, not detail). \"auto\" matches the source's own colorspace and is correct for virtually all sources. Only change this if you know your source's colorspace is mistagged.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1517,9 +1620,22 @@
       "group": "Rate Control",
       "cli_arg": "--crf",
       "value_type": "int",
-      "choices": [],
+      "choices": [
+        "16",
+        "17",
+        "18",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27"
+      ],
       "default": 20,
-      "tooltip": "Constant quality value. Smaller = higher quality/larger file.",
+      "tooltip": "Constant Rate Factor: the main quality/file-size dial for most codecs. Lower number = higher quality and bigger file; higher number = smaller file and lower quality. Recommended: 15-18 for near-lossless/archival quality, 20-23 for a good everyday balance.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1531,9 +1647,16 @@
       "group": "Rate Control",
       "cli_arg": "--video-bitrate",
       "value_type": "str",
-      "choices": [],
+      "choices": [
+        "160M",
+        "50M",
+        "16M",
+        "12M",
+        "8M",
+        "4M"
+      ],
       "default": "8M",
-      "tooltip": "Bitrate option, only used by the libopenh264 codec.",
+      "tooltip": "Only used by libopenh264, which doesn't support CRF. Sets a fixed data rate for the video (M = megabits/second) -- higher = better quality and bigger file. Recommended: 8M-16M for 1080p, higher for 4K.",
       "visible_if": null,
       "enabled_if": {
         "field": "video_codec",
@@ -1569,7 +1692,7 @@
         "p7"
       ],
       "default": "medium",
-      "tooltip": "Encoder speed/quality preset.",
+      "tooltip": "How hard the encoder works to compress efficiently. Slower presets (slow/slower/veryslow) give a smaller file at the same quality, but take longer to encode. Faster presets (fast/veryfast/ultrafast) encode quicker but produce a larger file for the same quality. Recommended: medium-slow for a good balance; veryfast if encoding time matters more than file size.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1596,21 +1719,36 @@
         "lossless"
       ],
       "default": "",
-      "tooltip": "Encoder tuning(s), space or comma separated. Which values are valid depends on the chosen codec (this simplified picker does not filter the list by codec the way the desktop GUI does).",
+      "tooltip": "For libx264/libx265: nudges the encoder's choices for a specific kind of content -- e.g. \"grain\" preserves film grain/noise better, \"animation\" suits flat-color cartoon content. Leave blank unless your source clearly matches one of these categories.\nFor hevc_nvenc/h264_nvenc: chooses the GPU encoder's quality/speed tradeoff. \"hq\" = high quality (good default). \"uhq\" (HEVC only, recent NVIDIA GPUs) = even higher quality than hq at a modest speed cost. \"lossless\" = no quality loss, very large file. \"ll\"/\"ull\" are for live-streaming, not useful for a normal conversion. \"fastdecode\"/\"zerolatency\" can also be typed here directly (space/comma separated with other values) -- fastdecode makes the file easier to decode on weak playback devices at a small compression-efficiency cost.",
       "visible_if": null,
       "enabled_if": null
     },
     {
       "name": "profile_level",
-      "label": "Profile Level",
+      "label": "Level",
       "widget": "combo_editable",
       "tab": "video_encoding",
       "group": "Tuning",
       "cli_arg": "--profile-level",
       "value_type": "str",
-      "choices": [],
+      "choices": [
+        "auto",
+        "3.0",
+        "3.1",
+        "3.2",
+        "4.0",
+        "4.1",
+        "4.2",
+        "5.0",
+        "5.1",
+        "5.2",
+        "6.0",
+        "6.1",
+        "6.2",
+        "8.5"
+      ],
       "default": null,
-      "tooltip": "H.264 profile level, e.g. 4.1. Advanced use.",
+      "tooltip": "A technical compatibility limit (resolution/bitrate ceiling) some older TVs/players check before they'll play a file. Recommended: \"auto\" -- only set this manually if a specific playback device of yours refuses to play the output.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1628,7 +1766,7 @@
         "CPU"
       ],
       "default": null,
-      "tooltip": "Which GPU (or CPU) does the work. Populated via nvidia-smi as a separate process, never torch.cuda.*, so opening this GUI can never claim a CUDA context before it's needed (see ADR-034/071/075).",
+      "tooltip": "Which GPU (or CPU) does the AI processing. \"All CUDA Device\" splits work across every GPU you have for faster batch processing. CPU works without a GPU but is dramatically slower -- only use it if you have no compatible graphics card.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1642,7 +1780,7 @@
       "value_type": "bool",
       "choices": [],
       "default": true,
-      "tooltip": "Uses half-precision math for faster/lower-VRAM inference. The real flag is --disable-amp (inverted) -- handled specially in worker.py, same pattern as Stereo Format.",
+      "tooltip": "Use FP16 (fast) -- runs the AI math at lower numeric precision, which is significantly faster and uses less VRAM on modern GPUs, with no visible quality cost in virtually all cases. Recommended: on.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1656,7 +1794,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Disables batch processing so each frame uses less GPU memory at a time. Slower, but avoids out-of-memory crashes/freezes on smaller GPUs or VRAM-heavy methods like forward_splat_fill.",
+      "tooltip": "Trades speed for lower memory use, by processing in a way that needs less VRAM at once. Only turn this on if you're actually running out of memory -- it will make things slower.\nConfirmed real fix for Method forward_splat_fill's out-of-memory crashes on demanding footage, even when Depth Batch Size is already set to 1 -- turn this on if that method OOMs for you.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1670,7 +1808,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Compiles the depth/stereo models for faster inference. First run after a settings change is slower (compile time); needs the CUDA-context ordering this app already preserves (ADR-034/071/075) to combine safely with hardware decode.",
+      "tooltip": "Enable model compiling: optimizes the AI model before running, trading a slower startup (the first run after changing settings has to compile) for faster processing afterward. Worth it for long videos; not worth it for a single quick image or short clip. Requires extra setup (see this project's torch_compile docs) to actually take effect.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1682,9 +1820,24 @@
       "group": "Processor",
       "cli_arg": "--batch-size",
       "value_type": "int",
-      "choices": [],
+      "choices": [
+        "64",
+        "32",
+        "16",
+        "14",
+        "13",
+        "12",
+        "11",
+        "10",
+        "9",
+        "8",
+        "4",
+        "3",
+        "2",
+        "1"
+      ],
       "default": 2,
-      "tooltip": "How many frames are processed together per depth-model pass. Ignored when Low VRAM is on.",
+      "tooltip": "Video Only. How many frames are sent to the depth model at once. Higher = faster overall but uses more VRAM. Lower it if you run out of memory; raise it if you have VRAM to spare and want faster processing. Ignored when Low VRAM is on.",
       "visible_if": null,
       "enabled_if": {
         "field": "low_vram",
@@ -1701,16 +1854,23 @@
       "cli_arg": "--max-workers",
       "value_type": "int",
       "choices": [
-        "0",
-        "1",
-        "2",
-        "3",
-        "4",
+        "16",
+        "14",
+        "12",
+        "11",
+        "9",
         "8",
-        "16"
+        "7",
+        "6",
+        "5",
+        "4",
+        "3",
+        "2",
+        "1",
+        "0"
       ],
       "default": 0,
-      "tooltip": "Max inference worker threads for video processing. 0 = disabled.",
+      "tooltip": "Video Only. How many CPU threads handle the stereo/inpainting step and frame I/O in parallel. Higher can speed things up on a multi-core CPU, but uses more RAM/VRAM. Lower it if you run into memory issues or system slowdowns while converting.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1724,7 +1884,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Uses flip augmentation on the depth model for slightly higher quality, at extra compute cost.",
+      "tooltip": "Use flip augmentation to improve depth quality (slow). Runs the depth model on both the normal and mirrored image/video and blends the result, often a little cleaner/more accurate, at roughly double the processing time. Recommended: off for long videos (Flicker Reduction already covers similar ground there, for free) -- worth trying for a single hero image or a short clip.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1738,7 +1898,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "Uses a separate CUDA stream per worker thread/device.",
+      "tooltip": "Use per-thread CUDA Stream (experimental: fast or slow or crash). Lets multiple worker threads share the GPU more aggressively. May speed things up, may do nothing, may occasionally cause instability -- try it and turn it back off if you see crashes.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1752,7 +1912,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "When Suspend/Resume is used, also moves every loaded model off the GPU and frees VRAM while paused, reloading on Resume. Off by default (models stay resident for an instant Resume). Has no effect with multiple GPUs selected.",
+      "tooltip": "What: when you click Suspend, also move every loaded model off the GPU and actually release that VRAM back to Windows, instead of just pausing while everything stays loaded. Resume moves them all back before continuing.\nCons: Resume is no longer instant -- reloading takes a few seconds (longer if torch.compile is on). No effect with multi-GPU (\"All CUDA Device\").\nRecommended: off, unless you specifically need the GPU free for something else during a long pause.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1766,7 +1926,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "After conversion finishes, runs the output through waifu2x (a separate bundled AI upscaler) as one extra step, written to a separate '<name>_w2x<ext>' file.",
+      "tooltip": "What it's for (single video and Dual-Pass Depth Blend jobs only): once this job's finished output is fully written, automatically runs it through waifu2x (a separate, dedicated AI upscaler bundled with this app) as one extra step.\nHow it's safe: saved to a separate '_w2x' file -- the original conversion output is always left untouched, even if the upscale step itself fails.\nRecommended: on if you specifically want a higher-resolution final delivery file; off if your source resolution is already your target.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1784,7 +1944,7 @@
         "8k"
       ],
       "default": "auto",
-      "tooltip": "'auto' uses waifu2x-upscale's plain whole-frame behavior. '4k'/'8k' use a stereo-aware path that upscales each eye of a packed 3D output independently.",
+      "tooltip": "What it's for: only takes effect on a packed 3D stereo video output. \"auto\" (default) leaves the plain whole-frame upscale unchanged. \"4k\"/\"8k\" instead switch to a stereo-aware upscale: each eye is split out and upscaled separately (avoiding blurring pixels across the seam between eyes), with flicker-reducing smoothing, then recombined at the requested final width.\nCon: several extra full passes over the video, so real processing time is meaningfully longer.\nRecommended: auto unless you specifically need a 4K/8K delivery file from a 3D stereo source.",
       "visible_if": null,
       "enabled_if": {
         "field": "waifu2x_upscale",
@@ -1802,7 +1962,7 @@
       "value_type": "bool",
       "choices": [],
       "default": false,
-      "tooltip": "After conversion finishes, runs the finished packed stereo output through RIFE frame interpolation, raising the effective frame rate. Written to a separate '<name>_rife<ext>' file. Cannot be combined with Preserve Dolby Vision.",
+      "tooltip": "What it's for (single video and Dual-Pass Depth Blend jobs only): once this job's finished output is fully written, runs it through RIFE (a separate AI frame-interpolation model) as one extra step, generating new in-between frames for smoother-looking motion.\nHow it's safe: saved to a separate '_rife' file -- the original conversion output is always left untouched.\nCannot be combined with Preserve Dolby Vision: there's no way to assign correct DV/HDR10+ metadata to RIFE's synthetic in-between frames.\nRecommended: on if your source is naturally low frame rate (e.g. 24fps film) and you want smoother motion; off if you need Dolby Vision preserved.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1819,7 +1979,7 @@
         "rife_425_lite"
       ],
       "default": "rife_425",
-      "tooltip": "rife_425 is the recommended full-quality model; rife_425_lite is a lower-compute-cost variant.",
+      "tooltip": "Which RIFE model quality tier to use. rife_425: the recommended full model -- better motion accuracy on complex/fast motion, at a higher compute cost. rife_425_lite: a lower-compute-cost variant, trades a little accuracy for speed. Weights download automatically the first time you use a given tier. Recommended: rife_425 unless interpolation time is a real bottleneck.",
       "visible_if": null,
       "enabled_if": {
         "field": "rife_interpolate",
@@ -1842,7 +2002,7 @@
         "4"
       ],
       "default": null,
-      "tooltip": "Frame-rate multiplier: N=2 doubles the frame rate, N=3/4 triple/quadruple it. Mutually exclusive with RIFE Target FPS. Defaults to 2 if both are left blank.",
+      "tooltip": "What it's for: how many new frames RIFE inserts. 2x/3x/4x inserts 1/2/3 evenly-spaced new frames between every pair of real frames, multiplying the frame rate by that exact amount.\nRecommended: 2x for most uses. Mutually exclusive with RIFE Target FPS.",
       "visible_if": null,
       "enabled_if": {
         "field": "rife_interpolate",
@@ -1860,7 +2020,7 @@
       "value_type": "float",
       "choices": [],
       "default": null,
-      "tooltip": "Interpolates to this exact frame rate instead of a simple multiplier. Must be higher than the source's own frame rate. Mutually exclusive with RIFE Multiplier.",
+      "tooltip": "What it's for: the exact output frame rate to interpolate to, used instead of a simple multiplier, even when it isn't a clean multiple of the source.\nValues: any number higher than your source video's own frame rate.\nRecommended: 60 for standard smooth-motion displays, or match your target display/editing timeline's exact refresh rate.",
       "visible_if": null,
       "enabled_if": {
         "field": "rife_interpolate",

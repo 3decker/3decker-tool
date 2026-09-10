@@ -81,7 +81,10 @@ def _stage_fn(window, name):
 
 # stereo_format doesn't map 1:1 to a CLI arg -- see schema.py's own
 # docstring. Exactly one of these mutually-exclusive iw3 output flags (or
-# none, for iw3's own default Full SBS) is ever set True.
+# none, for iw3's own default Full SBS) is ever set True. "full_sbs" is
+# deliberately absent from this dict -- it's the real default that results
+# from leaving every flag False, not a flag of its own; _apply_stereo_format
+# below falls through to that for it (and for any other unrecognized value).
 _FORMAT_TO_FLAG = {
     "half_sbs": "half_sbs",
     "full_tb": "tb",

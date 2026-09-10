@@ -826,7 +826,7 @@ def _test_end_to_end_real_conversion_report_log_and_summary():
     this project's own NullDepthModel benchmark path and ADR-021/ADR-061's
     grid_sample integration tests made), confirming all three ADR-062
     deliverables together against a real run's real output: the saved
-    "<output>.auto_ema_report.csv" sidecar has the correct real per-scene rows,
+    "<output>.auto_ema_report.txt" sidecar (ADR-077) has the correct real per-scene rows,
     the live "[auto-ema] scene N: ..." lines appear in the log DURING the run,
     and the end-of-run "[auto-ema] Auto EMA by Scene Length: ..." summary line
     appears with the correct scene/distinct-value counts.
@@ -893,20 +893,27 @@ def _test_end_to_end_real_conversion_report_log_and_summary():
     log_output = captured.getvalue()
 
     # 1. The saved report file exists, next to the real output, with the correct
-    # real per-scene rows.
-    report_path = output_path + ".auto_ema_report.csv"
+    # real per-scene rows. Only a plain-text report is written now (ADR-077 --
+    # the earlier CSV/HTML siblings were dropped by request), so this parses
+    # the fixed-width TXT format instead of csv.DictReader: data rows start
+    # after the title/summary/blank/header/separator lines (5 lines), each
+    # optionally prefixed with a "|" same-settings-group marker (ADR-077)
+    # stripped off before splitting on whitespace.
+    report_path = output_path + ".auto_ema_report.txt"
     assert path.exists(output_path), "conversion did not produce its real output file"
-    assert path.exists(report_path), "no auto_ema_report.csv written"
-    with open(report_path, "r", encoding="utf-8", newline="") as f:
-        rows = list(csv.DictReader(f))
-    assert len(rows) == len(expected_applied), (rows, expected_applied)
-    for row, expected in zip(rows, expected_applied):
-        assert int(row["scene_index"]) == expected["scene_index"], (row, expected)
-        assert abs(float(row["start_time_sec"]) - expected["start_sec"]) < 0.01, (row, expected)
-        assert abs(float(row["duration_sec"]) - (expected["end_sec"] - expected["start_sec"])) < 0.01, \
-            (row, expected)
-        assert int(row["ema_buffer"]) == expected["settings"][0], (row, expected)
-        assert abs(float(row["ema_decay"]) - expected["settings"][1]) < 1e-6, (row, expected)
+    assert path.exists(report_path), "no auto_ema_report.txt written"
+    with open(report_path, "r", encoding="utf-8") as f:
+        text_lines = f.read().splitlines()
+    data_lines = text_lines[5:5 + len(expected_applied)]
+    assert len(data_lines) == len(expected_applied), (data_lines, expected_applied)
+    for line, expected in zip(data_lines, expected_applied):
+        stripped = line.lstrip()
+        if stripped.startswith("|"):
+            stripped = stripped[1:]
+        fields = stripped.split()
+        assert int(fields[0]) == expected["scene_index"], (fields, expected)
+        assert abs(float(fields[-2]) - expected["settings"][0]) < 1e-6, (fields, expected)
+        assert abs(float(fields[-1]) - expected["settings"][1]) < 1e-6, (fields, expected)
 
     # 2. Live per-scene lines appeared in the log DURING the run -- one per scene,
     # matching the real applied Buffer/Decay, in the documented [auto-ema] format.

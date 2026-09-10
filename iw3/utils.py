@@ -3454,16 +3454,21 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     if path.exists(output_filename):
         _apply_stereo_mode_tag(output_filename, args)
 
-    # Auto EMA by Scene Length report (ADR-062): a saved, after-the-fact record of
-    # exactly which Buffer/Decay this run actually applied to each scene, matching
-    # --scene-batch's own scene_manifest.csv in spirit -- the regular (non---
-    # scene-batch) path had no equivalent before this. Off by default: nothing is
-    # written unless the feature genuinely ran (scene_ema_report_rows non-empty,
-    # i.e. --scene-batch-auto-ema and --scene-detect were both actually on) and the
-    # run actually produced its final output.
+    # Auto EMA by Scene Length report (ADR-062, revised ADR-077): a saved,
+    # after-the-fact record of exactly which Buffer/Decay this run actually
+    # applied to each scene, matching --scene-batch's own scene_manifest.csv in
+    # spirit -- the regular (non---scene-batch) path had no equivalent before
+    # this. Off by default: nothing is written unless the feature genuinely ran
+    # (scene_ema_report_rows non-empty, i.e. --scene-batch-auto-ema and
+    # --scene-detect were both actually on) and the run actually produced its
+    # final output. Only the plain-text report is written (ADR-077) -- the
+    # earlier CSV and HTML siblings (ADR-062/074) were dropped by request once
+    # the TXT format alone proved to be the readable, Notepad-friendly report
+    # that was actually wanted; _write_scene_ema_report()/_write_scene_ema_report_html()
+    # are kept defined (unused here) rather than deleted, in case a future need
+    # for a machine-parseable CSV or a sortable HTML table comes back.
     applied_ema_rows = [r for r in scene_ema_report_rows if r["settings"] is not None]
     if applied_ema_rows and path.exists(output_filename):
-        report_path = output_filename + ".auto_ema_report.csv"
         report_rows = [
             {
                 "scene_index": r["scene_index"],
@@ -3474,32 +3479,19 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             }
             for r in applied_ema_rows
         ]
-        _write_scene_ema_report(report_path, report_rows)
         scene_count, distinct_count = _scene_ema_report_summary(applied_ema_rows)
-        # Human-readable sibling of the CSV above (ADR-074) -- a real, sortable
-        # HTML table, so these numbers are readable without opening a separate
-        # spreadsheet program. Best-effort only: never let a report-writing
-        # problem fail an otherwise-successful conversion job.
-        html_path = output_filename + ".auto_ema_report.html"
-        try:
-            _write_scene_ema_report_html(html_path, report_rows, scene_count, distinct_count,
-                                          path.basename(output_filename))
-        except Exception as e:
-            print(f"[auto-ema] could not write HTML report ({e.__class__.__name__}: {e}) -- "
-                  f"the CSV at {report_path} is still complete.", file=sys.stderr)
-        # Plain-text sibling (ADR-075) -- readable in Notepad, no HTML rendering needed.
-        # Same best-effort try/except as the HTML sibling above.
         txt_path = output_filename + ".auto_ema_report.txt"
         try:
             _write_scene_ema_report_txt(txt_path, report_rows, scene_count, distinct_count,
                                          path.basename(output_filename))
+            print(f"[auto-ema] Auto EMA by Scene Length: {scene_count} scenes, "
+                  f"{distinct_count} distinct Buffer/Decay values used (see {txt_path})",
+                  file=sys.stderr)
         except Exception as e:
-            print(f"[auto-ema] could not write TXT report ({e.__class__.__name__}: {e}) -- "
-                  f"the CSV at {report_path} is still complete.", file=sys.stderr)
-        print(f"[auto-ema] Auto EMA by Scene Length: {scene_count} scenes, "
-              f"{distinct_count} distinct Buffer/Decay values used (see {report_path}, "
-              f"{html_path}, and {txt_path})",
-              file=sys.stderr)
+            # Never let a report-writing problem fail an otherwise-successful
+            # conversion job -- this report is informational only.
+            print(f"[auto-ema] could not write TXT report ({e.__class__.__name__}: {e})",
+                  file=sys.stderr)
 
 
 def _probe_video_duration(path_str):

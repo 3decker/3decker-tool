@@ -115,7 +115,10 @@ def _self_test_special_cased_fields_have_no_cli_arg():
     metadata -- see schema.py's own docstring for why) -- if any of these
     ever trips, either that field grew a real 1:1 CLI arg (update worker.py's
     special-casing away) or someone accidentally gave it one by mistake."""
-    special_cased = {"stereo_format", "anaglyph_method", "metadata", "exif_transpose", "fp16"}
+    special_cased = {
+        "stereo_format", "anaglyph_method", "metadata", "exif_transpose", "fp16",
+        "deinterlace", "tune_fastdecode", "tune_zerolatency",
+    }
     for f in FIELDS:
         if f.name in special_cased:
             assert f.cli_arg is None, (
@@ -124,6 +127,34 @@ def _self_test_special_cased_fields_have_no_cli_arg():
                 f"that special-casing needs to be reconciled, not left stale."
             )
     print("_self_test_special_cased_fields_have_no_cli_arg: PASS")
+
+
+def _self_test_gui_only_fields_have_no_cli_arg_and_no_parser_collision():
+    """ADR-091: gui_only_attr fields (Object Stability's Max Shift/etc.,
+    Depth Blend's Feather Blur/etc., waifu2x's Method/etc., VR Optimized
+    Merge) are deliberately absent from create_parser() -- confirms both
+    that they're consistently marked cli_arg=None (never both a real CLI
+    arg AND a gui_only_attr) and that the attribute name doesn't happen to
+    collide with a real parser dest (which would mean it silently gained a
+    real CLI arg and this special-casing should be reconciled, not left
+    stale)."""
+    parser = create_parser(required_true=False)
+    real_dests = {action.dest for action in parser._actions}
+
+    for f in FIELDS:
+        if f.gui_only_attr is None:
+            continue
+        assert f.cli_arg is None, (
+            f"schema field {f.name!r} has both a gui_only_attr and a real "
+            f"cli_arg -- these are mutually exclusive, pick one mapping."
+        )
+        assert f.gui_only_attr not in real_dests, (
+            f"schema field {f.name!r}'s gui_only_attr {f.gui_only_attr!r} now "
+            f"collides with a real create_parser() argument -- it may have "
+            f"gained a real CLI flag; reconcile this special-casing instead "
+            f"of leaving it stale."
+        )
+    print("_self_test_gui_only_fields_have_no_cli_arg_and_no_parser_collision: PASS")
 
 
 def _self_test_dynamic_choice_providers_resolve():
@@ -146,6 +177,7 @@ def _self_test_dynamic_choice_providers_resolve():
 def _run_self_tests():
     _self_test_schema_fields_exist_on_real_parser()
     _self_test_special_cased_fields_have_no_cli_arg()
+    _self_test_gui_only_fields_have_no_cli_arg_and_no_parser_collision()
     _self_test_dynamic_choice_providers_resolve()
     print("All iw3.gui_web.schema_export self-tests PASSED")
 

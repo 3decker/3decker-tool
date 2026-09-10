@@ -137,6 +137,21 @@
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
+/* Single Page layout mode (ADR-092) -- mirrors gui.py's own LAYOUT_MODE_SINGLE_PAGE:
+   the tab rail hides and every tab's panel stacks in one scrolling column instead
+   of one-at-a-time via the rail. The JS-managed .active class is left alone (so
+   switching back to Tabbed needs no re-render) and simply overridden here. */
+.app-body.single-page .app-tabs { display: none; }
+.app-body.single-page .tab-panel {
+  display: block !important;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+  margin-bottom: 20px;
+}
+.app-body.single-page .tab-panel:last-child {
+  border-bottom: none;
+}
+
 .card {
   background: var(--panel);
   border: 1px solid var(--border);

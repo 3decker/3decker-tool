@@ -33,6 +33,19 @@
     }
   }
 
+  function applyLayout(mode) {
+    document.querySelector(".app-body").classList.toggle("single-page", mode === "single_page");
+    document.getElementById("layoutSelect").value = mode;
+  }
+
+  function applyZoom(pct) {
+    // WebView2 is Chromium-based, so the non-standard `zoom` CSS property
+    // works here the same way gui.py's own SetWindowSize-based zoom feature
+    // scales the wx GUI -- no layout-breaking transform/scale hacks needed.
+    document.body.style.zoom = (pct / 100);
+    document.getElementById("zoomSelect").value = String(pct);
+  }
+
   async function boot() {
     var schema = await IW3Api.call("get_schema");
     IW3Renderer.render(schema, document.getElementById("tabRail"), document.getElementById("tabPanels"));
@@ -41,6 +54,21 @@
     await refreshPresetList();
     var session = await IW3Api.call("get_session");
     applySettingsAndPaths(session);
+
+    var uiPrefs = await IW3Api.call("get_ui_prefs");
+    applyLayout(uiPrefs.layout);
+    applyZoom(uiPrefs.zoom);
+
+    document.getElementById("layoutSelect").addEventListener("change", async function (e) {
+      var mode = e.target.value;
+      applyLayout(mode);
+      await IW3Api.call("set_layout", mode);
+    });
+    document.getElementById("zoomSelect").addEventListener("change", async function (e) {
+      var pct = parseInt(e.target.value, 10);
+      applyZoom(pct);
+      await IW3Api.call("set_zoom", pct);
+    });
 
     document.getElementById("btnPresetMovie").addEventListener("click", function () {
       IW3Renderer.setValues(window.IW3_QUICK_PRESETS.movie);

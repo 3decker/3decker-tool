@@ -72,6 +72,18 @@ class Field:
     # schema_export.py fills these in at export time instead of hardcoding
     # a list here that could go stale.
     dynamic_choices: Optional[str] = None
+    # ADR-091: a real Namespace attribute gui.py sets directly (confirmed
+    # via its own real parser.set_defaults() keyword), for settings that are
+    # genuine, working wx GUI controls but were NEVER registered in
+    # create_parser() at all -- Object Stability's Max Shift/Flat-Area
+    # Boost/Edge Protection, Dual-Pass Depth Blend's Feather Blur/Bilateral
+    # Denoise/CLAHE/Depth Scale Alignment/Edge Suppression, waifu2x's
+    # Method/Noise Level/Style, VR Optimized Merge. Always paired with
+    # cli_arg=None; worker.py's build_args() applies these directly via
+    # setattr(args, gui_only_attr, ...) instead of routing through the
+    # create_parser()-derived dest the normal cli_arg path uses, since
+    # there's nothing in create_parser() to validate against for these.
+    gui_only_attr: Optional[str] = None
 
     def to_dict(self):
         return {
@@ -201,6 +213,12 @@ ANAGLYPH_METHOD_CHOICES = ["dubois", "dubois2", "color", "gray", "half-color", "
 
 STEREO_FORMAT_CHOICES = [
     "full_sbs", "half_sbs", "full_tb", "half_tb", "cross_eyed", "rgbd", "half_rgbd", "vr180", "anaglyph",
+    # Export-family formats (ADR-091) -- real selectable entries in the wx
+    # GUI's own Stereo Format dropdown, mapping to the real --export/
+    # --export-disparity/--debug-depth create_parser() flags. worker.py's
+    # _apply_stereo_format() sets these directly, same special-casing as
+    # every other stereo_format value.
+    "export", "export_disparity", "debug_depth",
 ]
 
 # Copied verbatim from create_parser()'s --depth-model choices (utils.py ~4934-4949).
@@ -445,6 +463,37 @@ FIELDS: List[Field] = [
                 "the fresh per-frame depth (0-1). Tapers down automatically "
                 "during fast motion.",
     ),
+    # Object Stability sub-fields -- real, working wx controls (confirmed via
+    # gui.py's own set_defaults() keywords) but NOT registered in
+    # create_parser() at all -- see Field.gui_only_attr's own docstring
+    # (ADR-091).
+    Field(
+        name="temporal_stabilize_max_shift", gui_only_attr="temporal_stabilize_max_shift_velocity",
+        label="Max Shift", widget="combo_editable", tab="stereo_generation",
+        value_type="float", choices=["", "0.01", "0.02", "0.05"], default=None,
+        enabled_if=Rule(field="temporal_stabilize", op="eq", value=True),
+        tooltip="Caps how far Object Stability is allowed to warp a pixel "
+                "toward its previous position in one frame. Leave blank "
+                "(default) for no cap.",
+    ),
+    Field(
+        name="temporal_stabilize_flat_boost", gui_only_attr="temporal_stabilize_flat_region_boost",
+        label="Flat-Area Boost", widget="combo_editable", tab="stereo_generation",
+        value_type="float", choices=["0.0", "0.3", "0.5", "0.7"], default=0.0,
+        enabled_if=Rule(field="temporal_stabilize", op="eq", value=True),
+        tooltip="Extra Object Stability strength applied specifically in "
+                "flat, low-detail areas of the depth map, where flicker is "
+                "easiest to see and cheapest to smooth away. 0.0 = off.",
+    ),
+    Field(
+        name="temporal_stabilize_edge_protect", gui_only_attr="temporal_stabilize_edge_protection",
+        label="Edge Protection", widget="combo_editable", tab="stereo_generation",
+        value_type="float", choices=["0.0", "0.3", "0.5", "0.7"], default=0.0,
+        enabled_if=Rule(field="temporal_stabilize", op="eq", value=True),
+        tooltip="Reduces Object Stability's smoothing right at real depth "
+                "edges, where blending with the previous frame is most "
+                "likely to cause visible ghosting/trailing. 0.0 = off.",
+    ),
     Field(
         name="foreground_pop", cli_arg="--foreground-pop", label="Foreground Pop",
         widget="combo_editable", tab="stereo_generation", value_type="float", default=0.0,
@@ -592,6 +641,22 @@ FIELDS: List[Field] = [
                 "when Stereo Format is Anaglyph.",
     ),
     Field(
+        name="export_depth_only", cli_arg="--export-depth-only", label="Depth Only",
+        widget="checkbox", tab="stereo_generation", value_type="bool", default=False,
+        visible_if=Rule(field="stereo_format", op="in", value=["export", "export_disparity"]),
+        tooltip="Only export the depth image, omitting the RGB image. Only "
+                "meaningful when Stereo Format is Export or Export "
+                "disparity.",
+    ),
+    Field(
+        name="export_depth_fit", cli_arg="--export-depth-fit", label="Resize to Fit",
+        widget="checkbox", tab="stereo_generation", value_type="bool", default=False,
+        visible_if=Rule(field="stereo_format", op="in", value=["export", "export_disparity"]),
+        tooltip="Resizes the exported depth image to match the RGB image's "
+                "own size. Only meaningful when Stereo Format is Export or "
+                "Export disparity.",
+    ),
+    Field(
         name="stereo_mode_tag", cli_arg="--stereo-mode-tag", label="Tag MKV as 3D",
         widget="checkbox", tab="stereo_generation", value_type="bool", default=False,
         tooltip="Tags the finished .mkv's video track with the Matroska "
@@ -645,6 +710,114 @@ FIELDS: List[Field] = [
         tooltip="For Blend Region foreground/background: what percent of the "
                 "scene (by depth) to blend the secondary model into.",
     ),
+    # Depth Blend sub-enhancements -- real, working wx controls, NOT
+    # registered in create_parser() (ADR-091, same gui_only_attr mechanism
+    # as Object Stability's sub-fields above). All enabled_if depth_blend.
+    Field(
+        name="depth_blend_feather_blur", gui_only_attr="depth_blend_feather_blur",
+        label="Feather Blur", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="int", choices=["0", "5", "15", "25", "35"], default=0,
+        enabled_if=Rule(field="depth_blend", op="eq", value=True),
+        tooltip="Blurs the blend mask between the primary and secondary "
+                "depth models, softening the transition line between them. "
+                "0 = a hard, unblurred edge.",
+    ),
+    Field(
+        name="depth_blend_bilateral", gui_only_attr="depth_blend_bilateral",
+        label="Bilateral Denoise", widget="checkbox", tab="dual_pass_depth_blend",
+        value_type="bool", default=False,
+        enabled_if=Rule(field="depth_blend", op="eq", value=True),
+        tooltip="Runs an edge-preserving (bilateral) denoise pass on the "
+                "secondary model's depth before blending it in, reducing "
+                "its own internal noise without blurring across real edges.",
+    ),
+    Field(
+        name="depth_blend_bilateral_d", gui_only_attr="depth_blend_bilateral_d",
+        label="Bilateral Denoise D", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="int", choices=["9", "12", "15"], default=12,
+        enabled_if=Rule(field="depth_blend_bilateral", op="eq", value=True),
+        tooltip="Bilateral Denoise's pixel neighborhood diameter. Larger = "
+                "smooths a wider area, at extra cost.",
+    ),
+    Field(
+        name="depth_blend_bilateral_sigma_color", gui_only_attr="depth_blend_bilateral_sigma_color",
+        label="Bilateral Sigma Color", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="float", choices=["50", "75", "100"], default=75,
+        enabled_if=Rule(field="depth_blend_bilateral", op="eq", value=True),
+        tooltip="Bilateral Denoise's color/depth-value similarity range -- "
+                "larger mixes together depth values that differ more.",
+    ),
+    Field(
+        name="depth_blend_bilateral_sigma_space", gui_only_attr="depth_blend_bilateral_sigma_space",
+        label="Bilateral Sigma Space", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="float", choices=["50", "75", "100"], default=75,
+        enabled_if=Rule(field="depth_blend_bilateral", op="eq", value=True),
+        tooltip="Bilateral Denoise's spatial range -- larger considers "
+                "pixels further away as part of the same smoothing "
+                "neighborhood.",
+    ),
+    Field(
+        name="depth_blend_clahe", gui_only_attr="depth_blend_clahe",
+        label="CLAHE Contrast (experimental)", widget="checkbox", tab="dual_pass_depth_blend",
+        value_type="bool", default=False,
+        enabled_if=Rule(field="depth_blend", op="eq", value=True),
+        tooltip="Applies adaptive local-contrast enhancement (CLAHE) to the "
+                "secondary model's depth before blending, making its own "
+                "fine detail more pronounced. Experimental.",
+    ),
+    Field(
+        name="depth_blend_clahe_clip", gui_only_attr="depth_blend_clahe_clip",
+        label="CLAHE Clip Limit", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="float", choices=["1.0", "2.0", "4.0"], default=2.0,
+        enabled_if=Rule(field="depth_blend_clahe", op="eq", value=True),
+        tooltip="CLAHE's contrast-limiting threshold -- higher allows "
+                "stronger local contrast boosts, at more risk of "
+                "over-enhancing noise.",
+    ),
+    Field(
+        name="depth_blend_clahe_tile", gui_only_attr="depth_blend_clahe_tile",
+        label="CLAHE Tile Grid", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="int", choices=["4", "8", "16"], default=8,
+        enabled_if=Rule(field="depth_blend_clahe", op="eq", value=True),
+        tooltip="CLAHE's local grid size (tiles per side) -- smaller tiles "
+                "boost more local detail, larger tiles behave closer to a "
+                "single global contrast adjustment.",
+    ),
+    Field(
+        name="depth_blend_align", gui_only_attr="depth_blend_align",
+        label="Depth Scale Alignment", widget="checkbox", tab="dual_pass_depth_blend",
+        value_type="bool", default=False,
+        enabled_if=Rule(field="depth_blend", op="eq", value=True),
+        tooltip="Rescales the secondary model's depth range to better "
+                "match the primary model's own before blending, reducing a "
+                "visible depth-intensity mismatch between the two.",
+    ),
+    Field(
+        name="depth_blend_align_decay", gui_only_attr="depth_blend_align_decay",
+        label="Alignment Decay", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="float", choices=["0.95", "0.9", "0.75", "0.5", "0"], default=0.9,
+        enabled_if=Rule(field="depth_blend_align", op="eq", value=True),
+        tooltip="How much past frames influence Depth Scale Alignment's own "
+                "running scale estimate, same idea as Flicker Reduction's "
+                "own Decay Rate. Higher = smoother, slower to react.",
+    ),
+    Field(
+        name="depth_blend_edge_suppression", gui_only_attr="depth_blend_edge_suppression",
+        label="Edge Suppression", widget="combo_editable", tab="dual_pass_depth_blend",
+        value_type="float", choices=["0.0", "0.25", "0.5", "0.75", "1.0"], default=0.5,
+        enabled_if=Rule(field="depth_blend", op="eq", value=True),
+        tooltip="Reduces how much the secondary model is trusted right at "
+                "the primary model's own confident depth edges, since the "
+                "two models often disagree most right at silhouettes.",
+    ),
+    Field(
+        name="depth_blend_edge_hard_cutoff", gui_only_attr="depth_blend_edge_hard_cutoff",
+        label="Hard Edge Cutoff", widget="checkbox", tab="dual_pass_depth_blend",
+        value_type="bool", default=False,
+        enabled_if=Rule(field="depth_blend", op="eq", value=True),
+        tooltip="Makes Edge Suppression an all-or-nothing cutoff right at "
+                "detected edges instead of a smooth taper.",
+    ),
 
     # ---------------- Video Filter ----------------
     Field(
@@ -661,6 +834,19 @@ FIELDS: List[Field] = [
         name="vf", cli_arg="--vf", label="-vf (raw ffmpeg filter)",
         widget="combo_editable", tab="video_filter", value_type="str", default="",
         tooltip="Raw ffmpeg -vf filter string, applied as-is. Advanced use.",
+    ),
+    # Deinterlace: a real wx dropdown (cbo_deinterlace) but NOT its own
+    # Namespace attribute -- gui.py folds the selected value directly into
+    # the same real --vf string the field above also feeds (ADR-091). No
+    # gui_only_attr here; worker.py special-cases it (cli_arg=None) by
+    # prepending it to the vf value at build time instead.
+    Field(
+        name="deinterlace", cli_arg=None, label="Deinterlace",
+        widget="select", tab="video_filter", value_type="str",
+        choices=["", "yadif"], default="",
+        tooltip="Deinterlaces interlaced source video before conversion. "
+                "Folded directly into the -vf filter string above -- "
+                "equivalent to typing \"yadif\" there yourself.",
     ),
     Field(
         name="rotate_left", cli_arg="--rotate-left", label="Rotate Left",
@@ -797,6 +983,26 @@ FIELDS: List[Field] = [
                 "so trying different settings never overwrites an earlier "
                 "attempt.",
     ),
+    # VR Optimized Merge -- real, working wx controls, NOT registered in
+    # create_parser() (ADR-091).
+    Field(
+        name="vr_optimized_merge", gui_only_attr="vr_optimized_merge",
+        label="VR Optimized Merge", widget="checkbox", tab="video_filter",
+        value_type="bool", default=False,
+        enabled_if=Rule(field="scene_batch", op="eq", value=True),
+        tooltip="For Automated Scene Batch: joins the per-scene clips back "
+                "together in a way tuned for VR headset playback, using the "
+                "frame rate set below instead of the source's own.",
+    ),
+    Field(
+        name="vr_merge_fps", gui_only_attr="vr_merge_fps",
+        label="VR Merge FPS", widget="select", tab="video_filter",
+        value_type="fps_or_source", choices=["Source FPS", "60", "72", "80", "90", "120"],
+        default="Source FPS",
+        enabled_if=Rule(field="vr_optimized_merge", op="eq", value=True),
+        tooltip="Frame rate to join VR Optimized Merge's scenes at. "
+                "\"Source FPS\" keeps the original video's own frame rate.",
+    ),
 
     # ---------------- Video Decoding ----------------
     Field(
@@ -877,7 +1083,26 @@ FIELDS: List[Field] = [
         tooltip="Encoder tuning(s), space or comma separated. Which values "
                 "are valid depends on the chosen codec (this simplified "
                 "picker does not filter the list by codec the way the "
-                "desktop GUI does).",
+                "desktop GUI does). Typing fastdecode/zerolatency here does "
+                "the same thing as the two checkboxes below.",
+    ),
+    # fastdecode/zerolatency -- real wx checkboxes, but not their own
+    # Namespace attribute: gui.py merges them directly into the same real
+    # --tune list the field above also feeds (ADR-091). cli_arg=None;
+    # worker.py special-cases both by appending to the tune value at build
+    # time.
+    Field(
+        name="tune_fastdecode", cli_arg=None, label="fastdecode",
+        widget="checkbox", tab="video_encoding", value_type="bool", default=False,
+        tooltip="Same as typing \"fastdecode\" into Tune above -- makes the "
+                "file easier/cheaper to decode on weak playback devices, at "
+                "a small compression-efficiency cost.",
+    ),
+    Field(
+        name="tune_zerolatency", cli_arg=None, label="zerolatency",
+        widget="checkbox", tab="video_encoding", value_type="bool", default=False,
+        tooltip="Same as typing \"zerolatency\" into Tune above -- for "
+                "live-streaming, not useful for a normal conversion.",
     ),
     Field(
         name="profile_level", cli_arg="--profile-level", label="Level",
@@ -965,6 +1190,40 @@ FIELDS: List[Field] = [
         tooltip="'auto' uses waifu2x-upscale's plain whole-frame behavior. "
                 "'4k'/'8k' use a stereo-aware path that upscales each eye of "
                 "a packed 3D output independently.",
+    ),
+    # waifu2x's own Method/Noise Level/Style -- real, working wx controls,
+    # NOT registered in create_parser() (ADR-091) -- only used by the
+    # plain whole-frame path (i.e. when Upscale Target is "auto").
+    Field(
+        name="waifu2x_method", gui_only_attr="waifu2x_method",
+        label="waifu2x Method", widget="select", tab="processor",
+        value_type="str",
+        choices=["noise_scale2x", "noise_scale4x", "scale2x", "scale4x"],
+        default="noise_scale2x",
+        enabled_if=Rule(field="waifu2x_upscale", op="eq", value=True),
+        tooltip="Which waifu2x model to upscale with. noise_scale* also "
+                "denoises while upscaling (see Noise Level); scale* only "
+                "upscales, no denoising.",
+    ),
+    Field(
+        name="waifu2x_noise_level", gui_only_attr="waifu2x_noise_level",
+        label="waifu2x Noise Level", widget="select", tab="processor",
+        value_type="str", choices=["0", "1", "2", "3"], default="1",
+        enabled_if=Rule(field="waifu2x_upscale", op="eq", value=True),
+        tooltip="How aggressively noise_scale* denoises while upscaling. "
+                "Higher = stronger denoise, at more risk of softening real "
+                "detail. Only used by the noise_scale2x/noise_scale4x "
+                "methods.",
+    ),
+    Field(
+        name="waifu2x_style", gui_only_attr="waifu2x_style",
+        label="waifu2x Style", widget="select", tab="processor",
+        value_type="str", choices=["photo", "art"], default="photo",
+        enabled_if=Rule(field="waifu2x_upscale", op="eq", value=True),
+        tooltip="Which waifu2x model was trained for. \"photo\" for "
+                "real-world video/photos (the correct choice for iw3's own "
+                "output); \"art\" is tuned for illustration/anime source "
+                "material instead.",
     ),
     Field(
         name="rife_interpolate", cli_arg="--rife-interpolate",

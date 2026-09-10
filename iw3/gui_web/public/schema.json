@@ -647,6 +647,75 @@
       }
     },
     {
+      "name": "temporal_stabilize_max_shift",
+      "label": "Max Shift",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "",
+        "0.01",
+        "0.02",
+        "0.05"
+      ],
+      "default": null,
+      "tooltip": "Caps how far Object Stability is allowed to warp a pixel toward its previous position in one frame. Leave blank (default) for no cap.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "temporal_stabilize",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "temporal_stabilize_flat_boost",
+      "label": "Flat-Area Boost",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "0.0",
+        "0.3",
+        "0.5",
+        "0.7"
+      ],
+      "default": 0.0,
+      "tooltip": "Extra Object Stability strength applied specifically in flat, low-detail areas of the depth map, where flicker is easiest to see and cheapest to smooth away. 0.0 = off.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "temporal_stabilize",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "temporal_stabilize_edge_protect",
+      "label": "Edge Protection",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "0.0",
+        "0.3",
+        "0.5",
+        "0.7"
+      ],
+      "default": 0.0,
+      "tooltip": "Reduces Object Stability's smoothing right at real depth edges, where blending with the previous frame is most likely to cause visible ghosting/trailing. 0.0 = off.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "temporal_stabilize",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
       "name": "foreground_pop",
       "label": "Foreground Pop",
       "widget": "combo_editable",
@@ -990,7 +1059,10 @@
         "rgbd",
         "half_rgbd",
         "vr180",
-        "anaglyph"
+        "anaglyph",
+        "export",
+        "export_disparity",
+        "debug_depth"
       ],
       "default": "half_sbs",
       "tooltip": "The final output layout. Full/Half SBS (side-by-side) and Full/Half TB (top-bottom) are the standard formats most 3D TVs and players expect -- Full keeps both eyes at full resolution (bigger file), Half squeezes both into the original frame size (smaller file, common for streaming/playback compatibility). VR180 is for VR headsets. Cross Eyed is for viewing without any equipment. Anaglyph is the red/cyan glasses look. RGB-D saves the depth data itself instead of a finished 3D image. Recommended: Half SBS for most TVs and 3D players, unless you know you need a different format.",
@@ -1020,6 +1092,48 @@
         "field": "stereo_format",
         "op": "eq",
         "value": "anaglyph"
+      },
+      "enabled_if": null
+    },
+    {
+      "name": "export_depth_only",
+      "label": "Depth Only",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "group": null,
+      "cli_arg": "--export-depth-only",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Only export the depth image, omitting the RGB image. Only meaningful when Stereo Format is Export or Export disparity.",
+      "visible_if": {
+        "field": "stereo_format",
+        "op": "in",
+        "value": [
+          "export",
+          "export_disparity"
+        ]
+      },
+      "enabled_if": null
+    },
+    {
+      "name": "export_depth_fit",
+      "label": "Resize to Fit",
+      "widget": "checkbox",
+      "tab": "stereo_generation",
+      "group": null,
+      "cli_arg": "--export-depth-fit",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Resizes the exported depth image to match the RGB image's own size. Only meaningful when Stereo Format is Export or Export disparity.",
+      "visible_if": {
+        "field": "stereo_format",
+        "op": "in",
+        "value": [
+          "export",
+          "export_disparity"
+        ]
       },
       "enabled_if": null
     },
@@ -1182,6 +1296,260 @@
       }
     },
     {
+      "name": "depth_blend_feather_blur",
+      "label": "Feather Blur",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "int",
+      "choices": [
+        "0",
+        "5",
+        "15",
+        "25",
+        "35"
+      ],
+      "default": 0,
+      "tooltip": "Blurs the blend mask between the primary and secondary depth models, softening the transition line between them. 0 = a hard, unblurred edge.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_bilateral",
+      "label": "Bilateral Denoise",
+      "widget": "checkbox",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Runs an edge-preserving (bilateral) denoise pass on the secondary model's depth before blending it in, reducing its own internal noise without blurring across real edges.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_bilateral_d",
+      "label": "Bilateral Denoise D",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "int",
+      "choices": [
+        "9",
+        "12",
+        "15"
+      ],
+      "default": 12,
+      "tooltip": "Bilateral Denoise's pixel neighborhood diameter. Larger = smooths a wider area, at extra cost.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend_bilateral",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_bilateral_sigma_color",
+      "label": "Bilateral Sigma Color",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "50",
+        "75",
+        "100"
+      ],
+      "default": 75,
+      "tooltip": "Bilateral Denoise's color/depth-value similarity range -- larger mixes together depth values that differ more.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend_bilateral",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_bilateral_sigma_space",
+      "label": "Bilateral Sigma Space",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "50",
+        "75",
+        "100"
+      ],
+      "default": 75,
+      "tooltip": "Bilateral Denoise's spatial range -- larger considers pixels further away as part of the same smoothing neighborhood.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend_bilateral",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_clahe",
+      "label": "CLAHE Contrast (experimental)",
+      "widget": "checkbox",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Applies adaptive local-contrast enhancement (CLAHE) to the secondary model's depth before blending, making its own fine detail more pronounced. Experimental.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_clahe_clip",
+      "label": "CLAHE Clip Limit",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "1.0",
+        "2.0",
+        "4.0"
+      ],
+      "default": 2.0,
+      "tooltip": "CLAHE's contrast-limiting threshold -- higher allows stronger local contrast boosts, at more risk of over-enhancing noise.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend_clahe",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_clahe_tile",
+      "label": "CLAHE Tile Grid",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "int",
+      "choices": [
+        "4",
+        "8",
+        "16"
+      ],
+      "default": 8,
+      "tooltip": "CLAHE's local grid size (tiles per side) -- smaller tiles boost more local detail, larger tiles behave closer to a single global contrast adjustment.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend_clahe",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_align",
+      "label": "Depth Scale Alignment",
+      "widget": "checkbox",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Rescales the secondary model's depth range to better match the primary model's own before blending, reducing a visible depth-intensity mismatch between the two.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_align_decay",
+      "label": "Alignment Decay",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "0.95",
+        "0.9",
+        "0.75",
+        "0.5",
+        "0"
+      ],
+      "default": 0.9,
+      "tooltip": "How much past frames influence Depth Scale Alignment's own running scale estimate, same idea as Flicker Reduction's own Decay Rate. Higher = smoother, slower to react.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend_align",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_edge_suppression",
+      "label": "Edge Suppression",
+      "widget": "combo_editable",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "float",
+      "choices": [
+        "0.0",
+        "0.25",
+        "0.5",
+        "0.75",
+        "1.0"
+      ],
+      "default": 0.5,
+      "tooltip": "Reduces how much the secondary model is trusted right at the primary model's own confident depth edges, since the two models often disagree most right at silhouettes.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "depth_blend_edge_hard_cutoff",
+      "label": "Hard Edge Cutoff",
+      "widget": "checkbox",
+      "tab": "dual_pass_depth_blend",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Makes Edge Suppression an all-or-nothing cutoff right at detected edges instead of a smooth taper.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "depth_blend",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
       "name": "start_time",
       "label": "Start Time",
       "widget": "combo_editable",
@@ -1220,6 +1588,23 @@
       "choices": [],
       "default": "",
       "tooltip": "Advanced: a raw ffmpeg video filter string applied to the source before 3D conversion. Leave blank unless you specifically need this -- most common needs (crop, rotate, pad, resize) already have their own simpler controls.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "deinterlace",
+      "label": "Deinterlace",
+      "widget": "select",
+      "tab": "video_filter",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "str",
+      "choices": [
+        "",
+        "yadif"
+      ],
+      "default": "",
+      "tooltip": "Deinterlaces interlaced source video before conversion. Folded directly into the -vf filter string above -- equivalent to typing \"yadif\" there yourself.",
       "visible_if": null,
       "enabled_if": null
     },
@@ -1569,6 +1954,49 @@
       }
     },
     {
+      "name": "vr_optimized_merge",
+      "label": "VR Optimized Merge",
+      "widget": "checkbox",
+      "tab": "video_filter",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "For Automated Scene Batch: joins the per-scene clips back together in a way tuned for VR headset playback, using the frame rate set below instead of the source's own.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "scene_batch",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "vr_merge_fps",
+      "label": "VR Merge FPS",
+      "widget": "select",
+      "tab": "video_filter",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "fps_or_source",
+      "choices": [
+        "Source FPS",
+        "60",
+        "72",
+        "80",
+        "90",
+        "120"
+      ],
+      "default": "Source FPS",
+      "tooltip": "Frame rate to join VR Optimized Merge's scenes at. \"Source FPS\" keeps the original video's own frame rate.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "vr_optimized_merge",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
       "name": "hwaccel",
       "label": "HWAccel",
       "widget": "select",
@@ -1830,6 +2258,34 @@
       "enabled_if": null
     },
     {
+      "name": "tune_fastdecode",
+      "label": "fastdecode",
+      "widget": "checkbox",
+      "tab": "video_encoding",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Same as typing \"fastdecode\" into Tune above -- makes the file easier/cheaper to decode on weak playback devices, at a small compression-efficiency cost.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "tune_zerolatency",
+      "label": "zerolatency",
+      "widget": "checkbox",
+      "tab": "video_encoding",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Same as typing \"zerolatency\" into Tune above -- for live-streaming, not useful for a normal conversion.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
       "name": "profile_level",
       "label": "Level",
       "widget": "combo_editable",
@@ -2051,6 +2507,73 @@
       ],
       "default": "auto",
       "tooltip": "What it's for: only takes effect on a packed 3D stereo video output. \"auto\" (default) leaves the plain whole-frame upscale unchanged. \"4k\"/\"8k\" instead switch to a stereo-aware upscale: each eye is split out and upscaled separately (avoiding blurring pixels across the seam between eyes), with flicker-reducing smoothing, then recombined at the requested final width.\nCon: several extra full passes over the video, so real processing time is meaningfully longer.\nRecommended: auto unless you specifically need a 4K/8K delivery file from a 3D stereo source.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "waifu2x_upscale",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "waifu2x_method",
+      "label": "waifu2x Method",
+      "widget": "select",
+      "tab": "processor",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "str",
+      "choices": [
+        "noise_scale2x",
+        "noise_scale4x",
+        "scale2x",
+        "scale4x"
+      ],
+      "default": "noise_scale2x",
+      "tooltip": "Which waifu2x model to upscale with. noise_scale* also denoises while upscaling (see Noise Level); scale* only upscales, no denoising.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "waifu2x_upscale",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "waifu2x_noise_level",
+      "label": "waifu2x Noise Level",
+      "widget": "select",
+      "tab": "processor",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "str",
+      "choices": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "default": "1",
+      "tooltip": "How aggressively noise_scale* denoises while upscaling. Higher = stronger denoise, at more risk of softening real detail. Only used by the noise_scale2x/noise_scale4x methods.",
+      "visible_if": null,
+      "enabled_if": {
+        "field": "waifu2x_upscale",
+        "op": "eq",
+        "value": true
+      }
+    },
+    {
+      "name": "waifu2x_style",
+      "label": "waifu2x Style",
+      "widget": "select",
+      "tab": "processor",
+      "group": null,
+      "cli_arg": null,
+      "value_type": "str",
+      "choices": [
+        "photo",
+        "art"
+      ],
+      "default": "photo",
+      "tooltip": "Which waifu2x model was trained for. \"photo\" for real-world video/photos (the correct choice for iw3's own output); \"art\" is tuned for illustration/anime source material instead.",
       "visible_if": null,
       "enabled_if": {
         "field": "waifu2x_upscale",

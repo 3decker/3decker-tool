@@ -103,9 +103,23 @@ def _apply_stereo_format(args, stereo_format, anaglyph_method):
 
     if stereo_format == "anaglyph":
         args.anaglyph = anaglyph_method or "dubois"
+    elif stereo_format == "export":
+        # Real create_parser() arg, not a layout flag (ADR-091) -- matches
+        # gui.py's own reconstruction priority (vr180 > half_sbs > ... >
+        # export > export_disparity > debug_depth > else Full SBS).
+        args.export = True
+    elif stereo_format == "export_disparity":
+        # set_state_args() itself also does `if args.export_disparity:
+        # args.export = True` -- set both explicitly here anyway for
+        # clarity, harmless either way.
+        args.export = True
+        args.export_disparity = True
+    elif stereo_format == "debug_depth":
+        args.debug_depth = True
     elif stereo_format in _FORMAT_TO_FLAG:
         setattr(args, _FORMAT_TO_FLAG[stereo_format], True)
-    # else (unrecognized/empty): leave every flag False -- iw3's own default.
+    # else (unrecognized/empty/"full_sbs"): leave every flag False -- iw3's
+    # own default.
 
 
 def _coerce(value_type, raw):
@@ -138,6 +152,12 @@ def _coerce(value_type, raw):
         # sending to the CLI, which genuinely wants a 0.0-1.0 fraction --
         # reproduces that same on-screen-vs-CLI split here.
         return float(raw) / 100.0
+    if value_type == "fps_or_source":
+        # vr_merge_fps only (ADR-091): "Source FPS" -> None (use the
+        # source's own frame rate), any other value -> a real int fps.
+        if raw == "Source FPS":
+            return None
+        return int(float(raw))
     return raw
 
 
@@ -154,17 +174,29 @@ def build_args(settings):
     args.output = settings["output"]
 
     for f in FIELDS:
-        if f.cli_arg is None:
-            continue  # special-cased fields, applied below
-        dest = f.cli_arg.lstrip("-").replace("-", "_")
         raw = settings.get(f.name, f.default)
         # "Default" is a real suggested value in stereo_width/resolution's
         # own dropdowns (matching gui.py's own cbo_stereo_width/
         # cbo_resolution choices, ADR-090) meaning "use the model's own
         # default" -- same as leaving the field blank, not a literal string
         # to send to the CLI.
-        if raw is None or raw == "" or raw == "Default":
+        is_blank = raw is None or raw == "" or raw == "Default"
+
+        if f.gui_only_attr is not None:
+            # Real Namespace attribute gui.py sets directly, never
+            # registered in create_parser() (ADR-091) -- applied the same
+            # way regardless of cli_arg, which is always None for these.
+            if is_blank:
+                continue
+            setattr(args, f.gui_only_attr, _coerce(f.value_type, raw))
             continue
+
+        if f.cli_arg is None:
+            continue  # special-cased fields (stereo_format/metadata/deinterlace/tune_*/exif_transpose/fp16), applied below
+
+        if is_blank:
+            continue
+        dest = f.cli_arg.lstrip("-").replace("-", "_")
         setattr(args, dest, _coerce(f.value_type, raw))
 
     _apply_stereo_format(
@@ -180,6 +212,23 @@ def build_args(settings):
     # somehow absent from settings, matching this GUI's own field defaults.
     args.disable_exif_transpose = not settings.get("exif_transpose", True)
     args.disable_amp = not settings.get("fp16", True)
+
+    # Deinterlace (ADR-091): a real wx dropdown, but gui.py folds its value
+    # directly into the same real --vf string the free-text vf field also
+    # feeds, rather than its own Namespace attribute -- reproduced here the
+    # same way, deinterlace first then the user's own -vf text.
+    deinterlace = settings.get("deinterlace") or ""
+    vf_parts = [p for p in (deinterlace, args.vf) if p]
+    args.vf = ",".join(vf_parts)
+
+    # fastdecode/zerolatency (ADR-091): real wx checkboxes that merge
+    # directly into the same real --tune list the Tune field above already
+    # built, rather than their own Namespace attribute.
+    if settings.get("tune_fastdecode") and "fastdecode" not in args.tune:
+        args.tune.append("fastdecode")
+    if settings.get("tune_zerolatency") and "zerolatency" not in args.tune:
+        args.tune.append("zerolatency")
+
     return args
 
 

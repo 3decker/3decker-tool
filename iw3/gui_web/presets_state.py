@@ -17,6 +17,11 @@ from nunif.utils.filename import sanitize_filename
 
 PRESET_DIR = path.join(CONFIG_DIR, "gui_web_presets")
 SESSION_PATH = path.join(CONFIG_DIR, "iw3-gui-web-session.json")
+# Separate small files, same convention as gui.py's own LAYOUT_CONFIG_PATH/
+# ZOOM_CONFIG_PATH (ADR-092) -- live-applied UI preferences, not part of
+# the conversion settings session above.
+LAYOUT_PATH = path.join(CONFIG_DIR, "iw3-gui-web-layout.txt")
+ZOOM_PATH = path.join(CONFIG_DIR, "iw3-gui-web-zoom.txt")
 
 
 def _ensure_preset_dir():
@@ -70,3 +75,38 @@ def load_session():
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def get_layout():
+    try:
+        with open(LAYOUT_PATH, "r", encoding="utf-8") as f:
+            v = f.read().strip()
+            return v if v in ("tabs", "single_page") else "tabs"
+    except OSError:
+        return "tabs"
+
+
+def set_layout(mode):
+    if mode not in ("tabs", "single_page"):
+        return
+    try:
+        with open(LAYOUT_PATH, "w", encoding="utf-8") as f:
+            f.write(mode)
+    except OSError:
+        pass
+
+
+def get_zoom():
+    try:
+        with open(ZOOM_PATH, "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 100
+
+
+def set_zoom(pct):
+    try:
+        with open(ZOOM_PATH, "w", encoding="utf-8") as f:
+            f.write(str(int(pct)))
+    except OSError:
+        pass

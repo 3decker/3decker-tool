@@ -89,6 +89,17 @@ class Api:
     def get_session(self):
         return presets_state.load_session()
 
+    def get_ui_prefs(self):
+        return {"layout": presets_state.get_layout(), "zoom": presets_state.get_zoom()}
+
+    def set_layout(self, mode):
+        presets_state.set_layout(mode)
+        return {"ok": True}
+
+    def set_zoom(self, pct):
+        presets_state.set_zoom(pct)
+        return {"ok": True}
+
     def list_presets(self):
         return presets_state.list_presets()
 

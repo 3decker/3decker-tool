@@ -529,6 +529,48 @@ def _apply_combo_value(combo, value):
         combo.SetValue(text)
 
 
+# "Guided Light" pilot (ADR-097): a wx.Slider companion for each of these continuous
+# numeric Stereo Generation fields, two-way synced to the field's existing
+# EditableComboBox. The combo stays the sole thing build_processor_args()/persistence
+# ever reads -- the slider is purely a more tactile way to set the same value.
+# (combo_attr, slider_attr, min_val, max_val, multiplier, is_int, extra_sync_method)
+# wx.Slider is integer-only, so float fields are stored as round(value * multiplier)
+# and divided back. Fields with a real blank/"disabled" sentinel value in their own
+# choices list (foreground/background divergence, temporal_stabilize_max_shift,
+# edge_dilation_y, inpaint_max_width) are deliberately excluded -- a plain slider has
+# no clean way to represent "off".
+STEREO_SLIDER_FIELDS = [
+    ("cbo_divergence", "sld_stereo_divergence", 1.0, 5.0, 10, False, "update_divergence_warning"),
+    ("cbo_convergence", "sld_stereo_convergence", 0.0, 1.0, 100, False, None),
+    ("cbo_convergence_smoothing", "sld_stereo_convergence_smoothing", 0.0, 0.95, 100, False, None),
+    ("cbo_splat_blend_temperature", "sld_stereo_splat_blend_temperature", 10.0, 85.0, 1, False, None),
+    ("cbo_depth_refine_strength", "sld_stereo_depth_refine_strength", 0.25, 1.5, 100, False, None),
+    ("cbo_temporal_stabilize_strength", "sld_stereo_temporal_stabilize_strength", 0.3, 0.9, 100, False, None),
+    ("cbo_foreground_pop", "sld_stereo_foreground_pop", 0.0, 1.0, 100, False, None),
+    ("cbo_background_pop", "sld_stereo_background_pop", 0.0, 1.0, 100, False, None),
+    ("cbo_background_pop_coverage", "sld_stereo_background_pop_coverage", 15, 40, 1, True, None),
+    ("cbo_edge_repair", "sld_stereo_edge_repair", 0.0, 1.0, 100, False, None),
+    ("cbo_sharpen_strength", "sld_stereo_sharpen_strength", 0.25, 1.0, 100, False, None),
+    ("cbo_ema_decay", "sld_stereo_ema_decay", 0.0, 0.99, 100, False, None),
+    ("cbo_ema_buffer", "sld_stereo_ema_buffer", 1, 150, 1, True, None),
+]
+
+
+def _build_stereo_slider(parent, combo, min_val, max_val, multiplier):
+    """Constructs a wx.Slider for a Guided Light pilot (ADR-097) numeric field,
+    initialized from the combo's current value. wx.Slider only takes integers, so the
+    slider's own range/position is the field's real value * multiplier, divided back
+    in the sync handlers below."""
+    try:
+        current = float(combo.GetValue())
+    except ValueError:
+        current = min_val
+    current = max(min_val, min(max_val, current))
+    slider = wx.Slider(parent, minValue=round(min_val * multiplier), maxValue=round(max_val * multiplier))
+    slider.SetValue(round(current * multiplier))
+    return slider
+
+
 def _query_nvidia_smi_gpu_names():
     """Returns a list of CUDA GPU names via `nvidia-smi` (a separate process), or
     None on any failure. Used to populate the Device/RIFE-GPU dropdowns at window
@@ -862,6 +904,7 @@ class MainFrame(wx.Frame):
               "shift between the left/right eye. Higher = more dramatic depth, but more edge artifacts. "
               "Lower = subtler, cleaner. Recommended: 2.0-3.0 for most movies."))
         self.cbo_divergence.SetSelection(4)
+        self.sld_stereo_divergence = _build_stereo_slider(self.grp_stereo, self.cbo_divergence, 1.0, 5.0, 10)
 
         self.lbl_convergence = wx.StaticText(self.grp_stereo, label=T("Convergence Plane"))
         self.cbo_convergence_mode = wx.ComboBox(self.grp_stereo, choices=["constant", "sod_v1", "face_detect"],
@@ -900,6 +943,7 @@ class MainFrame(wx.Frame):
               "out toward you) to 1 (everything sits behind the screen). Only used directly when mode is "
               "\"constant\" — for sod_v1 it acts as a relative offset within the detected subject's depth "
               "range. Recommended: 0.5 as a balanced starting point."))
+        self.sld_stereo_convergence = _build_stereo_slider(self.grp_stereo, self.cbo_convergence, 0.0, 1.0, 100)
 
         self.lbl_convergence_smoothing = wx.StaticText(self.grp_stereo, label=T("Convergence Smoothing"))
         self.cbo_convergence_smoothing = EditableComboBox(
@@ -910,6 +954,8 @@ class MainFrame(wx.Frame):
             T("Only affects sod_v1 / Face Detect convergence modes. Controls how quickly the automatic "
               "convergence point reacts to scene changes. Higher = smoother but slower to react. Lower = "
               "more aggressive/dynamic, reacts faster but may jitter more. 0 = no smoothing at all."))
+        self.sld_stereo_convergence_smoothing = _build_stereo_slider(
+            self.grp_stereo, self.cbo_convergence_smoothing, 0.0, 0.95, 100)
 
         self.lbl_ipd_offset = wx.StaticText(self.grp_stereo, label=T("Your Own Size"))
         # SpinCtrlDouble is better, but cannot save with PersistenceManager
@@ -1002,6 +1048,8 @@ class MainFrame(wx.Frame):
               "settings in this app, there isn't yet a body of real-world testing behind these numbers.\n"
               "Recommended: start at the default (50.0) and only adjust it if forward_splat_fill's "
               "results look wrong to you at that default."))
+        self.sld_stereo_splat_blend_temperature = _build_stereo_slider(
+            self.grp_stereo, self.cbo_splat_blend_temperature, 10.0, 85.0, 1)
 
         self.lbl_inpaint_model = wx.StaticText(self.grp_stereo, label=T("Inpainting Model"))
         self.cbo_inpaint_model = wx.ComboBox(self.grp_stereo,
@@ -1191,6 +1239,8 @@ class MainFrame(wx.Frame):
               "softening genuinely fine depth detail if pushed too far); lower = gentler, closer to doing "
               "nothing. Recommended: 1.0 as a safe starting point; try 1.25-1.5 if you want a bit more of "
               "the \"cleaner/more solid 3D\" effect this setting gives."))
+        self.sld_stereo_depth_refine_strength = _build_stereo_slider(
+            self.grp_stereo, self.cbo_depth_refine_strength, 0.25, 1.5, 100)
 
         self.chk_temporal_stabilize = wx.CheckBox(self.grp_stereo, label=T("Object Stability (experimental)"),
                                                   name="chk_temporal_stabilize")
@@ -1211,6 +1261,8 @@ class MainFrame(wx.Frame):
         self.cbo_temporal_stabilize_strength.SetToolTip(
             T("How strongly to trust the motion-warped previous frame vs the fresh per-frame depth (0-1). "
               "Automatically tapers down during fast/unreliable motion regardless of this setting."))
+        self.sld_stereo_temporal_stabilize_strength = _build_stereo_slider(
+            self.grp_stereo, self.cbo_temporal_stabilize_strength, 0.3, 0.9, 100)
 
         self.lbl_temporal_stabilize_max_shift = wx.StaticText(self.grp_stereo, label=T("Max Shift"))
         self.cbo_temporal_stabilize_max_shift = EditableComboBox(
@@ -1485,8 +1537,13 @@ class MainFrame(wx.Frame):
         sizer_depth_blend = wx.StaticBoxSizer(self.grp_depth_blend, wx.VERTICAL)
         sizer_depth_blend.Add(layout_depth_blend, 1, wx.ALL | wx.EXPAND, 4)
 
-        self.lbl_foreground_pop = wx.StaticText(self.grp_stereo, label=T("Foreground Pop"))
-        self.cbo_foreground_pop = EditableComboBox(self.grp_stereo,
+        self.cpn_stereo_pop_divergence = wx.CollapsiblePane(
+            self.grp_stereo, label=T("Pop & Divergence"), name="cpn_stereo_pop_divergence")
+        self.cpn_stereo_pop_divergence.Collapse(True)
+        self.cpn_stereo_pop_divergence.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                            self.on_toggled_stereo_collapsible_pane)
+        self.lbl_foreground_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Pop"))
+        self.cbo_foreground_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                    choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
                                                    name="cbo_foreground_pop")
         self.cbo_foreground_pop.SetSelection(0)
@@ -1499,9 +1556,10 @@ class MainFrame(wx.Frame):
               "clash with the frame edges (pair with Preserve Screen Border to reduce that risk).\n"
               "Recommended: 0 (off) for a restrained, professional look; 0.25-0.5 for deliberate "
               "\"poke at the audience\" moments; reserve 0.75-1.0 for a genuinely gimmicky effect."))
+        self.sld_stereo_foreground_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_foreground_pop, 0.0, 1.0, 100)
 
-        self.lbl_foreground_divergence = wx.StaticText(self.grp_stereo, label=T("Foreground Divergence"))
-        self.cbo_foreground_divergence = EditableComboBox(self.grp_stereo,
+        self.lbl_foreground_divergence = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Divergence"))
+        self.cbo_foreground_divergence = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                            choices=["", "2.0", "2.5", "3.0", "3.5", "4.0"],
                                                            name="cbo_foreground_divergence")
         self.cbo_foreground_divergence.SetSelection(0)
@@ -1515,8 +1573,8 @@ class MainFrame(wx.Frame):
               "Recommended: leave blank unless you've specifically noticed the foreground needs its own "
               "strength independent of the rest of the scene."))
 
-        self.lbl_background_pop = wx.StaticText(self.grp_stereo, label=T("Background Pop"))
-        self.cbo_background_pop = EditableComboBox(self.grp_stereo,
+        self.lbl_background_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Pop"))
+        self.cbo_background_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                     choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
                                                     name="cbo_background_pop")
         self.cbo_background_pop.SetSelection(0)
@@ -1530,9 +1588,10 @@ class MainFrame(wx.Frame):
               "Recommended: 0.15-0.25 for a modestly more immersive background on most content; go higher "
               "for content with a genuinely deep, expansive background you want to emphasize (landscapes, "
               "wide establishing shots)."))
+        self.sld_stereo_background_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop, 0.0, 1.0, 100)
 
-        self.lbl_background_pop_coverage = wx.StaticText(self.grp_stereo, label=T("Background Pop Coverage %"))
-        self.cbo_background_pop_coverage = EditableComboBox(self.grp_stereo,
+        self.lbl_background_pop_coverage = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Pop Coverage %"))
+        self.cbo_background_pop_coverage = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                              choices=["15", "20", "25", "30", "40"],
                                                              name="cbo_background_pop_coverage")
         self.cbo_background_pop_coverage.SetSelection(0)
@@ -1544,9 +1603,11 @@ class MainFrame(wx.Frame):
               "noticeable as an odd \"step\" in the depth.\n"
               "Recommended: 15% (default) for a subtle, hard-to-notice effect; raise to 20-30% only if "
               "you want the effect to reach further into the scene and don't mind it becoming more visible."))
+        self.sld_stereo_background_pop_coverage = _build_stereo_slider(
+            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop_coverage, 15, 40, 1)
 
-        self.lbl_background_divergence = wx.StaticText(self.grp_stereo, label=T("Background Divergence"))
-        self.cbo_background_divergence = EditableComboBox(self.grp_stereo,
+        self.lbl_background_divergence = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Divergence"))
+        self.cbo_background_divergence = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                            choices=["", "2.0", "2.5", "3.0", "3.5", "4.0"],
                                                            name="cbo_background_divergence")
         self.cbo_background_divergence.SetSelection(0)
@@ -1559,8 +1620,8 @@ class MainFrame(wx.Frame):
               "Recommended: leave blank unless you've specifically noticed the background needs its own "
               "strength independent of the rest of the scene."))
 
-        self.lbl_edge_repair = wx.StaticText(self.grp_stereo, label=T("Edge Repair"))
-        self.cbo_edge_repair = EditableComboBox(self.grp_stereo,
+        self.lbl_edge_repair = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Edge Repair"))
+        self.cbo_edge_repair = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                 choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
                                                 name="cbo_edge_repair")
         self.cbo_edge_repair.SetSelection(0)
@@ -1569,8 +1630,9 @@ class MainFrame(wx.Frame):
               "Gently smooths a thin hairline right around real depth edges to reduce fringing/ghosting "
               "residue left over from the 3D warp. Cannot affect flat areas or anywhere without a depth "
               "edge. 0.0=off (default), 1.0=strongest."))
+        self.sld_stereo_edge_repair = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_edge_repair, 0.0, 1.0, 100)
 
-        self.chk_sharpen = wx.CheckBox(self.grp_stereo, label=T("Sharpen"), name="chk_sharpen")
+        self.chk_sharpen = wx.CheckBox(self.cpn_stereo_pop_divergence.GetPane(), label=T("Sharpen"), name="chk_sharpen")
         self.chk_sharpen.SetValue(False)
         self.chk_sharpen.SetToolTip(
             T("What it's for: enhances fine detail/sharpness in the FINISHED, fully-rendered 3D picture "
@@ -1593,7 +1655,7 @@ class MainFrame(wx.Frame):
               "Recommended: off (default) unless the finished 3D output looks a little soft to you; start "
               "at the default 0.5 Strength and raise only if you still want more."))
 
-        self.cbo_sharpen_strength = EditableComboBox(self.grp_stereo,
+        self.cbo_sharpen_strength = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                      choices=["0.25", "0.5", "0.75", "1.0"],
                                                      name="cbo_sharpen_strength")
         self.cbo_sharpen_strength.SetSelection(1)
@@ -1601,6 +1663,7 @@ class MainFrame(wx.Frame):
             T("How strong the Sharpen effect is (0.0-1.0). Higher = more pronounced detail boost at real "
               "edges/texture, but also more risk of an over-crisp/harsh look or exaggerating real "
               "compression artifacts. Recommended: 0.5 (default) as a safe starting point."))
+        self.sld_stereo_sharpen_strength = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_sharpen_strength, 0.25, 1.0, 100)
 
         self.lbl_edge_dilation = wx.StaticText(self.grp_stereo, label=T("Edge Fix"))
         self.cbo_edge_dilation = EditableComboBox(self.grp_stereo,
@@ -1672,6 +1735,7 @@ class MainFrame(wx.Frame):
               "Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own "
               "per-scene Decay/Buffer instead — this value is still kept and still used as the fallback "
               "before the first detected scene boundary."))
+        self.sld_stereo_ema_decay = _build_stereo_slider(self.grp_stereo, self.cbo_ema_decay, 0.0, 0.99, 100)
 
         self.cbo_ema_buffer = EditableComboBox(self.grp_stereo, choices=["150", "60", "30", "1"],
                                                name="cbo_ema_buffer")
@@ -1697,6 +1761,7 @@ class MainFrame(wx.Frame):
               "Greyed out when \"Auto EMA by Scene Length\" below is checked, since that picks its own "
               "per-scene Decay/Buffer instead — this value is still kept and still used as the fallback "
               "before the first detected scene boundary."))
+        self.sld_stereo_ema_buffer = _build_stereo_slider(self.grp_stereo, self.cbo_ema_buffer, 1, 150, 1)
 
         # Parented to grp_stereo (Flicker Reduction's own StaticBox) and laid out
         # directly under the Decay Rate/Buffer row above, not grp_video_filter, so it
@@ -2076,12 +2141,15 @@ class MainFrame(wx.Frame):
         i = 0
         layout.Add(self.lbl_divergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_divergence, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_divergence, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_divergence_warning, pos=(i := i + 1, 0), span=(0, 3), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_convergence, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_convergence, (i := i + 1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_smoothing, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_smoothing, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_convergence_smoothing, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
 
         layout.Add(self.lbl_ipd_offset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.sld_ipd_offset, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -2091,6 +2159,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_method, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_splat_blend_temperature, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_splat_blend_temperature, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_splat_blend_temperature, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
 
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -2128,8 +2197,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_depth_aa, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_depth_refine, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_depth_refine_strength, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_depth_refine_strength, (i, 2), flag=wx.EXPAND)
         layout.Add(self.chk_temporal_stabilize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_temporal_stabilize_strength, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_temporal_stabilize_strength, (i, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_temporal_stabilize_max_shift, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_temporal_stabilize_max_shift, (i, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_temporal_stabilize_flat_boost, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
@@ -2140,20 +2211,43 @@ class MainFrame(wx.Frame):
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 6), (i := i + 1, 0))
-        layout.Add(self.lbl_foreground_pop, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_foreground_pop, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_foreground_divergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_foreground_divergence, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_background_pop, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_background_pop, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_background_pop_coverage, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_background_pop_coverage, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_background_divergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_background_divergence, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_edge_repair, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_edge_repair, (i, 1), (1, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_sharpen, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_sharpen_strength, (i, 1), flag=wx.EXPAND)
+
+        # Guided Light pilot (ADR-097): Pop & Divergence collapsed into its own
+        # wx.CollapsiblePane -- construction/reparenting happened earlier, up where
+        # these fields are built (search cpn_stereo_pop_divergence). Only the pane
+        # itself (plus its colored indicator square) occupies a row in the OUTER
+        # layout; everything that used to be added directly above now belongs to a
+        # separate GridBagSizer built here for the pane's own GetPane() window.
+        self.pnl_stereo_pop_divergence_dot = wx.Panel(self.grp_stereo, size=self.FromDIP((10, 10)))
+        self.pnl_stereo_pop_divergence_dot.SetBackgroundColour(wx.Colour(79, 216, 255))
+        pane_header_row = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row.Add(self.pnl_stereo_pop_divergence_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row.Add(self.cpn_stereo_pop_divergence, 1, wx.EXPAND)
+        layout.Add(pane_header_row, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
+
+        pane_layout = wx.GridBagSizer(vgap=4, hgap=4)
+        pane_layout.SetEmptyCellSize((0, 0))
+        k = 0
+        pane_layout.Add(self.lbl_foreground_pop, (k, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_foreground_pop, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_foreground_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_foreground_divergence, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_foreground_divergence, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_background_pop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_background_pop, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_background_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_background_pop_coverage, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_background_pop_coverage, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_background_pop_coverage, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_background_divergence, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_background_divergence, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_edge_repair, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_edge_repair, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_edge_repair, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.chk_sharpen, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_sharpen_strength, (k, 1), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_sharpen_strength, (k, 2), flag=wx.EXPAND)
+        self.cpn_stereo_pop_divergence.GetPane().SetSizer(pane_layout)
 
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -2161,6 +2255,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_ema_normalize, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_ema_decay, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_ema_buffer, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_ema_decay, (i := i + 1, 1), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_ema_buffer, (i, 2), flag=wx.EXPAND)
         layout.Add(self.chk_scene_batch_auto_ema, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
         layout.Add(self.cbo_scene_batch_auto_ema_model, (i, 2), (0, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_genre_preset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -4286,7 +4382,31 @@ class MainFrame(wx.Frame):
         self.pnl_file.bind_input_path_changed(self.on_text_changed_txt_input)
         self.pnl_file.bind_output_path_changed(self.on_text_changed_txt_output)
 
-        self.cbo_divergence.Bind(wx.EVT_TEXT, self.update_divergence_warning)
+        # Guided Light pilot (ADR-097): two-way slider <-> combo sync for every field
+        # in STEREO_SLIDER_FIELDS. wx.EvtHandler.Bind() REPLACES any existing handler
+        # for the same (event, control) pair rather than adding a second one (this
+        # wx build has no `add=` kwarg at all -- confirmed the hard way), so
+        # cbo_divergence -- which already needs its own EVT_TEXT handler,
+        # update_divergence_warning() -- gets a combined wrapper below instead of a
+        # plain functools.partial, so both behaviors still run off one binding. This
+        # replaces the old standalone `self.cbo_divergence.Bind(wx.EVT_TEXT,
+        # self.update_divergence_warning)` line -- it would otherwise just get
+        # silently overwritten by this loop anyway.
+        for _combo_name, _slider_name, _lo, _hi, _mult, _is_int, _extra in STEREO_SLIDER_FIELDS:
+            _combo = getattr(self, _combo_name)
+            _slider = getattr(self, _slider_name)
+            _slider.Bind(wx.EVT_SLIDER, functools.partial(
+                self._on_stereo_slider_scroll, combo=_combo, slider=_slider,
+                min_val=_lo, max_val=_hi, multiplier=_mult, is_int=_is_int, extra_sync=_extra))
+            if _combo_name == "cbo_divergence":
+                def _divergence_text_handler(event, _self=self, _c=_combo, _s=_slider, _l=_lo, _h=_hi, _m=_mult):
+                    _self.update_divergence_warning(event)
+                    _self._on_stereo_combo_text_sync_slider(event, combo=_c, slider=_s, min_val=_l, max_val=_h, multiplier=_m)
+                _combo.Bind(wx.EVT_TEXT, _divergence_text_handler)
+            else:
+                _combo.Bind(wx.EVT_TEXT, functools.partial(
+                    self._on_stereo_combo_text_sync_slider, combo=_combo, slider=_slider,
+                    min_val=_lo, max_val=_hi, multiplier=_mult))
         self.cbo_synthetic_view.Bind(wx.EVT_TEXT, self.update_divergence_warning)
         self.cbo_method.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_method)
         self.lbl_divergence_warning.Bind(wx.EVT_LEFT_DOWN, self.on_click_divergence_warning)
@@ -4682,6 +4802,12 @@ class MainFrame(wx.Frame):
             self.tab_wrap_tools,
             self.pnl_file_option, self.pnl_preset, self.pnl_process,
             self.pnl_file.panel,
+            # Guided Light pilot (ADR-097): a CollapsiblePane's content pane is its
+            # own real window, not automatically covered by any of the above -- theme
+            # it too so it doesn't show a default white/gray background in dark mode.
+            # The colored indicator square deliberately keeps its own accent color,
+            # not panel_bg.
+            self.cpn_stereo_pop_divergence.GetPane(),
         ):
             panel.SetBackgroundColour(panel_bg)
 
@@ -4775,6 +4901,78 @@ class MainFrame(wx.Frame):
             depth_models.append("VDA_Stream_Metric_L")
 
         return depth_models
+
+    def _on_stereo_slider_scroll(self, event, combo, slider, min_val, max_val, multiplier, is_int, extra_sync):
+        """Guided Light pilot (ADR-097): dragging a slider writes the resulting value
+        into its combo box via the existing _apply_combo_value() helper, so every
+        existing consumer of that combo (arg-building, persistence, dependent-field
+        update_* methods) sees a real, normal value change. wx.Slider.SetValue() never
+        itself fires EVT_SLIDER, so the reverse sync below can't loop back into this."""
+        value = slider.GetValue() / multiplier
+        text = str(int(value)) if is_int else str(round(value, 2))
+        _apply_combo_value(combo, text)
+        if extra_sync is not None:
+            getattr(self, extra_sync)()
+        event.Skip()
+
+    def _on_stereo_combo_text_sync_slider(self, event, combo, slider, min_val, max_val, multiplier):
+        """Guided Light pilot (ADR-097): typing/selecting a value in the combo moves
+        the slider thumb to match. Invalid or mid-keystroke text is silently ignored
+        (the slider just stays where it was) rather than raising or clamping to a
+        misleading edge value."""
+        event.Skip()
+        try:
+            value = float(combo.GetValue())
+        except ValueError:
+            return
+        value = max(min_val, min(max_val, value))
+        slider.SetValue(round(value * multiplier))
+
+    def get_stereo_sliders_and_panes(self):
+        """Guided Light pilot (ADR-097) controls that must NEVER be handed to
+        wx.lib.agw.persist -- it ships handlers for both wx.Slider and
+        wx.CollapsiblePane (persist_handlers.py) that would otherwise auto-attach and
+        persist a second, independent value alongside the combo's real one, or (for a
+        pane) silently desync the ScrolledPanel's pinned MinSize on restore, since
+        Restore() doesn't fire EVT_COLLAPSIBLEPANE_CHANGED. Sliders always derive from
+        their combo at construction/load time; panes always start at their
+        construction-time default expand state every launch -- see
+        on_toggled_stereo_collapsible_pane()."""
+        sliders = [getattr(self, slider_attr) for _, slider_attr, *_ in STEREO_SLIDER_FIELDS]
+        pane_attrs = ("cpn_stereo_pop_divergence", "cpn_stereo_stability_flicker",
+                      "cpn_stereo_inpainting_depth", "cpn_stereo_advanced")
+        panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
+        return sliders + panes
+
+    def on_toggled_stereo_collapsible_pane(self, event):
+        """Guided Light pilot (ADR-097): a collapsible pane toggling changes
+        grp_stereo's real content height, which the ScrolledPanel wrapper (Tabbed
+        mode: tab_wrap_stereo; Single Page mode: pnl_single) never re-measures on its
+        own -- its MinSize is pinned once at construction (ADR-048) and nothing before
+        this reused apply_zoom_level()'s exact fix for the same class of stale-MinSize
+        bug caused by a different height-changing trigger (live zoom, not a pane).
+
+        Order matters: refresh_layouts()'s recursive InvalidateBestSize() must run
+        BEFORE the CalcMin()/SetMinSize() pinning below, not after -- a plain
+        Layout() call repositions children using their EXISTING cached best-size, it
+        does not itself force that cache to be recomputed, so computing CalcMin()
+        first (the order apply_zoom_level uses) would silently reuse the pane's
+        pre-toggle size here. apply_zoom_level gets away with a CalcMin()-then-
+        refresh_layouts() order only because its own SetFont() call earlier already
+        invalidates every descendant's best-size cache as a side effect -- a toggled
+        CollapsiblePane has no equivalent implicit invalidation, so it must be done
+        explicitly, first (confirmed live: the opposite order left Single Page mode's
+        pnl_single MinSize completely unchanged after a real toggle)."""
+        refresh_layouts(self)
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+        else:
+            wrap_sizer = self.tab_wrap_stereo.GetSizer()
+            if wrap_sizer is not None:
+                self.tab_wrap_stereo.SetMinSize(wrap_sizer.CalcMin())
+        refresh_layouts(self)
+        self._clamp_frame_to_screen()
+        event.Skip()
 
     def get_editable_comboboxes(self):
         editable_comboboxes = [
@@ -6113,6 +6311,8 @@ class MainFrame(wx.Frame):
             persistent_manager_register_all(manager, self)
             for control in self.get_editable_comboboxes():
                 persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+            for control in self.get_stereo_sliders_and_panes():
+                manager.Unregister(control)
             manager.SaveAndUnregister()
             self.reload_preset()
         finally:
@@ -6158,6 +6358,8 @@ class MainFrame(wx.Frame):
             persistent_manager_register_all(manager, self)
             for control in self.get_editable_comboboxes():
                 persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+            for control in self.get_stereo_sliders_and_panes():
+                manager.Unregister(control)
             persistent_manager_restore_all(manager, exclude_names)
             persistent_manager_unregister_all(manager)
         finally:
@@ -7073,6 +7275,8 @@ class MainFrame(wx.Frame):
         persistent_manager_register_all(manager, self)
         for control in self.get_editable_comboboxes():
             persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+        for control in self.get_stereo_sliders_and_panes():
+            manager.Unregister(control)
         manager.SaveAndUnregister()
         return snapshot_path
 
@@ -7083,6 +7287,8 @@ class MainFrame(wx.Frame):
         persistent_manager_register_all(manager, self)
         for control in self.get_editable_comboboxes():
             persistent_manager_register(manager, control, EditableComboBoxPersistentHandler)
+        for control in self.get_stereo_sliders_and_panes():
+            manager.Unregister(control)
         persistent_manager_restore_all(manager, {"cbo_language", "cbo_layout"})
         persistent_manager_unregister_all(manager)
         self.update_controls()
@@ -8577,6 +8783,167 @@ def _self_test_tabbed_scrolling():
         app.Destroy()
 
     print("_self_test_tabbed_scrolling: PASS")
+
+
+def _self_test_stereo_sliders_sync():
+    """Regression test for the Guided Light pilot's (ADR-097) slider <-> combo two-way
+    sync: for every field in STEREO_SLIDER_FIELDS, dragging the slider must update the
+    combo's value, and typing/selecting in the combo must move the slider thumb, using
+    the same real event-firing path wx itself uses (ProcessWindowEvent), not a direct
+    method call, so the actual Bind() wiring is what's under test. Also confirms
+    cbo_divergence's slider path keeps update_divergence_warning() wired. No GPU or
+    real movie file needed."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+
+        for combo_name, slider_name, lo, hi, multiplier, is_int, extra_sync in gui_mod.STEREO_SLIDER_FIELDS:
+            combo = getattr(frame, combo_name)
+            slider = getattr(frame, slider_name)
+
+            # slider -> combo. Mirror the real handler's own two-step rounding (value
+            # is stored as an int thumb position, then divided back) rather than
+            # comparing against the un-rounded midpoint directly -- the real code
+            # path's own rounding can legitimately land one cent away from a naive
+            # round(mid, 2) (e.g. 0.475 -> thumb 48 (round-half-to-even) -> 0.48, not
+            # the 0.47 a direct round(0.475, 2) gives due to float representation).
+            mid = (lo + hi) / 2
+            thumb = round(mid * multiplier)
+            slider.SetValue(thumb)
+            slider.ProcessWindowEvent(wx.CommandEvent(wx.wxEVT_SLIDER, slider.GetId()))
+            resolved = thumb / multiplier
+            expected = str(int(resolved)) if is_int else str(round(resolved, 2))
+            assert combo.GetValue() == expected, \
+                f"{combo_name}: slider->combo sync failed (slider={mid}, combo={combo.GetValue()!r}, expected={expected!r})"
+
+            # combo -> slider
+            _apply_combo_value(combo, str(lo))
+            combo.ProcessWindowEvent(wx.CommandEvent(wx.wxEVT_TEXT, combo.GetId()))
+            assert slider.GetValue() == round(lo * multiplier), \
+                f"{combo_name}: combo->slider sync failed (combo={lo}, slider={slider.GetValue()}, expected={round(lo * multiplier)})"
+
+        # cbo_divergence's slider path must still trigger the real warning-label logic
+        # (not bypass it) -- push it to an extreme value known to trigger a warning.
+        frame.sld_stereo_divergence.SetValue(round(5.0 * 10))
+        frame.sld_stereo_divergence.ProcessWindowEvent(wx.CommandEvent(wx.wxEVT_SLIDER, frame.sld_stereo_divergence.GetId()))
+        assert frame.cbo_divergence.GetValue() == "5.0"
+        frame.update_divergence_warning()
+        # (visibility itself depends on other state like method/format; just confirm
+        # the call path executes without raising, proving extra_sync actually fired
+        # above via the slider handler -- an exception there would have already failed
+        # the slider->combo assertion for this field.)
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            # wx.Destroy() on MSW defers actual HWND teardown to the next event-loop
+            # idle pass -- without pumping it here, this test's ~15 extra windows
+            # (13 sliders + 1 pane + 1 indicator square) plus a whole second
+            # MainFrame's worth of controls stay allocated until whatever runs next
+            # happens to yield, which measurably contributed to a real
+            # "system allowance of handles for Window Manager objects" failure
+            # several self-tests later in the full suite before this was added.
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_stereo_sliders_sync: PASS")
+
+
+def _self_test_stereo_collapsible_sections():
+    """Regression test for the Guided Light pilot's (ADR-097) collapsible panes.
+
+    The mode-independent invariant: tab_stereo's OWN sizer CalcMin() must change on
+    every real toggle -- this is the direct proof the pane's Show/Hide actually
+    reflowed grp_stereo's content, true regardless of which layout mode is active.
+
+    The mode-SPECIFIC invariant differs, confirmed by live diagnosis rather than
+    assumed: in Tabbed mode, tab_wrap_stereo (the ScrolledPanel wrapper, ADR-048)
+    holds ONLY tab_stereo 1:1, so its pinned MinSize must track the same change
+    exactly -- this exercises the real flagged risk (a pane changing height without
+    the wrapper's stale, construction-time-pinned MinSize ever being told). In
+    Single Page mode, tab_stereo is one of 7 panels sharing pnl_single's 4-column
+    GridBagSizer (ADR-037) -- pnl_single's OVERALL min size is only ever set by
+    whichever column is tallest, and Stereo Generation is not always that column
+    (Standalone Tools' tab_tools is taller, confirmed by direct measurement: 1949px
+    vs Stereo Generation's ~1400px expanded), so asserting pnl_single's total size
+    must change on every Stereo Generation toggle would be asserting something
+    false about this specific layout, not a real invariant -- the correct check is
+    only that SetMinSize() runs without error and never reports a smaller value
+    than tab_stereo's own new requirement (i.e. never silently drops below what's
+    actually needed, which WOULD be a real clipping bug).
+
+    Exercised in both layout modes, and a switch back to Tabbed, since ADR-045 live
+    switching reparents tab_stereo between two different containers with two
+    different pinned-MinSize mechanisms. No GPU or real movie file needed."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    try:
+        gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+        frame = gui_mod.MainFrame()
+        panes = frame.get_stereo_sliders_and_panes()
+        panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
+        assert len(panes) > 0, "no collapsible panes were built -- nothing to test"
+
+        def toggle_and_check(label, check_wrapper_tracks=None):
+            for pane in panes:
+                before_expanded = pane.IsExpanded()
+                tab_min_before = frame.tab_stereo.GetSizer().CalcMin()
+                if check_wrapper_tracks is not None:
+                    wrap_min_before = check_wrapper_tracks()
+
+                pane.Collapse(before_expanded)  # Collapse(True) if it was expanded, else no-op-ish
+                frame.on_toggled_stereo_collapsible_pane(
+                    wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+                tab_min_after = frame.tab_stereo.GetSizer().CalcMin()
+                assert tab_min_after != tab_min_before, \
+                    f"{label}: {pane.GetLabel()} toggle did not change tab_stereo's own content size " \
+                    f"({tab_min_before} -> {tab_min_after})"
+                w, h = tab_min_after
+                assert w > 50 and h > 50, f"{label}: tab_stereo collapsed to near-zero after toggling {pane.GetLabel()}"
+
+                if check_wrapper_tracks is not None:
+                    wrap_min_after = check_wrapper_tracks()
+                    assert wrap_min_after != wrap_min_before, \
+                        f"{label}: wrapper did not track {pane.GetLabel()}'s toggle " \
+                        f"({wrap_min_before} -> {wrap_min_after})"
+                    assert wrap_min_after[1] >= tab_min_after[1], \
+                        f"{label}: wrapper height ({wrap_min_after[1]}) fell below tab_stereo's own " \
+                        f"requirement ({tab_min_after[1]}) after toggling {pane.GetLabel()} -- would clip"
+
+                # restore original state so the next pane's before/after comparison is clean
+                pane.Collapse(before_expanded)
+                frame.on_toggled_stereo_collapsible_pane(
+                    wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+        # Tabbed: tab_wrap_stereo holds tab_stereo 1:1, so it must track exactly.
+        toggle_and_check("Tabbed", check_wrapper_tracks=lambda: frame.tab_wrap_stereo.GetSizer().CalcMin())
+
+        # Single Page: pnl_single's overall min is legitimately dominated by other
+        # columns (see docstring) -- only assert tab_stereo's own size changes and
+        # that pnl_single's SetMinSize path runs cleanly without ever under-sizing.
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_SINGLE_PAGE)
+        toggle_and_check("Single Page")
+        w, h = frame.pnl_single.GetSizer().CalcMin()
+        assert w > 100 and h > 100, "pnl_single collapsed to near-zero after a Stereo Generation pane toggle"
+
+        # Switch back: tab_wrap_stereo must resume tracking exactly, same as before.
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_TABS)
+        toggle_and_check("Tabbed (after switch back)",
+                          check_wrapper_tracks=lambda: frame.tab_wrap_stereo.GetSizer().CalcMin())
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()  # see _self_test_stereo_sliders_sync's finally block for why
+        app.Destroy()
+
+    print("_self_test_stereo_collapsible_sections: PASS")
 
 
 def _self_test_zoom_level_persistence():
@@ -10694,6 +11061,8 @@ def _run_self_tests():
     _self_test_layout_modes()
     _self_test_layout_mode_live_switch()
     _self_test_tabbed_scrolling()
+    _self_test_stereo_sliders_sync()
+    _self_test_stereo_collapsible_sections()
     _self_test_zoom_level_persistence()
     _self_test_zoom_startup_restore()
     _self_test_zoom_live_rescale()

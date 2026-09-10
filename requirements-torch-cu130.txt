@@ -1,0 +1,25 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+# Required for RTX 50-series (Blackwell, compute capability 12.0) GPUs: the
+# cu126-tagged build in requirements-torch-cu126.txt is compiled against the
+# CUDA 12.6 toolkit, which does not include Blackwell kernel images -- running
+# it on an RTX 5090 fails with "CUDA error: no kernel image is available for
+# execution on the device" (confirmed real, 2026-09-09, see
+# docs/ai/AI_DECISIONS.md). This cu130 build is the one actually verified
+# working on this project's own RTX 5090 dev machine.
+
+# waifu2x: optional ONNX super-resolution model support (loading external SR
+# models, e.g. SPAN-style exports, dropped into a folder -- see
+# waifu2x/external_sr.py and docs/ai/AI_DECISIONS.md). CUDA-specific package,
+# only meaningful alongside a CUDA torch build like this file's own -- imported
+# lazily in code, so its absence doesn't break anything for users without it.
+onnxruntime-gpu
+
+# Linux
+torch==2.12.0+cu130; sys_platform == "linux"
+torchvision==0.27.0+cu130; sys_platform == "linux"
+
+# Windows
+torch==2.12.0+cu130; sys_platform == "win32"
+torchvision==0.27.0+cu130; sys_platform == "win32"
+triton-windows<3.8; sys_platform == "win32"

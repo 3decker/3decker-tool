@@ -46,7 +46,10 @@ window.IW3Renderer = (function () {
       (f.choices || []).forEach(function (choice) {
         var opt = document.createElement("option");
         opt.value = choice;
-        opt.textContent = choice;
+        // ADR-093: a handful of fields (Stereo Format's "vr180"/"VR90") show
+        // a real display label that differs from the internal value sent to
+        // worker.py -- choice_labels carries that mapping when present.
+        opt.textContent = (f.choice_labels && f.choice_labels[choice]) || choice;
         input.appendChild(opt);
       });
       if (f.default != null) input.value = f.default;
@@ -64,6 +67,7 @@ window.IW3Renderer = (function () {
         f.choices.forEach(function (choice) {
           var opt = document.createElement("option");
           opt.value = choice;
+          opt.textContent = (f.choice_labels && f.choice_labels[choice]) || choice;
           list.appendChild(opt);
         });
         input.setAttribute("list", listId);

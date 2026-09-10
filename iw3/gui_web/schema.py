@@ -84,6 +84,13 @@ class Field:
     # create_parser()-derived dest the normal cli_arg path uses, since
     # there's nothing in create_parser() to validate against for these.
     gui_only_attr: Optional[str] = None
+    # ADR-093: value -> real display label, for the rare field where the
+    # real wx GUI's own dropdown shows friendly text (e.g. "VR90") for an
+    # internal value that stays a plain code here (e.g. "vr180"). Most
+    # fields leave this unset -- their choice values ARE the real display
+    # text already (CLI enum values like "row_flow_v3", or short codes like
+    # "tb"/"lr" that gui.py's own dropdown shows verbatim too).
+    choice_labels: Optional[dict] = None
 
     def to_dict(self):
         return {
@@ -105,6 +112,7 @@ class Field:
             # from iw3/gui.py's own controls -- preferred over this Field's
             # own short, hand-written fallback when a real one exists.
             "choices": FIELD_CHOICES.get(self.name, self.choices),
+            "choice_labels": self.choice_labels,
             "default": self.default,
             "tooltip": FIELD_TOOLTIPS.get(self.name, self.tooltip),
             "visible_if": self.visible_if.to_dict() if self.visible_if else None,
@@ -212,7 +220,10 @@ METHOD_CHOICES = [
 ANAGLYPH_METHOD_CHOICES = ["dubois", "dubois2", "color", "gray", "half-color", "wimmer", "wimmer2"]
 
 STEREO_FORMAT_CHOICES = [
-    "full_sbs", "half_sbs", "full_tb", "half_tb", "cross_eyed", "rgbd", "half_rgbd", "vr180", "anaglyph",
+    # Order matches gui.py's own cbo_stereo_format choices= list exactly
+    # (ADR-093) -- confirmed real order, not alphabetical/grouped by this
+    # GUI's own preference.
+    "full_sbs", "half_sbs", "full_tb", "half_tb", "vr180", "cross_eyed", "rgbd", "half_rgbd", "anaglyph",
     # Export-family formats (ADR-091) -- real selectable entries in the wx
     # GUI's own Stereo Format dropdown, mapping to the real --export/
     # --export-disparity/--debug-depth create_parser() flags. worker.py's
@@ -220,6 +231,28 @@ STEREO_FORMAT_CHOICES = [
     # every other stereo_format value.
     "export", "export_disparity", "debug_depth",
 ]
+
+# The internal values above are this GUI's own snake_case codes (kept
+# unchanged from ADR-082 so worker.py's _apply_stereo_format()/_FORMAT_TO_
+# FLAG mapping, the self-tests, and presets.js's quick presets don't all
+# need renaming) -- but the real wx GUI's own cbo_stereo_format dropdown
+# shows friendly display strings instead (gui.py ~line 2107-2118), most
+# notably "VR90" for what this schema calls "vr180" (confirmed literally in
+# gui.py's own code -- `vr180 = self.cbo_stereo_format.GetValue() == "VR90"`,
+# a real, intentional label choice in the original app, not a typo).
+# Field.to_dict() exposes this as "choice_labels"; renderer.js prefers it
+# over the raw value for the option's displayed text (ADR-093) so the two
+# apps' dropdowns read the same to a user comparing them side by side, even
+# though the values passed between JS and worker.py stay the original codes.
+STEREO_FORMAT_LABELS = {
+    "full_sbs": "Full SBS", "half_sbs": "Half SBS",
+    "full_tb": "Full TB", "half_tb": "Half TB",
+    "vr180": "VR90", "cross_eyed": "Cross Eyed",
+    "rgbd": "RGB-D", "half_rgbd": "Half RGB-D",
+    "anaglyph": "Anaglyph",
+    "export": "Export", "export_disparity": "Export disparity",
+    "debug_depth": "Debug Depth",
+}
 
 # Copied verbatim from create_parser()'s --depth-model choices (utils.py ~4934-4949).
 DEPTH_MODEL_CHOICES = [
@@ -626,7 +659,11 @@ FIELDS: List[Field] = [
     Field(
         name="stereo_format", cli_arg=None, label="Stereo Format",
         widget="select", tab="stereo_generation", value_type="str",
-        choices=STEREO_FORMAT_CHOICES, default="half_sbs",
+        choices=STEREO_FORMAT_CHOICES,
+        # Matches the real wx control's own default: cbo_stereo_format.
+        # SetSelection(0) on a list starting with "Full SBS" (ADR-093) --
+        # NOT "half_sbs" as this schema previously assumed.
+        default="full_sbs", choice_labels=STEREO_FORMAT_LABELS,
         tooltip="The output layout. Maps to several mutually-exclusive iw3 CLI "
                 "flags under the hood (--half-sbs/--tb/--half-tb/--vr180/"
                 "--cross-eyed/--rgbd/--half-rgbd/--anaglyph) -- handled "
@@ -875,9 +912,17 @@ FIELDS: List[Field] = [
     Field(
         name="pad_mode", cli_arg="--pad-mode", label="Padding Mode",
         widget="select", tab="video_filter", value_type="str",
-        choices=["tblr", "tb", "lr", "16:9", "top"], default="tblr",
+        # Real wx control (cbo_pad_mode) choices=["", "tb", "lr", "top",
+        # "16:9"], SetSelection(0) -- the real default is BLANK, not a
+        # literal "tblr" option (there is no such selectable entry; blank
+        # means "use the real --pad-mode CLI default, tblr" -- confirmed in
+        # gui.py's own `if not pad_mode: pad_mode = "tblr"`). Fixed here to
+        # match exactly (ADR-093): blank is_blank in worker.py, so the field
+        # is simply omitted and create_parser()'s own tblr default applies.
+        choices=["", "tb", "lr", "top", "16:9"], default=None,
         enabled_if=Rule(field="pad", op="ne", value=None),
-        tooltip="Which sides Padding is applied to.",
+        tooltip="Which sides Padding is applied to. Blank = all sides "
+                "(tblr), the real default.",
     ),
     Field(
         name="max_output_width", cli_arg="--max-output-width", label="Max Output Width",

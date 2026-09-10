@@ -200,7 +200,7 @@ def build_args(settings):
         setattr(args, dest, _coerce(f.value_type, raw))
 
     _apply_stereo_format(
-        args, settings.get("stereo_format", "half_sbs"), settings.get("anaglyph_method"))
+        args, settings.get("stereo_format", "full_sbs"), settings.get("anaglyph_method"))
     # --metadata is an optional-value flag (nargs="?", const="filename"),
     # not a plain boolean -- the schema models it as a checkbox and this
     # turns that back into the real flag's shape.

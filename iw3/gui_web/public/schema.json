@@ -1,0 +1,174 @@
+{
+  "tabs": [
+    {
+      "key": "stereo_generation",
+      "label": "Stereo Generation"
+    },
+    {
+      "key": "processor",
+      "label": "Processor"
+    }
+  ],
+  "fields": [
+    {
+      "name": "divergence",
+      "label": "3D Strength",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--divergence",
+      "value_type": "float",
+      "choices": [
+        "5.0",
+        "4.0",
+        "3.0",
+        "2.5",
+        "2.0",
+        "1.0"
+      ],
+      "default": 2.0,
+      "tooltip": "Strength of the 3D effect. 0-2 is a reasonable range for most content; higher values push more depth but can increase artifacts near edges.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "method",
+      "label": "Method",
+      "widget": "select",
+      "tab": "stereo_generation",
+      "cli_arg": "--method",
+      "value_type": "str",
+      "choices": [
+        "grid_sample",
+        "backward",
+        "monobw",
+        "monobw_inpaint",
+        "forward",
+        "forward_fill",
+        "forward_splat_fill",
+        "forward_inpaint",
+        "mlbw_l2",
+        "mlbw_l4",
+        "mlbw_l2s",
+        "mlbw_l4s",
+        "mask_mlbw_l2",
+        "mlbw_l2_inpaint",
+        "row_flow",
+        "row_flow_sym",
+        "row_flow_v3",
+        "row_flow_v3_sym",
+        "row_flow_v2",
+        "NULL"
+      ],
+      "default": "row_flow",
+      "tooltip": "The stereo-generation algorithm used to synthesize the second eye's view from the depth map. row_flow_v3 is the modern default for most content.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "convergence",
+      "label": "Convergence Plane",
+      "widget": "combo_editable",
+      "tab": "stereo_generation",
+      "cli_arg": "--convergence",
+      "value_type": "float",
+      "choices": [],
+      "default": 0.5,
+      "tooltip": "Normalized depth position (0-1) that appears at screen distance, with nothing feeling like it's popping out or sinking in at that point.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "stereo_format",
+      "label": "Stereo Format",
+      "widget": "select",
+      "tab": "stereo_generation",
+      "cli_arg": null,
+      "value_type": "str",
+      "choices": [
+        "half_sbs",
+        "full_tb",
+        "half_tb",
+        "cross_eyed",
+        "rgbd",
+        "half_rgbd",
+        "vr180",
+        "anaglyph"
+      ],
+      "default": "half_sbs",
+      "tooltip": "The output layout. Maps to several mutually-exclusive iw3 CLI flags under the hood (--half-sbs/--tb/--half-tb/--vr180/--cross-eyed/--rgbd/--half-rgbd/--anaglyph) -- handled specially in worker.py, not a direct 1:1 CLI arg.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "anaglyph_method",
+      "label": "Anaglyph Method",
+      "widget": "select",
+      "tab": "stereo_generation",
+      "cli_arg": null,
+      "value_type": "str",
+      "choices": [
+        "dubois",
+        "dubois2",
+        "color",
+        "gray",
+        "half-color",
+        "wimmer",
+        "wimmer2"
+      ],
+      "default": "dubois",
+      "tooltip": "Which anaglyph color-filter recipe to use. Only meaningful when Stereo Format is Anaglyph.",
+      "visible_if": {
+        "field": "stereo_format",
+        "op": "eq",
+        "value": "anaglyph"
+      },
+      "enabled_if": null
+    },
+    {
+      "name": "low_vram",
+      "label": "Low VRAM",
+      "widget": "checkbox",
+      "tab": "processor",
+      "cli_arg": "--low-vram",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Disables batch processing so each frame uses less GPU memory at a time. Slower, but avoids out-of-memory crashes/freezes on smaller GPUs or VRAM-heavy methods like forward_splat_fill.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "compile",
+      "label": "torch.compile",
+      "widget": "checkbox",
+      "tab": "processor",
+      "cli_arg": "--compile",
+      "value_type": "bool",
+      "choices": [],
+      "default": false,
+      "tooltip": "Compiles the depth/stereo models for faster inference. First run after a settings change is slower (compile time); needs the CUDA-context ordering this app already preserves (ADR-034/071/075) to combine safely with hardware decode.",
+      "visible_if": null,
+      "enabled_if": null
+    },
+    {
+      "name": "hwaccel",
+      "label": "HWAccel",
+      "widget": "select",
+      "tab": "processor",
+      "cli_arg": "--hwaccel",
+      "value_type": "str",
+      "choices": [
+        "cuda",
+        "cuda_hwdownload",
+        "d3d12va",
+        "d3d11va",
+        "dxva2",
+        "amf"
+      ],
+      "default": null,
+      "tooltip": "Hardware-accelerated video decode. Included in this slice specifically to exercise the hwaccel+compile regression test (ADR-034/071/075) end-to-end through the new GUI.",
+      "visible_if": null,
+      "enabled_if": null
+    }
+  ]
+}

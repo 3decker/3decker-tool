@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3DECKER</title>
+<link rel="stylesheet" href="css/depth-scan.css">
+<link rel="stylesheet" href="css/layout.css">
+</head>
+<body>
+  <div class="app-frame">
+    <div class="app-titlebar">
+      <span class="app-title">3DECKER — iw3 2D to 3D Converter</span>
+      <span class="app-status" id="statusText">Idle</span>
+    </div>
+
+    <div class="app-iopaths">
+      <div class="path-row">
+        <label>Input</label>
+        <input type="text" id="inputPath" readonly placeholder="Choose a video or image...">
+        <button class="btn" id="btnBrowseInput">Browse</button>
+      </div>
+      <div class="path-row">
+        <label>Output</label>
+        <input type="text" id="outputPath" readonly placeholder="Choose where to save...">
+        <button class="btn" id="btnBrowseOutput">Browse</button>
+      </div>
+    </div>
+
+    <div class="app-body">
+      <nav class="app-tabs" id="tabRail"></nav>
+      <main class="app-main" id="tabPanels"></main>
+    </div>
+
+    <div class="app-footer">
+      <button class="btn primary" id="btnStart">Start</button>
+      <button class="btn" id="btnSuspend" disabled>Suspend</button>
+      <button class="btn danger" id="btnCancel" disabled>Cancel</button>
+      <div class="progress-track">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <span class="progress-pct" id="progressPct"></span>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/progress.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

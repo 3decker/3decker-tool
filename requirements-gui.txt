@@ -1,5 +1,7 @@
 wxpython >= 4.0.0
 pywin32; sys_platform == 'win32'
+# iw3/gui_web (ADR-081) -- web-rendered GUI, wx-free, alongside the wx GUI above
+pywebview >= 6.2.1; sys_platform == 'win32'
 windows_capture == 1.4.2; sys_platform == 'win32'
 xlib >= 0.21; sys_platform == 'linux'
 mss >= 10.1.0

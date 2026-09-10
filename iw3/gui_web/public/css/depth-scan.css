@@ -1,0 +1,87 @@
+/* Depth Scan theme tokens -- ported verbatim from iw3/gui.py's DEPTHSCAN_*
+   wx.Colour constants (ADR-080) and the approved mockup's
+   [data-concept="holographic"] block, so this is a genuine color match, not
+   a re-guess.
+
+   Font note: this deliberately uses only system fonts (no Google Fonts CDN)
+   -- this app must keep working with no internet connection, the same as
+   every other bundled tool in this distribution. The mockup's Orbitron/IBM
+   Plex pairing can be bundled as local font files in a later phase for
+   closer visual fidelity; system fonts with a similar geometric/technical
+   feel are the honest Phase-1 substitute. */
+
+:root {
+  --bg: #060a10;
+  --panel: #0a121c;
+  --panel2: #0d1826;
+  --border: #17304a;
+  --fg: #d8f3ff;
+  --fg-dim: #5f8aa8;
+  --accent: #4fd8ff;
+  --accent2: #ff4fd8;
+  --accent-fg: #06121a;
+  --danger: #ff5470;
+  --font-display: "Segoe UI Semibold", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", "IBM Plex Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 13px;
+  background-image:
+    linear-gradient(rgba(79, 216, 255, .06) 1px, transparent 1px) 0 0/100% 24px,
+    linear-gradient(90deg, rgba(79, 216, 255, .06) 1px, transparent 1px) 0 0/24px 100%,
+    var(--bg);
+}
+
+button {
+  font-family: var(--font-body);
+  cursor: pointer;
+}
+
+.btn {
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--fg);
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  box-shadow: 0 0 16px -2px var(--accent);
+}
+.btn.danger {
+  background: transparent;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+input[type="text"], select {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 7px 9px;
+  border-radius: 5px;
+}
+input[type="text"]:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79, 216, 255, .25);
+}
+
+label { color: var(--fg-dim); }

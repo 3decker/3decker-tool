@@ -2791,13 +2791,40 @@ def _fmt_hms_report(sec):
     return f"{sign}{int(m)}:{s:06.3f}"
 
 
+_EMA_REPORT_HEADERS = ["Scene", "Start Time", "Duration (s)", "EMA Buffer", "EMA Decay"]
+
+
+def _scene_ema_report_group_parity(rows):
+    """Assigns each row a 0/1 "group" number that flips every time consecutive
+    rows' (ema_buffer, ema_decay) pair changes -- shared by the HTML and TXT
+    report writers so scenes using identical smoothing settings are visually
+    banded together instead of a plain alternating-row stripe that carries no
+    real information (ADR-077)."""
+    parity = 0
+    prev_key = None
+    out = []
+    for r in rows:
+        key = (r["ema_buffer"], r["ema_decay"])
+        if key != prev_key:
+            parity ^= 1
+            prev_key = key
+        out.append(parity)
+    return out
+
+
 def _write_scene_ema_report_txt(txt_path, rows, scene_count, distinct_count, source_name):
-    """Plain-text sibling of _write_scene_ema_report's CSV (ADR-075), readable in
-    Notepad or any plain text viewer with no HTML rendering: a fixed-width
-    table, column widths sized to the actual data so it stays aligned
-    regardless of row count. Same temp-name + os.replace pattern (CS-IO-001)
-    as the CSV/HTML siblings."""
-    headers = ["Scene", "Start", "Duration", "Buffer", "Decay"]
+    """Plain-text sibling of _write_scene_ema_report's CSV (ADR-075/ADR-077),
+    readable in Notepad or any plain text viewer with no HTML rendering: a
+    fixed-width table, column widths sized to the actual data so it stays
+    aligned regardless of row count. Deliberately mirrors the HTML sibling's
+    title/summary line and column headers word-for-word, and marks the same
+    same-Buffer/Decay row groups the HTML shades (via a leading marker
+    column, plain text's only real equivalent to a background tint) so
+    switching between the two formats feels like the same report, not two
+    different ones. Same temp-name + os.replace pattern (CS-IO-001) as the
+    CSV/HTML siblings."""
+    headers = _EMA_REPORT_HEADERS
+    groups = _scene_ema_report_group_parity(rows)
     cells = [
         [
             str(r["scene_index"]),
@@ -2810,20 +2837,20 @@ def _write_scene_ema_report_txt(txt_path, rows, scene_count, distinct_count, sou
     ]
     widths = [max(len(headers[i]), max((len(row[i]) for row in cells), default=0)) for i in range(5)]
 
-    def fmt_row(values):
+    def fmt_row(values, marker=" "):
         # Scene (column 0) left-justified, the four numeric columns right-justified.
         parts = [values[0].ljust(widths[0])]
         parts += [values[i].rjust(widths[i]) for i in range(1, 5)]
-        return "  ".join(parts)
+        return marker + " " + "  ".join(parts)
 
     lines = [
         f"Auto EMA by Scene Length -- {source_name}",
-        f"scenes: {scene_count}   distinct buffer/decay pairs: {distinct_count}",
+        f"{scene_count} scenes -- {distinct_count} distinct Buffer/Decay values used",
         "",
         fmt_row(headers),
-        "  ".join("-" * w for w in widths),
+        "  " + "  ".join("-" * w for w in widths),
     ]
-    lines += [fmt_row(row) for row in cells]
+    lines += [fmt_row(row, "|" if groups[i] else " ") for i, row in enumerate(cells)]
 
     tmp_path = txt_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8", newline="\r\n") as f:
@@ -2833,22 +2860,30 @@ def _write_scene_ema_report_txt(txt_path, rows, scene_count, distinct_count, sou
 
 
 def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, source_name):
-    """Human-readable sibling of _write_scene_ema_report's plain CSV (ADR-074):
-    a single self-contained HTML file (no network/CDN dependency -- this is an
-    offline desktop tool) with the same rows as a real, sortable, scrollable
-    table, so the numbers are readable without opening the CSV in a separate
-    spreadsheet program. Written after the CSV, same temp-name + os.replace
-    pattern (CS-IO-001) so a reader never sees a half-written file."""
+    """Human-readable sibling of _write_scene_ema_report's plain CSV (ADR-074,
+    revised ADR-077): a single self-contained HTML file (no network/CDN
+    dependency -- this is an offline desktop tool, so every font is a system
+    stack, nothing loaded remotely) with the same rows as a real, sortable,
+    scrollable table, so the numbers are readable without opening the CSV in
+    a separate spreadsheet program. Rows sharing the same (Buffer, Decay) are
+    banded together (see _scene_ema_report_group_parity) instead of a plain
+    even/odd stripe, so runs of scenes using identical smoothing settings are
+    visible at a glance -- the same grouping the TXT sibling marks with a `|`
+    column, so the two formats read as one report. Written after the CSV,
+    same temp-name + os.replace pattern (CS-IO-001) so a reader never sees a
+    half-written file."""
     def esc(s):
         return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace('"', "&quot;"))
 
     fmt_hms = _fmt_hms_report
+    groups = _scene_ema_report_group_parity(rows)
 
     row_html = []
-    for r in rows:
+    for i, r in enumerate(rows):
+        cls = "g1" if groups[i] else "g0"
         row_html.append(
-            "<tr>"
+            f'<tr class="{cls}">'
             f"<td>{esc(r['scene_index'])}</td>"
             f"<td>{esc(fmt_hms(r['start_time_sec']))}</td>"
             f"<td>{esc(f'{float(r['duration_sec']):.3f}')}</td>"
@@ -2857,42 +2892,81 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
             "</tr>"
         )
 
+    header_cells = "".join(f"<th data-n>{esc(h)}</th>" for h in _EMA_REPORT_HEADERS)
+
     html = f"""<!doctype html>
 <html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Auto EMA by Scene Length Report</title>
 <style>
-  :root {{ --bg:#faf9f7; --fg:#2a2622; --border:#ddd8d1; --head-bg:#efece7; --row-alt:#f4f2ef; --accent:#8a6a4f; }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{ --bg:#1c1a18; --fg:#e8e4de; --border:#3a352f; --head-bg:#252220; --row-alt:#221f1c; --accent:#c9a37c; }}
+  :root {{
+    --bg:#faf9f7; --surface:#ffffff; --fg:#2a2622; --fg-dim:#847c70; --border:#e2ddd4;
+    --head-bg:#f2efe9; --row-a:#ffffff; --row-b:#f6f3ee; --accent:#93714c; --accent-fg:#fff9f2;
+    --shadow:0 1px 2px rgba(40,32,20,.06), 0 6px 16px -8px rgba(40,32,20,.12);
   }}
-  body {{ margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 -apple-system,Segoe UI,sans-serif; }}
-  header {{ padding:16px 20px; border-bottom:1px solid var(--border); }}
-  h1 {{ font-size:16px; margin:0 0 4px; }}
-  .summary {{ color:var(--accent); font-size:13px; }}
-  .wrap {{ max-height:calc(100vh - 90px); overflow:auto; }}
-  table {{ border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }}
-  th, td {{ padding:3px 10px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --bg:#17140f; --surface:#1d1a15; --fg:#ece6da; --fg-dim:#9c9284; --border:#3a352c;
+      --head-bg:#252019; --row-a:#1d1a15; --row-b:#232019; --accent:#d3ac7a; --accent-fg:#211a10;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 10px 24px -10px rgba(0,0,0,.5);
+    }}
+  }}
+  * {{ box-sizing:border-box; }}
+  body {{
+    margin:0; padding:28px 20px; background:var(--bg); color:var(--fg);
+    font:14px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }}
+  .card {{
+    max-width:900px; margin:0 auto; background:var(--surface); border:1px solid var(--border);
+    border-radius:12px; box-shadow:var(--shadow); overflow:hidden;
+  }}
+  header {{ padding:18px 22px; border-bottom:1px solid var(--border); }}
+  h1 {{ font-size:17px; font-weight:600; margin:0 0 8px; text-wrap:balance; }}
+  .stats {{ display:flex; gap:8px; flex-wrap:wrap; }}
+  .stat {{
+    font:600 12px/1 -apple-system, "Segoe UI", system-ui, sans-serif; color:var(--accent);
+    background:var(--head-bg); border:1px solid var(--border); border-radius:999px; padding:5px 11px;
+  }}
+  .hint {{ margin-top:8px; color:var(--fg-dim); font-size:12px; }}
+  .wrap {{ max-height:calc(100vh - 170px); overflow:auto; }}
+  table {{
+    border-collapse:collapse; width:100%;
+    font:13.5px/1.3 ui-monospace, "Cascadia Mono", "Segoe UI Mono", "SFMono-Regular", Consolas, monospace;
+    font-variant-numeric:tabular-nums;
+  }}
+  th, td {{ padding:7px 14px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }}
   th:first-child, td:first-child {{ text-align:left; }}
-  th {{ position:sticky; top:0; background:var(--head-bg); cursor:pointer; user-select:none; }}
+  th {{
+    position:sticky; top:0; background:var(--head-bg); cursor:pointer; user-select:none;
+    font:600 11px/1 -apple-system, "Segoe UI", system-ui, sans-serif; letter-spacing:.04em;
+    text-transform:uppercase; color:var(--fg-dim); box-shadow:0 1px 0 var(--border);
+  }}
   th:hover {{ color:var(--accent); }}
-  tbody tr:nth-child(even) {{ background:var(--row-alt); }}
+  tr.g0 td {{ background:var(--row-a); }}
+  tr.g1 td {{ background:var(--row-b); }}
+  tbody tr:hover td {{ background:var(--head-bg); }}
+  th.sorted {{ color:var(--accent); }}
   th.sorted::after {{ content:" \\25BE"; }}
   th.sorted.asc::after {{ content:" \\25B4"; }}
 </style></head>
 <body>
+<div class="card">
 <header>
   <h1>Auto EMA by Scene Length &mdash; {esc(source_name)}</h1>
-  <div class="summary">{scene_count} scenes &middot; {distinct_count} distinct Buffer/Decay values used &middot; click a column header to sort</div>
+  <div class="stats">
+    <span class="stat">{scene_count} scenes</span>
+    <span class="stat">{distinct_count} distinct Buffer/Decay values</span>
+  </div>
+  <div class="hint">Click a column header to sort. Shaded bands mark consecutive scenes sharing the same Buffer/Decay.</div>
 </header>
 <div class="wrap">
 <table id="t">
-<thead><tr>
-  <th data-n>Scene</th><th data-n>Start Time</th><th data-n>Duration (s)</th><th data-n>EMA Buffer</th><th data-n>EMA Decay</th>
-</tr></thead>
+<thead><tr>{header_cells}</tr></thead>
 <tbody>
 {"".join(row_html)}
 </tbody>
 </table>
+</div>
 </div>
 <script>
 (function() {{
@@ -2913,7 +2987,10 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
         if (av > bv) return asc ? 1 : -1;
         return 0;
       }});
-      rows.forEach(function(r) {{ tbody.appendChild(r); }});
+      rows.forEach(function(r, i) {{
+        r.className = (i % 2) ? "g1" : "g0";
+        tbody.appendChild(r);
+      }});
     }});
   }});
 }})();

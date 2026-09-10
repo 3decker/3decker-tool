@@ -5,8 +5,12 @@ window.IW3Progress = (function () {
   var total = 0;
   var current = 0;
   var onDone = null;
+  var onUpdateLog = null;
+  var onUpdateDone = null;
 
   function setOnDone(fn) { onDone = fn; }
+  function setOnUpdateLog(fn) { onUpdateLog = fn; }
+  function setOnUpdateDone(fn) { onUpdateDone = fn; }
 
   function fillEl() { return document.getElementById("progressFill"); }
   function pctEl() { return document.getElementById("progressPct"); }
@@ -35,10 +39,18 @@ window.IW3Progress = (function () {
     } else if (channel === "done") {
       statusEl().textContent = payload.ok ? "Done" : ("Error: " + payload.error);
       if (onDone) onDone(payload);
+    } else if (channel === "update_log") {
+      if (onUpdateLog) onUpdateLog(payload.line);
+    } else if (channel === "update_done") {
+      if (onUpdateDone) onUpdateDone(payload);
     }
   }
 
   window.__iw3PushEvent = handle;
 
-  return { setOnDone: setOnDone };
+  return {
+    setOnDone: setOnDone,
+    setOnUpdateLog: setOnUpdateLog,
+    setOnUpdateDone: setOnUpdateDone,
+  };
 })();

@@ -139,6 +139,68 @@
       document.getElementById("statusText").textContent = "Imported command";
     });
 
+    document.getElementById("btnCheckUpdates").addEventListener("click", async function () {
+      document.getElementById("statusText").textContent = "Checking for updates...";
+      var btn = document.getElementById("btnCheckUpdates");
+      btn.disabled = true;
+      try {
+        var result = await IW3Api.call("check_for_updates");
+        document.getElementById("updateResultsText").textContent = result.message;
+        document.getElementById("updateResultsBox").hidden = false;
+        document.getElementById("statusText").textContent =
+          result.status === "error" ? "Check for Updates failed" :
+          result.status === "up_to_date" ? "Already up to date" :
+          "Updates are available upstream";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    document.getElementById("btnUpdateResultsClose").addEventListener("click", function () {
+      document.getElementById("updateResultsBox").hidden = true;
+    });
+
+    document.getElementById("btnRunUpdate").addEventListener("click", function () {
+      document.getElementById("updateConfirmBox").hidden = false;
+    });
+    document.getElementById("btnUpdateConfirmNo").addEventListener("click", function () {
+      document.getElementById("updateConfirmBox").hidden = true;
+    });
+    document.getElementById("btnUpdateConfirmYes").addEventListener("click", async function () {
+      document.getElementById("updateConfirmBox").hidden = true;
+      document.getElementById("updateLogText").value = "";
+      document.getElementById("updateLogStatus").textContent = "Running...";
+      document.getElementById("btnUpdateLogClose").disabled = true;
+      document.getElementById("updateLogBox").hidden = false;
+      document.getElementById("btnRunUpdate").disabled = true;
+      document.getElementById("btnCheckUpdates").disabled = true;
+      try {
+        await IW3Api.call("run_update");
+      } catch (e) {
+        document.getElementById("updateLogText").value += "\n" + e;
+        document.getElementById("updateLogStatus").textContent = "Error";
+        document.getElementById("btnUpdateLogClose").disabled = false;
+        document.getElementById("btnRunUpdate").disabled = false;
+        document.getElementById("btnCheckUpdates").disabled = false;
+      }
+    });
+    document.getElementById("btnUpdateLogClose").addEventListener("click", function () {
+      document.getElementById("updateLogBox").hidden = true;
+    });
+    IW3Progress.setOnUpdateLog(function (line) {
+      var ta = document.getElementById("updateLogText");
+      ta.value += line;
+      ta.scrollTop = ta.scrollHeight;
+    });
+    IW3Progress.setOnUpdateDone(function (payload) {
+      document.getElementById("updateLogStatus").textContent =
+        payload.ok ? "Update finished successfully" : "Update failed -- see the log above";
+      document.getElementById("btnUpdateLogClose").disabled = false;
+      document.getElementById("btnRunUpdate").disabled = false;
+      document.getElementById("btnCheckUpdates").disabled = false;
+      document.getElementById("statusText").textContent =
+        payload.ok ? "Update finished successfully" : "Update failed";
+    });
+
     document.getElementById("btnBrowseInput").addEventListener("click", async function () {
       var p = await IW3Api.call("browse_input");
       if (p) {

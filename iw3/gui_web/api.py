@@ -16,6 +16,7 @@ from .paths_state import (
 )
 from . import presets_state
 from .command_line import build_cli_command, parse_cli_command
+from .update_manager import check_for_updates, format_result_message, UpdateJob
 
 
 class Api:
@@ -25,6 +26,7 @@ class Api:
         # zero-arg callable returning it once it exists.
         self._window_getter = window_getter
         self._job = None
+        self._update_job = None
 
     @property
     def _window(self):
@@ -68,6 +70,10 @@ class Api:
         return chosen
 
     def start(self, settings):
+        if self._update_job is not None and self._update_job.running:
+            raise RuntimeError(
+                "An update is currently running. Wait for it to finish before starting a "
+                "conversion -- packages/models/source may be mid-update.")
         # Auto-save the session on every Start, matching gui.py's own
         # CONFIG_PATH auto-save-on-close behavior closely enough (this GUI
         # has no equivalent "on window close" hook to reuse, but "state as
@@ -117,3 +123,28 @@ class Api:
 
     def is_running(self):
         return bool(self._job is not None and self._job.running)
+
+    def check_for_updates(self):
+        # Read-only (git fetch + comparison only, never pull/merge/reset --
+        # see iw3/update_check.py's own module docstring). Called
+        # synchronously like browse_input/browse_output -- pywebview already
+        # runs Api methods off the UI thread, confirmed by native file
+        # dialogs (also a blocking call) already working without freezing
+        # the window.
+        result = check_for_updates()
+        return {"status": result["status"], "message": format_result_message(result)}
+
+    def run_update(self):
+        if self._update_job is not None and self._update_job.running:
+            raise RuntimeError("an update is already running")
+        if self._job is not None and self._job.running:
+            raise RuntimeError(
+                "A conversion is currently running. Wait for it to finish, or cancel it, before "
+                "running the updater -- updating packages/models/source while a job is using them "
+                "could break that job.")
+        self._update_job = UpdateJob(self._window)
+        self._update_job.start()
+        return {"started": True}
+
+    def is_updating(self):
+        return bool(self._update_job is not None and self._update_job.running)

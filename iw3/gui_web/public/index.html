@@ -27,6 +27,36 @@
       <span class="toolbar-sep"></span>
       <button class="btn" id="btnCopyCommand">Copy Command</button>
       <button class="btn" id="btnImportCommand">Import Command</button>
+      <span class="toolbar-sep"></span>
+      <button class="btn" id="btnCheckUpdates">Check for Updates</button>
+      <button class="btn" id="btnRunUpdate">Run Update</button>
+    </div>
+
+    <div class="update-box" id="updateResultsBox" hidden>
+      <div id="updateResultsText" class="update-results-text"></div>
+      <div class="import-command-actions">
+        <button class="btn" id="btnUpdateResultsClose">Close</button>
+      </div>
+    </div>
+
+    <div class="update-box" id="updateConfirmBox" hidden>
+      <div class="update-results-text">
+        This runs the real update.bat script and will update your Python packages,
+        downloaded models, and source code together. This can take a while and there is
+        no undo -- don't close this window while it's running. Continue?
+      </div>
+      <div class="import-command-actions">
+        <button class="btn danger" id="btnUpdateConfirmYes">Yes, run it</button>
+        <button class="btn" id="btnUpdateConfirmNo">Cancel</button>
+      </div>
+    </div>
+
+    <div class="update-box" id="updateLogBox" hidden>
+      <textarea id="updateLogText" rows="10" readonly></textarea>
+      <div class="import-command-actions">
+        <span id="updateLogStatus" class="toolbar-label"></span>
+        <button class="btn" id="btnUpdateLogClose" disabled>Close</button>
+      </div>
     </div>
 
     <div class="import-command-box" id="importCommandBox" hidden>

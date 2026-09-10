@@ -579,6 +579,13 @@ PROCESSOR_SLIDER_FIELDS = [
     ("cbo_max_workers", "sld_processor_max_workers", 0, 16, 1, True, None),
 ]
 
+# Guided Light pattern extended to Standalone Tools (ADR-100). Only one clean slider
+# candidate exists across all 7 standalone-tool groups -- Sharpen's own Strength field
+# mirrors the in-pipeline cbo_sharpen_strength exactly (same range, no sentinel).
+STANDALONE_TOOLS_SLIDER_FIELDS = [
+    ("cbo_sharpen_strength_standalone", "sld_sharpen_strength_standalone", 0.25, 1.0, 100, False, None),
+]
+
 
 def _build_stereo_slider(parent, combo, min_val, max_val, multiplier):
     """Constructs a wx.Slider for a Guided Light pilot (ADR-097) numeric field,
@@ -2579,7 +2586,20 @@ class MainFrame(wx.Frame):
               "Recommended: on whenever you're testing new settings on a file for the first time; off for "
               "your actual final conversion run."))
 
-        self.chk_scene_batch = wx.CheckBox(self.grp_video_filter, label=T("Automated Scene Batch"),
+        # Guided Light pattern extended to Video Filter (ADR-100): Automated Scene
+        # Batch is a self-contained, niche, whole-movie automated pipeline (its own
+        # tooltip describes it as such) distinct from the more commonly-used fields
+        # above -- a strong, natural fit for a collapsible pane, same rationale as
+        # Stereo Generation's panes. Unlike those, no slider candidate exists here
+        # (every field in this block is a checkbox, a free-text path, or a discrete
+        # dropdown), so this is a pure declutter-only pane.
+        self.cpn_video_filter_scene_batch = wx.CollapsiblePane(
+            self.grp_video_filter, label=T("Automated Scene Batch"), name="cpn_video_filter_scene_batch")
+        self.cpn_video_filter_scene_batch.Collapse(True)
+        self.cpn_video_filter_scene_batch.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                               self.on_toggled_video_filter_collapsible_pane)
+
+        self.chk_scene_batch = wx.CheckBox(self.cpn_video_filter_scene_batch.GetPane(), label=T("Automated Scene Batch"),
                                            name="chk_scene_batch")
         self.chk_scene_batch.SetValue(False)
         self.chk_scene_batch.SetToolTip(
@@ -2591,24 +2611,24 @@ class MainFrame(wx.Frame):
               "extracted once from the source and reinjected once at the end -- never per-clip. "
               "Input must be a single video file, not a folder."))
 
-        self.lbl_scene_batch_crop = wx.StaticText(self.grp_video_filter, label=T("Scene Batch Crop"))
-        self.txt_scene_batch_crop = wx.TextCtrl(self.grp_video_filter, name="txt_scene_batch_crop")
+        self.lbl_scene_batch_crop = wx.StaticText(self.cpn_video_filter_scene_batch.GetPane(), label=T("Scene Batch Crop"))
+        self.txt_scene_batch_crop = wx.TextCtrl(self.cpn_video_filter_scene_batch.GetPane(), name="txt_scene_batch_crop")
         self.txt_scene_batch_crop.SetValue("")
         self.txt_scene_batch_crop.SetToolTip(
             T("Optional, for Automated Scene Batch. Explicit crop as WxH or WxH:X:Y (X/Y default "
               "to centered). Leave blank to auto-detect letterbox bars once from the whole movie."))
 
-        self.lbl_scene_settings = wx.StaticText(self.grp_video_filter, label=T("Scene Settings File"))
-        self.txt_scene_settings = wx.TextCtrl(self.grp_video_filter, name="txt_scene_settings",
+        self.lbl_scene_settings = wx.StaticText(self.cpn_video_filter_scene_batch.GetPane(), label=T("Scene Settings File"))
+        self.txt_scene_settings = wx.TextCtrl(self.cpn_video_filter_scene_batch.GetPane(), name="txt_scene_settings",
                                               style=wx.TE_READONLY)
         self.txt_scene_settings.SetValue("")
-        self.btn_scene_settings = wx.Button(self.grp_video_filter, label=T("..."))
+        self.btn_scene_settings = wx.Button(self.cpn_video_filter_scene_batch.GetPane(), label=T("..."))
         self.btn_scene_settings.SetToolTip(
             T("Optional, for Automated Scene Batch. JSON file giving per-scene setting overrides "
               "(e.g. a different Divergence for different stretches of the movie). Leave blank to "
               "use the same settings for every scene."))
 
-        self.chk_vr_optimized_merge = wx.CheckBox(self.grp_video_filter,
+        self.chk_vr_optimized_merge = wx.CheckBox(self.cpn_video_filter_scene_batch.GetPane(),
                                                   label=T("VR Optimized Merge"),
                                                   name="chk_vr_optimized_merge")
         self.chk_vr_optimized_merge.SetValue(False)
@@ -2620,7 +2640,7 @@ class MainFrame(wx.Frame):
               "stream with clean regenerated timestamps and AAC 48kHz audio, intended for smoother "
               "VR/headset playback. Slower than the default -- only turn this on if you're actually "
               "delivering to a VR headset workflow."))
-        self.cbo_vr_merge_fps = wx.ComboBox(self.grp_video_filter,
+        self.cbo_vr_merge_fps = wx.ComboBox(self.cpn_video_filter_scene_batch.GetPane(),
                                             choices=["Source FPS", "60", "72", "80", "90", "120"],
                                             name="cbo_vr_merge_fps")
         self.cbo_vr_merge_fps.SetEditable(False)
@@ -2631,8 +2651,8 @@ class MainFrame(wx.Frame):
               "specific forced rate) -- pick a fixed VR headset refresh rate instead if your delivery "
               "target needs one exactly."))
 
-        self.lbl_scene_batch_variant = wx.StaticText(self.grp_video_filter, label=T("Scene Batch Variant"))
-        self.txt_scene_batch_variant = wx.TextCtrl(self.grp_video_filter, name="txt_scene_batch_variant")
+        self.lbl_scene_batch_variant = wx.StaticText(self.cpn_video_filter_scene_batch.GetPane(), label=T("Scene Batch Variant"))
+        self.txt_scene_batch_variant = wx.TextCtrl(self.cpn_video_filter_scene_batch.GetPane(), name="txt_scene_batch_variant")
         self.txt_scene_batch_variant.SetValue("")
         self.txt_scene_batch_variant.SetToolTip(
             T("Optional, for Automated Scene Batch. Reuses the shared, already-done work from a "
@@ -2717,20 +2737,37 @@ class MainFrame(wx.Frame):
         layout.Add((0, 8), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_video_filter), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 6), (i := i + 1, 0))
-        layout.Add(self.chk_scene_batch, (i := i + 1, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_scene_batch_crop, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
-        layout.Add(self.txt_scene_batch_crop, (i, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.lbl_scene_settings, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
-        layout.Add(self.txt_scene_settings, (i, 1), flag=wx.EXPAND)
-        layout.Add(self.btn_scene_settings, (i, 2), flag=wx.EXPAND)
+
+        # Guided Light pane (ADR-100): construction/reparenting happened earlier, up
+        # where these fields are built (search cpn_video_filter_scene_batch). Only the
+        # pane itself (plus its colored indicator square) occupies a row in the OUTER
+        # layout; everything that used to be added directly above now belongs to a
+        # separate GridBagSizer built here for the pane's own GetPane() window.
+        self.pnl_video_filter_scene_batch_dot = wx.Panel(self.grp_video_filter, size=self.FromDIP((10, 10)))
+        self.pnl_video_filter_scene_batch_dot.SetBackgroundColour(wx.Colour(196, 140, 255))
+        pane_header_row = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row.Add(self.pnl_video_filter_scene_batch_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row.Add(self.cpn_video_filter_scene_batch, 1, wx.EXPAND)
+        layout.Add(pane_header_row, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
+
+        pane_layout_scene_batch = wx.GridBagSizer(vgap=4, hgap=4)
+        pane_layout_scene_batch.SetEmptyCellSize((0, 0))
+        k = 0
+        pane_layout_scene_batch.Add(self.chk_scene_batch, (k, 1), (0, 2), flag=wx.EXPAND)
+        pane_layout_scene_batch.Add(self.lbl_scene_batch_crop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        pane_layout_scene_batch.Add(self.txt_scene_batch_crop, (k, 1), (0, 2), flag=wx.EXPAND)
+        pane_layout_scene_batch.Add(self.lbl_scene_settings, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        pane_layout_scene_batch.Add(self.txt_scene_settings, (k, 1), flag=wx.EXPAND)
+        pane_layout_scene_batch.Add(self.btn_scene_settings, (k, 2), flag=wx.EXPAND)
         # chk_scene_batch_auto_ema/cbo_scene_batch_auto_ema_model/btn_scene_batch_auto_ema_edit
         # moved to grp_stereo's own layout (Flicker Reduction group), directly under
         # the Decay Rate/Buffer row -- see docs/ai/AI_DECISIONS.md ADR-057 amendment
         # (2026-09-08, relocation). No longer added here.
-        layout.Add(self.lbl_scene_batch_variant, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
-        layout.Add(self.txt_scene_batch_variant, (i, 1), (0, 2), flag=wx.EXPAND)
-        layout.Add(self.chk_vr_optimized_merge, (i := i + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
-        layout.Add(self.cbo_vr_merge_fps, (i, 2), (0, 1), flag=wx.EXPAND)
+        pane_layout_scene_batch.Add(self.lbl_scene_batch_variant, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        pane_layout_scene_batch.Add(self.txt_scene_batch_variant, (k, 1), (0, 2), flag=wx.EXPAND)
+        pane_layout_scene_batch.Add(self.chk_vr_optimized_merge, (k := k + 1, 1), (0, 1), flag=wx.EXPAND | wx.LEFT, border=14)
+        pane_layout_scene_batch.Add(self.cbo_vr_merge_fps, (k, 2), (0, 1), flag=wx.EXPAND)
+        self.cpn_video_filter_scene_batch.GetPane().SetSizer(pane_layout_scene_batch)
 
         sizer_video_filter = wx.StaticBoxSizer(self.grp_video_filter, wx.VERTICAL)
         sizer_video_filter.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
@@ -3938,6 +3975,8 @@ class MainFrame(wx.Frame):
               "re-encoded, but every pixel is left unchanged) -- useful only for testing.\n"
               "Recommended: 0.5 (default) as a safe starting point, same as the "
               "in-pipeline control."))
+        self.sld_sharpen_strength_standalone = _build_stereo_slider(
+            self.grp_sharpen, self.cbo_sharpen_strength_standalone, 0.25, 1.0, 100)
 
         self.btn_sharpen_run = wx.Button(self.grp_sharpen, label=T("Run"))
         self.btn_sharpen_run.SetToolTip(
@@ -3983,6 +4022,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_sharpen_format, (h, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_sharpen_strength, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_sharpen_strength_standalone, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.sld_sharpen_strength_standalone, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.btn_sharpen_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_sharpen_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_sharpen_clear, (h := h + 1, 3), flag=wx.EXPAND)
@@ -4532,7 +4572,8 @@ class MainFrame(wx.Frame):
         # directly against every Bind() call in this file before assuming so), so the
         # plain functools.partial branch is safe for all of them, no combined-wrapper
         # case needed the way cbo_divergence required above.
-        for _combo_name, _slider_name, _lo, _hi, _mult, _is_int, _extra in DEPTH_BLEND_SLIDER_FIELDS + PROCESSOR_SLIDER_FIELDS:
+        for _combo_name, _slider_name, _lo, _hi, _mult, _is_int, _extra in (
+                DEPTH_BLEND_SLIDER_FIELDS + PROCESSOR_SLIDER_FIELDS + STANDALONE_TOOLS_SLIDER_FIELDS):
             _combo = getattr(self, _combo_name)
             _slider = getattr(self, _slider_name)
             _slider.Bind(wx.EVT_SLIDER, functools.partial(
@@ -4944,6 +4985,7 @@ class MainFrame(wx.Frame):
             self.cpn_stereo_pop_divergence.GetPane(),
             self.cpn_stereo_inpainting_depth.GetPane(),
             self.cpn_stereo_stability_flicker.GetPane(),
+            self.cpn_video_filter_scene_batch.GetPane(),
         ):
             panel.SetBackgroundColour(panel_bg)
 
@@ -5097,6 +5139,30 @@ class MainFrame(wx.Frame):
         nowhere near the field count that motivated panes on Stereo Generation."""
         return [getattr(self, slider_attr) for _, slider_attr, *_ in PROCESSOR_SLIDER_FIELDS]
 
+    def get_video_filter_sliders_and_panes(self):
+        """Same persistence-exclusion purpose as get_stereo_sliders_and_panes(), for
+        the one Guided Light pane added to Video Filter (ADR-100, Automated Scene
+        Batch). No slider candidates exist on this tab -- every field in
+        grp_video_filter is a checkbox, a free-text path, or a discrete dropdown; the
+        one EditableComboBox present (cbo_pad) has a real blank/"off" sentinel value in
+        its own choices list, so it's excluded from slider treatment by the same rule
+        used everywhere else in this pattern."""
+        return [self.cpn_video_filter_scene_batch]
+
+    def get_standalone_tools_sliders_and_panes(self):
+        """Same persistence-exclusion purpose as get_stereo_sliders_and_panes(), for
+        the one Guided Light slider added to Standalone Tools (Sharpen's Strength
+        field). No collapsible panes were added on this tab -- see docs/ai/AI_DECISIONS.md
+        ADR-100 for the judgment call: wrapping each of the 7 standalone utilities
+        (HDR/DV Reinjection, Subtitle Search, Subtitle Mux, Audio Mux, StereoMode
+        Tagging, Sharpen, RIFE Interpolation) in its own pane was considered, since
+        each is already a small, self-contained group -- but each group is already
+        small enough on its own (3-8 fields) that a pane adds a click to reach the one
+        tool actually being used without meaningfully reducing what's on screen,
+        unlike Stereo Generation's ~60 interdependent fields where panes had a real
+        decluttering effect. Not built."""
+        return [self.sld_sharpen_strength_standalone]
+
     def on_toggled_stereo_collapsible_pane(self, event):
         """Guided Light pilot (ADR-097): a collapsible pane toggling changes
         grp_stereo's real content height, which the ScrolledPanel wrapper (Tabbed
@@ -5123,6 +5189,24 @@ class MainFrame(wx.Frame):
             wrap_sizer = self.tab_wrap_stereo.GetSizer()
             if wrap_sizer is not None:
                 self.tab_wrap_stereo.SetMinSize(wrap_sizer.CalcMin())
+        refresh_layouts(self)
+        self._clamp_frame_to_screen()
+        event.Skip()
+
+    def on_toggled_video_filter_collapsible_pane(self, event):
+        """Same fix as on_toggled_stereo_collapsible_pane(), for the one Guided Light
+        pane added to Video Filter (ADR-100) -- tab_video_filter/tab_wrap_video_filter
+        in place of tab_stereo/tab_wrap_stereo. Kept as a separate, near-identical
+        method rather than a parameterized shared one, matching this file's existing
+        convention of explicit per-field/per-tab handlers over abstracted-for-reuse
+        ones (see e.g. the many individual on_selected_index_changed_cbo_* handlers)."""
+        refresh_layouts(self)
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+        else:
+            wrap_sizer = self.tab_wrap_video_filter.GetSizer()
+            if wrap_sizer is not None:
+                self.tab_wrap_video_filter.SetMinSize(wrap_sizer.CalcMin())
         refresh_layouts(self)
         self._clamp_frame_to_screen()
         event.Skip()
@@ -6470,6 +6554,10 @@ class MainFrame(wx.Frame):
                 manager.Unregister(control)
             for control in self.get_processor_sliders_and_panes():
                 manager.Unregister(control)
+            for control in self.get_video_filter_sliders_and_panes():
+                manager.Unregister(control)
+            for control in self.get_standalone_tools_sliders_and_panes():
+                manager.Unregister(control)
             manager.SaveAndUnregister()
             self.reload_preset()
         finally:
@@ -6520,6 +6608,10 @@ class MainFrame(wx.Frame):
             for control in self.get_depth_blend_sliders_and_panes():
                 manager.Unregister(control)
             for control in self.get_processor_sliders_and_panes():
+                manager.Unregister(control)
+            for control in self.get_video_filter_sliders_and_panes():
+                manager.Unregister(control)
+            for control in self.get_standalone_tools_sliders_and_panes():
                 manager.Unregister(control)
             persistent_manager_restore_all(manager, exclude_names)
             persistent_manager_unregister_all(manager)
@@ -7442,6 +7534,10 @@ class MainFrame(wx.Frame):
             manager.Unregister(control)
         for control in self.get_processor_sliders_and_panes():
             manager.Unregister(control)
+        for control in self.get_video_filter_sliders_and_panes():
+            manager.Unregister(control)
+        for control in self.get_standalone_tools_sliders_and_panes():
+            manager.Unregister(control)
         manager.SaveAndUnregister()
         return snapshot_path
 
@@ -7457,6 +7553,10 @@ class MainFrame(wx.Frame):
         for control in self.get_depth_blend_sliders_and_panes():
             manager.Unregister(control)
         for control in self.get_processor_sliders_and_panes():
+            manager.Unregister(control)
+        for control in self.get_video_filter_sliders_and_panes():
+            manager.Unregister(control)
+        for control in self.get_standalone_tools_sliders_and_panes():
             manager.Unregister(control)
         persistent_manager_restore_all(manager, {"cbo_language", "cbo_layout"})
         persistent_manager_unregister_all(manager)
@@ -9022,8 +9122,9 @@ def _self_test_stereo_sliders_sync():
 
 def _self_test_depth_blend_and_processor_sliders_sync():
     """Same regression coverage as _self_test_stereo_sliders_sync, extended to the
-    Guided Light sliders added to Dual-Pass Depth Blend (DEPTH_BLEND_SLIDER_FIELDS)
-    and Processor (PROCESSOR_SLIDER_FIELDS). No field in either table has an
+    Guided Light sliders added to Dual-Pass Depth Blend (DEPTH_BLEND_SLIDER_FIELDS),
+    Processor (PROCESSOR_SLIDER_FIELDS), and Standalone Tools' Sharpen strength
+    (STANDALONE_TOOLS_SLIDER_FIELDS, ADR-100). No field in any of these tables has an
     extra_sync callback, so this omits that half of the original test. No GPU or real
     movie file needed."""
     import iw3.gui as gui_mod
@@ -9034,7 +9135,8 @@ def _self_test_depth_blend_and_processor_sliders_sync():
         frame = gui_mod.MainFrame()
 
         for combo_name, slider_name, lo, hi, multiplier, is_int, extra_sync in (
-                gui_mod.DEPTH_BLEND_SLIDER_FIELDS + gui_mod.PROCESSOR_SLIDER_FIELDS):
+                gui_mod.DEPTH_BLEND_SLIDER_FIELDS + gui_mod.PROCESSOR_SLIDER_FIELDS
+                + gui_mod.STANDALONE_TOOLS_SLIDER_FIELDS):
             combo = getattr(frame, combo_name)
             slider = getattr(frame, slider_name)
 
@@ -9153,6 +9255,77 @@ def _self_test_stereo_collapsible_sections():
         app.Destroy()
 
     print("_self_test_stereo_collapsible_sections: PASS")
+
+
+def _self_test_video_filter_collapsible_section():
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the one
+    Guided Light pane added to Video Filter (ADR-100, Automated Scene Batch) --
+    tab_video_filter/tab_wrap_video_filter/on_toggled_video_filter_collapsible_pane in
+    place of the Stereo Generation equivalents. Exercised in both layout modes, and a
+    switch back to Tabbed, same reasoning as the Stereo Generation test. No GPU or real
+    movie file needed."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    try:
+        gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+        frame = gui_mod.MainFrame()
+        panes = frame.get_video_filter_sliders_and_panes()
+        panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
+        assert len(panes) > 0, "no collapsible panes were built on Video Filter -- nothing to test"
+
+        def toggle_and_check(label, check_wrapper_tracks=None):
+            for pane in panes:
+                before_expanded = pane.IsExpanded()
+                tab_min_before = frame.tab_video_filter.GetSizer().CalcMin()
+                if check_wrapper_tracks is not None:
+                    wrap_min_before = check_wrapper_tracks()
+
+                pane.Collapse(before_expanded)
+                frame.on_toggled_video_filter_collapsible_pane(
+                    wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+                tab_min_after = frame.tab_video_filter.GetSizer().CalcMin()
+                assert tab_min_after != tab_min_before, \
+                    f"{label}: {pane.GetLabel()} toggle did not change tab_video_filter's own content size " \
+                    f"({tab_min_before} -> {tab_min_after})"
+                w, h = tab_min_after
+                assert w > 50 and h > 50, \
+                    f"{label}: tab_video_filter collapsed to near-zero after toggling {pane.GetLabel()}"
+
+                if check_wrapper_tracks is not None:
+                    wrap_min_after = check_wrapper_tracks()
+                    assert wrap_min_after != wrap_min_before, \
+                        f"{label}: wrapper did not track {pane.GetLabel()}'s toggle " \
+                        f"({wrap_min_before} -> {wrap_min_after})"
+                    assert wrap_min_after[1] >= tab_min_after[1], \
+                        f"{label}: wrapper height ({wrap_min_after[1]}) fell below tab_video_filter's own " \
+                        f"requirement ({tab_min_after[1]}) after toggling {pane.GetLabel()} -- would clip"
+
+                pane.Collapse(before_expanded)
+                frame.on_toggled_video_filter_collapsible_pane(
+                    wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+
+        toggle_and_check("Tabbed", check_wrapper_tracks=lambda: frame.tab_wrap_video_filter.GetSizer().CalcMin())
+
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_SINGLE_PAGE)
+        toggle_and_check("Single Page")
+        w, h = frame.pnl_single.GetSizer().CalcMin()
+        assert w > 100 and h > 100, "pnl_single collapsed to near-zero after a Video Filter pane toggle"
+
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_TABS)
+        toggle_and_check("Tabbed (after switch back)",
+                          check_wrapper_tracks=lambda: frame.tab_wrap_video_filter.GetSizer().CalcMin())
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_video_filter_collapsible_section: PASS")
 
 
 def _self_test_zoom_level_persistence():
@@ -11273,6 +11446,7 @@ def _run_self_tests():
     _self_test_stereo_sliders_sync()
     _self_test_depth_blend_and_processor_sliders_sync()
     _self_test_stereo_collapsible_sections()
+    _self_test_video_filter_collapsible_section()
     _self_test_zoom_level_persistence()
     _self_test_zoom_startup_restore()
     _self_test_zoom_live_rescale()

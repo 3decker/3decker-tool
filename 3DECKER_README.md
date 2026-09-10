@@ -27,7 +27,61 @@ project folder.
 This guide covers the main iw3 app (the 3D converter) in enough detail to get
 you started confidently. For the full, detailed explanation of any individual
 setting, **hover your mouse over it in the app** — every control has its own
-tooltip explaining what it does, why you'd want it, and what's recommended.
+tooltip explaining what it does, why you'd want it, and what's recommended. For
+a complete written reference of every setting, see `3DECKER_SETTINGS_GUIDE.md`.
+
+---
+
+## Getting Started — Two Ways to Install
+
+Pick whichever matches your situation. Both end up in the same place: a working
+copy of 3DECKER you launch with `iw3-gui.bat`.
+
+### Option 1: Fresh install — you don't have iw3/nunif set up yet
+
+Use this if you're starting from nothing. One file downloads and sets up
+everything: Python, the source code, the video tools (ffmpeg, MKVToolNix,
+dovi_tool, hdr10plus_tool), and the AI models.
+
+1. Go to [`windows_package/setup.ps1`](https://github.com/3decker/3decker-tool/blob/my-customizations/windows_package/setup.ps1)
+   in the repo, click it, then use the download button (or the **Raw** button →
+   Save As) to save just that one file.
+2. Put it by itself in an empty folder — this becomes your install folder.
+3. Right-click the file → **Properties** → if you see an **Unblock** checkbox,
+   check it → **OK**. (Windows flags anything downloaded from the internet this
+   way; unblocking lets it run.)
+4. Run it: right-click → **Run with PowerShell** (or open a terminal in that
+   folder and run `powershell -ExecutionPolicy Bypass -File .\setup.ps1`).
+5. It automatically detects your NVIDIA GPU and installs the correct PyTorch
+   build for it (works whether you have an RTX 50-series card or an older
+   one) — no need to know which one you need yourself.
+6. This downloads several GB (Python packages + AI models), so it takes a
+   while depending on your connection. When it prints "Setup complete," launch
+   `iw3-gui.bat` from that same folder.
+
+### Option 2: You already have a working iw3/nunif install
+
+Use this if you've already got Python, the video tools, and the AI models set
+up — from the original nunif-windows package, or an earlier version of this
+fork. You don't need to redownload any of that; just switch your existing
+`nunif` folder's source code over to the 3DECKER-customized version:
+
+1. Open `nunif-prompt.bat` (or any terminal) and go into your existing `nunif`
+   folder.
+2. Run:
+   ```
+   git remote add 3decker https://github.com/3decker/3decker-tool.git
+   git fetch 3decker
+   git checkout -b my-customizations 3decker/my-customizations
+   ```
+3. Done — your Python, tools, and downloaded AI models stay exactly where they
+   are; nothing gets re-downloaded. Only the source code (the GUI and all its
+   features) switches over. Launch `iw3-gui.bat` as usual.
+
+This only works if your existing `nunif` folder is a real git clone — true for
+anyone who used the standard nunif-windows install/update process. To go back
+to the plain, non-customized version later, run `git checkout master` in that
+same folder.
 
 ---
 

@@ -41,7 +41,6 @@ from nunif.utils.video import (
 )
 from nunif.utils.video.metadata import parse_time
 from nunif.utils.filename import sanitize_filename
-from nunif.utils.git import get_current_branch
 from nunif.utils.home_dir import ensure_home_dir
 from nunif.utils.autocrop import AutoCrop
 import nunif.utils.pil_io as pil_io
@@ -668,18 +667,10 @@ class IW3App(wx.App):
 
 class MainFrame(wx.Frame):
     def __init__(self):
-        branch_name = get_current_branch()
-        if branch_name is None or branch_name in {"master", "main"}:
-            branch_tag = ""
-        else:
-            branch_tag = f" ({branch_name})"
-
-        python_version_tag = f" ({sys.implementation.name}-{sys.version_info[0]}.{sys.version_info[1]})"
-
         super(MainFrame, self).__init__(
             None,
             name="iw3-gui",
-            title=T("3DECKER — iw3") + branch_tag + python_version_tag,
+            title=T("3DECKER"),
             size=(1000, 840),
             style=(wx.DEFAULT_FRAME_STYLE & ~wx.MAXIMIZE_BOX)
         )

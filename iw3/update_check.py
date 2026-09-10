@@ -83,6 +83,16 @@ def check_for_updates(repo_root=None, git_bin=None):
 
     remote = upstream_ref.split("/", 1)[0]
 
+    # Which repo does the tracked remote actually point at? Determines which wording
+    # format_result_message() uses below -- a real 3DECKER install's upstream is the
+    # 3DECKER repo itself (see ADR-105), so the commits found ARE this fork's own
+    # updates, not something foreign to warn about. Best-effort: a failure here just
+    # means the generic/cautious wording is used, never an error for the whole check.
+    try:
+        remote_url = _run(["remote", "get-url", remote]).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        remote_url = ""
+
     try:
         # Fetch only -- updates remote-tracking refs (e.g. origin/master) only. Never
         # pull/merge/reset/checkout.
@@ -98,7 +108,8 @@ def check_for_updates(repo_root=None, git_bin=None):
         return {"status": "error", "message": f"Failed to compare commits: {_err_text(e)}"}
 
     if count == 0:
-        return {"status": "up_to_date", "local_branch": local_branch, "upstream_ref": upstream_ref}
+        return {"status": "up_to_date", "local_branch": local_branch, "upstream_ref": upstream_ref,
+                "remote_url": remote_url}
 
     try:
         log_output = _run(["log", "--oneline", f"HEAD..{upstream_ref}"]).stdout
@@ -112,6 +123,7 @@ def check_for_updates(repo_root=None, git_bin=None):
         "status": "updates_available",
         "local_branch": local_branch,
         "upstream_ref": upstream_ref,
+        "remote_url": remote_url,
         "count": count,
         "subjects": shown,
         "more": max(0, count - len(shown)),
@@ -138,11 +150,20 @@ def format_result_message(result):
     lines.extend(f"  - {subject}" for subject in result["subjects"])
     if result["more"] > 0:
         lines.append(f"  ... +{result['more']} more")
+
+    if "3decker-tool" in result.get("remote_url", "").lower():
+        # A real 3DECKER install's upstream tracks the 3DECKER repo itself (ADR-105) --
+        # these commits ARE this fork's own updates, not something foreign to warn about.
+        source_line = "These are 3DECKER's own updates (new features, UI changes, or fixes)."
+    else:
+        # This is the original, cautious wording -- correct for a branch actually
+        # tracking plain upstream nunif (e.g. this project's own dev environment).
+        source_line = ("These commits come from the original nunif project, NOT from this fork's own "
+                       "customizations (RIFE, Z-Splat, HDR reinjection, subtitle muxing, StereoMode "
+                       "tagging, etc.) -- they could differ from or conflict with those customizations.")
     lines.extend([
         "",
-        "These commits come from the original nunif project, NOT from this fork's own "
-        "customizations (RIFE, Z-Splat, HDR reinjection, subtitle muxing, StereoMode "
-        "tagging, etc.) -- they could differ from or conflict with those customizations.",
+        source_line,
         "",
         "This is informational only. Nothing has been changed or applied -- no pull, "
         "merge, or reset was performed. Applying an update is a separate, deliberate "
@@ -171,6 +192,7 @@ def _test_check_for_updates():
     base_script = {
         ("rev-parse", "--abbrev-ref", "HEAD"): "my-customizations\n",
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): "origin/master\n",
+        ("remote", "get-url", "origin"): "https://github.com/nagadomi/nunif.git\n",
         ("fetch", "origin"): "",
     }
 
@@ -195,6 +217,23 @@ def _test_check_for_updates():
     assert result["more"] == 0
     msg = format_result_message(result)
     assert "3 new commit(s)" in msg and "Fix bug" in msg and "informational only" in msg
+    # Default/dev-environment remote (plain upstream nunif) keeps the original,
+    # cautious "not from this fork" wording (ADR-105).
+    assert "NOT from this fork's own customizations" in msg
+    assert "3DECKER's own updates" not in msg
+
+    # 2b. Same scenario, but the tracked remote IS the 3DECKER repo -- a real install's
+    # normal case. Message must say these are 3DECKER's own updates, not the cautious
+    # "foreign commits" wording (ADR-105).
+    script_3decker = dict(script)
+    script_3decker[("remote", "get-url", "origin")] = "https://github.com/3decker/3decker-tool.git\n"
+    with patch("subprocess.run", side_effect=fake_run_factory(script_3decker)):
+        result_3decker = check_for_updates(repo_root="dummy_repo", git_bin="git")
+    assert result_3decker["remote_url"] == "https://github.com/3decker/3decker-tool.git"
+    msg_3decker = format_result_message(result_3decker)
+    assert "3DECKER's own updates" in msg_3decker
+    assert "NOT from this fork's own customizations" not in msg_3decker
+    assert "informational only" in msg_3decker
 
     # 3. Updates available with truncation ("+N more").
     script = dict(base_script)
@@ -243,7 +282,7 @@ def _test_check_for_updates():
 
     # 7. Never invokes a write/destructive git subcommand -- confirmed by asserting
     # only the expected read-only verbs appear across every call made in this test.
-    allowed_verbs = {"rev-parse", "fetch", "rev-list", "log"}
+    allowed_verbs = {"rev-parse", "fetch", "rev-list", "log", "remote"}
     forbidden_verbs = {"pull", "merge", "reset", "checkout", "push", "rebase", "clean"}
     seen_verbs = set()
 

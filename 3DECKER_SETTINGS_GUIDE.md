@@ -131,38 +131,47 @@ taller window.
 reasonable middle ground on a high-resolution display.
 **Note:** applies immediately — no restart needed.
 
-#### Check for Updates
+#### Check for 3DECKER Updates
 
-**What it does:** Checks whether the original upstream nunif project
-(github.com/nagadomi/nunif) has new commits that aren't in this fork yet, and
-shows you what they are.
-**Pros:** lets you see what's changed upstream without any risk to your setup
-or this session's own customizations (RIFE, Z-Splat, HDR reinjection,
-subtitle muxing, StereoMode tagging, etc.).
-**Cons:** read-only — runs `git fetch` plus a comparison only. It never runs
-pull/merge/reset, so nothing is ever applied automatically; this button
-cannot update anything by itself, and upstream commits could conflict with
-this fork's own customizations if applied later.
-**Recommended:** safe to click any time — it only reads and reports, never
-changes anything.
+**What it does:** Checks whether this fork's own repo
+(github.com/3decker/3decker-tool) has new commits that aren't in your install
+yet, and shows you what they are. This is also checked silently once, on
+every app startup, so you'll get a quiet heads-up if an update is waiting
+without having to click anything.
+**Pros:** always checks this fork specifically, regardless of how your
+install's own git remote happens to be configured — no ambiguity about which
+project it's looking at.
+**Cons:** read-only by itself — runs `git fetch` plus a comparison only. It
+never runs pull/merge/reset on its own; nothing changes on disk until you
+choose to install.
+**Recommended:** safe to click any time — it only reads and reports.
 
-#### Run Update
+#### Install Update Now (in the Check for 3DECKER Updates popup)
 
-**What it does:** Actually runs the real `update.bat` script from inside the
-app — the same script you'd otherwise have to find and double-click outside
-the app — updating Python packages, downloaded models, and the source code
-together in one operation.
-**Why it's separate from Check for Updates:** that button only checks and
-reports what's different upstream and changes nothing on disk; this button
-actually applies an update to real files.
+**What it does:** Shown only when a 3DECKER update was actually found. Runs
+the real update script from inside the app — updating Python packages,
+downloaded models, and the source code together in one operation, always
+pulling from this fork's own repo specifically.
 **Cons:** a real, somewhat time-consuming operation (package downloads, model
 downloads, a source pull) with no undo — a confirmation dialog appears before
-anything runs, and, as Check for Updates already warns, an upstream source
-update could in principle conflict with this fork's own customizations.
-Disabled while a conversion (or other background job) is running, so
-packages/source can't change out from under a job that's using them.
-**Recommended:** use it when you actually want to apply an update you already
-know about (e.g. from Check for Updates) — not as a routine/automatic click.
+anything runs. Disabled while a conversion (or other background job) is
+running, so packages/source can't change out from under a job that's using
+them.
+**Recommended:** use it once you know an update is available and you're not
+mid-conversion.
+
+#### Check for Nagadomi Updates / Install Update Now
+
+**What it does:** The same pair of checks and install, but hardcoded to the
+original upstream nunif project (github.com/nagadomi/nunif) instead of this
+fork. Lets you see, and optionally pull in, upstream changes separately from
+3DECKER's own updates.
+**Cons:** upstream commits could conflict with this fork's own customizations
+(RIFE, Z-Splat, HDR reinjection, subtitle muxing, StereoMode tagging, etc.) —
+this is a maintainer-facing/advanced check, not part of normal day-to-day use.
+**Recommended:** most users can ignore this pair entirely and only use the
+3DECKER ones above; this exists mainly for keeping track of upstream nunif
+development.
 
 ---
 

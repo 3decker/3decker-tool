@@ -108,11 +108,13 @@ conversion process again. You'll find these under the **Standalone Tools** tab.
   in-between frames, raising the frame rate (for example, 24fps up to 48fps).
   Like Sharpen, this works on a video you've already converted, so you can add
   smoother motion after the fact without redoing the conversion.
-- **Run Update** (top toolbar, not this tab) — actually applies the latest
-  update (new packages, AI models, and source code together) from inside the
-  app, with a confirmation prompt first. A separate, read-only **Check for
-  Updates** button lets you see if an update is available without changing
-  anything.
+- **Check for 3DECKER Updates / Check for Nagadomi Updates** (top toolbar, not
+  this tab) — two separate, clearly-labeled checks: one for this fork's own
+  repo (what you want almost all the time), one for the original nunif
+  project. Each is read-only by itself — it just tells you if something new
+  is available — and if it finds something, shows its own **Install Update
+  Now** button right in the popup to actually apply it (new packages, AI
+  models, and source code together), with a confirmation prompt first.
 
 Every tool above works on a *copy* — none of them ever modify your original
 files. Each has its own log box (with a Clear button) showing exactly what

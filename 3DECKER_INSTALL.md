@@ -80,7 +80,7 @@ video tools (ffmpeg, MKVToolNix, dovi_tool, hdr10plus_tool), and the AI models.
 5. Run `setup.bat` from there — same as step 3 above. It'll detect the source
    is already present and skip straight to installing everything around it.
    One tradeoff: a ZIP download has no git history, so later updates and the
-   in-app "Run Update" button won't be able to auto-pull new versions — if you
+   in-app update buttons won't be able to auto-pull new versions — if you
    want that, use the direct two-file method instead.
 
 If something fails partway through (a download hiccup, etc.), it's safe to just
@@ -121,9 +121,14 @@ same folder.
   setup step beyond what `setup.ps1` installs automatically. See
   `windows_package/docs/torch_compile.md` for exactly what's needed.
 - **Updating later:** if you installed via a real git clone (Option 1's direct
-  `setup.ps1` route, or Option 2), the in-app **Run Update** button (top
-  toolbar) pulls the latest source. From a ZIP-download install, delete the
-  `nunif` folder and re-run `setup.ps1` to get a real git clone instead.
+  `setup.ps1` route, or Option 2), use the two update buttons in the app's top
+  toolbar: **Check for 3DECKER Updates** checks this fork's own repo (what you
+  want almost all the time), and **Check for Nagadomi Updates** checks the
+  original nunif project separately. Each one, if it finds something new,
+  shows an **Install Update Now** button right in the popup. From a
+  ZIP-download install, delete the `nunif` folder and re-run `setup.ps1` to
+  get a real git clone instead — a ZIP has no git history, so neither update
+  button can pull new versions into it.
 - **Uninstalling:** delete the entire install folder. Nothing this project
   installs lives anywhere else on your system.
 

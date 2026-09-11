@@ -22,6 +22,15 @@ from os import path
 # "+N more" note.
 MAX_LISTED_COMMITS = 20
 
+# THIS fork's own repo/branch, hardcoded -- used by format_result_message() (ADR-105)
+# to tell whether a found update is 3DECKER's own, and as the explicit, never-inferred
+# target for the separate "Install Update Now" action (ADR-108) in gui.py's
+# _find_3decker_update_bat()/on_click_install_3decker_update. Must be kept in sync with
+# the identical literal strings in windows_package/update-3decker.bat -- there's no
+# cheap way to inject a Python constant into a static .bat file.
+THIS_FORK_REPO_URL = "https://github.com/3decker/3decker-tool.git"
+THIS_FORK_BRANCH = "my-customizations"
+
 
 def _find_git():
     """Resolve the bundled MinGit binary the same way iw3/utils.py resolves ffmpeg/

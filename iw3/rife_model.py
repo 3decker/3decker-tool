@@ -237,6 +237,21 @@ def load_rife_model(tier, device):
         torch.cuda.set_device(device)
 
     rife_hd = importlib.import_module("train_log.RIFE_HDv3")
+    # Real bug, confirmed live (ADR-119): the official RIFE_HDv3.py hardcodes its
+    # OWN module-level `device = torch.device("cuda" if torch.cuda.is_available()
+    # else "cpu")`, evaluated once at import time -- and Model.__init__ /
+    # Model.device() (both called below) move the whole flownet onto THAT global,
+    # not onto whatever device THIS function's own caller actually requested.
+    # torch.cuda.is_available() is True on any CUDA-equipped machine regardless of
+    # whether the caller asked for CPU (--gpu -1) -- so a "CPU-only" run silently
+    # tried to use CUDA anyway. On a machine where the GPU is already heavily
+    # loaded by something else, this caused a real, confirmed hang (a --gpu -1 run
+    # stalled identically to a --gpu 0 run under heavy concurrent GPU load, even
+    # though it should never have touched the GPU at all). Override the module's
+    # own device global BEFORE constructing Model() so every self.device() call
+    # inside it (in __init__ and the explicit one below) moves the model to the
+    # device THIS function was actually asked for.
+    rife_hd.device = device
     model = rife_hd.Model()
     model.load_model(train_log_dir, -1)
     model.eval()

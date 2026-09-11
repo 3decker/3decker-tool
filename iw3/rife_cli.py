@@ -491,6 +491,73 @@ def _simulate_pairs(ratio, n_pairs):
     return all_timesteps, frames_out
 
 
+def _test_rife_cpu_device_not_overridden_by_cuda_availability():
+    """Regression test for a real, confirmed-live bug (2026-09-11, see
+    docs/ai/AI_DECISIONS.md ADR-119): the official, downloaded RIFE_HDv3.py
+    hardcodes its OWN module-level `device = torch.device("cuda" if
+    torch.cuda.is_available() else "cpu")`, and Model.__init__/Model.device()
+    move the flownet onto THAT global -- not onto whatever device
+    rife_model.load_rife_model()'s own caller actually requested. On a
+    CUDA-equipped machine, torch.cuda.is_available() is True regardless of a
+    caller asking for CPU (--gpu -1), so a "CPU-only" run silently tried to use
+    CUDA anyway -- confirmed live as a real hang when the GPU was already heavily
+    loaded by something else (a --gpu -1 run stalled identically to a --gpu 0 run,
+    even though it should never have touched the GPU at all).
+
+    Synthetic (CS-TEST-001): builds a fake `train_log.RIFE_HDv3` module shaped
+    exactly like the real one for this specific bug -- a module-level `device`
+    global that ALWAYS resolves to "cuda" (simulating torch.cuda.is_available()
+    being True), and a `Model` class whose device()/load_model() read that same
+    module global the same way the real file does. No real GPU, network, or model
+    weights needed -- this isolates the device-propagation bug from everything
+    else load_rife_model() does."""
+    import types
+    from unittest.mock import patch
+    from . import rife_model as rm
+
+    fake_module = types.ModuleType("train_log.RIFE_HDv3")
+    fake_module.device = torch.device("cuda")  # simulates torch.cuda.is_available() == True
+
+    class FakeModel:
+        def __init__(self):
+            self.placed_device = None
+            self.device()  # real Model.__init__ calls self.device() unconditionally
+
+        def device(self):
+            # Real RIFE_HDv3.Model.device(): self.flownet.to(device) -- reads the
+            # MODULE global, not a device this class was ever given directly.
+            self.placed_device = fake_module.device
+
+        def load_model(self, path, rank=0):
+            pass  # no real weights needed for this test
+
+        def eval(self):
+            pass
+
+    fake_module.Model = FakeModel
+
+    # load_rife_model() actively clears any existing "train_log"/"train_log.*"
+    # sys.modules entries and does a real importlib.import_module() call -- so
+    # this test mocks import_module itself (returning the fake module for
+    # "train_log.RIFE_HDv3", real behavior for anything else) rather than
+    # pre-seeding sys.modules, which load_rife_model() would just delete.
+    real_import_module = rm.importlib.import_module
+
+    def fake_import_module(name, *args, **kwargs):
+        if name == "train_log.RIFE_HDv3":
+            return fake_module
+        return real_import_module(name, *args, **kwargs)
+
+    with patch.object(rm, "ensure_rife_model", lambda tier, show_progress=True: "/fake/train_log"), \
+         patch.object(rm.importlib, "import_module", fake_import_module):
+        model = rm.load_rife_model("rife_425", torch.device("cpu"))
+        assert model.placed_device == torch.device("cpu"), (
+            f"load_rife_model(device=cpu) placed the model on {model.placed_device} instead -- "
+            f"the module-level device global was not overridden before Model() construction")
+
+    print("_test_rife_cpu_device_not_overridden_by_cuda_availability: PASS")
+
+
 def _test_rife_multiplier_timesteps():
     """Regression test for docs/ai/AI_DECISIONS.md ADR-049's simple-multiplier
     scheduling math (2x/3x/4x): confirms _resolve_target_fps computes
@@ -734,6 +801,7 @@ def _test_rife_video_codec_options():
 
 def _run_self_tests():
     _test_ensure_rife_model_downloads_model_package()
+    _test_rife_cpu_device_not_overridden_by_cuda_availability()
     _test_rife_multiplier_timesteps()
     _test_rife_target_fps_scheduling()
     _test_rife_fps_validation()

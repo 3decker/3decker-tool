@@ -207,13 +207,15 @@ def _run_rife_interpolation(output_path, args):
     rife_model = getattr(args, "rife_model", None) or "rife_425"
     rife_multiplier = getattr(args, "rife_multiplier", None)
     rife_target_fps = getattr(args, "rife_target_fps", None)
+    rife_gpu = getattr(args, "rife_gpu", 0)
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
 
     base, ext = path.splitext(str(output_path))
     interpolated_path = f"{base}_rife{ext}"
     cmd = [sys.executable, "-m", "iw3.rife_cli",
            "-i", str(output_path), "-o", interpolated_path,
-           "--rife-model", rife_model]
+           "--rife-model", rife_model,
+           "--gpu", str(rife_gpu)]
     if rife_target_fps is not None:
         cmd += ["--rife-target-fps", str(rife_target_fps)]
     elif rife_multiplier is not None:
@@ -5052,6 +5054,12 @@ def create_parser(required_true=True):
                               "a simple multiplier (e.g. 60 to go from a 24fps source to 60fps). Must be "
                               "higher than the source's own frame rate. Mutually exclusive with "
                               "--rife-multiplier."))
+    parser.add_argument("--rife-gpu", type=int, default=0,
+                        help=("which GPU index (or -1 for CPU) runs --rife-interpolate's own RIFE model. "
+                              "Independent of --gpu/the main conversion's own device -- RIFE always runs as "
+                              "a separate subprocess after the main conversion's output is fully written, so "
+                              "it can target a different device. Same -1-means-CPU convention as "
+                              "iw3.rife_cli's own --gpu option."))
     parser.add_argument("--waifu2x-upscale", action="store_true",
                         help=("after conversion finishes, run the finished output through waifu2x (a "
                               "separate, dedicated AI upscaler bundled with this app) as one extra step. "

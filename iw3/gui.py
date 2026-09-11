@@ -3143,6 +3143,36 @@ class MainFrame(wx.Frame):
               "it never removes them.\n"
               "Recommended: 60 for standard smooth-motion displays, or match your target display/editing "
               "timeline's exact refresh rate."))
+        self.lbl_rife_gpu = wx.StaticText(self.grp_postprocess, label=T("RIFE Device"))
+        self.cbo_rife_gpu = wx.ComboBox(self.grp_postprocess, name="cbo_rife_gpu")
+        self.cbo_rife_gpu.SetEditable(False)
+        cuda_device_names = _query_nvidia_smi_gpu_names()
+        if cuda_device_names is not None:
+            for i, device_name in enumerate(cuda_device_names):
+                self.cbo_rife_gpu.Append(f"{i}:{device_name}", i)
+        elif torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                device_name = torch.cuda.get_device_properties(i).name
+                self.cbo_rife_gpu.Append(f"{i}:{device_name}", i)
+        elif mps_is_available():
+            self.cbo_rife_gpu.Append("MPS", 0)
+        elif xpu_is_available():
+            for i in range(torch.xpu.device_count()):
+                device_name = torch.xpu.get_device_name(i)
+                self.cbo_rife_gpu.Append(f"{i}:{device_name}", i)
+        self.cbo_rife_gpu.Append("CPU", -1)
+        self.cbo_rife_gpu.SetSelection(0)
+        self.cbo_rife_gpu.SetToolTip(
+            T("Which GPU (or CPU) runs this RIFE interpolation step -- same convention as the "
+              "Standalone RIFE Tool's own GPU field, independent of the Processor tab's Device "
+              "selector: RIFE always runs as a separate process after the main conversion is fully "
+              "done, so it can target a different device if you want.\n"
+              "Con: CPU works without a compatible graphics card but is dramatically slower -- only "
+              "use it if you have no GPU available, or are deliberately running this alongside "
+              "another GPU job and want to keep them on separate devices.\n"
+              "Recommended: your main GPU (the first entry) unless you have a specific reason to "
+              "pick otherwise."))
+
         self.cbo_rife_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_mode)
         self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
         self.update_rife_interpolate()
@@ -3163,6 +3193,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_rife_model, (j := j + 1, 0), flag=wx.EXPAND | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_mode, (j, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_target_fps, (j, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_gpu, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.cbo_rife_gpu, (j, 1), flag=wx.EXPAND)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -5940,6 +5972,7 @@ class MainFrame(wx.Frame):
         enabled = self.chk_rife_interpolate.GetValue()
         self.cbo_rife_model.Enable(enabled)
         self.cbo_rife_mode.Enable(enabled)
+        self.cbo_rife_gpu.Enable(enabled)
         self.txt_rife_target_fps.Enable(enabled and self.cbo_rife_mode.GetValue() == "Custom FPS...")
 
     def on_changed_chk_rife_interpolate(self, event):
@@ -6374,6 +6407,7 @@ class MainFrame(wx.Frame):
             waifu2x_upscale_target=self.cbo_waifu2x_target.GetValue(),
             rife_interpolate=self.chk_rife_interpolate.GetValue(),
             rife_model=self.cbo_rife_model.GetValue(),
+            rife_gpu=int(self.cbo_rife_gpu.GetClientData(self.cbo_rife_gpu.GetSelection())),
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
             scene_detect=scene_detect,
@@ -7363,6 +7397,18 @@ class MainFrame(wx.Frame):
 
         self.chk_rife_interpolate.SetValue(bool(args.rife_interpolate))
         _apply_combo_value(self.cbo_rife_model, args.rife_model)
+        # cbo_rife_gpu is a non-editable ComboBox keyed by integer ClientData (device
+        # index, or -1 for CPU) -- not a plain string value _apply_combo_value can
+        # match, so find the matching entry directly. Falls back to the first entry
+        # (index 0) if the saved value doesn't match any currently-available device
+        # (e.g. a GPU index that no longer exists on this machine).
+        rife_gpu_value = getattr(args, "rife_gpu", 0)
+        for i in range(self.cbo_rife_gpu.GetCount()):
+            if int(self.cbo_rife_gpu.GetClientData(i)) == rife_gpu_value:
+                self.cbo_rife_gpu.SetSelection(i)
+                break
+        else:
+            self.cbo_rife_gpu.SetSelection(0)
         if args.rife_target_fps is not None:
             _apply_combo_value(self.cbo_rife_mode, "Custom FPS...")
             self.txt_rife_target_fps.SetValue(str(args.rife_target_fps))

@@ -4609,37 +4609,43 @@ class MainFrame(wx.Frame):
         self.sep_update = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
         self.btn_check_updates = wx.Button(self.pnl_preset, label=T("Check for 3DECKER Updates"))
         self.btn_check_updates.SetToolTip(
-            T("What it's for: checks whether the original upstream nunif project "
-              "(github.com/nagadomi/nunif) has new commits that aren't in this fork yet, and shows you "
-              "what they are.\n"
-              "How it helps: lets you see what's changed upstream without any risk to your setup or "
-              "this session's own customizations (RIFE, Z-Splat, HDR reinjection, subtitle muxing, "
-              "StereoMode tagging, etc.).\n"
-              "Con: read-only -- runs 'git fetch' plus a comparison only. It NEVER runs pull/merge/reset, "
-              "so nothing is ever applied automatically; this button cannot update anything by itself, "
-              "and upstream commits could conflict with this fork's own customizations if applied later.\n"
-              "Recommended: safe to click any time -- it only reads and reports, never changes anything."))
+            T("What it's for: checks whether 3DECKER's own repo (github.com/3decker/3decker-tool) has "
+              "new commits that aren't in your local copy yet -- new features, UI changes, fixes -- and "
+              "shows you what they are. On a real 3DECKER install this always means this fork's own "
+              "updates specifically, not the original nunif project's.\n"
+              "How it helps: lets you see what's new, and (ADR-108) the result popup has its own "
+              "'Install Update Now' button right there, so you can go straight from seeing what's new "
+              "to actually installing it -- no separate step needed.\n"
+              "Con: on its own, just checking is read-only -- runs 'git fetch' plus a comparison only, "
+              "never pull/merge/reset by itself; nothing is applied unless you click Install Update "
+              "Now on the popup, or use Run Update separately.\n"
+              "Recommended: safe to click any time -- checking alone never changes anything."))
 
         # run update (applies the real update.bat -- see docs/ai/AI_DECISIONS.md
         # ADR-069, the direct follow-up to ADR-035's deliberately-deferred
-        # "applying an update" scope)
+        # "applying an update" scope. ADR-108 split "Install Update Now" -- always
+        # 3DECKER's own repo, hardcoded -- into its own action reachable from the
+        # Check for 3DECKER Updates popup; THIS button is intentionally left running
+        # the original, general-purpose update.bat unchanged, which pulls from
+        # whatever this install's own git connection is actually configured to.)
         self.btn_run_update = wx.Button(self.pnl_preset, label=T("Run Update"))
         self.btn_run_update.SetToolTip(
-            T("What it's for: actually runs the real update.bat script from inside the app -- the "
-              "same script you'd otherwise have to find and double-click outside the app -- to "
-              "update Python packages, downloaded models, and the source code together, all in "
-              "one real operation.\n"
-              "Why it's separate from Check for Updates: that button only checks and reports what's "
-              "different upstream and changes nothing on disk; this button actually applies an "
-              "update to real files.\n"
+            T("What it's for: runs the original update.bat script from inside the app -- the same "
+              "script you'd otherwise have to find and double-click outside the app -- to update "
+              "Python packages, downloaded models, and the source code together, all in one real "
+              "operation. This is the general nunif/iw3 updater this app has always had, unchanged.\n"
+              "Which source it pulls from: whatever this install's own git connection is actually set "
+              "up to track -- for a normal 3DECKER install that's this fork's own repo (same place "
+              "Check for 3DECKER Updates checks), same as clicking Install Update Now.\n"
+              "If you specifically want 3DECKER's own updates: 'Install Update Now' on the Check for "
+              "3DECKER Updates popup (ADR-108) does the identical packages+models+source update, "
+              "always targeting 3DECKER's repo explicitly regardless of this install's own git setup -- "
+              "prefer that button if you want to be certain which repo is used.\n"
               "Con: a real, somewhat time-consuming operation (package downloads, model downloads, "
-              "a source pull) with no undo -- a confirmation dialog appears before anything runs, "
-              "and, as Check for Updates already warns, an upstream source update could in "
-              "principle conflict with this fork's own customizations.\n"
+              "a source pull) with no undo -- a confirmation dialog appears before anything runs.\n"
               "Disabled while a conversion (or other background job) is running, so packages/source "
               "can't change out from under a job that's using them.\n"
-              "Recommended: use it when you actually want to apply an update you already know about "
-              "(e.g. from Check for Updates) -- not as a routine/automatic click."))
+              "Recommended: use it when you actually want to apply an update you already know about."))
 
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.lbl_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
@@ -11666,7 +11672,7 @@ def _self_test_run_update_button():
         frame = gui_mod.MainFrame()
         assert frame.btn_run_update.GetLabelText() == T("Run Update")
         tip = frame.btn_run_update.GetToolTip().GetTip()
-        assert "update.bat" in tip and "Check for Updates" in tip, tip
+        assert "update.bat" in tip and "Install Update Now" in tip, tip
         assert frame.btn_run_update.IsEnabled(), "must be enabled by default (nothing running)"
 
         gui_mod.wx.MessageDialog = _FakeConfirmDialog

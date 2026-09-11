@@ -1,7 +1,14 @@
 @echo off
 
 setlocal enabledelayedexpansion
-call "%~dp0\setenv.bat"
+@rem This script lives in windows_package\, two levels below the real distribution
+@rem root (root\nunif\windows_package\) -- unlike update.bat (which lives AT the
+@rem root, where %~dp0\setenv.bat is correct), a bare %~dp0\setenv.bat here would
+@rem silently call THIS folder's own template copy of setenv.bat, which computes
+@rem ROOT_DIR/NUNIF_DIR/MINGIT_DIR etc. relative to windows_package\ instead of the
+@rem real root -- pointing PATH at a git\cmd that doesn't exist there and failing
+@rem with "'git' is not recognized" (confirmed live, this was a real, shipped bug).
+call "%~dp0..\..\setenv.bat"
 
 @rem check to make sure the variables are available
 if "%ROOT_DIR%"=="" goto :on_error
@@ -25,8 +32,9 @@ if %ERRORLEVEL% neq 0 (
   if %ERRORLEVEL% neq 0 goto :on_error
 )
 
-@rem update update-installer.bat (same as update.bat's own convention)
-copy /y "%NUNIF_DIR%\windows_package\update-installer.bat" "%~dp0\update-installer.bat"
+@rem update update-installer.bat (same as update.bat's own convention) -- must land
+@rem at the real root, not this folder, same %~dp0 reasoning as above.
+copy /y "%NUNIF_DIR%\windows_package\update-installer.bat" "%~dp0..\..\update-installer.bat"
 
 echo Installing Python Packages...
 python -m pip install --no-cache-dir --upgrade pip

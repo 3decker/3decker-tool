@@ -14,6 +14,8 @@ layered on top on the `my-customizations` branch.
 
 ![3DECKER toolbar](docs/screenshots/toolbar.png)
 ![3DECKER main window](docs/screenshots/panels.png)
+![3DECKER with collapsible sections expanded, part 1](docs/screenshots/panels-expanded-1.png)
+![3DECKER with collapsible sections expanded, part 2](docs/screenshots/panels-expanded-2.png)
 
 Everything below this point is the original upstream project's own README,
 covering the underlying source code, dependencies, and license notes — still

@@ -7,6 +7,7 @@ TODO
 /logs
 tmp
 *.png
+!/docs/screenshots/*.png
 *.jpg
 *.gif
 *.mp4

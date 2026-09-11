@@ -6350,7 +6350,15 @@ class MainFrame(wx.Frame):
             start_time=start_time,
             end_time=end_time,
         )
-        args = parser.parse_args()
+        # Explicit empty arg list, not the implicit sys.argv[1:] default: every real
+        # value here already comes from the set_defaults(**kwargs) call above (built
+        # from the GUI's current widget state) -- this call's only job is to resolve
+        # those defaults into a real Namespace, never to also consume this process's
+        # actual argv. A real launch (pythonw -m iw3.gui, no extra args) never
+        # exposed this, but running under `--self-test` does: that flag is real
+        # process argv this parser doesn't recognize, causing a genuine argparse
+        # SystemExit(2) from deep inside this widely-shared method (ADR-109).
+        args = parser.parse_args([])
         if not skip_set_state:
             set_state_args(
                 args,
@@ -7001,7 +7009,14 @@ class MainFrame(wx.Frame):
         if gui_args is None:
             return None
         default_parser = create_parser(required_true=False)
-        default_args = default_parser.parse_args()
+        # Explicit empty arg list, not the implicit sys.argv[1:] default -- this must
+        # always resolve to the parser's own pure defaults regardless of how this
+        # process itself was actually launched. A real launch (pythonw -m iw3.gui,
+        # no extra args) never exposed this, but running under `--self-test` does:
+        # that flag is real process argv this parser doesn't recognize, causing a
+        # genuine argparse SystemExit(2) -- found via the self-test harness fix that
+        # stopped swallowing it (ADR-109).
+        default_args = default_parser.parse_args([])
         gui_args = vars(gui_args)
         default_args = vars(default_args)
 
@@ -9085,6 +9100,7 @@ def _self_test_no_eager_cuda_context():
         gui_mod.check_compile_support = orig_compile
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -9130,6 +9146,7 @@ def _self_test_device_dropdown_no_torch_cuda_touch():
         torch.cuda.get_device_properties = orig_get_device_properties
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -9184,6 +9201,7 @@ def _self_test_compile_probe_crash_handled():
             gui_mod.check_compile_support = orig_compile
             if frame is not None:
                 frame.Destroy()
+                wx.SafeYield()
             if app is not None:
                 app.Destroy()
 
@@ -9244,6 +9262,7 @@ def _self_test_layout_modes():
                 gui_mod._load_layout_mode = orig_load
                 if frame is not None:
                     frame.Destroy()
+                    wx.SafeYield()
     finally:
         app.Destroy()
 
@@ -9333,6 +9352,7 @@ def _self_test_layout_mode_live_switch():
         gui_mod._load_layout_mode = orig_load
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_layout_mode_live_switch: PASS")
@@ -9396,6 +9416,7 @@ def _self_test_tabbed_scrolling():
         gui_mod._load_layout_mode = orig_load
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_tabbed_scrolling: PASS")
@@ -9922,6 +9943,7 @@ def _self_test_zoom_startup_restore():
         gui_mod._load_zoom_level = orig_load
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_zoom_startup_restore: PASS")
@@ -9962,6 +9984,7 @@ def _self_test_zoom_live_rescale():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_zoom_live_rescale: PASS")
@@ -10132,6 +10155,7 @@ def _self_test_progress_stage_display():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_progress_stage_display: PASS")
@@ -10196,6 +10220,7 @@ def _self_test_progress_bar_visible_on_screen():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_progress_bar_visible_on_screen: PASS")
@@ -10260,6 +10285,7 @@ def _self_test_progress_bar_visible_after_live_field_changes():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_progress_bar_visible_after_live_field_changes: PASS")
@@ -10366,6 +10392,7 @@ def _self_test_scene_batch_auto_ema_editor():
         scene_batch_mod.EMA_OVERRIDES_PATH = orig_override_path
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10421,6 +10448,7 @@ def _self_test_nagadomi_reference_ema_option():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10478,6 +10506,7 @@ def _self_test_gemini_ai_ema_option():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10535,6 +10564,7 @@ def _self_test_chatgpt_ema_option():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10593,6 +10623,7 @@ def _self_test_grok_ema_option():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10652,6 +10683,7 @@ def _self_test_fast_action_ema_option():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10711,6 +10743,7 @@ def _self_test_medium_magical_ema_option():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10770,6 +10803,7 @@ def _self_test_drama_slow_paced_ema_option():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10803,6 +10837,7 @@ def _self_test_auto_ema_default_is_nagadomi_reference():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10846,6 +10881,7 @@ def _self_test_scene_auto_ema_regular_gate():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -10868,13 +10904,18 @@ def _self_test_auto_ema_relocated_and_disables_ema_fields():
         app = wx.App()
         frame = MainFrame()
 
-        # (a) Relocation: the three controls are now real children of grp_stereo
-        # (Flicker Reduction's StaticBox), not grp_video_filter, and are laid out in
-        # the SAME GridBagSizer as cbo_ema_buffer (Flicker Reduction's own Buffer
-        # field) -- i.e. genuinely inside that group's layout, not merely reparented.
-        assert frame.chk_scene_batch_auto_ema.GetParent() is frame.grp_stereo
-        assert frame.cbo_scene_batch_auto_ema_model.GetParent() is frame.grp_stereo
-        assert frame.btn_scene_batch_auto_ema_edit.GetParent() is frame.grp_stereo
+        # (a) Relocation: the three controls are now real children of Flicker
+        # Reduction's own area, laid out in the SAME GridBagSizer as cbo_ema_buffer
+        # (Flicker Reduction's own Buffer field) -- i.e. genuinely inside that
+        # group's layout, not merely reparented. Updated for ADR-098's "Stability &
+        # Flicker" collapsible pane (Guided Light Phase 2): Flicker Reduction's
+        # fields, including these three, now live inside
+        # cpn_stereo_stability_flicker.GetPane() rather than directly in grp_stereo
+        # -- the pane itself is still a real child of grp_stereo, so the relocation
+        # (out of grp_video_filter) this test guards against is unaffected.
+        assert frame.chk_scene_batch_auto_ema.GetParent() is frame.cpn_stereo_stability_flicker.GetPane()
+        assert frame.cbo_scene_batch_auto_ema_model.GetParent() is frame.cpn_stereo_stability_flicker.GetPane()
+        assert frame.btn_scene_batch_auto_ema_edit.GetParent() is frame.cpn_stereo_stability_flicker.GetPane()
 
         stereo_grid = frame.cbo_ema_buffer.GetContainingSizer()
         assert isinstance(stereo_grid, wx.GridBagSizer), "Flicker Reduction's own layout must be a GridBagSizer"
@@ -10915,6 +10956,7 @@ def _self_test_auto_ema_relocated_and_disables_ema_fields():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -11002,6 +11044,7 @@ def _self_test_genre_preset_quick_fill():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -11039,8 +11082,12 @@ def _self_test_hdr_reinject_rife_manifest_field():
     try:
         frame = gui_mod.MainFrame()
 
-        assert frame.txt_reinject_rife_manifest.GetParent() is frame.grp_hdr_reinject
-        assert frame.btn_reinject_rife_manifest.GetParent() is frame.grp_hdr_reinject
+        # ADR-101 wrapped this whole standalone tool's fields in a collapsible pane
+        # (cpn_hdr_reinject) -- the real parent is the pane's content area now, not
+        # grp_hdr_reinject directly (grp_hdr_reinject's own StaticBox still holds
+        # the pane itself).
+        assert frame.txt_reinject_rife_manifest.GetParent() is frame.cpn_hdr_reinject.GetPane()
+        assert frame.btn_reinject_rife_manifest.GetParent() is frame.cpn_hdr_reinject.GetPane()
 
         captured = {}
 
@@ -11159,6 +11206,7 @@ def _self_test_hdr_reinject_rife_manifest_field():
         gui_mod.wx.MessageBox = orig_message_box
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_hdr_reinject_rife_manifest_field: PASS")
@@ -11271,6 +11319,7 @@ def _self_test_3decker_quick_preset():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -11302,13 +11351,17 @@ def _self_test_rife_standalone_panel():
         frame = gui_mod.MainFrame()
 
         assert frame.grp_rife_standalone.GetParent() is frame.tab_tools
+        # ADR-101 wrapped this tool's fields in a collapsible pane (cpn_rife_standalone)
+        # -- their real parent is the pane's content area now, not grp_rife_standalone
+        # directly (grp_rife_standalone's own StaticBox still holds the pane itself,
+        # confirmed by the GetParent()-is-tab_tools check just above, unaffected).
         for name in ("txt_rife_standalone_input", "txt_rife_standalone_output",
                      "cbo_rife_standalone_model", "cbo_rife_standalone_mode",
                      "txt_rife_standalone_target_fps", "cbo_rife_standalone_gpu",
                      "cbo_rife_standalone_codec",
                      "btn_rife_standalone_run", "txt_rife_standalone_log"):
             ctrl = getattr(frame, name)
-            assert ctrl.GetParent() is frame.grp_rife_standalone, name
+            assert ctrl.GetParent() is frame.cpn_rife_standalone.GetPane(), name
 
         # Output Codec: real, confirmed fix (2026-09-08, see docs/ai/AI_DECISIONS.md
         # ADR-051/ADR-064 amendments) for the bug that RIFE could never output HEVC
@@ -11438,6 +11491,7 @@ def _self_test_rife_standalone_panel():
         gui_mod.startWorker = orig_start_worker
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_rife_standalone_panel: PASS")
@@ -11478,19 +11532,22 @@ def _self_test_tool_log_clear_buttons():
     try:
         frame = gui_mod.MainFrame()
 
+        # ADR-101 wrapped each of these 7 tools' fields in its own collapsible pane
+        # (cpn_*) -- the real parent is each pane's content area now, not the
+        # grp_* StaticBox directly (the StaticBox itself still holds the pane).
         pairs = [
-            ("txt_reinject_log", "btn_reinject_clear", "grp_hdr_reinject"),
-            ("txt_subsearch_log", "btn_subsearch_clear", "grp_subsearch"),
-            ("txt_submux_log", "btn_submux_clear", "grp_submux"),
-            ("txt_audiomux_log", "btn_audiomux_clear", "grp_audiomux"),
-            ("txt_stereotag_log", "btn_stereotag_clear", "grp_stereotag"),
-            ("txt_sharpen_log", "btn_sharpen_clear", "grp_sharpen"),
-            ("txt_rife_standalone_log", "btn_rife_standalone_clear", "grp_rife_standalone"),
+            ("txt_reinject_log", "btn_reinject_clear", "cpn_hdr_reinject"),
+            ("txt_subsearch_log", "btn_subsearch_clear", "cpn_subsearch"),
+            ("txt_submux_log", "btn_submux_clear", "cpn_submux"),
+            ("txt_audiomux_log", "btn_audiomux_clear", "cpn_audiomux"),
+            ("txt_stereotag_log", "btn_stereotag_clear", "cpn_stereotag"),
+            ("txt_sharpen_log", "btn_sharpen_clear", "cpn_sharpen"),
+            ("txt_rife_standalone_log", "btn_rife_standalone_clear", "cpn_rife_standalone"),
         ]
-        for log_name, btn_name, group_name in pairs:
+        for log_name, btn_name, pane_name in pairs:
             btn = getattr(frame, btn_name)
-            group = getattr(frame, group_name)
-            assert btn.GetParent() is group, btn_name
+            pane = getattr(frame, pane_name)
+            assert btn.GetParent() is pane.GetPane(), btn_name
             assert btn.GetLabelText() == T("Clear"), btn_name
             assert btn.IsEnabled(), f"{btn_name} must be enabled by default (no job running)"
 
@@ -11548,6 +11605,7 @@ def _self_test_tool_log_clear_buttons():
         gui_mod.startWorker = orig_start_worker
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_tool_log_clear_buttons: PASS")
@@ -11674,6 +11732,7 @@ def _self_test_run_update_button():
         gui_mod.wx.MessageBox = orig_message_box
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_run_update_button: PASS")
@@ -11769,6 +11828,7 @@ def _self_test_run_update_git_checkpoint():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -11887,6 +11947,7 @@ def _self_test_install_3decker_update_button():
         gui_mod.wx.MessageBox = orig_message_box
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_install_3decker_update_button: PASS")
@@ -12008,6 +12069,7 @@ def _self_test_update_available_dialog_wiring():
         gui_mod.wx.MessageBox = orig_message_box
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         app.Destroy()
 
     print("_self_test_update_available_dialog_wiring: PASS")
@@ -12092,6 +12154,7 @@ def _self_test_import_command_round_trip():
             assert vars(args1_reparsed) == vars(args2_reparsed), (command1, command2)
         finally:
             frame2.Destroy()
+            wx.SafeYield()
 
         # 2) The real Hocus Pocus command from a live session.
         real_command = (
@@ -12155,6 +12218,7 @@ def _self_test_import_command_round_trip():
                 "compile checkbox itself must still be settable -- only the live GPU probe is skipped"
         finally:
             frame3.Destroy()
+            wx.SafeYield()
 
         # 3) Mutually-exclusive Stereo Format dispatch: Anaglyph+method pair,
         # then Export+Depth Only (can't combine with part 2's Half SBS state).
@@ -12175,6 +12239,7 @@ def _self_test_import_command_round_trip():
             assert frame4.chk_export_depth_only.GetValue() is True
         finally:
             frame4.Destroy()
+            wx.SafeYield()
 
         # 4) Malformed/unrecognized paste: rejected with a message, nothing applied.
         divergence_before = frame.cbo_divergence.GetValue()
@@ -12191,6 +12256,7 @@ def _self_test_import_command_round_trip():
     finally:
         if frame is not None:
             frame.Destroy()
+            wx.SafeYield()
         if app is not None:
             app.Destroy()
 
@@ -12198,45 +12264,82 @@ def _self_test_import_command_round_trip():
 
 
 def _run_self_tests():
-    _self_test_no_eager_cuda_context()
-    _self_test_compile_probe_crash_handled()
-    _self_test_layout_modes()
-    _self_test_layout_mode_live_switch()
-    _self_test_tabbed_scrolling()
-    _self_test_stereo_sliders_sync()
-    _self_test_depth_blend_and_processor_sliders_sync()
-    _self_test_stereo_collapsible_sections()
-    _self_test_video_filter_collapsible_section()
-    _self_test_standalone_tools_collapsible_sections()
-    _self_test_depth_blend_collapsible_section()
-    _self_test_zoom_level_persistence()
-    _self_test_zoom_startup_restore()
-    _self_test_zoom_live_rescale()
-    _self_test_progress_stage_display()
-    _self_test_progress_bar_visible_on_screen()
-    _self_test_progress_bar_visible_after_live_field_changes()
-    _self_test_scene_batch_auto_ema_editor()
-    _self_test_nagadomi_reference_ema_option()
-    _self_test_gemini_ai_ema_option()
-    _self_test_chatgpt_ema_option()
-    _self_test_grok_ema_option()
-    _self_test_fast_action_ema_option()
-    _self_test_medium_magical_ema_option()
-    _self_test_drama_slow_paced_ema_option()
-    _self_test_auto_ema_default_is_nagadomi_reference()
-    _self_test_scene_auto_ema_regular_gate()
-    _self_test_auto_ema_relocated_and_disables_ema_fields()
-    _self_test_genre_preset_quick_fill()
-    _self_test_3decker_quick_preset()
-    _self_test_hdr_reinject_rife_manifest_field()
-    _self_test_rife_standalone_panel()
-    _self_test_tool_log_clear_buttons()
-    _self_test_run_update_button()
-    _self_test_run_update_git_checkpoint()
-    _self_test_install_3decker_update_button()
-    _self_test_update_available_dialog_wiring()
-    _self_test_import_command_round_trip()
-    _self_test_device_dropdown_no_torch_cuda_touch()
+    """Runs every registered self-test and reports a complete pass/fail summary.
+
+    Deliberately does NOT let one failing test stop the rest from running: each test
+    used to be a bare sequential call, so a real exception from ANY test (in practice,
+    the long-known, already-documented _self_test_nagadomi_reference_ema_option
+    failure, ADR-057 Amendment 7) silently aborted the whole run right there --
+    every test registered after it in this list never executed at all, even though
+    the command's output (a long run of "X: PASS" lines) looked complete. Confirmed
+    directly: two brand-new tests for the "Install Update Now" feature (ADR-108) were
+    silently never run this way. Each test is now isolated in its own try/except so a
+    genuinely broken suite still reports every OTHER test's real status, and the exit
+    code still reflects any failure (same as before) -- just with a trustworthy,
+    complete report instead of a truncated one."""
+    tests = [
+        _self_test_no_eager_cuda_context,
+        _self_test_compile_probe_crash_handled,
+        _self_test_layout_modes,
+        _self_test_layout_mode_live_switch,
+        _self_test_tabbed_scrolling,
+        _self_test_stereo_sliders_sync,
+        _self_test_depth_blend_and_processor_sliders_sync,
+        _self_test_stereo_collapsible_sections,
+        _self_test_video_filter_collapsible_section,
+        _self_test_standalone_tools_collapsible_sections,
+        _self_test_depth_blend_collapsible_section,
+        _self_test_zoom_level_persistence,
+        _self_test_zoom_startup_restore,
+        _self_test_zoom_live_rescale,
+        _self_test_progress_stage_display,
+        _self_test_progress_bar_visible_on_screen,
+        _self_test_progress_bar_visible_after_live_field_changes,
+        _self_test_scene_batch_auto_ema_editor,
+        _self_test_nagadomi_reference_ema_option,
+        _self_test_gemini_ai_ema_option,
+        _self_test_chatgpt_ema_option,
+        _self_test_grok_ema_option,
+        _self_test_fast_action_ema_option,
+        _self_test_medium_magical_ema_option,
+        _self_test_drama_slow_paced_ema_option,
+        _self_test_auto_ema_default_is_nagadomi_reference,
+        _self_test_scene_auto_ema_regular_gate,
+        _self_test_auto_ema_relocated_and_disables_ema_fields,
+        _self_test_genre_preset_quick_fill,
+        _self_test_3decker_quick_preset,
+        _self_test_hdr_reinject_rife_manifest_field,
+        _self_test_rife_standalone_panel,
+        _self_test_tool_log_clear_buttons,
+        _self_test_run_update_button,
+        _self_test_run_update_git_checkpoint,
+        _self_test_install_3decker_update_button,
+        _self_test_update_available_dialog_wiring,
+        _self_test_import_command_round_trip,
+        _self_test_device_dropdown_no_torch_cuda_touch,
+    ]
+    failures = []
+    for test in tests:
+        try:
+            test()
+        except KeyboardInterrupt:
+            raise
+        except BaseException as e: # noqa
+            # BaseException, not Exception: argparse calls sys.exit() on a parse
+            # error, and SystemExit is a BaseException, not an Exception -- an
+            # `except Exception` here would let a runaway SystemExit from inside a
+            # test (e.g. one that accidentally exercises the real CLI parser)
+            # silently kill this whole loop, reproducing a milder version of the
+            # exact masking bug this rewrite exists to fix. KeyboardInterrupt stays
+            # a real interrupt, not a test failure.
+            failures.append((test.__name__, e))
+            print(f"{test.__name__}: FAIL -- {e}")
+
+    if failures:
+        print(f"\n{len(failures)} of {len(tests)} iw3.gui self-tests FAILED:")
+        for name, e in failures:
+            print(f"  - {name}: {e}")
+        sys.exit(1)
     print("All iw3.gui self-tests PASSED")
 
 

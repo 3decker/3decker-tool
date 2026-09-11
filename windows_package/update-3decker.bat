@@ -36,6 +36,24 @@ if %ERRORLEVEL% neq 0 (
 @rem at the real root, not this folder, same %~dp0 reasoning as above.
 copy /y "%NUNIF_DIR%\windows_package\update-installer.bat" "%~dp0..\..\update-installer.bat"
 
+@rem ADR-117: also refresh the launcher .bat files at the root directly, instead of
+@rem only refreshing update-installer.bat and leaving the user to separately
+@rem double-click it by hand -- confirmed live this was a real gap (3decker-gui.bat
+@rem never appeared at the root after "Install Update Now" until update-installer.bat
+@rem was run manually afterward). Same copy list update-installer.bat uses, inlined
+@rem here without its own pause/exit so this runs unattended as part of the update.
+copy /y "%NUNIF_DIR%\windows_package\setenv.bat" "%~dp0..\..\setenv.bat"
+copy /y "%NUNIF_DIR%\windows_package\update.bat" "%~dp0..\..\update.bat"
+copy /y "%NUNIF_DIR%\windows_package\install.bat" "%~dp0..\..\install.bat"
+copy /y "%NUNIF_DIR%\windows_package\nunif-prompt.bat" "%~dp0..\..\nunif-prompt.bat"
+copy /y "%NUNIF_DIR%\windows_package\3decker-gui.bat" "%~dp0..\..\3decker-gui.bat"
+copy /y "%NUNIF_DIR%\windows_package\iw3-desktop-gui.bat" "%~dp0..\..\iw3-desktop-gui.bat"
+copy /y "%NUNIF_DIR%\windows_package\iw3-player-gui.bat" "%~dp0..\..\iw3-player-gui.bat"
+copy /y "%NUNIF_DIR%\windows_package\waifu2x-gui.bat" "%~dp0..\..\waifu2x-gui.bat"
+copy /y "%NUNIF_DIR%\windows_package\waifu2x-web.bat" "%~dp0..\..\waifu2x-web.bat"
+xcopy "%NUNIF_DIR%\windows_package\torch_compile" "%~dp0..\..\torch_compile" /E /H /Y /I
+if exist "%~dp0..\..\torch_compile\install_triton_windows.bat" del /f /q "%~dp0..\..\torch_compile\install_triton_windows.bat"
+
 echo Installing Python Packages...
 python -m pip install --no-cache-dir --upgrade pip
 if %ERRORLEVEL% neq 0 goto :on_error

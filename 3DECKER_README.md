@@ -21,7 +21,7 @@ This distribution also bundles a few other tools alongside the main 3D converter
 Everything runs from a self-contained copy of Python and its supporting tools
 (ffmpeg for video, MKVToolNix for the video container format, and others) that
 comes bundled with this project — you don't need to install anything separately
-to get started. Just use the `.bat` launcher files (like `iw3-gui.bat`) in the
+to get started. Just use the `.bat` launcher files (like `3decker-gui.bat`) in the
 project folder.
 
 This guide covers the main iw3 app (the 3D converter) in enough detail to get

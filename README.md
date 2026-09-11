@@ -1,3 +1,24 @@
+# 3DECKER
+
+**3DECKER** is a customized Windows build of **iw3** (this repo's 2D-to-3D video
+converter), built on top of [nunif](https://github.com/nagadomi/nunif) by
+nagadomi — this repository is that upstream project, with 3DECKER's changes
+layered on top on the `my-customizations` branch.
+
+- **New here?** Start with [`3DECKER_INSTALL.md`](3DECKER_INSTALL.md) — the full
+  install guide (one-file setup, no separate Python/tools install needed).
+- **Using the app?** [`3DECKER_README.md`](3DECKER_README.md) explains what
+  everything does in plain language, and [`3DECKER_SETTINGS_GUIDE.md`](3DECKER_SETTINGS_GUIDE.md)
+  covers every individual setting in detail.
+- **What's changed recently?** See [`3DECKER_CHANGELOG.md`](3DECKER_CHANGELOG.md).
+
+Everything below this point is the original upstream project's own README,
+covering the underlying source code, dependencies, and license notes — still
+accurate and worth reading if you're building from source or working on
+something other than Windows.
+
+---
+
 My playground.
 
 For the time being, I will make incompatible changes.

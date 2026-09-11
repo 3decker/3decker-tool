@@ -40,7 +40,7 @@ The first time you run it, it may take long time before the window pops up.
 
 ## iw3
 
-Run `iw3-gui.bat`.
+Run `3decker-gui.bat`.
 The first time you run it, it may take long time before the window pops up.
 
 ## Update

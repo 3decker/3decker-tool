@@ -30,7 +30,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%setup.ps1" %*
 if %ERRORLEVEL% neq 0 goto :on_error
 
 echo.
-echo Setup complete -- see the output above. You can now launch iw3-gui.bat or waifu2x-gui.bat in this folder.
+echo Setup complete -- see the output above. You can now launch 3decker-gui.bat or waifu2x-gui.bat in this folder.
 pause
 exit /b 0
 

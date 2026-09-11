@@ -164,13 +164,13 @@ if (Test-Path (Join-Path $nunifDir ".git")) {
 Write-Step "Launcher scripts"
 
 # nunif\windows_package\ holds the templates for these (same convention upstream
-# nunif uses) -- copy them out to root so iw3-gui.bat etc. actually exist to run.
+# nunif uses) -- copy them out to root so 3decker-gui.bat etc. actually exist to run.
 # Re-copied every run (even if already present) so an update.bat/update-installer.bat
 # change in a newer nunif\ pull is picked up, matching update.bat's own
 # `copy /y ... update-installer.bat` behavior.
 $launcherFiles = @(
     "install.bat", "update.bat", "update-installer.bat", "setenv.bat",
-    "nunif-prompt.bat", "iw3-gui.bat", "iw3-desktop-gui.bat", "iw3-player-gui.bat",
+    "nunif-prompt.bat", "3decker-gui.bat", "iw3-desktop-gui.bat", "iw3-player-gui.bat",
     "waifu2x-gui.bat", "waifu2x-web.bat", "setup.bat"
 )
 $windowsPackageDir = Join-Path $nunifDir "windows_package"
@@ -184,7 +184,7 @@ Write-Host "  Launcher scripts copied to $root."
 
 # Feature overview / changelog docs -- these live at the nunif repo root (so they
 # also render nicely when browsing the repo on GitHub), copied out here too so a
-# fresh install has them sitting right next to iw3-gui.bat, not buried in nunif\.
+# fresh install has them sitting right next to 3decker-gui.bat, not buried in nunif\.
 $docFiles = @("3DECKER_README.md", "3DECKER_CHANGELOG.md", "3DECKER_SETTINGS_GUIDE.md", "3DECKER_INSTALL.md")
 foreach ($f in $docFiles) {
     $src = Join-Path $nunifDir $f
@@ -342,7 +342,7 @@ if ($SkipModels) {
 
 # ---------------------------------------------------------------------------
 Write-Step "Done"
-Write-Host "Setup complete. Launch iw3-gui.bat or waifu2x-gui.bat to get started." -ForegroundColor Green
+Write-Host "Setup complete. Launch 3decker-gui.bat or waifu2x-gui.bat to get started." -ForegroundColor Green
 Write-Host "If you plan to use torch.compile, see nunif\windows_package\docs\torch_compile.md for the additional one-time setup it needs." -ForegroundColor Green
 exit 0
 

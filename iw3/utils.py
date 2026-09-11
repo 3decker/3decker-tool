@@ -2285,7 +2285,8 @@ def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene
                 update = scene_ema_settings.get(frame.pts)
                 if update is not None:
                     depth_model.enable_ema(decay=update[1], buffer_size=update[0],
-                                           motion_adaptive=getattr(args, "ema_motion_adaptive", False))
+                                           motion_adaptive=getattr(args, "ema_motion_adaptive", False),
+                                           motion_spread=getattr(args, "ema_motion_spread", 0.06))
                     if scene_ema_report:
                         row = scene_ema_report.get(frame.pts)
                         if row is not None:
@@ -3040,7 +3041,8 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     ema_normalize = args.ema_normalize and args.max_fps >= 15
     if ema_normalize:
         depth_model.enable_ema(decay=args.ema_decay, buffer_size=args.ema_buffer,
-                                motion_adaptive=getattr(args, "ema_motion_adaptive", False))
+                                motion_adaptive=getattr(args, "ema_motion_adaptive", False),
+                                motion_spread=getattr(args, "ema_motion_spread", 0.06))
 
     if (
             args.compile and
@@ -3188,7 +3190,8 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                                        if r["settings"] is not None}
             if first_scene_settings is not None:
                 depth_model.enable_ema(decay=first_scene_settings[1], buffer_size=first_scene_settings[0],
-                                       motion_adaptive=getattr(args, "ema_motion_adaptive", False))
+                                       motion_adaptive=getattr(args, "ema_motion_adaptive", False),
+                                       motion_spread=getattr(args, "ema_motion_spread", 0.06))
                 _log_scene_ema_row(scene_ema_report_rows[0])
 
     if args.autocrop is not None:
@@ -4522,7 +4525,8 @@ def export_video(input_filename, output_dir, args, title=None):
     ema_normalize = args.ema_normalize and args.max_fps >= 15
     if ema_normalize:
         depth_model.enable_ema(decay=args.ema_decay, buffer_size=args.ema_buffer,
-                                motion_adaptive=getattr(args, "ema_motion_adaptive", False))
+                                motion_adaptive=getattr(args, "ema_motion_adaptive", False),
+                                motion_spread=getattr(args, "ema_motion_spread", 0.06))
 
     max_workers = max(args.max_workers, 8)
     with depth_model.compile_context(enabled=args.compile), PoolExecutor(max_workers=max_workers) as pool:
@@ -5125,6 +5129,13 @@ def create_parser(required_true=True):
                               "smearing/lag on fast scenes while keeping full smoothing on calm ones. "
                               "Never smooths MORE than --ema-decay itself, only less -- a safe layer on "
                               "top of your existing EMA settings, not a replacement for them."))
+    parser.add_argument("--ema-motion-spread", type=float, default=0.06,
+                        help=("how much --ema-motion-adaptive is allowed to ease --ema-decay down during "
+                              "the most extreme detected motion (effective decay = ema-decay minus this, "
+                              "scaled 0-1 by how much motion is actually detected right now). Higher values "
+                              "let heavy/high-decay settings react much faster during real action; 0 "
+                              "disables the easing entirely (same as leaving --ema-motion-adaptive off). "
+                              "Has no effect unless --ema-motion-adaptive is also on."))
     parser.add_argument("--scene-detect", action="store_true",
                         help=("splitting a scene using shot boundary detection. "
                               "ema and other states will be reset at the boundary of the scene"))

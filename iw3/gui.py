@@ -595,6 +595,7 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_splat_blend_temperature", "sld_stereo_splat_blend_temperature", 10.0, 85.0, 1, False, None),
     ("cbo_depth_refine_strength", "sld_stereo_depth_refine_strength", 0.25, 1.5, 100, False, None),
     ("cbo_temporal_stabilize_strength", "sld_stereo_temporal_stabilize_strength", 0.3, 0.9, 100, False, None),
+    ("cbo_ema_motion_spread", "sld_stereo_ema_motion_spread", 0.0, 0.3, 100, False, None),
     ("cbo_foreground_pop", "sld_stereo_foreground_pop", 0.0, 1.0, 100, False, None),
     ("cbo_background_pop", "sld_stereo_background_pop", 0.0, 1.0, 100, False, None),
     ("cbo_background_pop_coverage", "sld_stereo_background_pop_coverage", 15, 40, 1, True, None),
@@ -2152,6 +2153,27 @@ class MainFrame(wx.Frame):
               "choosing a sensible Decay Rate.\n"
               "Recommended: on, if your content mixes calm and fast-motion scenes (most movies do)."))
 
+        self.cbo_ema_motion_spread = EditableComboBox(self.cpn_stereo_stability_flicker.GetPane(),
+                                                       choices=["0.06", "0.1", "0.15", "0.2", "0.3"],
+                                                       name="cbo_ema_motion_spread")
+        self.cbo_ema_motion_spread.SetSelection(0)
+        self.cbo_ema_motion_spread.SetToolTip(
+            T("What it's for: how far Motion-Adaptive Smoothing is allowed to ease Decay Rate down during "
+              "the most extreme motion it detects. The actual per-frame reduction is this value scaled by "
+              "how much motion is really happening right now (0-1), so calm moments barely move at all.\n"
+              "How it helps: 0.06 (the built-in default) is a gentle nudge -- a heavy Decay Rate like 0.97 "
+              "only eases to about 0.91 even at maximum detected motion. Raising this lets Motion-Adaptive "
+              "Smoothing react much harder during real action, at the cost of a bigger jump in smoothing "
+              "strength between calm and fast moments.\n"
+              "Con: too high a value can make the smoothing strength itself feel inconsistent/noticeable as "
+              "motion ramps up and down, trading flicker for a different kind of visible change.\n"
+              "Values: 0.06 (default/gentle) to 0.3 (aggressive). 0 disables the easing entirely, same as "
+              "turning Motion-Adaptive Smoothing off.\n"
+              "Recommended: leave at the default 0.06 unless you've specifically found a high Decay Rate "
+              "still lagging on fast action even with Motion-Adaptive Smoothing on."))
+        self.sld_stereo_ema_motion_spread = _build_stereo_slider(
+            self.cpn_stereo_stability_flicker.GetPane(), self.cbo_ema_motion_spread, 0.0, 0.3, 100)
+
         self.chk_scene_detect = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                             label=T("Scene Boundary Detection"),
                                             name="chk_scene_detect")
@@ -2413,6 +2435,8 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.cbo_genre_preset, (k, 1), flag=wx.EXPAND)
         pane_layout_stability.Add(self.btn_scene_batch_auto_ema_edit, (k, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_ema_motion_adaptive, (k := k + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_ema_motion_spread, (k := k + 1, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.sld_stereo_ema_motion_spread, (k, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_scene_detect, (k := k + 1, 0), (0, 1), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_scene_detect_cache, (k, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_preserve_screen_border, (k := k + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -4778,6 +4802,7 @@ class MainFrame(wx.Frame):
         self.cbo_depth_model.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_depth_model)
         self.cbo_edge_dilation_y.Bind(wx.EVT_TEXT, self.on_changed_edge_dilation)
         self.chk_ema_normalize.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_ema_normalize)
+        self.chk_ema_motion_adaptive.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_ema_motion_adaptive)
         self.chk_scene_batch_auto_ema.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_scene_batch_auto_ema)
         self.cbo_genre_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_genre_preset)
         self.chk_depth_blend.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend)
@@ -5519,6 +5544,7 @@ class MainFrame(wx.Frame):
             self.cbo_depth_refine_strength,
             self.cbo_depth_blend_edge_suppression,
             self.cbo_temporal_stabilize_strength,
+            self.cbo_ema_motion_spread,
             self.cbo_temporal_stabilize_max_shift,
             self.cbo_temporal_stabilize_flat_boost,
             self.cbo_temporal_stabilize_edge_protect,
@@ -5782,6 +5808,7 @@ class MainFrame(wx.Frame):
             self.chk_ema_motion_adaptive.Enable()
         else:
             self.chk_ema_motion_adaptive.Disable()
+        self.update_ema_motion_spread()
         # Decay Rate/Buffer are greyed out (never cleared) whenever "Auto EMA by
         # Scene Length" is checked, since that feature picks its own per-scene
         # values instead and these fixed ones only matter as its pre-first-scene
@@ -5801,9 +5828,22 @@ class MainFrame(wx.Frame):
     def update_scene_segment(self, *args, **kwargs):
         pass
 
+    def update_ema_motion_spread(self):
+        # Only meaningful when both EMA Normalize AND Motion-Adaptive Smoothing
+        # itself are checked -- mirrors the CLI help text ("has no effect unless
+        # --ema-motion-adaptive is also on"), same gating pattern as
+        # update_temporal_stabilize()'s sub-fields.
+        if self.chk_ema_normalize.IsChecked() and self.chk_ema_motion_adaptive.IsChecked():
+            self.cbo_ema_motion_spread.Enable()
+        else:
+            self.cbo_ema_motion_spread.Disable()
+
     def on_changed_chk_ema_normalize(self, event):
         self.update_ema_normalize()
         self.update_scene_segment()
+
+    def on_changed_chk_ema_motion_adaptive(self, event):
+        self.update_ema_motion_spread()
 
     def on_changed_chk_scene_batch_auto_ema(self, event):
         self.update_ema_normalize()
@@ -6231,7 +6271,8 @@ class MainFrame(wx.Frame):
             ema_options = dict(ema_normalize=True,
                                ema_decay=float(self.cbo_ema_decay.GetValue()),
                                ema_buffer=int(self.cbo_ema_buffer.GetValue()),
-                               ema_motion_adaptive=self.chk_ema_motion_adaptive.GetValue())
+                               ema_motion_adaptive=self.chk_ema_motion_adaptive.GetValue(),
+                               ema_motion_spread=float(self.cbo_ema_motion_spread.GetValue()))
         else:
             ema_options = {}
 
@@ -7301,6 +7342,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_ema_decay, args.ema_decay)
         _apply_combo_value(self.cbo_ema_buffer, args.ema_buffer)
         self.chk_ema_motion_adaptive.SetValue(bool(args.ema_motion_adaptive))
+        _apply_combo_value(self.cbo_ema_motion_spread, getattr(args, "ema_motion_spread", 0.06))
 
         self.chk_depth_refine.SetValue(bool(args.depth_refine))
         _apply_combo_value(self.cbo_depth_refine_strength, args.depth_refine_strength)

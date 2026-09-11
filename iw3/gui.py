@@ -216,32 +216,28 @@ def _post_stage_change(window, name):
     wx.PostEvent(window, StageChangeEvent(_myEVT_IW3_STAGE, -1, name))
 
 
-def _find_update_bat():
-    """Resolve update.bat at the nunif-windows distribution root -- the same
-    relative-path convention as iw3/update_check.py's _find_git()/
-    _get_nunif_repo_root() (two levels up from this file: iw3/ -> nunif/ ->
-    nunif-windows root, where update.bat, setenv.bat, git/, python/ all live).
-    Returns (update_bat_path, nunif_windows_root) so the caller can launch it with
-    an explicit matching cwd -- update.bat's own setenv.bat call is anchored to its
-    own location (%~dp0) so it would likely work from any cwd, but this avoids
-    depending on that rather than assuming it, matching CS-SUBPROCESS-001's
+def _find_3decker_update_bat():
+    """Resolve update-3decker.bat (ADR-108) -- deliberately NOT at the distribution
+    root like the real update.bat file (which still exists on disk, real and
+    independently double-clickable, just no longer launched from inside this GUI as
+    of ADR-111). This script is only ever launched programmatically by this GUI,
+    never manually double-clicked, so it doesn't need setup.ps1's/
+    update-installer.bat's "copy template out to root" treatment -- it's run directly
+    from inside nunif/windows_package/, which a plain source pull (via either
+    installer) already keeps current. Returns (bat_path, cwd) so the caller can
+    launch it with an explicit matching cwd, same reasoning as CS-SUBPROCESS-001's
     "never assume PATH/cwd" convention used for every other bundled tool."""
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))  # nunif/
     nunif_windows_root = path.dirname(nunif_dir)
-    return path.join(nunif_windows_root, "update.bat"), nunif_windows_root
+    return path.join(nunif_dir, "windows_package", "update-3decker.bat"), nunif_windows_root
 
 
-def _find_3decker_update_bat():
-    """Resolve update-3decker.bat (ADR-108) -- deliberately NOT at the distribution
-    root like update.bat. This script is only ever launched programmatically by this
-    GUI, never manually double-clicked, so it doesn't need setup.ps1's/
-    update-installer.bat's "copy template out to root" treatment -- it's run directly
-    from inside nunif/windows_package/, which a plain source pull (via either updater)
-    already keeps current. Returns (bat_path, cwd) matching _find_update_bat()'s shape
-    so the caller can reuse the exact same launch code either way."""
+def _find_nagadomi_update_bat():
+    """Resolve update-nagadomi.bat (ADR-111) -- the Nagadomi-specific counterpart to
+    _find_3decker_update_bat() just above, same reasoning and same shape."""
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))  # nunif/
     nunif_windows_root = path.dirname(nunif_dir)
-    return path.join(nunif_dir, "windows_package", "update-3decker.bat"), nunif_windows_root
+    return path.join(nunif_dir, "windows_package", "update-nagadomi.bat"), nunif_windows_root
 
 
 def _git_checkpoint_before_update(nunif_dir, log_fn):
@@ -303,23 +299,24 @@ def _git_checkpoint_before_update(nunif_dir, log_fn):
 
 
 class RunUpdateDialog(wx.Dialog):
-    """Live output window for "Run Update" (see docs/ai/AI_DECISIONS.md ADR-069,
-    the direct follow-up to ADR-035's "Check for Updates" button -- that one only
-    checks, this dialog shows the real update.bat run that actually applies it).
+    """Live output window for applying a real update (originally ADR-069, "Run
+    Update" -- since ADR-111, shared by "Install 3DECKER Update Now" and "Install
+    Nagadomi Update Now", the caller passing an explicit `title` for whichever one is
+    running; see docs/ai/AI_DECISIONS.md).
 
     A separate window rather than a log box inlined into pnl_preset's toolbar row:
     that row is a thin horizontal strip sized for buttons/combo boxes (Preset Load/
-    Save, Quick Presets, Language, Layout, Zoom, ...), not a multi-line log, and
-    update.bat can run long enough (package installs, model downloads, a source
-    pull) that the user needs a persistent, clearly-labeled place to watch it happen
-    -- not a few squeezed-in lines.
+    Save, Quick Presets, Language, Layout, Zoom, ...), not a multi-line log, and an
+    update.bat-style run can run long enough (package installs, model downloads, a
+    source pull) that the user needs a persistent, clearly-labeled place to watch it
+    happen -- not a few squeezed-in lines.
 
     Close is disabled, and the window's own titlebar close button is vetoed, until
     the run actually finishes (mark_finished()), so the user can't lose the log or
     think a still-running update finished early by closing this window."""
 
     def __init__(self, parent, title=None):
-        super().__init__(parent, title=title if title is not None else T("Run Update"),
+        super().__init__(parent, title=title if title is not None else T("Install Update"),
                           size=parent.FromDIP((640, 420)),
                           style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.finished = False
@@ -353,19 +350,23 @@ class RunUpdateDialog(wx.Dialog):
 class UpdateAvailableDialog(wx.Dialog):
     """Result popup for a real "updates_available" check (ADR-108), replacing the
     plain wx.MessageBox previously used for that one status -- shown from both the
-    manual Check for 3DECKER Updates button (on_exit_check_updates_worker) and the
-    silent startup auto-check (on_exit_startup_check_updates_worker, ADR-107), since
-    the "here's what's new" moment is the same regardless of what triggered it.
+    manual Check for 3DECKER/Nagadomi Updates buttons and the silent startup
+    auto-check (on_exit_startup_check_updates_worker, ADR-107), since the "here's
+    what's new" moment is the same regardless of what triggered it.
 
     Unlike the plain informational popup this replaces, this one carries a real
     action -- "Install Update Now" -- wired by the caller (see
-    MainFrame.on_click_install_3decker_update) rather than built into this dialog
-    itself, so this class stays a dumb, reusable presentation shell with no update
-    logic of its own. "Close" just dismisses without installing, same as clicking OK
-    on the old wx.MessageBox did."""
+    MainFrame.show_update_available_dialog's `on_install` parameter, ADR-111) rather
+    than built into this dialog itself, so this class stays a dumb, reusable
+    presentation shell with no update logic of its own. "Close" just dismisses
+    without installing, same as clicking OK on the old wx.MessageBox did.
 
-    def __init__(self, parent, message):
-        super().__init__(parent, title=T("3DECKER Update Available"),
+    `title` (ADR-111) lets the same dialog class serve both the 3DECKER and Nagadomi
+    checks with the correct title each time -- defaults to the original 3DECKER
+    wording so any other/future caller that omits it keeps working unchanged."""
+
+    def __init__(self, parent, message, title=None):
+        super().__init__(parent, title=title if title is not None else T("3DECKER Update Available"),
                           size=parent.FromDIP((560, 380)),
                           style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.txt_message = wx.TextCtrl(self, value=message,
@@ -715,7 +716,7 @@ class IW3App(wx.App):
         # startWorker schedules this on a background thread and returns immediately, so
         # it adds no startup delay; see on_exit_startup_check_updates_worker() for why it
         # stays silent unless there's a real update to report.
-        startWorker(main_frame.on_exit_startup_check_updates_worker, main_frame.run_check_updates)
+        startWorker(main_frame.on_exit_startup_check_updates_worker, main_frame.run_check_3decker_updates)
         return True
 
 
@@ -736,8 +737,8 @@ class MainFrame(wx.Frame):
         self.base_title = self.GetTitle()
         self.processing = False
         self.updating = False
-        self.dlg_run_update = None
         self.dlg_install_3decker_update = None
+        self.dlg_install_nagadomi_update = None
         self.start_time = 0
         self.input_type = None
         self.cuda_context_initialized = False
@@ -4621,31 +4622,29 @@ class MainFrame(wx.Frame):
               "Now on the popup, or use Run Update separately.\n"
               "Recommended: safe to click any time -- checking alone never changes anything."))
 
-        # run update (applies the real update.bat -- see docs/ai/AI_DECISIONS.md
-        # ADR-069, the direct follow-up to ADR-035's deliberately-deferred
-        # "applying an update" scope. ADR-108 split "Install Update Now" -- always
-        # 3DECKER's own repo, hardcoded -- into its own action reachable from the
-        # Check for 3DECKER Updates popup; THIS button is intentionally left running
-        # the original, general-purpose update.bat unchanged, which pulls from
-        # whatever this install's own git connection is actually configured to.)
-        self.btn_run_update = wx.Button(self.pnl_preset, label=T("Run Update"))
-        self.btn_run_update.SetToolTip(
-            T("What it's for: runs the original update.bat script from inside the app -- the same "
-              "script you'd otherwise have to find and double-click outside the app -- to update "
-              "Python packages, downloaded models, and the source code together, all in one real "
-              "operation. This is the general nunif/iw3 updater this app has always had, unchanged.\n"
-              "Which source it pulls from: whatever this install's own git connection is actually set "
-              "up to track -- for a normal 3DECKER install that's this fork's own repo (same place "
-              "Check for 3DECKER Updates checks), same as clicking Install Update Now.\n"
-              "If you specifically want 3DECKER's own updates: 'Install Update Now' on the Check for "
-              "3DECKER Updates popup (ADR-108) does the identical packages+models+source update, "
-              "always targeting 3DECKER's repo explicitly regardless of this install's own git setup -- "
-              "prefer that button if you want to be certain which repo is used.\n"
-              "Con: a real, somewhat time-consuming operation (package downloads, model downloads, "
-              "a source pull) with no undo -- a confirmation dialog appears before anything runs.\n"
-              "Disabled while a conversion (or other background job) is running, so packages/source "
-              "can't change out from under a job that's using them.\n"
-              "Recommended: use it when you actually want to apply an update you already know about."))
+        # check for Nagadomi updates (ADR-111): the genuinely separate, hardcoded
+        # counterpart to Check for 3DECKER Updates just above -- checks the ORIGINAL
+        # upstream nunif project specifically, never 3DECKER's own repo, regardless of
+        # this install's own git setup. Manual/deliberate only -- unlike 3DECKER's
+        # check, this one is never run automatically on startup (ADR-107 startup
+        # auto-check stays 3DECKER-only; a regular user shouldn't be notified about
+        # upstream nagadomi commits on every launch).
+        self.btn_check_nagadomi_updates = wx.Button(self.pnl_preset, label=T("Check for Nagadomi Updates"))
+        self.btn_check_nagadomi_updates.SetToolTip(
+            T("What it's for: checks whether the ORIGINAL upstream nunif project "
+              "(github.com/nagadomi/nunif) has new commits that aren't in your local copy yet -- "
+              "always this specific repo, hardcoded, regardless of what this install's own git "
+              "connection happens to be set up to track.\n"
+              "How it helps: lets a maintainer keep this fork current with upstream fixes/features. "
+              "The result popup has its own 'Install Update Now' button, same as Check for 3DECKER "
+              "Updates.\n"
+              "Con: upstream commits touch the SAME files this fork's own customizations (RIFE, "
+              "Z-Splat, HDR reinjection, subtitle muxing, StereoMode tagging, etc.) live in, so "
+              "installing one could conflict with those customizations. Most users will never need "
+              "this button -- it exists for keeping the fork itself up to date with its origin "
+              "project, not for regular 3DECKER updates (use Check for 3DECKER Updates for those).\n"
+              "Recommended: safe to click any time -- checking alone never changes anything; only "
+              "install if you specifically want upstream nunif's own latest changes."))
 
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.lbl_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
@@ -4692,7 +4691,7 @@ class MainFrame(wx.Frame):
         layout.AddSpacer(4)
         layout.Add(self.btn_check_updates, flag=wx.ALL, border=2)
         layout.AddSpacer(2)
-        layout.Add(self.btn_run_update, flag=wx.ALL, border=2)
+        layout.Add(self.btn_check_nagadomi_updates, flag=wx.ALL, border=2)
         layout.AddSpacer(8)
         self.pnl_preset.SetSizer(layout)
 
@@ -4810,7 +4809,7 @@ class MainFrame(wx.Frame):
         self.cbo_layout.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_layout)
         self.cbo_zoom.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_zoom)
         self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_updates)
-        self.btn_run_update.Bind(wx.EVT_BUTTON, self.on_click_btn_run_update)
+        self.btn_check_nagadomi_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_nagadomi_updates)
 
         self.btn_autocrop_test.Bind(wx.EVT_BUTTON, self.on_click_btn_autocrop_test)
         self.btn_scene_settings.Bind(wx.EVT_BUTTON, self.on_click_btn_scene_settings)
@@ -5541,8 +5540,6 @@ class MainFrame(wx.Frame):
                 self.btn_start.Enable()
             else:
                 self.btn_start.Disable()
-        if hasattr(self, "btn_run_update"):
-            self.btn_run_update.Enable(not self.processing and not self.updating)
 
     def update_input_option_state(self):
         input_path = self.pnl_file.input_path
@@ -6476,7 +6473,6 @@ class MainFrame(wx.Frame):
 
         self.btn_autocrop_test.Disable()
         self.btn_start.Disable()
-        self.btn_run_update.Disable()
         self.btn_cancel.Enable()
         self.btn_suspend.Enable()
         self.stop_event.clear()
@@ -7445,14 +7441,28 @@ class MainFrame(wx.Frame):
 
     # --- Check for Updates (read-only fetch + compare only, see docs/ai/AI_DECISIONS.md) ---
 
-    def run_check_updates(self):
+    def run_check_3decker_updates(self):
         # Runs on a background thread via startWorker -- this hits the network
         # (git fetch) and must never freeze the GUI thread while waiting on it.
-        return update_check.check_for_updates()
+        # ADR-111: always the hardcoded 3DECKER check, never check_for_updates()'s
+        # "whatever's configured" one -- this was a real, confirmed bug before this
+        # change: on this dev machine specifically, this used to check nagadomi/nunif
+        # (since that's what @{u} resolves to here) while "Install Update Now" was
+        # already hardcoded to 3DECKER -- a genuine check/install target mismatch,
+        # exactly the source of the user's real confusion.
+        return update_check.check_for_3decker_updates()
+
+    def run_check_nagadomi_updates(self):
+        # Nagadomi-specific counterpart to run_check_3decker_updates() just above --
+        # same background-thread reasoning, always the hardcoded Nagadomi check.
+        return update_check.check_for_nagadomi_updates()
 
     def on_exit_startup_check_updates_worker(self, result):
         """Completion callback for the automatic startup update check (ADR-107) -- kicked
-        off once from IW3App.OnInit(), NOT wired to the Check for Updates button. Unlike
+        off once from IW3App.OnInit(), NOT wired to either Check for Updates button.
+        Always the 3DECKER check (ADR-111) -- a regular user should be silently
+        notified about 3DECKER's own updates on launch, never about upstream Nagadomi
+        commits, which stay a deliberate, manual, maintainer-facing action only. Unlike
         on_exit_check_updates_worker() just below, this must stay completely silent
         except for the genuine "updates available" case: an offline launch or an
         already-up-to-date install (the common case) must show nothing at all, not an
@@ -7464,17 +7474,20 @@ class MainFrame(wx.Frame):
             return
         if check_result["status"] != "updates_available":
             return
-        self.show_update_available_dialog(check_result)
+        self.show_update_available_dialog(check_result, self.on_click_install_3decker_update,
+                                          title=T("3DECKER Update Available"))
 
-    def show_update_available_dialog(self, check_result):
-        """Shared by the manual "Check for 3DECKER Updates" result and the silent
-        startup auto-check (ADR-107) -- both show the same UpdateAvailableDialog
-        (ADR-108) for a genuine "updates_available" result, since it's the same
-        moment regardless of what triggered the check."""
+    def show_update_available_dialog(self, check_result, on_install, title):
+        """Shared by both manual "Check for ... Updates" button results and the
+        silent startup auto-check (ADR-107) -- all show the same UpdateAvailableDialog
+        (ADR-108) for a genuine "updates_available" result, since it's the same moment
+        regardless of what triggered the check. `on_install`/`title` (ADR-111) let the
+        same dialog/method serve both the 3DECKER and Nagadomi paths correctly -- the
+        caller decides which install action Install Update Now actually triggers."""
         message = update_check.format_result_message(check_result)
-        with UpdateAvailableDialog(self, message) as dlg:
+        with UpdateAvailableDialog(self, message, title=title) as dlg:
             if dlg.ShowModal() == wx.ID_OK:
-                self.on_click_install_3decker_update()
+                on_install()
 
     def on_exit_check_updates_worker(self, result):
         self.btn_check_updates.Enable()
@@ -7497,12 +7510,46 @@ class MainFrame(wx.Frame):
             wx.MessageBox(message, T("Check for 3DECKER Updates"), wx.OK | wx.ICON_INFORMATION)
         else:
             self.SetStatusText(T("A 3DECKER update is available"))
-            self.show_update_available_dialog(check_result)
+            self.show_update_available_dialog(check_result, self.on_click_install_3decker_update,
+                                              title=T("3DECKER Update Available"))
 
     def on_click_btn_check_updates(self, event):
         self.btn_check_updates.Disable()
         self.SetStatusText(T("Checking for 3DECKER updates..."))
-        startWorker(self.on_exit_check_updates_worker, self.run_check_updates)
+        startWorker(self.on_exit_check_updates_worker, self.run_check_3decker_updates)
+
+    # --- Check for Nagadomi Updates (ADR-111): the genuinely separate, hardcoded
+    # counterpart to Check for 3DECKER Updates just above. Mirrors it exactly, with
+    # only the target/wording changed. ---
+
+    def on_exit_check_nagadomi_updates_worker(self, result):
+        self.btn_check_nagadomi_updates.Enable()
+        try:
+            check_result = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        message = update_check.format_result_message(check_result)
+        if check_result["status"] == "error":
+            self.SetStatusText(T("Check for Nagadomi Updates failed"))
+            wx.MessageBox(message, T("Check for Nagadomi Updates"), wx.OK | wx.ICON_ERROR)
+        elif check_result["status"] == "up_to_date":
+            self.SetStatusText(T("Already up to date"))
+            wx.MessageBox(message, T("Check for Nagadomi Updates"), wx.OK | wx.ICON_INFORMATION)
+        else:
+            self.SetStatusText(T("A Nagadomi update is available"))
+            self.show_update_available_dialog(check_result, self.on_click_install_nagadomi_update,
+                                              title=T("Nagadomi Update Available"))
+
+    def on_click_btn_check_nagadomi_updates(self, event):
+        self.btn_check_nagadomi_updates.Disable()
+        self.SetStatusText(T("Checking for Nagadomi updates..."))
+        startWorker(self.on_exit_check_nagadomi_updates_worker, self.run_check_nagadomi_updates)
 
     # --- Run Update (applies the real update.bat -- see docs/ai/AI_DECISIONS.md
     # ADR-069, the direct follow-up to ADR-035's deliberately-deferred "applying an
@@ -7537,90 +7584,17 @@ class MainFrame(wx.Frame):
         proc.wait()
         return proc.returncode
 
-    def on_exit_run_update_worker(self, result):
-        self.updating = False
-        self.update_start_button_state()
-        dlg = self.dlg_run_update
-        try:
-            returncode = result.get()
-        except: # noqa
-            e_type, e, tb = sys.exc_info()
-            message = getattr(e, "message", str(e))
-            traceback.print_tb(tb)
-            if dlg is not None:
-                dlg.append("\n" + message)
-                dlg.mark_finished()
-            self.SetStatusText(T("Error"))
-            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
-            return
-
-        if dlg is not None:
-            dlg.mark_finished()
-        if returncode == 0:
-            self.SetStatusText(T("Update finished successfully"))
-        else:
-            self.SetStatusText(T("Update failed -- see the log window"))
-            wx.MessageBox(T("update.bat exited with an error -- see the log window for the exact "
-                             "reason."),
-                          T("Run Update"), wx.OK | wx.ICON_ERROR)
-
-    def on_click_btn_run_update(self, event):
-        if self.processing or self.updating:
-            wx.MessageBox(
-                T("A conversion (or another background job) is currently running. Wait for it to "
-                  "finish, or cancel it, before running the updater -- updating packages/models/"
-                  "source while a job is using them could break that job."),
-                T("Run Update"), wx.OK | wx.ICON_WARNING)
-            return
-
-        with wx.MessageDialog(
-                self,
-                message=(T("This runs the real update.bat script and will update your Python "
-                           "packages, downloaded models, and source code together.") + "\n\n" +
-                         T("This can take a while (package downloads and model downloads can be "
-                           "large) and there is no undo -- don't close this window while it's "
-                           "running.") + "\n\n" +
-                         T("Continue?")),
-                caption=T("Run Update"),
-                style=wx.YES_NO | wx.ICON_WARNING) as dlg:
-            if dlg.ShowModal() != wx.ID_YES:
-                return
-
-        update_bat_path, cwd = _find_update_bat()
-        if not path.exists(update_bat_path):
-            wx.MessageBox(
-                T("update.bat was not found at the expected location:") + f"\n{update_bat_path}",
-                T("Run Update"), wx.OK | wx.ICON_ERROR)
-            return
-
-        nunif_dir = update_check._get_nunif_repo_root()
-
-        comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
-        cmd = [comspec, "/c", update_bat_path]
-
-        self.updating = True
-        self.update_start_button_state()
-        self.SetStatusText(T("Running update..."))
-
-        self.dlg_run_update = RunUpdateDialog(self)
-        self.dlg_run_update.append(
-            T("Running update.bat...") + "\n" + T("This can take a while -- please wait.") + "\n\n")
-        self.dlg_run_update.append(
-            T("Checking for uncommitted changes to safety check-point first...") + "\n")
-        self.dlg_run_update.Show()
-
-        startWorker(self.on_exit_run_update_worker, self.run_update,
-                    wargs=(cmd, cwd, nunif_dir, self.dlg_run_update))
-
-    # --- Install Update Now (ADR-108): a genuinely separate action from Run Update
-    # just above. Run Update stays exactly what it always was -- launching the real
-    # update.bat -- untouched by this feature. This installs 3DECKER's own updates
-    # specifically, via a hardcoded repo/branch (update_check.THIS_FORK_REPO_URL/
-    # THIS_FORK_BRANCH, matched in windows_package/update-3decker.bat), never inferred
-    # from whatever the local branch happens to track -- see docs/ai/AI_DECISIONS.md
-    # for why that distinction matters. Reuses run_update()/RunUpdateDialog/
-    # _git_checkpoint_before_update completely unchanged; only the target script and
-    # this file's own text differ from on_click_btn_run_update. ---
+    # --- Install 3DECKER Update Now (ADR-108, hardcoded target confirmed by
+    # ADR-111): installs 3DECKER's own updates specifically, via a hardcoded
+    # repo/branch (update_check.THIS_FORK_REPO_URL/THIS_FORK_BRANCH, matched in
+    # windows_package/update-3decker.bat), never inferred from whatever the local
+    # branch happens to track -- see docs/ai/AI_DECISIONS.md for why that distinction
+    # matters. The old generic "Run Update" button (whatever's-configured,
+    # update.bat) was removed entirely in ADR-111 -- update.bat itself still exists
+    # on disk, real and independently double-clickable, just no longer launched from
+    # inside this GUI. Reuses run_update()/RunUpdateDialog/_git_checkpoint_before_update
+    # completely unchanged; only the target script and this method's own text differ
+    # from the Nagadomi counterpart just below. ---
 
     def on_exit_install_3decker_update_worker(self, result):
         self.updating = False
@@ -7677,7 +7651,8 @@ class MainFrame(wx.Frame):
             wx.MessageBox(
                 T("update-3decker.bat was not found at the expected location:") + f"\n{update_bat_path}\n\n" +
                 T("This is expected if this install has never received a 3DECKER update since this "
-                  "feature was added -- use Run Update once first, which will pull this file in, "
+                  "feature was added -- find and double-click update.bat directly in your "
+                  "installation folder (outside this app) once, which will pull this file in, "
                   "then Install Update Now will work for every update after that."),
                 T("Install 3DECKER Update"), wx.OK | wx.ICON_ERROR)
             return
@@ -7701,6 +7676,94 @@ class MainFrame(wx.Frame):
 
         startWorker(self.on_exit_install_3decker_update_worker, self.run_update,
                     wargs=(cmd, cwd, nunif_dir, self.dlg_install_3decker_update))
+
+    # --- Install Nagadomi Update Now (ADR-111): the genuinely separate, hardcoded
+    # counterpart to Install 3DECKER Update Now just above. Mirrors it exactly --
+    # reuses run_update()/RunUpdateDialog/_git_checkpoint_before_update completely
+    # unchanged, only the target script and this file's own text differ. ---
+
+    def on_exit_install_nagadomi_update_worker(self, result):
+        self.updating = False
+        self.update_start_button_state()
+        dlg = self.dlg_install_nagadomi_update
+        try:
+            returncode = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            if dlg is not None:
+                dlg.append("\n" + message)
+                dlg.mark_finished()
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        if dlg is not None:
+            dlg.mark_finished()
+        if returncode == 0:
+            self.SetStatusText(T("Nagadomi update installed successfully"))
+        else:
+            self.SetStatusText(T("Update failed -- see the log window"))
+            wx.MessageBox(T("update-nagadomi.bat exited with an error -- see the log window for the "
+                             "exact reason."),
+                          T("Install Nagadomi Update"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_install_nagadomi_update(self, event=None):
+        if self.processing or self.updating:
+            wx.MessageBox(
+                T("A conversion (or another background job) is currently running. Wait for it to "
+                  "finish, or cancel it, before installing the update -- updating packages/models/"
+                  "source while a job is using them could break that job."),
+                T("Install Nagadomi Update"), wx.OK | wx.ICON_WARNING)
+            return
+
+        with wx.MessageDialog(
+                self,
+                message=(T("This installs the latest update from the ORIGINAL nunif project -- "
+                           "Python packages, downloaded models, and source code together, pulled "
+                           "from github.com/nagadomi/nunif (not 3DECKER's own repo). These commits "
+                           "touch the same files this fork's own customizations live in, so this "
+                           "could conflict with them.") + "\n\n" +
+                         T("This can take a while (package downloads and model downloads can be "
+                           "large) and there is no undo -- don't close this window while it's "
+                           "running.") + "\n\n" +
+                         T("Continue?")),
+                caption=T("Install Nagadomi Update"),
+                style=wx.YES_NO | wx.ICON_WARNING) as dlg:
+            if dlg.ShowModal() != wx.ID_YES:
+                return
+
+        update_bat_path, cwd = _find_nagadomi_update_bat()
+        if not path.exists(update_bat_path):
+            wx.MessageBox(
+                T("update-nagadomi.bat was not found at the expected location:") + f"\n{update_bat_path}\n\n" +
+                T("This is expected if this install has never received a 3DECKER update since this "
+                  "feature was added -- find and double-click update.bat directly in your "
+                  "installation folder (outside this app) once, which will pull this file in, "
+                  "then Install Update Now will work for every update after that."),
+                T("Install Nagadomi Update"), wx.OK | wx.ICON_ERROR)
+            return
+
+        nunif_dir = update_check._get_nunif_repo_root()
+
+        comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
+        cmd = [comspec, "/c", update_bat_path]
+
+        self.updating = True
+        self.update_start_button_state()
+        self.SetStatusText(T("Installing Nagadomi update..."))
+
+        self.dlg_install_nagadomi_update = RunUpdateDialog(self, title=T("Installing Nagadomi Update"))
+        self.dlg_install_nagadomi_update.append(
+            T("Running update-nagadomi.bat...") + "\n" +
+            T("This can take a while -- please wait.") + "\n\n")
+        self.dlg_install_nagadomi_update.append(
+            T("Checking for uncommitted changes to safety check-point first...") + "\n")
+        self.dlg_install_nagadomi_update.Show()
+
+        startWorker(self.on_exit_install_nagadomi_update_worker, self.run_update,
+                    wargs=(cmd, cwd, nunif_dir, self.dlg_install_nagadomi_update))
 
     def test_autocrop(self):
         self.txt_autocrop_test.SetValue("")
@@ -11617,133 +11680,6 @@ def _self_test_tool_log_clear_buttons():
     print("_self_test_tool_log_clear_buttons: PASS")
 
 
-def _self_test_run_update_button():
-    """Regression test for the "Run Update" button (ADR-069, ADR-035's direct
-    follow-up): confirms (a) the button and its confirmation dialog exist and are
-    wired to the real click handler, (b) declining the confirmation dialog never
-    launches update.bat -- startWorker is never called, (c) accepting it launches
-    update.bat via the real subprocess command (cmd.exe /c <real update.bat path>,
-    with the nunif-windows root as cwd) exactly once, and toggles self.updating/
-    button state correctly while it's "running" and once it finishes, (d) the
-    button refuses to start a new run (and never touches startWorker) while a
-    conversion job (self.processing) is already active, warning the user instead
-    of silently doing nothing, and (e) the button is visually disabled while
-    self.processing is True and re-enabled once it's False -- the same
-    disable-during-a-job pattern this file's other real-process buttons (ADR-066's
-    Clear buttons) already use. No GPU or real movie file needed, and update.bat is
-    never actually executed: startWorker is monkeypatched to capture its args
-    instead of running the worker function, and wx.MessageDialog/wx.MessageBox are
-    monkeypatched so no real modal blocks this test waiting on real user input."""
-    import iw3.gui as gui_mod
-
-    class _FakeResult:
-        def __init__(self, value):
-            self._value = value
-
-        def get(self):
-            return self._value
-
-    class _FakeConfirmDialog:
-        result = wx.ID_YES
-
-        def __init__(self, *a, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def ShowModal(self):
-            return _FakeConfirmDialog.result
-
-    message_box_calls = []
-
-    def _fake_message_box(message, caption="", style=0):
-        message_box_calls.append((message, caption, style))
-
-    app = wx.App()
-    frame = None
-    orig_start_worker = gui_mod.startWorker
-    orig_message_dialog = gui_mod.wx.MessageDialog
-    orig_message_box = gui_mod.wx.MessageBox
-    try:
-        frame = gui_mod.MainFrame()
-        assert frame.btn_run_update.GetLabelText() == T("Run Update")
-        tip = frame.btn_run_update.GetToolTip().GetTip()
-        assert "update.bat" in tip and "Install Update Now" in tip, tip
-        assert frame.btn_run_update.IsEnabled(), "must be enabled by default (nothing running)"
-
-        gui_mod.wx.MessageDialog = _FakeConfirmDialog
-        gui_mod.wx.MessageBox = _fake_message_box
-
-        captured = {}
-
-        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
-            captured["on_exit"] = on_exit
-            captured["wargs"] = wargs
-        gui_mod.startWorker = _fake_start_worker
-
-        # Declining the confirmation must never launch anything.
-        _FakeConfirmDialog.result = wx.ID_NO
-        frame.on_click_btn_run_update(None)
-        assert "wargs" not in captured, "declining the confirmation must never call startWorker"
-        assert not frame.updating
-        assert frame.btn_run_update.IsEnabled()
-
-        # Accepting it launches the real update.bat via the real subprocess command.
-        _FakeConfirmDialog.result = wx.ID_YES
-        frame.on_click_btn_run_update(None)
-        assert "wargs" in captured, "accepting the confirmation must launch update.bat"
-        cmd, cwd, nunif_dir, dlg = captured["wargs"]
-        expected_bat, expected_root = gui_mod._find_update_bat()
-        assert path.exists(expected_bat), expected_bat
-        assert cmd[-1] == expected_bat, cmd
-        assert cmd[0].lower().endswith("cmd.exe"), cmd
-        assert cmd[1] == "/c", cmd
-        assert cwd == expected_root, (cwd, expected_root)
-        assert nunif_dir == gui_mod.update_check._get_nunif_repo_root(), nunif_dir
-        assert frame.updating
-        assert not frame.btn_run_update.IsEnabled(), "must disable while update.bat is 'running'"
-        assert not frame.btn_start.IsEnabled(), "Start must be disabled while updating too"
-        assert not dlg.btn_close.IsEnabled(), "Close must be disabled until the run finishes"
-
-        on_exit = captured["on_exit"]
-        on_exit(_FakeResult(0))
-        assert not frame.updating
-        assert frame.btn_run_update.IsEnabled()
-        assert dlg.finished
-        assert dlg.btn_close.IsEnabled()
-
-        # Refuses to start (and never touches startWorker) while a conversion job
-        # is already running, warning the user instead of silently doing nothing.
-        captured.clear()
-        message_box_calls.clear()
-        frame.processing = True
-        frame.on_click_btn_run_update(None)
-        assert "wargs" not in captured, "must never launch update.bat while a job is running"
-        assert message_box_calls, "must warn the user instead of silently doing nothing"
-
-        # Visual disable/re-enable in lockstep with self.processing, via the same
-        # central update_start_button_state() other job-lifecycle transitions use.
-        frame.update_start_button_state()
-        assert not frame.btn_run_update.IsEnabled()
-        frame.processing = False
-        frame.update_start_button_state()
-        assert frame.btn_run_update.IsEnabled()
-    finally:
-        gui_mod.startWorker = orig_start_worker
-        gui_mod.wx.MessageDialog = orig_message_dialog
-        gui_mod.wx.MessageBox = orig_message_box
-        if frame is not None:
-            frame.Destroy()
-            wx.SafeYield()
-        app.Destroy()
-
-    print("_self_test_run_update_button: PASS")
-
-
 def _self_test_run_update_git_checkpoint():
     """ADR-069 dated amendment: `run_update()` must call the safety check-point
     BEFORE ever launching update.bat, and a real checkpoint failure must stop
@@ -11842,18 +11778,16 @@ def _self_test_run_update_git_checkpoint():
 
 
 def _self_test_install_3decker_update_button():
-    """Regression test for "Install Update Now" (ADR-108) -- the genuinely separate
-    action from "Run Update" tested by _self_test_run_update_button just above.
-    Mirrors that test's structure exactly, confirming: (a) declining the confirmation
-    never calls startWorker, (b) accepting it launches update-3decker.bat (NOT
-    update.bat) via the real subprocess command, using the SAME self.updating flag
-    and button-disable behavior (including disabling btn_run_update too -- proving
-    the two actions are mutually exclusive, not independent), (c) the log dialog's
-    title correctly says "Installing 3DECKER Update" (via RunUpdateDialog's new
-    optional `title` param), not the generic "Run Update", (d) it refuses to start
-    while a conversion job is running, same as Run Update. update-3decker.bat is
-    never actually executed -- startWorker/wx.MessageDialog/wx.MessageBox are
-    monkeypatched, same convention as _self_test_run_update_button."""
+    """Regression test for "Install Update Now" (ADR-108/111): confirms (a) declining
+    the confirmation never calls startWorker, (b) accepting it launches
+    update-3decker.bat specifically via the real subprocess command, using
+    self.updating/button-disable behavior, (c) the log dialog's title correctly says
+    "Installing 3DECKER Update", (d) it refuses to start while a conversion job is
+    running, (e) it also refuses to start while a Nagadomi install (the OTHER
+    hardcoded path, ADR-111) is already running -- proving the two share
+    self.updating and are genuinely mutually exclusive, not independent. Nothing is
+    ever actually executed -- startWorker/wx.MessageDialog/wx.MessageBox are
+    monkeypatched so no real modal or subprocess blocks this test."""
     import iw3.gui as gui_mod
 
     class _FakeResult:
@@ -11890,8 +11824,6 @@ def _self_test_install_3decker_update_button():
     orig_message_box = gui_mod.wx.MessageBox
     try:
         frame = gui_mod.MainFrame()
-        assert frame.btn_run_update.GetLabelText() == T("Run Update"), \
-            "Run Update's own label must stay untouched by this feature"
 
         gui_mod.wx.MessageDialog = _FakeConfirmDialog
         gui_mod.wx.MessageBox = _fake_message_box
@@ -11909,35 +11841,49 @@ def _self_test_install_3decker_update_button():
         assert "wargs" not in captured, "declining the confirmation must never call startWorker"
         assert not frame.updating
 
-        # Accepting it launches update-3decker.bat specifically -- never update.bat.
+        # Accepting it launches update-3decker.bat specifically -- never any other script.
         _FakeConfirmDialog.result = wx.ID_YES
         frame.on_click_install_3decker_update(None)
         assert "wargs" in captured, "accepting the confirmation must launch update-3decker.bat"
         cmd, cwd, nunif_dir, dlg = captured["wargs"]
         expected_bat, expected_root = gui_mod._find_3decker_update_bat()
-        expected_update_bat, _ = gui_mod._find_update_bat()
+        expected_nagadomi_bat, _ = gui_mod._find_nagadomi_update_bat()
         assert path.exists(expected_bat), expected_bat
         assert cmd[-1] == expected_bat, cmd
-        assert cmd[-1] != expected_update_bat, "must never launch the real update.bat"
+        assert cmd[-1] != expected_nagadomi_bat, "must never launch update-nagadomi.bat"
         assert path.basename(expected_bat) == "update-3decker.bat", expected_bat
         assert cmd[0].lower().endswith("cmd.exe"), cmd
         assert cmd[1] == "/c", cmd
         assert cwd == expected_root, (cwd, expected_root)
         assert nunif_dir == gui_mod.update_check._get_nunif_repo_root(), nunif_dir
         assert frame.updating
-        assert not frame.btn_run_update.IsEnabled(), \
-            "Run Update must ALSO disable while installing -- same self.updating flag, mutually exclusive"
         assert not frame.btn_start.IsEnabled(), "Start must be disabled while updating too"
         assert not dlg.btn_close.IsEnabled(), "Close must be disabled until the run finishes"
         assert dlg.GetTitle() == T("Installing 3DECKER Update"), \
-            "log dialog must say '3DECKER', not the generic 'Run Update' title"
+            "log dialog must say '3DECKER'"
 
+        # The Nagadomi install (the OTHER hardcoded path) must refuse to start too,
+        # while this one is "running" -- proving they share self.updating, not
+        # independent flags. Since it refuses BEFORE touching startWorker, `captured`
+        # (still holding the 3DECKER install's own wargs/on_exit from just above)
+        # must stay completely unchanged -- checked directly rather than re-triggering
+        # a second real install attempt (which would construct a second real
+        # RunUpdateDialog with nothing to destroy it, the exact resource-leak class
+        # ADR-109 fixed elsewhere in this suite).
+        message_box_calls.clear()
         on_exit = captured["on_exit"]
+        frame.on_click_install_nagadomi_update(None)
+        assert captured["wargs"][0] == cmd, \
+            "Install Nagadomi Update must refuse to start while a 3DECKER install is running"
+        assert message_box_calls, "must warn the user instead of silently doing nothing"
+
+        # Finish the ALREADY-running 3DECKER install using its own captured on_exit --
+        # no second dialog constructed.
         on_exit(_FakeResult(0))
         assert not frame.updating
-        assert frame.btn_run_update.IsEnabled()
         assert dlg.finished
         assert dlg.btn_close.IsEnabled()
+        dlg.Destroy()
 
         # Refuses to start while a conversion job is already running.
         captured.clear()
@@ -11959,28 +11905,152 @@ def _self_test_install_3decker_update_button():
     print("_self_test_install_3decker_update_button: PASS")
 
 
+def _self_test_install_nagadomi_update_button():
+    """Nagadomi-specific counterpart to _self_test_install_3decker_update_button
+    (ADR-111) -- mirrors it, confirming accepting the confirmation launches
+    update-nagadomi.bat specifically, NEVER update-3decker.bat. This cross-check is
+    the crux of "genuinely separate" -- if the two install actions were ever
+    accidentally wired to the same script, one of these two tests would fail."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    class _FakeConfirmDialog:
+        result = wx.ID_YES
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ShowModal(self):
+            return _FakeConfirmDialog.result
+
+    message_box_calls = []
+
+    def _fake_message_box(message, caption="", style=0):
+        message_box_calls.append((message, caption, style))
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_message_dialog = gui_mod.wx.MessageDialog
+    orig_message_box = gui_mod.wx.MessageBox
+    try:
+        frame = gui_mod.MainFrame()
+
+        gui_mod.wx.MessageDialog = _FakeConfirmDialog
+        gui_mod.wx.MessageBox = _fake_message_box
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["on_exit"] = on_exit
+            captured["wargs"] = wargs
+        gui_mod.startWorker = _fake_start_worker
+
+        # Declining the confirmation must never launch anything.
+        _FakeConfirmDialog.result = wx.ID_NO
+        frame.on_click_install_nagadomi_update(None)
+        assert "wargs" not in captured, "declining the confirmation must never call startWorker"
+        assert not frame.updating
+
+        # Accepting it launches update-nagadomi.bat specifically -- never update-3decker.bat.
+        _FakeConfirmDialog.result = wx.ID_YES
+        frame.on_click_install_nagadomi_update(None)
+        assert "wargs" in captured, "accepting the confirmation must launch update-nagadomi.bat"
+        cmd, cwd, nunif_dir, dlg = captured["wargs"]
+        expected_bat, expected_root = gui_mod._find_nagadomi_update_bat()
+        expected_3decker_bat, _ = gui_mod._find_3decker_update_bat()
+        assert path.exists(expected_bat), expected_bat
+        assert cmd[-1] == expected_bat, cmd
+        assert cmd[-1] != expected_3decker_bat, "must never launch update-3decker.bat"
+        assert path.basename(expected_bat) == "update-nagadomi.bat", expected_bat
+        assert cmd[0].lower().endswith("cmd.exe"), cmd
+        assert cmd[1] == "/c", cmd
+        assert cwd == expected_root, (cwd, expected_root)
+        assert nunif_dir == gui_mod.update_check._get_nunif_repo_root(), nunif_dir
+        assert frame.updating
+        assert not frame.btn_start.IsEnabled(), "Start must be disabled while updating too"
+        assert not dlg.btn_close.IsEnabled(), "Close must be disabled until the run finishes"
+        assert dlg.GetTitle() == T("Installing Nagadomi Update"), \
+            "log dialog must say 'Nagadomi'"
+
+        # The 3DECKER install must refuse to start too, while this one is "running" --
+        # checked directly against the already-captured wargs/on_exit rather than
+        # re-triggering a second real install attempt (see the mirrored comment in
+        # _self_test_install_3decker_update_button for why).
+        message_box_calls.clear()
+        on_exit = captured["on_exit"]
+        frame.on_click_install_3decker_update(None)
+        assert captured["wargs"][0] == cmd, \
+            "Install 3DECKER Update must refuse to start while a Nagadomi install is running"
+        assert message_box_calls, "must warn the user instead of silently doing nothing"
+
+        # Finish the ALREADY-running Nagadomi install using its own captured on_exit
+        # -- no second dialog constructed.
+        on_exit(_FakeResult(0))
+        assert not frame.updating
+        assert dlg.finished
+        assert dlg.btn_close.IsEnabled()
+        dlg.Destroy()
+
+        # Refuses to start while a conversion job is already running.
+        captured.clear()
+        message_box_calls.clear()
+        frame.processing = True
+        frame.on_click_install_nagadomi_update(None)
+        assert "wargs" not in captured, "must never launch update-nagadomi.bat while a job is running"
+        assert message_box_calls, "must warn the user instead of silently doing nothing"
+        frame.processing = False
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        gui_mod.wx.MessageDialog = orig_message_dialog
+        gui_mod.wx.MessageBox = orig_message_box
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_install_nagadomi_update_button: PASS")
+
+
 def _self_test_update_available_dialog_wiring():
-    """Regression test for ADR-108's UpdateAvailableDialog wiring: both places that
-    learn about a real "updates_available" result -- the manual Check for 3DECKER
-    Updates button (on_exit_check_updates_worker) and the silent startup auto-check
-    (on_exit_startup_check_updates_worker, ADR-107) -- must show UpdateAvailableDialog
-    (not a plain wx.MessageBox) for that one status, and clicking its "Install Update
-    Now" button (ID_OK) must call on_click_install_3decker_update. The "up_to_date"/
-    "error" statuses must be UNCHANGED: still a plain wx.MessageBox, no dialog, no
-    install call. UpdateAvailableDialog itself is monkeypatched to a fake
-    context-manager (same convention as _FakeConfirmDialog elsewhere in this file) so
-    no real modal blocks this test; on_click_install_3decker_update is monkeypatched
-    to a call-counting stub, since its own internals are already covered by
-    _self_test_install_3decker_update_button -- this test only proves the wiring
-    connects, not re-testing the install flow's internals."""
+    """Regression test for ADR-108/111's UpdateAvailableDialog wiring: all three
+    places that learn about a real "updates_available" result -- the manual Check
+    for 3DECKER Updates button, the manual Check for Nagadomi Updates button
+    (ADR-111), and the silent startup auto-check (on_exit_startup_check_updates_worker,
+    ADR-107, 3DECKER-only) -- must show UpdateAvailableDialog (not a plain
+    wx.MessageBox) for that one status, with the correct title, and clicking its
+    "Install Update Now" button (ID_OK) must call the CORRECT install action for
+    which check produced the result (3DECKER's check -> 3DECKER's install; Nagadomi's
+    check -> Nagadomi's install -- never crossed). The "up_to_date"/"error" statuses
+    must be UNCHANGED: still a plain wx.MessageBox, no dialog, no install call.
+    UpdateAvailableDialog itself is monkeypatched to a fake context-manager (same
+    convention as _FakeConfirmDialog elsewhere in this file) so no real modal blocks
+    this test; both install actions are monkeypatched to call-counting stubs, since
+    their own internals are already covered by _self_test_install_3decker_update_button/
+    _self_test_install_nagadomi_update_button -- this test only proves the wiring
+    connects to the right target, not re-testing the install flows' internals."""
     import iw3.gui as gui_mod
 
     class _FakeUpdateAvailableDialog:
         result = wx.ID_CLOSE
         last_message = None
+        last_title = None
 
-        def __init__(self, parent, message):
+        def __init__(self, parent, message, title=None):
             _FakeUpdateAvailableDialog.last_message = message
+            _FakeUpdateAvailableDialog.last_title = title
 
         def __enter__(self):
             return self
@@ -12005,14 +12075,21 @@ def _self_test_update_available_dialog_wiring():
         gui_mod.UpdateAvailableDialog = _FakeUpdateAvailableDialog
         gui_mod.wx.MessageBox = _fake_message_box
 
-        install_calls = []
-        frame.on_click_install_3decker_update = lambda *a, **kw: install_calls.append(True)
+        install_3decker_calls = []
+        install_nagadomi_calls = []
+        frame.on_click_install_3decker_update = lambda *a, **kw: install_3decker_calls.append(True)
+        frame.on_click_install_nagadomi_update = lambda *a, **kw: install_nagadomi_calls.append(True)
 
-        updates_available_result = {
+        updates_available_3decker = {
             "status": "updates_available", "local_branch": "my-customizations",
-            "upstream_ref": "origin/my-customizations",
+            "upstream_ref": "3decker-tool/my-customizations",
             "remote_url": "https://github.com/3decker/3decker-tool.git",
             "count": 1, "subjects": ["Some commit"], "more": 0}
+        updates_available_nagadomi = {
+            "status": "updates_available", "local_branch": "my-customizations",
+            "upstream_ref": "nagadomi/nunif/master",
+            "remote_url": "https://github.com/nagadomi/nunif.git",
+            "count": 1, "subjects": ["Upstream fix"], "more": 0}
         up_to_date_result = {"status": "up_to_date", "local_branch": "my-customizations",
                              "upstream_ref": "origin/my-customizations", "remote_url": ""}
         error_result = {"status": "error", "message": "no network"}
@@ -12024,51 +12101,80 @@ def _self_test_update_available_dialog_wiring():
             def get(self):
                 return self._value
 
-        # Manual button: updates_available -> UpdateAvailableDialog shown, Install
-        # clicked (ID_OK simulated) -> on_click_install_3decker_update called.
+        def _reset():
+            install_3decker_calls.clear()
+            install_nagadomi_calls.clear()
+            message_box_calls.clear()
+            _FakeUpdateAvailableDialog.last_message = None
+            _FakeUpdateAvailableDialog.last_title = None
+
+        # 3DECKER manual button: updates_available -> UpdateAvailableDialog shown with
+        # the 3DECKER title, Install clicked (ID_OK) -> the 3DECKER install action
+        # specifically, NEVER Nagadomi's.
         _FakeUpdateAvailableDialog.result = wx.ID_OK
-        frame.on_exit_check_updates_worker(_FakeCheckResult(updates_available_result))
+        frame.on_exit_check_updates_worker(_FakeCheckResult(updates_available_3decker))
         assert _FakeUpdateAvailableDialog.last_message is not None
         assert "3DECKER's own updates" in _FakeUpdateAvailableDialog.last_message
-        assert len(install_calls) == 1, "clicking Install (ID_OK) must call on_click_install_3decker_update"
+        assert _FakeUpdateAvailableDialog.last_title == T("3DECKER Update Available"), \
+            _FakeUpdateAvailableDialog.last_title
+        assert len(install_3decker_calls) == 1, "must call the 3DECKER install action"
+        assert not install_nagadomi_calls, "must NEVER call the Nagadomi install action"
         assert not message_box_calls, "updates_available must use the dialog, not a plain MessageBox"
 
-        # Manual button: up_to_date -> unchanged plain wx.MessageBox, no dialog, no install.
-        install_calls.clear()
-        message_box_calls.clear()
-        _FakeUpdateAvailableDialog.last_message = None
+        # 3DECKER manual button: up_to_date -> unchanged plain wx.MessageBox, no dialog.
+        _reset()
         frame.on_exit_check_updates_worker(_FakeCheckResult(up_to_date_result))
         assert _FakeUpdateAvailableDialog.last_message is None, "up_to_date must never show UpdateAvailableDialog"
-        assert not install_calls
+        assert not install_3decker_calls and not install_nagadomi_calls
         assert message_box_calls, "up_to_date must still show its plain informational popup"
 
-        # Manual button: error -> unchanged plain wx.MessageBox, no dialog, no install.
-        install_calls.clear()
-        message_box_calls.clear()
+        # 3DECKER manual button: error -> unchanged plain wx.MessageBox, no dialog.
+        _reset()
         frame.on_exit_check_updates_worker(_FakeCheckResult(error_result))
         assert _FakeUpdateAvailableDialog.last_message is None, "error must never show UpdateAvailableDialog"
-        assert not install_calls
+        assert not install_3decker_calls and not install_nagadomi_calls
         assert message_box_calls
 
-        # Startup auto-check (ADR-107): updates_available -> same dialog; Close
-        # (ID_CLOSE) instead of Install this time -> must NOT call install.
-        install_calls.clear()
-        message_box_calls.clear()
-        _FakeUpdateAvailableDialog.last_message = None
-        _FakeUpdateAvailableDialog.result = wx.ID_CLOSE
-        frame.on_exit_startup_check_updates_worker(_FakeCheckResult(updates_available_result))
+        # Nagadomi manual button (ADR-111): updates_available -> UpdateAvailableDialog
+        # shown with the Nagadomi title, Install clicked -> the Nagadomi install
+        # action specifically, NEVER 3DECKER's.
+        _reset()
+        _FakeUpdateAvailableDialog.result = wx.ID_OK
+        frame.on_exit_check_nagadomi_updates_worker(_FakeCheckResult(updates_available_nagadomi))
         assert _FakeUpdateAvailableDialog.last_message is not None
-        assert not install_calls, "clicking Close (ID_CLOSE) must never call on_click_install_3decker_update"
+        assert "NOT from this fork's own customizations" in _FakeUpdateAvailableDialog.last_message
+        assert _FakeUpdateAvailableDialog.last_title == T("Nagadomi Update Available"), \
+            _FakeUpdateAvailableDialog.last_title
+        assert len(install_nagadomi_calls) == 1, "must call the Nagadomi install action"
+        assert not install_3decker_calls, "must NEVER call the 3DECKER install action"
+        assert not message_box_calls
+
+        # Nagadomi manual button: up_to_date/error -> unchanged plain wx.MessageBox.
+        _reset()
+        frame.on_exit_check_nagadomi_updates_worker(_FakeCheckResult(up_to_date_result))
+        frame.on_exit_check_nagadomi_updates_worker(_FakeCheckResult(error_result))
+        assert _FakeUpdateAvailableDialog.last_message is None
+        assert not install_3decker_calls and not install_nagadomi_calls
+        assert message_box_calls
+
+        # Startup auto-check (ADR-107, 3DECKER-only): updates_available -> same
+        # dialog with the 3DECKER title; Close (ID_CLOSE) instead of Install this
+        # time -> must NOT call either install action.
+        _reset()
+        _FakeUpdateAvailableDialog.result = wx.ID_CLOSE
+        frame.on_exit_startup_check_updates_worker(_FakeCheckResult(updates_available_3decker))
+        assert _FakeUpdateAvailableDialog.last_message is not None
+        assert _FakeUpdateAvailableDialog.last_title == T("3DECKER Update Available")
+        assert not install_3decker_calls and not install_nagadomi_calls, \
+            "clicking Close (ID_CLOSE) must never call an install action"
 
         # Startup auto-check: up_to_date/error stay completely silent (ADR-107's own
         # existing behavior) -- confirm this plan didn't disturb that.
-        install_calls.clear()
-        message_box_calls.clear()
-        _FakeUpdateAvailableDialog.last_message = None
+        _reset()
         frame.on_exit_startup_check_updates_worker(_FakeCheckResult(up_to_date_result))
         frame.on_exit_startup_check_updates_worker(_FakeCheckResult(error_result))
         assert _FakeUpdateAvailableDialog.last_message is None
-        assert not install_calls
+        assert not install_3decker_calls and not install_nagadomi_calls
         assert not message_box_calls, "startup auto-check must stay silent for up_to_date/error"
     finally:
         gui_mod.UpdateAvailableDialog = orig_dialog_cls
@@ -12317,9 +12423,9 @@ def _run_self_tests():
         _self_test_hdr_reinject_rife_manifest_field,
         _self_test_rife_standalone_panel,
         _self_test_tool_log_clear_buttons,
-        _self_test_run_update_button,
         _self_test_run_update_git_checkpoint,
         _self_test_install_3decker_update_button,
+        _self_test_install_nagadomi_update_button,
         _self_test_update_available_dialog_wiring,
         _self_test_import_command_round_trip,
         _self_test_device_dropdown_no_torch_cuda_touch,

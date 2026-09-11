@@ -5157,17 +5157,17 @@ class MainFrame(wx.Frame):
         apply_dark_mode() (nunif/gui/common.py) so it always applies last instead of
         being clobbered by that function's blanket recursive fg/bg reset.
 
-        ADR-115: always applies this fork's own deliberately warm, high-contrast
-        palette, regardless of the Windows light/dark setting -- per direct user
-        request for a less bright background and stronger text contrast across the
-        whole app (first tried a dark version, user preferred a light brown look
-        instead -- kept the dark, near-black text for contrast, changed the
-        background to light brown/tan).
+        ADR-116: always applies this fork's own deliberately high-contrast palette,
+        regardless of the Windows light/dark setting -- per direct user request for
+        a less bright background and stronger text contrast across the whole app.
+        Went through a few rounds live (dark charcoal, then light brown) before
+        landing on "Soft Sky" -- a light, muted blue -- picked from a set of
+        mockups covering brown/grey/blue options.
         """
-        accent = wx.Colour(0x8a, 0x4a, 0x1f)
-        panel_bg = wx.Colour(0xdb, 0xc7, 0xa1)
-        text_fg = wx.Colour(0x3b, 0x2a, 0x16)
-        field_bg = wx.Colour(0xf5, 0xee, 0xdd)
+        accent = wx.Colour(0x3a, 0x6e, 0xa5)
+        panel_bg = wx.Colour(0xd8, 0xe3, 0xee)
+        text_fg = wx.Colour(0x1c, 0x2e, 0x3f)
+        field_bg = wx.Colour(0xf2, 0xf7, 0xfb)
 
         # Base text color for every control in the window, before the more specific
         # overrides below (group box titles, Start/Cancel) get applied on top.
@@ -5220,6 +5220,19 @@ class MainFrame(wx.Frame):
             self.cpn_rife_standalone.GetPane(),
         ):
             panel.SetBackgroundColour(panel_bg)
+
+        # ADR-116: bold each collapsible section's own header (the clickable
+        # triangle+label bar) -- previously only the group box titles above were
+        # bold, these used the default weight, so section headers looked
+        # inconsistent with the group titles right next to them.
+        for cpn in (
+            self.cpn_stereo_pop_divergence, self.cpn_stereo_inpainting_depth,
+            self.cpn_stereo_stability_flicker, self.cpn_video_filter_scene_batch,
+            self.cpn_depth_blend, self.cpn_hdr_reinject, self.cpn_subsearch,
+            self.cpn_submux, self.cpn_audiomux, self.cpn_stereotag,
+            self.cpn_sharpen, self.cpn_rife_standalone,
+        ):
+            cpn.SetFont(box_font)
 
         # Primary/danger accents on the two most consequential process-panel actions
         # only -- Start (goes) and Cancel (stops) -- everything else stays neutral so

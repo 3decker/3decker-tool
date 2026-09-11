@@ -13,6 +13,36 @@ it matters.
 
 ---
 
+## Latest Update — September 10, 2026
+
+**A friendlier main screen.** The Stereo Generation tab (the one you use on every
+conversion) now has real sliders you can drag for the settings you adjust most — 3D
+Strength, Convergence, Edge Suppression, and more — instead of only typing numbers into
+a box. The long lists of less-common settings are now tucked behind small, clickable,
+color-coded sections (like "Pop & Divergence" or "Stability & Flicker") that stay
+collapsed until you actually need them, so the tab isn't a wall of controls anymore.
+Dual-Pass Depth Blend, Video Filter's batch-processing options, and every Standalone
+Tool got the same treatment — each one is now a compact card you expand only when
+you're using it.
+
+**Updating the app is clearer now.** There used to be one "Check for Updates" button
+that was ambiguous about which project's updates it was actually looking at. That's
+been split into two genuinely separate, unmistakable buttons: **"Check for 3DECKER
+Updates"** (this project's own new features, UI changes, and fixes) and **"Check for
+Nagadomi Updates"** (the original open-source nunif project this tool is built on).
+Each one shows you exactly what's new before anything installs, with its own
+**"Install Update Now"** button right on that same screen — no more guessing which
+button does what, and no separate step needed to actually apply what you just saw.
+
+**The app also quietly lets you know when an update is available**, right when you
+open it — no popup at all if you're already current, so this never gets in your way.
+
+**Naming and branding cleanup.** The window title now simply reads "3DECKER" instead
+of a long technical string. The app launcher was renamed from `iw3-gui.bat` to the
+correct `3decker-gui.bat`, and the app now has its own dedicated icon.
+
+---
+
 ## 3D Conversion Quality
 
 **Dual-Pass Depth Blend — combining two AI "depth" models into one better result.**
@@ -211,11 +241,14 @@ movie up to 48fps.
   elapsed time, speed, and estimated time remaining) instead of one
   undifferentiated bar, and the window can no longer get stuck positioned
   off-screen.
-- A **Check for Updates** button lets you see if a newer version is available
-  without changing anything, and a separate **Run Update** button actually
-  applies the update (packages, downloaded models, and source code together)
-  from inside the app — with a confirmation prompt first, and an automatic
-  safety backup of any of your own unsaved customizations before it runs.
+- Two separate update buttons — **"Check for 3DECKER Updates"** and **"Check for
+  Nagadomi Updates"** — let you see what's new from either project without changing
+  anything, each with its own **"Install Update Now"** button right on the results
+  screen to actually apply it (packages, downloaded models, and source code
+  together) — with a confirmation prompt first, and an automatic safety backup of
+  any of your own unsaved customizations before it runs. The app also checks
+  quietly in the background when you open it and lets you know if a 3DECKER update
+  is available, with no popup at all if you're already up to date.
 - Every standalone tool's output log now has its own **Clear** button.
 - A standalone **Retroactively Tag MKV as 3D** tool writes the correct 3D
   metadata into an already-converted file, so 3D-aware players and TVs (VLC,

@@ -5128,17 +5128,50 @@ class MainFrame(wx.Frame):
         for child in window.GetChildren():
             self._set_font_recursive(child, font)
 
+    def _set_fg_recursive(self, window, text_color, field_bg_color):
+        """Sets text color on every descendant that isn't separately re-colored right
+        after this call (group box titles get the accent color, Start/Cancel get
+        white-on-fill) -- so this is deliberately the FIRST pass in
+        apply_accent_theme(), with those specific overrides applied on top of it.
+
+        Editable fields (TextCtrl/ComboBox/SpinCtrl/Choice/ListBox) get their own
+        background too, not just text color -- they don't inherit a parent panel's
+        background the way a plain label does, so leaving them at the OS default
+        white would put light text on a white field (unreadable) instead of reading
+        as a themed input."""
+        if isinstance(window, (wx.Button, wx.StaticBox)):
+            pass
+        elif isinstance(window, (wx.TextCtrl, wx.ComboBox, wx.Choice,
+                                  wx.SpinCtrl, wx.SpinCtrlDouble, wx.ListBox)):
+            window.SetForegroundColour(text_color)
+            window.SetBackgroundColour(field_bg_color)
+        else:
+            window.SetForegroundColour(text_color)
+        for child in window.GetChildren():
+            self._set_fg_recursive(child, text_color, field_bg_color)
+
     def apply_accent_theme(self):
         """3DECKER visual pass: a real, considered color palette using only what
         wxPython natively supports (SetForegroundColour/SetBackgroundColour/SetFont) --
         no new GUI toolkit, no control renamed/rebound/retooltipped. Runs after
         apply_dark_mode() (nunif/gui/common.py) so it always applies last instead of
-        being clobbered by that function's blanket recursive fg/bg reset, and picks
-        light vs. dark palette values itself so the accent stays legible either way.
+        being clobbered by that function's blanket recursive fg/bg reset.
+
+        ADR-115: always applies this fork's own deliberately warm, high-contrast
+        palette, regardless of the Windows light/dark setting -- per direct user
+        request for a less bright background and stronger text contrast across the
+        whole app (first tried a dark version, user preferred a light brown look
+        instead -- kept the dark, near-black text for contrast, changed the
+        background to light brown/tan).
         """
-        dark = is_dark_mode()
-        accent = wx.Colour(0x6f, 0xb2, 0xf7) if dark else wx.Colour(0x1f, 0x5f, 0xc9)
-        panel_bg = wx.Colour(0x2c, 0x30, 0x38) if dark else wx.Colour(0xf3, 0xf5, 0xf9)
+        accent = wx.Colour(0x8a, 0x4a, 0x1f)
+        panel_bg = wx.Colour(0xdb, 0xc7, 0xa1)
+        text_fg = wx.Colour(0x3b, 0x2a, 0x16)
+        field_bg = wx.Colour(0xf5, 0xee, 0xdd)
+
+        # Base text color for every control in the window, before the more specific
+        # overrides below (group box titles, Start/Cancel) get applied on top.
+        self._set_fg_recursive(self, text_fg, field_bg)
 
         box_font = self.grp_stereo.GetFont().Bold()
         for box in (

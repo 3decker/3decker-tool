@@ -6864,7 +6864,18 @@ class MainFrame(wx.Frame):
             self.grp_video.cbo_fps.SetValue("1000.0")
             self.grp_video.cbo_crf.SetValue("15")
             self.grp_video_dec.cbo_hwaccel.SetStringSelection("cuda")
-            self.grp_video_dec.chk_software_fallback.SetValue(False)
+            # Software Fallback stays ON (the default) -- confirmed via a real
+            # crash report from a fresh install (ADR-123) that turning it OFF here,
+            # combined with this same preset's Compile=ON and Autocrop=BLACK, is a
+            # real, reproducible crash: AutoCrop's own pre-analysis pass opens the
+            # input with hwaccel BEFORE the main pipeline runs, and nunif/utils/
+            # video/processor.py's open_input_container_with_hwaccel() already has
+            # a documented, intentional fallback to software decode specifically
+            # for the well-known "torch.compile probe corrupts the CUDA primary
+            # context" failure (av.error.OSError [Errno 129]) -- but that fallback
+            # is unconditionally skipped when Software Fallback is disabled, so
+            # this preset was defeating its own safety net for no real benefit.
+            self.grp_video_dec.chk_software_fallback.SetValue(True)
 
             self.cbo_max_workers.SetStringSelection("2")
             self.chk_metadata.SetValue(True)
@@ -11529,7 +11540,11 @@ def _self_test_3decker_quick_preset():
         assert frame.grp_video.cbo_fps.GetValue() == "1000.0", frame.grp_video.cbo_fps.GetValue()
         assert frame.grp_video.cbo_crf.GetValue() == "15", frame.grp_video.cbo_crf.GetValue()
         assert frame.grp_video_dec.cbo_hwaccel.GetValue() == "cuda", frame.grp_video_dec.cbo_hwaccel.GetValue()
-        assert frame.grp_video_dec.chk_software_fallback.GetValue() is False
+        # Software Fallback must stay ON here -- see ADR-123: turning it off
+        # combined with this preset's Compile=ON/Autocrop=BLACK is a real,
+        # confirmed crash (AutoCrop's pre-analysis hwaccel open has no other
+        # protection against the documented torch.compile-probe CUDA corruption).
+        assert frame.grp_video_dec.chk_software_fallback.GetValue() is True
 
         assert frame.cbo_max_workers.GetValue() == "2", frame.cbo_max_workers.GetValue()
         assert frame.chk_metadata.GetValue() is True

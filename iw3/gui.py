@@ -7278,16 +7278,15 @@ class MainFrame(wx.Frame):
         they're silently skipped, matching this project's established
         "genuinely CLI-only setting -> skip, don't error" convention.
 
-        Conversely, a handful of real GUI settings -- confirmed by reading
-        create_parser() directly, not assumed -- have NO real --flag at all
-        (waifu2x_method/noise_level/style; the Dual-Pass Depth Blend feather/
+        As of the CLI-completeness audit (docs/ai/AI_DECISIONS.md, ADR-121),
+        every real GUI setting now has a matching --flag in create_parser() --
+        waifu2x_method/noise_level/style; the Dual-Pass Depth Blend feather/
         bilateral/CLAHE/align/edge-suppression fields; Object Stability's
-        max-shift/flat-boost/edge-protection; VR Optimized Merge/its FPS):
-        Copy Command already cannot
-        export these (get_cli_command() only iterates create_parser()'s own
-        default Namespace keys), so a pasted command can never carry them
-        either -- `args` here simply won't have these attributes, and this
-        function does not try to guess or preserve them.
+        max-shift/flat-boost/edge-protection; and VR Optimized Merge/its FPS
+        are all real registered arguments now, restored below like any other
+        field. Older pasted commands (from before this fix) simply won't have
+        these attributes on `args`, so the getattr(..., default) fallbacks
+        used below keep those still working with their defaults.
 
         Does NOT probe torch.compile support (see ADR-068, and ADR-074's use
         of the same guard) and does NOT run a conversion -- only sets widget
@@ -7383,16 +7382,45 @@ class MainFrame(wx.Frame):
 
         self.chk_temporal_stabilize.SetValue(bool(args.temporal_stabilize))
         _apply_combo_value(self.cbo_temporal_stabilize_strength, args.temporal_stabilize_strength)
+        max_shift = getattr(args, "temporal_stabilize_max_shift_velocity", None)
+        _apply_combo_value(self.cbo_temporal_stabilize_max_shift, "" if max_shift is None else max_shift)
+        _apply_combo_value(
+            self.cbo_temporal_stabilize_flat_boost, getattr(args, "temporal_stabilize_flat_region_boost", 0.0))
+        _apply_combo_value(
+            self.cbo_temporal_stabilize_edge_protect, getattr(args, "temporal_stabilize_edge_protection", 0.0))
 
-        # depth_blend_* fields beyond these 5 (feather blur, bilateral, CLAHE,
-        # align, edge suppression) are GUI-only -- see docstring above -- left as-is.
+        # depth_blend_* fields (feather blur, bilateral +d/sigma-color/sigma-space,
+        # CLAHE +clip/tile, align +decay, edge suppression, edge hard-cutoff) all now
+        # have real --depth-blend-* CLI flags (create_parser() in utils.py) -- no
+        # longer GUI-only.
         self.chk_depth_blend.SetValue(bool(args.depth_blend))
         _apply_combo_value(self.cbo_depth_blend_model, args.depth_blend_model)
         _apply_combo_value(self.cbo_depth_blend_strength, args.depth_blend_strength)
         _apply_combo_value(self.cbo_depth_blend_region, args.depth_blend_region)
         _apply_combo_value(self.cbo_depth_blend_region_percent, args.depth_blend_region_percent)
+        _apply_combo_value(self.cbo_depth_blend_feather_blur, getattr(args, "depth_blend_feather_blur", 0))
+        self.chk_depth_blend_bilateral.SetValue(bool(getattr(args, "depth_blend_bilateral", False)))
+        _apply_combo_value(self.cbo_depth_blend_bilateral_d, getattr(args, "depth_blend_bilateral_d", 12))
+        _apply_combo_value(
+            self.cbo_depth_blend_bilateral_sigma_color, getattr(args, "depth_blend_bilateral_sigma_color", 75.0))
+        _apply_combo_value(
+            self.cbo_depth_blend_bilateral_sigma_space, getattr(args, "depth_blend_bilateral_sigma_space", 75.0))
+        self.chk_depth_blend_clahe.SetValue(bool(getattr(args, "depth_blend_clahe", False)))
+        _apply_combo_value(self.cbo_depth_blend_clahe_clip, getattr(args, "depth_blend_clahe_clip", 2.0))
+        _apply_combo_value(self.cbo_depth_blend_clahe_tile, getattr(args, "depth_blend_clahe_tile", 8))
+        self.chk_depth_blend_align.SetValue(bool(getattr(args, "depth_blend_align", False)))
+        _apply_combo_value(self.cbo_depth_blend_align_decay, getattr(args, "depth_blend_align_decay", 0.9))
+        _apply_combo_value(
+            self.cbo_depth_blend_edge_suppression, getattr(args, "depth_blend_edge_suppression", 0.5))
+        self.chk_depth_blend_edge_hard_cutoff.SetValue(bool(getattr(args, "depth_blend_edge_hard_cutoff", False)))
+        self.update_depth_blend_bilateral()
+        self.update_depth_blend_clahe()
+        self.update_depth_blend_align()
 
         self.chk_waifu2x_upscale.SetValue(bool(args.waifu2x_upscale))
+        _apply_combo_value(self.cbo_waifu2x_method, getattr(args, "waifu2x_method", "noise_scale2x"))
+        _apply_combo_value(self.cbo_waifu2x_noise_level, getattr(args, "waifu2x_noise_level", 1))
+        _apply_combo_value(self.cbo_waifu2x_style, getattr(args, "waifu2x_style", "photo"))
         _apply_combo_value(self.cbo_waifu2x_target, args.waifu2x_upscale_target)
 
         self.chk_rife_interpolate.SetValue(bool(args.rife_interpolate))
@@ -7483,8 +7511,12 @@ class MainFrame(wx.Frame):
         self.chk_scene_batch_auto_ema.SetValue(bool(args.scene_batch_auto_ema))
         _apply_combo_value(self.cbo_scene_batch_auto_ema_model, args.scene_batch_auto_ema_model)
         self.txt_scene_batch_variant.SetValue(args.scene_batch_variant or "")
-        # VR Optimized Merge / vr_merge_fps are GUI-only (no real --flag, same as
-        # the fields called out above) -- left as-is, see docstring above.
+        # vr_optimized_merge / vr_merge_fps now have real --vr-optimized-merge /
+        # --vr-merge-fps CLI flags (create_parser() in utils.py) -- restore them here
+        # same as any other checkbox/combo.
+        self.chk_vr_optimized_merge.SetValue(bool(getattr(args, "vr_optimized_merge", False)))
+        vr_merge_fps = getattr(args, "vr_merge_fps", None)
+        _apply_combo_value(self.cbo_vr_merge_fps, "Source FPS" if vr_merge_fps is None else str(int(vr_merge_fps)))
 
         gpu_ids = args.gpu or []
         all_cuda_ids = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []

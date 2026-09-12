@@ -5065,10 +5065,25 @@ def create_parser(required_true=True):
                               "separate, dedicated AI upscaler bundled with this app) as one extra step. "
                               "Written to a separate '<name>_w2x<ext>' file -- the original conversion "
                               "output is never modified. See --waifu2x-method/--waifu2x-noise-level/"
-                              "--waifu2x-style for the plain whole-frame upscale's own settings (GUI-only "
-                              "controls historically; use waifu2x.cli directly for full control from the "
-                              "CLI). --waifu2x-upscale-target additionally selects a stereo-aware per-eye "
+                              "--waifu2x-style for the plain whole-frame upscale's own settings (use "
+                              "waifu2x.cli directly instead for this app's full upscaling surface). "
+                              "--waifu2x-upscale-target additionally selects a stereo-aware per-eye "
                               "upscale path on a packed 3D video output."))
+    parser.add_argument("--waifu2x-method", type=str, default="noise_scale2x",
+                        choices=["noise_scale2x", "noise_scale4x", "scale2x", "scale4x"],
+                        help=("which waifu2x mode --waifu2x-upscale runs. \"noise_scale\" upscales AND "
+                              "reduces compression artifacts/noise at the same time; plain \"scale\" only "
+                              "upscales, leaving existing noise as-is. This was previously GUI-only, with "
+                              "no command-line equivalent."))
+    parser.add_argument("--waifu2x-noise-level", type=int, default=1, choices=[0, 1, 2, 3],
+                        help=("waifu2x noise reduction strength for --waifu2x-upscale (0=off, "
+                              "3=strongest). Ignored for plain \"scale\" methods (only matters for "
+                              "noise_scale2x/4x). This was previously GUI-only, with no command-line "
+                              "equivalent."))
+    parser.add_argument("--waifu2x-style", type=str, default="photo", choices=["photo", "art"],
+                        help=("waifu2x model style for --waifu2x-upscale. \"photo\" (default) suits real "
+                              "movie footage; \"art\" is tuned for illustration/anime source material. "
+                              "This was previously GUI-only, with no command-line equivalent."))
     parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
                         choices=["auto", "4k", "8k"],
                         help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "
@@ -5213,6 +5228,20 @@ def create_parser(required_true=True):
                               "converted scenes and final output under this name, so trying different "
                               "settings (e.g. a different EMA table) never touches or overwrites an "
                               "earlier attempt. Output becomes <name>_<variant>.<ext>."))
+    parser.add_argument("--vr-optimized-merge", action="store_true",
+                        help=("for --scene-batch's final join step. Off (default): scenes are joined with "
+                              "a fast, lossless stream copy -- quick, but each scene clip keeps its own "
+                              "independent timestamps/keyframe structure, which can read as uneven on a VR "
+                              "headset even though normal playback looks fine. On: re-encodes the joined "
+                              "timeline as one continuous stream with clean regenerated timestamps and AAC "
+                              "48kHz audio, intended for smoother VR/headset playback -- slower than the "
+                              "default. This was previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--vr-merge-fps", type=float, default=None,
+                        help=("target constant frame rate for --vr-optimized-merge. Unset/omitted (the "
+                              "default) keeps the already-converted frame rate as-is (still gets clean "
+                              "regenerated timestamps, just no specific forced rate) -- set a fixed VR "
+                              "headset refresh rate instead if your delivery target needs one exactly. "
+                              "This was previously GUI-only, with no command-line equivalent."))
 
     parser.add_argument("--depth-blend", action="store_true",
                         help=("blend depth from a second model into --depth-model's output, favoring the "
@@ -5246,6 +5275,65 @@ def create_parser(required_true=True):
                         help=("for --depth-blend-region foreground/background: what percent of the scene "
                               "(by depth) to blend the secondary model into, e.g. 25 = nearest (or "
                               "farthest) 25%% of the scene. Ignored for --depth-blend-region detail."))
+    parser.add_argument("--depth-blend-feather-blur", type=int, default=0,
+                        help=("for --depth-blend: blur kernel size (pixels) softening the blend transition "
+                              "itself, so the seam between blended/unblended areas doesn't read as a "
+                              "visible hard line. 0 (default) is a sharp on/off transition. This was "
+                              "previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-bilateral", action="store_true",
+                        help=("for --depth-blend: runs an edge-preserving smoothing pass over the FINAL "
+                              "blended depth to clean up noise introduced by mixing two models, without "
+                              "softening real depth boundaries. Off by default. This was previously "
+                              "GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-bilateral-d", type=int, default=12,
+                        help=("bilateral filter diameter in pixels for --depth-blend-bilateral -- how "
+                              "large an area around each pixel is considered. Higher smooths a wider "
+                              "neighborhood at more processing cost. This was previously GUI-only, with no "
+                              "command-line equivalent."))
+    parser.add_argument("--depth-blend-bilateral-sigma-color", type=float, default=75.0,
+                        help=("bilateral filter's depth-value sensitivity for --depth-blend-bilateral, in "
+                              "familiar 0-255-ish terms (scaled internally to this pipeline's real 16-bit "
+                              "depth range). Higher smooths across bigger depth differences, risking real "
+                              "edges. This was previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-bilateral-sigma-space", type=float, default=75.0,
+                        help=("bilateral filter's spatial reach in pixels for --depth-blend-bilateral. "
+                              "Higher smooths across a physically wider area of the frame. This was "
+                              "previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-clahe", action="store_true",
+                        help=("for --depth-blend: local contrast enhancement over the final blended depth. "
+                              "Off by default and not generally recommended -- an earlier benchmark on "
+                              "this project's own depth data found CLAHE amplifies whatever local "
+                              "variation it finds, noise included (see docs/ai/AI_DECISIONS.md ADR-001). "
+                              "This was previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-clahe-clip", type=float, default=2.0,
+                        help=("CLAHE contrast clip limit for --depth-blend-clahe -- how aggressively local "
+                              "contrast gets boosted. Higher is stronger but amplifies more noise. This was "
+                              "previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-clahe-tile", type=int, default=8,
+                        help=("CLAHE tile grid size (NxN) for --depth-blend-clahe -- how finely the frame "
+                              "is divided for local contrast adjustment. More tiles is more localized. This "
+                              "was previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-align", action="store_true",
+                        help=("for --depth-blend: rescales the secondary model's depth to match the "
+                              "primary model's actual distribution (robust linear fit), since both being "
+                              "independently normalized to 0-1 doesn't guarantee the same value means the "
+                              "same real-world distance in both. Off by default. This was previously "
+                              "GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-align-decay", type=float, default=0.9,
+                        help=("for --depth-blend-align: how much the frame-to-frame alignment fit is "
+                              "smoothed across frames instead of being recalculated fresh for every frame. "
+                              "This was previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--depth-blend-edge-suppression", type=float, default=0.5,
+                        help=("for --depth-blend-region detail only: protects a band around the primary "
+                              "model's own clean, confident edges (e.g. a person's silhouette) from being "
+                              "blended, since the two models rarely agree on the exact pixel there and "
+                              "blending risks a soft, doubled-looking edge. This was previously GUI-only, "
+                              "with no command-line equivalent."))
+    parser.add_argument("--depth-blend-edge-hard-cutoff", action="store_true",
+                        help=("for --depth-blend-edge-suppression (detail region only): switches the "
+                              "normally-smooth fade near a real silhouette into a hard on/off step instead, "
+                              "same protected band width. Off by default. This was previously GUI-only, "
+                              "with no command-line equivalent."))
 
     parser.add_argument("--autocrop", type=str.upper, default=None,
                         choices=["BLACK_TB", "BLACK", "FLAT_TB", "FLAT"],
@@ -5295,6 +5383,25 @@ def create_parser(required_true=True):
                         help=("how strongly to trust the motion-warped previous frame vs the fresh "
                               "per-frame depth (0-1) for --temporal-stabilize. Automatically tapers down "
                               "during fast/unreliable motion regardless of this setting."))
+    parser.add_argument("--temporal-stabilize-max-shift-velocity", type=float, default=None,
+                        help=("hard cap, for --temporal-stabilize, on how much depth is allowed to change "
+                              "for the same pixel between two consecutive output frames (0-1 scale, same "
+                              "units as depth value). Stops a single-frame spike from ever \"popping\", no "
+                              "matter how strong the raw model's disagreement is. Unset/omitted (the "
+                              "default) disables the cap entirely -- same as leaving the GUI's Max Shift "
+                              "field blank. This was previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--temporal-stabilize-flat-region-boost", type=float, default=0.0,
+                        help=("for --temporal-stabilize: extra smoothing specifically where the CURRENT "
+                              "frame's own depth is flat (sky, walls, floors) -- exactly the areas where "
+                              "flicker is most visible and least likely to be real motion. 0 (default) is "
+                              "no extra smoothing, matching this feature's original behavior. This was "
+                              "previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--temporal-stabilize-edge-protection", type=float, default=0.0,
+                        help=("for --temporal-stabilize: reduces smoothing where the CURRENT frame has a "
+                              "strong, real depth edge (an object's silhouette), so the flicker reduction "
+                              "doesn't smear or lag behind a moving object's outline. 0 (default) is no "
+                              "reduction, matching this feature's original behavior. This was previously "
+                              "GUI-only, with no command-line equivalent."))
     parser.add_argument("--max-workers", type=int, default=0, choices=[0, 1, 2, 3, 4, 8, 16],
                         help="max inference worker threads for video processing. 0 is disabled")
     parser.add_argument("--video-format", "-vf", type=str, default="mp4", choices=["mp4", "mkv", "avi"],

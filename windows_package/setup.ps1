@@ -150,10 +150,22 @@ if (Test-Path (Join-Path $nunifDir ".git")) {
     if ($LASTEXITCODE -ne 0) { throw "git pull failed in $nunifDir (exit $LASTEXITCODE)" }
 } elseif (Test-Path $nunifDir) {
     # nunif\ exists but has no .git folder -- e.g. GitHub's "Download ZIP" button
-    # strips git history entirely, so a renamed zip extraction lands here. Use it
-    # as-is; just can't auto-update via git later without a real clone.
-    Write-Host "  Found $nunifDir but it is not a git repository (no .git folder) -- using it as-is."
-    Write-Host "  NOTE: without git history, the app's 'Check for 3DECKER Updates'/'Check for Nagadomi Updates' buttons and future setup.ps1 re-runs cannot pull updates automatically. Delete this nunif\ folder and re-run setup.ps1 in an empty folder for a real git clone if you want that." -ForegroundColor Yellow
+    # strips git history entirely, so a renamed zip extraction lands here. This
+    # USED TO just print a yellow warning and silently continue with whatever old
+    # code was already there -- confirmed as a real bug: a user could re-download
+    # setup.bat/setup.ps1 and re-run them as many times as they wanted and this
+    # branch would never update their actual source code, no matter how new the
+    # downloaded setup scripts themselves were, because the warning was easy to
+    # miss and setup.ps1 has no other way to update a non-git folder. Fails loudly
+    # instead now, so it's impossible to miss and impossible to end up silently
+    # stuck on stale code.
+    throw ("Found '$nunifDir' but it is not a git repository (no .git folder inside it) -- " +
+        "setup.ps1 cannot pull updates into a folder like this, so continuing would silently " +
+        "leave you on old code. Fix: delete the '$nunifDir' folder completely, then run this " +
+        "setup script again in this same folder -- that will do a real 'git clone' and get " +
+        "the current code. (This happens if nunif\ was ever created from GitHub's 'Download " +
+        "ZIP' button instead of a real git clone -- see 3DECKER_INSTALL.md, Option 1's direct " +
+        "two-file method, to avoid this next time.)")
 } else {
     & $gitExe clone -b my-customizations "https://github.com/3decker/3decker-tool.git" $nunifDir
     if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE)" }

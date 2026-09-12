@@ -153,7 +153,7 @@ if (Test-Path (Join-Path $nunifDir ".git")) {
     # strips git history entirely, so a renamed zip extraction lands here. Use it
     # as-is; just can't auto-update via git later without a real clone.
     Write-Host "  Found $nunifDir but it is not a git repository (no .git folder) -- using it as-is."
-    Write-Host "  NOTE: without git history, 'Run Update' and future setup.ps1 re-runs cannot pull updates automatically. Delete this nunif\ folder and re-run setup.ps1 in an empty folder for a real git clone if you want that." -ForegroundColor Yellow
+    Write-Host "  NOTE: without git history, the app's 'Check for 3DECKER Updates'/'Check for Nagadomi Updates' buttons and future setup.ps1 re-runs cannot pull updates automatically. Delete this nunif\ folder and re-run setup.ps1 in an empty folder for a real git clone if you want that." -ForegroundColor Yellow
 } else {
     & $gitExe clone -b my-customizations "https://github.com/3decker/3decker-tool.git" $nunifDir
     if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE)" }

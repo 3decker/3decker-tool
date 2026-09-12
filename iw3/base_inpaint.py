@@ -199,6 +199,7 @@ class BaseImageInpaint(InpaintComponent):
         inner_dilation: int = 0,
         outer_dilation: int = 0,
         base_width: int | None = None,
+        max_width: int | None = None,
     ) -> torch.Tensor:
         assert self.model is not None
         if is_left:
@@ -211,7 +212,36 @@ class BaseImageInpaint(InpaintComponent):
             outer_dilation=outer_dilation,
             base_width=base_width,
         )
-        eye = self.model.infer(eye, mask)
+
+        if max_width is not None and eye.shape[-1] > max_width:
+            new_w = max_width
+            if new_w % 2 != 0:
+                new_w += 1
+            new_h = int((max_width / eye.shape[-1]) * eye.shape[-2])
+            if new_h % 2 != 0:
+                new_h += 1
+
+            if hasattr(self.model, "preprocess"):
+                _, blurred_mask = self.model.preprocess(eye, mask)
+            else:
+                blurred_mask = mask.float()
+
+            valid_mask = 1.0 - mask.float()
+            eye_valid = eye * valid_mask
+            eye_low_sum = torch.nn.functional.interpolate(eye_valid, size=(new_h, new_w), mode="bilinear", antialias=True, align_corners=False)
+            mask_low_inv_sum = torch.nn.functional.interpolate(valid_mask, size=(new_h, new_w), mode="bilinear", antialias=True, align_corners=False)
+            eye_low = eye_low_sum / torch.clamp(mask_low_inv_sum, min=1e-6)
+
+            mask_low = torch.nn.functional.interpolate(mask.float(), size=(new_h, new_w), mode="nearest") > 0
+
+            inpainted_low = self.model.infer(eye_low, mask_low)
+            
+            inpainted_high = torch.nn.functional.interpolate(inpainted_low, size=eye.shape[-2:], mode="bicubic", antialias=True, align_corners=False)
+            eye_low_up = torch.nn.functional.interpolate(eye_low, size=eye.shape[-2:], mode="bicubic", antialias=True, align_corners=False)
+
+            eye = inpainted_high + (eye - eye_low_up) * (1.0 - blurred_mask)
+        else:
+            eye = self.model.infer(eye, mask)
 
         if is_left:
             eye = eye.flip(-1)
@@ -227,6 +257,7 @@ class BaseImageInpaint(InpaintComponent):
         inner_dilation: int = 0,
         outer_dilation: int = 0,
         base_width: int | None = None,
+        max_width: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if synthetic_view == "both":
             assert left_mask is not None
@@ -238,6 +269,7 @@ class BaseImageInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
             right_eye = self._inpaint_single(
                 right_eye,
@@ -246,6 +278,7 @@ class BaseImageInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
         elif synthetic_view == "right":
             assert right_mask is not None
@@ -256,6 +289,7 @@ class BaseImageInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
         elif synthetic_view == "left":
             assert left_mask is not None
@@ -266,6 +300,7 @@ class BaseImageInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
         return left_eye, right_eye
 
@@ -282,7 +317,6 @@ class BaseImageInpaint(InpaintComponent):
         preserve_screen_border: bool = False,
         enable_amp: bool = True,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        x = self._resize(x, max_width)
         return self(
             x,
             depth,
@@ -293,6 +327,7 @@ class BaseImageInpaint(InpaintComponent):
             outer_dilation=outer_dilation,
             preserve_screen_border=preserve_screen_border,
             enable_amp=enable_amp,
+            max_width=max_width,
         )
 
     def forward(
@@ -306,6 +341,7 @@ class BaseImageInpaint(InpaintComponent):
         outer_dilation: int = 0,
         preserve_screen_border: bool = False,
         enable_amp: bool = True,
+        max_width: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         left_eye, right_eye, left_mask, right_mask = self.apply_warp(
             x,
@@ -325,6 +361,7 @@ class BaseImageInpaint(InpaintComponent):
             inner_dilation=inner_dilation,
             outer_dilation=outer_dilation,
             base_width=depth.shape[-1],
+            max_width=max_width,
         )
 
 
@@ -334,6 +371,7 @@ class BaseVideoInpaint(InpaintComponent):
     frame_queue: FrameQueue | None
     synthetic_view: str | None
     base_width: int | None
+    max_width: int | None
 
     def __init__(self, model: LightVideoInpaintV1, pre_padding: int = 3, post_padding: int = 3, device_id: int = -1):
         super().__init__()
@@ -344,6 +382,7 @@ class BaseVideoInpaint(InpaintComponent):
         self.frame_queue = None
         self.synthetic_view = None
         self.base_width = None
+        self.max_width = None
         self.device = create_device(device_id)
         self.eval()
 
@@ -408,6 +447,7 @@ class BaseVideoInpaint(InpaintComponent):
         inner_dilation: int = 0,
         outer_dilation: int = 0,
         base_width: int | None = None,
+        max_width: int | None = None,
     ) -> torch.Tensor:
         assert self.model is not None
         if is_left:
@@ -420,7 +460,36 @@ class BaseVideoInpaint(InpaintComponent):
             outer_dilation=outer_dilation,
             base_width=base_width,
         )
-        eye = self.model.infer(eye, mask)
+
+        if max_width is not None and eye.shape[-1] > max_width:
+            new_w = max_width
+            if new_w % 2 != 0:
+                new_w += 1
+            new_h = int((max_width / eye.shape[-1]) * eye.shape[-2])
+            if new_h % 2 != 0:
+                new_h += 1
+
+            if hasattr(self.model, "preprocess"):
+                _, blurred_mask = self.model.preprocess(eye, mask)
+            else:
+                blurred_mask = mask.float()
+
+            valid_mask = 1.0 - mask.float()
+            eye_valid = eye * valid_mask
+            eye_low_sum = torch.nn.functional.interpolate(eye_valid, size=(new_h, new_w), mode="bilinear", antialias=True, align_corners=False)
+            mask_low_inv_sum = torch.nn.functional.interpolate(valid_mask, size=(new_h, new_w), mode="bilinear", antialias=True, align_corners=False)
+            eye_low = eye_low_sum / torch.clamp(mask_low_inv_sum, min=1e-6)
+
+            mask_low = torch.nn.functional.interpolate(mask.float(), size=(new_h, new_w), mode="nearest") > 0
+
+            inpainted_low = self.model.infer(eye_low, mask_low)
+            
+            inpainted_high = torch.nn.functional.interpolate(inpainted_low, size=eye.shape[-2:], mode="bicubic", antialias=True, align_corners=False)
+            eye_low_up = torch.nn.functional.interpolate(eye_low, size=eye.shape[-2:], mode="bicubic", antialias=True, align_corners=False)
+
+            eye = inpainted_high + (eye - eye_low_up) * (1.0 - blurred_mask)
+        else:
+            eye = self.model.infer(eye, mask)
 
         if is_left:
             eye = eye.flip(-1)
@@ -436,6 +505,7 @@ class BaseVideoInpaint(InpaintComponent):
         inner_dilation: int = 0,
         outer_dilation: int = 0,
         base_width: int | None = None,
+        max_width: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if synthetic_view == "both":
             assert left_mask is not None
@@ -447,6 +517,7 @@ class BaseVideoInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
             right_eye = self._inpaint_single(
                 right_eye,
@@ -455,6 +526,7 @@ class BaseVideoInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
         elif synthetic_view == "right":
             assert right_mask is not None
@@ -465,6 +537,7 @@ class BaseVideoInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
         elif synthetic_view == "left":
             assert left_mask is not None
@@ -475,11 +548,12 @@ class BaseVideoInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
         return left_eye, right_eye
 
     def forward(
-        self, flush: bool = False, inner_dilation: int = 0, outer_dilation: int = 0, base_width: int | None = None
+        self, flush: bool = False, inner_dilation: int = 0, outer_dilation: int = 0, base_width: int | None = None, max_width: int | None = None
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         assert self.frame_queue is not None
         assert self.synthetic_view is not None
@@ -507,6 +581,7 @@ class BaseVideoInpaint(InpaintComponent):
                 inner_dilation=inner_dilation,
                 outer_dilation=outer_dilation,
                 base_width=base_width,
+                max_width=max_width,
             )
 
             if flush:
@@ -539,10 +614,10 @@ class BaseVideoInpaint(InpaintComponent):
         enable_amp: bool = True,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         assert x.shape[0] <= self.model_seq
-        x = self._resize(x, max_width)
 
         self.synthetic_view = synthetic_view
         self.base_width = depth.shape[-1]
+        self.max_width = max_width
         if self.frame_queue is None:
             self.frame_queue = self.create_frame_queue(x, depth, synthetic_view=synthetic_view)
         assert self.frame_queue is not None
@@ -573,7 +648,7 @@ class BaseVideoInpaint(InpaintComponent):
                 for _ in range(repeat):
                     self.frame_queue.add(left_eye[i], right_eye[i], left_mask=left_mask[i])
 
-        return self(inner_dilation=inner_dilation, outer_dilation=outer_dilation, base_width=self.base_width)
+        return self(inner_dilation=inner_dilation, outer_dilation=outer_dilation, base_width=self.base_width, max_width=self.max_width)
 
     def flush(
         self, inner_dilation: int = 0, outer_dilation: int = 0, enable_amp: bool = True
@@ -588,6 +663,7 @@ class BaseVideoInpaint(InpaintComponent):
             inner_dilation=inner_dilation,
             outer_dilation=outer_dilation,
             base_width=self.base_width,
+            max_width=self.max_width,
         )
 
         if pad > 0:

@@ -360,8 +360,9 @@ def _depth_edge_mask(depth_a_u16, suppression_strength=0.5, hard_cutoff=False, h
 def _region_mask(depth_a_u16, region, percent):
     """0-1 mask selecting a percentile slice of the depth map itself, instead of
     looking at the RGB image at all. Uses the SAME near/far convention already
-    established everywhere else in iw3 (apply_foreground_pop, apply_foreground_
-    divergence, etc.): a HIGHER depth value is NEARER the camera, lower is farther.
+    established everywhere else in iw3 (depth_effects.py's apply_depth_band_pop,
+    the shared primitive behind Foreground/Midground/Background Pop): a HIGHER
+    depth value is NEARER the camera, lower is farther.
     That convention is confirmed directly from iw3's own existing code, not guessed --
     the earlier detail-based mask deliberately avoided depth-based logic specifically
     because this convention hadn't been nailed down yet at the time.

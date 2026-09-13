@@ -9,20 +9,20 @@ _BLUR3 = _BLUR3 / _BLUR3.sum()
 
 def apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=1.0):
     """
-    Single shared primitive behind Foreground Pop, Midground Pop, and Background
-    Pop (all three call this same function with a different threshold_low/
-    threshold_high pair -- see the three thin wrappers below). Pushes pixels in
-    the depth band between threshold_low and threshold_high percentiles toward
-    the audience (strength > 0) or away from it (strength < 0), leaving anything
-    OUTSIDE that band completely untouched.
+    Single shared primitive behind ALL THREE Pop tools -- Foreground Pop,
+    Midground Pop, and Background Pop each call this exact same function
+    directly, just with a different threshold_low/threshold_high pair (all
+    three are fully symmetric: one signed strength, two independently
+    adjustable thresholds, no per-zone special-casing or wrapper functions).
+    Pushes pixels in the depth band between threshold_low and threshold_high
+    percentiles toward the audience (strength > 0) or away from it
+    (strength < 0), leaving anything OUTSIDE that band completely untouched.
 
-    - Foreground Pop: threshold_low=<a threshold>, threshold_high=1.0 (band runs
-      open-ended up to the true nearest pixel -- "nearest X%").
-    - Background Pop: threshold_low=0.0, threshold_high=<a threshold> (band runs
-      open-ended down to the true farthest pixel -- "farthest X%").
-    - Midground Pop: both threshold_low and threshold_high independently set,
-      a genuine closed band with true foreground/background on either side left
-      alone.
+    Typical threshold pairs (all independently user-adjustable, these are
+    just the defaults):
+    - Foreground Pop: threshold_low=0.85, threshold_high=1.0 ("nearest 15%")
+    - Midground Pop: threshold_low=0.15, threshold_high=0.85 (the middle 70%)
+    - Background Pop: threshold_low=0.0, threshold_high=0.15 ("farthest 15%")
 
     strength: -1.0 to 1.0. Positive amplifies each in-band pixel's own distance
     from the band's FAR edge (threshold_low) and adds that as a boost, pushing it
@@ -45,73 +45,6 @@ def apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=1.0)
             offset = (t_high - d).clamp(min=0)
             d_shifted = d - offset * abs(strength) * 2.0
         d_out = d * (1 - mask) + d_shifted * mask
-        result.append(d_out)
-    return torch.stack(result, dim=0)
-
-
-def apply_foreground_pop(depth, strength, threshold=0.85):
-    """Foreground Pop: thin wrapper over apply_depth_band_pop with the band open-
-    ended up to the true nearest pixel. threshold=0.85 (default) means "nearest
-    15%". strength: -1.0 to 1.0, positive pushes toward the audience, negative
-    pulls the foreground band back toward the midground."""
-    return apply_depth_band_pop(depth, strength, threshold_low=threshold, threshold_high=1.0)
-
-
-def apply_background_pop(depth, strength, threshold=0.15):
-    """Background Pop: thin wrapper over apply_depth_band_pop with the band open-
-    ended down to the true farthest pixel. threshold=0.15 (default) means
-    "farthest 15%". strength: -1.0 to 1.0, positive pulls the background band
-    forward toward the midground, negative pushes it further away."""
-    return apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=threshold)
-
-
-def apply_background_divergence(depth, convergence, base_divergence, background_divergence,
-                                 threshold_percentile=0.15):
-    """
-    Give the farthest threshold_percentile of pixels their own effective Divergence,
-    independent of the Divergence applied to the rest of the scene.
-
-    Mechanism: final pixel shift is proportional to (depth - convergence) * divergence.
-    Rescaling a pixel's distance from the convergence plane by (background_divergence /
-    base_divergence) before the shared Divergence multiplier is applied reproduces the
-    same result as if that pixel alone used background_divergence. Pixels above the
-    threshold (not in the farthest slice) are left untouched.
-    """
-    if base_divergence == 0 or background_divergence == base_divergence:
-        return depth
-    ratio = background_divergence / base_divergence
-    B = depth.shape[0]
-    result = []
-    for i in range(B):
-        d = depth[i]
-        c = convergence[i] if torch.is_tensor(convergence) and convergence.ndim > 0 else convergence
-        threshold = d.flatten().quantile(threshold_percentile)
-        mask = (d < threshold).to(d.dtype)
-        rescaled = c + (d - c) * ratio
-        d_out = d * (1 - mask) + rescaled * mask
-        result.append(d_out)
-    return torch.stack(result, dim=0)
-
-
-def apply_foreground_divergence(depth, convergence, base_divergence, foreground_divergence,
-                                 threshold_percentile=0.85):
-    """
-    Give the nearest (1 - threshold_percentile) of pixels their own effective
-    Divergence, independent of the Divergence applied to the rest of the scene.
-    Mirror image of apply_background_divergence — same mechanism, opposite end.
-    """
-    if base_divergence == 0 or foreground_divergence == base_divergence:
-        return depth
-    ratio = foreground_divergence / base_divergence
-    B = depth.shape[0]
-    result = []
-    for i in range(B):
-        d = depth[i]
-        c = convergence[i] if torch.is_tensor(convergence) and convergence.ndim > 0 else convergence
-        threshold = d.flatten().quantile(threshold_percentile)
-        mask = (d > threshold).to(d.dtype)
-        rescaled = c + (d - c) * ratio
-        d_out = d * (1 - mask) + rescaled * mask
         result.append(d_out)
     return torch.stack(result, dim=0)
 
@@ -330,54 +263,53 @@ def _test_apply_depth_band_pop():
     print("_test_apply_depth_band_pop: PASS")
 
 
-def _test_apply_foreground_pop():
-    """apply_foreground_pop: band open-ended up to the true nearest pixel. At
-    threshold=0.85, everything below that quantile (background + midground)
-    must be untouched; everything above must only ever move UP (positive
-    strength) or only ever move DOWN (negative strength), same direction rule
-    as the shared primitive."""
+def _test_apply_depth_band_pop_foreground_shape():
+    """Confirms apply_depth_band_pop works correctly for a Foreground-Pop-shaped
+    call (threshold_low=0.85, threshold_high=1.0 -- an "open-ended up to the
+    nearest pixel" band, now just one of three equally-valid threshold pairs
+    callers pass directly, not a separate wrapper function)."""
     ramp = torch.linspace(0.0, 1.0, steps=100).view(1, 1, 10, 10)
     below_mask = ramp < ramp.flatten().quantile(0.85)
     fg_mask = ramp >= ramp.flatten().quantile(0.85)
 
-    out_pos = apply_foreground_pop(ramp, 0.5, threshold=0.85)
+    out_pos = apply_depth_band_pop(ramp, 0.5, threshold_low=0.85, threshold_high=1.0)
     assert torch.allclose(out_pos[below_mask], ramp[below_mask]), \
-        "foreground pop must not touch anything below its threshold"
+        "foreground-shaped band must not touch anything below its low threshold"
     assert (out_pos[fg_mask] >= ramp[fg_mask]).all(), \
-        "positive foreground pop must only ever push values up (nearer)"
-    assert (out_pos[fg_mask] > ramp[fg_mask]).any(), "positive foreground pop must change something"
+        "positive strength must only ever push values up (nearer)"
+    assert (out_pos[fg_mask] > ramp[fg_mask]).any(), "positive strength must change something"
 
-    out_neg = apply_foreground_pop(ramp, -0.5, threshold=0.85)
+    out_neg = apply_depth_band_pop(ramp, -0.5, threshold_low=0.85, threshold_high=1.0)
     assert (out_neg[fg_mask] <= ramp[fg_mask]).all(), \
-        "negative foreground pop must only ever push values down (pull back toward midground)"
-    assert (out_neg[fg_mask] < ramp[fg_mask]).any(), "negative foreground pop must change something"
+        "negative strength must only ever push values down (pull back toward midground)"
+    assert (out_neg[fg_mask] < ramp[fg_mask]).any(), "negative strength must change something"
 
-    print("_test_apply_foreground_pop: PASS")
+    print("_test_apply_depth_band_pop_foreground_shape: PASS")
 
 
-def _test_apply_background_pop():
-    """apply_background_pop: band open-ended down to the true farthest pixel.
-    Mirror of the foreground test, opposite end."""
+def _test_apply_depth_band_pop_background_shape():
+    """Mirror of the foreground-shape test: threshold_low=0.0, threshold_high=0.15
+    -- an "open-ended down to the farthest pixel" band."""
     ramp = torch.linspace(0.0, 1.0, steps=100).view(1, 1, 10, 10)
     above_mask = ramp > ramp.flatten().quantile(0.15)
     bg_mask = ramp <= ramp.flatten().quantile(0.15)
 
-    out_pos = apply_background_pop(ramp, 0.5, threshold=0.15)
+    out_pos = apply_depth_band_pop(ramp, 0.5, threshold_low=0.0, threshold_high=0.15)
     assert torch.allclose(out_pos[above_mask], ramp[above_mask]), \
-        "background pop must not touch anything above its threshold"
+        "background-shaped band must not touch anything above its high threshold"
     assert (out_pos[bg_mask] >= ramp[bg_mask]).all(), \
-        "positive background pop must only ever push values up (pull forward toward midground)"
-    assert (out_pos[bg_mask] > ramp[bg_mask]).any(), "positive background pop must change something"
+        "positive strength must only ever push values up (pull forward toward midground)"
+    assert (out_pos[bg_mask] > ramp[bg_mask]).any(), "positive strength must change something"
 
-    out_neg = apply_background_pop(ramp, -0.5, threshold=0.15)
+    out_neg = apply_depth_band_pop(ramp, -0.5, threshold_low=0.0, threshold_high=0.15)
     assert (out_neg[bg_mask] <= ramp[bg_mask]).all(), \
-        "negative background pop must only ever push values down (farther away)"
-    assert (out_neg[bg_mask] < ramp[bg_mask]).any(), "negative background pop must change something"
+        "negative strength must only ever push values down (farther away)"
+    assert (out_neg[bg_mask] < ramp[bg_mask]).any(), "negative strength must change something"
 
-    print("_test_apply_background_pop: PASS")
+    print("_test_apply_depth_band_pop_background_shape: PASS")
 
 
 if __name__ == "__main__":
     _test_apply_depth_band_pop()
-    _test_apply_foreground_pop()
-    _test_apply_background_pop()
+    _test_apply_depth_band_pop_foreground_shape()
+    _test_apply_depth_band_pop_background_shape()

@@ -1300,27 +1300,25 @@ def make_output_filename(input_filename, args, video=False):
         if getattr(args, "foreground_pop", 0.0) != 0.0:
             fp_val = args.foreground_pop
             fp = f"_fp{'n' if fp_val < 0 else ''}{to_deciaml(abs(fp_val), 100, 2)}"
-            fp_th = getattr(args, "foreground_pop_threshold", 0.85)
-            if fp_th != 0.85:
-                fp += f"th{to_deciaml(fp_th, 100, 2)}"
+            fp_low = getattr(args, "foreground_pop_threshold_low", 0.85)
+            fp_high = getattr(args, "foreground_pop_threshold_high", 1.0)
+            if fp_low != 0.85:
+                fp += f"lo{to_deciaml(fp_low, 100, 2)}"
+            if fp_high != 1.0:
+                fp += f"hi{to_deciaml(fp_high, 100, 2)}"
         else:
             fp = ""
         if getattr(args, "background_pop", 0.0) != 0.0:
             bp_val = args.background_pop
             bp = f"_bp{'n' if bp_val < 0 else ''}{to_deciaml(abs(bp_val), 100, 2)}"
-            bp_th = getattr(args, "background_pop_threshold", 0.15)
-            if bp_th != 0.15:
-                bp += f"th{to_deciaml(bp_th, 100, 2)}"
+            bp_low = getattr(args, "background_pop_threshold_low", 0.0)
+            bp_high = getattr(args, "background_pop_threshold_high", 0.15)
+            if bp_low != 0.0:
+                bp += f"lo{to_deciaml(bp_low, 100, 2)}"
+            if bp_high != 0.15:
+                bp += f"hi{to_deciaml(bp_high, 100, 2)}"
         else:
             bp = ""
-        if getattr(args, "foreground_divergence", None) is not None:
-            fd = f"_fd{to_deciaml(args.foreground_divergence, 10, 2)}"
-        else:
-            fd = ""
-        if getattr(args, "background_divergence", None) is not None:
-            bd = f"_bd{to_deciaml(args.background_divergence, 10, 2)}"
-        else:
-            bd = ""
         if getattr(args, "midground_pop", 0.0) != 0.0:
             mp_val = args.midground_pop
             mp = f"_mp{'n' if mp_val < 0 else ''}{to_deciaml(abs(mp_val), 100, 2)}"
@@ -1472,7 +1470,7 @@ def make_output_filename(input_filename, args, video=False):
             smtag = ""
 
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
-                    f"d{to_deciaml(args.divergence, 10, 2)}{fd}{bd}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
+                    f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
@@ -1502,10 +1500,6 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append("iw3_depth_aa=1")
     comment_parts.append(f"iw3_method={args.method}")
     comment_parts.append(f"iw3_divergence={args.divergence}")
-    if getattr(args, "foreground_divergence", None) is not None:
-        comment_parts.append(f"iw3_foreground_divergence={args.foreground_divergence}")
-    if getattr(args, "background_divergence", None) is not None:
-        comment_parts.append(f"iw3_background_divergence={args.background_divergence}")
     comment_parts.append(f"iw3_convergence={args.convergence}")
     if args.convergence_mode != "constant":
         comment_parts.append(f"iw3_convergence_mode={args.convergence_mode}")
@@ -1518,12 +1512,16 @@ def _build_iw3_comment_metadata(args, video=True):
     comment_parts.append(f"iw3_foreground_scale={args.foreground_scale}")
     if getattr(args, "foreground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_foreground_pop={args.foreground_pop}")
-        if getattr(args, "foreground_pop_threshold", 0.85) != 0.85:
-            comment_parts.append(f"iw3_foreground_pop_threshold={args.foreground_pop_threshold}")
+        if getattr(args, "foreground_pop_threshold_low", 0.85) != 0.85:
+            comment_parts.append(f"iw3_foreground_pop_threshold_low={args.foreground_pop_threshold_low}")
+        if getattr(args, "foreground_pop_threshold_high", 1.0) != 1.0:
+            comment_parts.append(f"iw3_foreground_pop_threshold_high={args.foreground_pop_threshold_high}")
     if getattr(args, "background_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_background_pop={args.background_pop}")
-        if getattr(args, "background_pop_threshold", 0.15) != 0.15:
-            comment_parts.append(f"iw3_background_pop_threshold={args.background_pop_threshold}")
+        if getattr(args, "background_pop_threshold_low", 0.0) != 0.0:
+            comment_parts.append(f"iw3_background_pop_threshold_low={args.background_pop_threshold_low}")
+        if getattr(args, "background_pop_threshold_high", 0.15) != 0.15:
+            comment_parts.append(f"iw3_background_pop_threshold_high={args.background_pop_threshold_high}")
     if getattr(args, "midground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_midground_pop={args.midground_pop}")
         if getattr(args, "midground_threshold_low", 0.15) != 0.15:
@@ -1888,24 +1886,26 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
         convergence = args.convergence
         depth = get_mapper(args.mapper)(depth)
 
-    # Depth pop effects -- all three (Foreground/Midground/Background Pop) share
-    # one underlying primitive (DE.apply_depth_band_pop), called here through its
-    # thin per-zone wrappers with a signed strength (-1.0 to 1.0: positive pushes
-    # toward the audience, negative pulls back/away).
+    # Depth pop effects -- all three (Foreground/Midground/Background Pop) are
+    # fully symmetric: one shared primitive (DE.apply_depth_band_pop), called
+    # here directly for each zone with its own signed strength (-1.0 to 1.0:
+    # positive pushes toward the audience, negative pulls back/away) and its own
+    # independently adjustable Low/High threshold pair. No per-zone wrapper
+    # functions or special-casing.
     foreground_pop = getattr(args, "foreground_pop", 0.0)
     if foreground_pop != 0.0:
-        foreground_pop_threshold = getattr(args, "foreground_pop_threshold", 0.85)
-        depth = DE.apply_foreground_pop(depth, foreground_pop, threshold=foreground_pop_threshold)
-    foreground_divergence = getattr(args, "foreground_divergence", None)
-    if foreground_divergence is not None:
-        depth = DE.apply_foreground_divergence(depth, convergence, args.divergence, foreground_divergence)
+        foreground_pop_threshold_low = getattr(args, "foreground_pop_threshold_low", 0.85)
+        foreground_pop_threshold_high = getattr(args, "foreground_pop_threshold_high", 1.0)
+        depth = DE.apply_depth_band_pop(depth, foreground_pop,
+                                        threshold_low=foreground_pop_threshold_low,
+                                        threshold_high=foreground_pop_threshold_high)
     background_pop = getattr(args, "background_pop", 0.0)
     if background_pop != 0.0:
-        background_pop_threshold = getattr(args, "background_pop_threshold", 0.15)
-        depth = DE.apply_background_pop(depth, background_pop, threshold=background_pop_threshold)
-    background_divergence = getattr(args, "background_divergence", None)
-    if background_divergence is not None:
-        depth = DE.apply_background_divergence(depth, convergence, args.divergence, background_divergence)
+        background_pop_threshold_low = getattr(args, "background_pop_threshold_low", 0.0)
+        background_pop_threshold_high = getattr(args, "background_pop_threshold_high", 0.15)
+        depth = DE.apply_depth_band_pop(depth, background_pop,
+                                        threshold_low=background_pop_threshold_low,
+                                        threshold_high=background_pop_threshold_high)
     midground_pop = getattr(args, "midground_pop", 0.0)
     if midground_pop != 0.0:
         midground_threshold_low = getattr(args, "midground_threshold_low", 0.15)
@@ -5040,29 +5040,29 @@ def create_parser(required_true=True):
                               "directly using this option is not recommended. "
                               "use --foreground-scale instead."))
     parser.add_argument("--foreground-pop", type=float, default=0.0,
-                        help="push the nearest pixels (see --foreground-pop-threshold) toward the audience "
-                             "(positive) or pull them back toward the midground (negative). -1.0 to 1.0, "
-                             "0.0=off")
-    parser.add_argument("--foreground-pop-threshold", type=float, default=0.85,
+                        help="push the nearest pixels (see --foreground-pop-threshold-low/-high) toward the "
+                             "audience (positive) or pull them back toward the midground (negative). "
+                             "-1.0 to 1.0, 0.0=off")
+    parser.add_argument("--foreground-pop-threshold-low", type=float, default=0.85,
                         help="depth percentile marking where Foreground Pop's band starts (0.0-1.0, e.g. "
                              "0.85 = nearest 15%%). Lower values affect more of the scene but move the "
                              "transition line further into the midground")
-    parser.add_argument("--foreground-divergence", type=float, default=None,
-                        help="use a separate effective Divergence value for the nearest 15%% of pixels only "
-                             "(same units/range as --divergence). unset = disabled, uses the same Divergence as "
-                             "the rest of the scene")
+    parser.add_argument("--foreground-pop-threshold-high", type=float, default=1.0,
+                        help="depth percentile marking where Foreground Pop's band ends (0.0-1.0). Default "
+                             "1.0 = the true nearest pixel; lower it to exclude the very closest pixels "
+                             "from the effect")
     parser.add_argument("--background-pop", type=float, default=0.0,
-                        help="pull the farthest pixels (see --background-pop-threshold) toward the "
-                             "midground (positive) or push them further away (negative). -1.0 to 1.0, "
+                        help="pull the farthest pixels (see --background-pop-threshold-low/-high) toward "
+                             "the midground (positive) or push them further away (negative). -1.0 to 1.0, "
                              "0.0=off")
-    parser.add_argument("--background-pop-threshold", type=float, default=0.15,
+    parser.add_argument("--background-pop-threshold-low", type=float, default=0.0,
+                        help="depth percentile marking where Background Pop's band starts (0.0-1.0). "
+                             "Default 0.0 = the true farthest pixel; raise it to exclude the very farthest "
+                             "pixels from the effect")
+    parser.add_argument("--background-pop-threshold-high", type=float, default=0.15,
                         help="depth percentile marking where Background Pop's band ends (0.0-1.0, e.g. "
                              "0.15 = farthest 15%%). Higher values affect more of the scene but move the "
                              "transition line further into the midground")
-    parser.add_argument("--background-divergence", type=float, default=None,
-                        help="use a separate effective Divergence value for the farthest 15%% of pixels only "
-                             "(same units/range as --divergence). unset = disabled, uses the same Divergence as "
-                             "the rest of the scene")
     parser.add_argument("--midground-pop", type=float, default=0.0,
                         help="push the MIDDLE depth band (between --midground-threshold-low and "
                              "--midground-threshold-high) toward the audience (positive) or away from it "

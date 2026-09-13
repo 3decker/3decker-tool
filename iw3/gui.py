@@ -1829,7 +1829,7 @@ class MainFrame(wx.Frame):
             T("What it's for: the FAR edge of Midground Pop's band (bordering true background), by depth "
               "percentile -- pixels below this (farther than this) are treated as background and left "
               "untouched by Midground Pop.\n"
-              "Recommended: 15% (default) matches Background Pop's own default coverage, so the two "
+              "Recommended: 15% (default) matches Background Pop's own default High Threshold, so the two "
               "features meet cleanly with no gap or overlap at their defaults. Raise it if you want "
               "Midground Pop to leave more of the far scene alone."))
         self.sld_stereo_midground_threshold_low = _build_stereo_slider(
@@ -1845,7 +1845,7 @@ class MainFrame(wx.Frame):
             T("What it's for: the NEAR edge of Midground Pop's band (bordering true foreground), by depth "
               "percentile -- pixels above this (closer than this) are treated as foreground and left "
               "untouched by Midground Pop.\n"
-              "Recommended: 85% (default) matches Foreground Pop's own default threshold, so the two "
+              "Recommended: 85% (default) matches Foreground Pop's own default Low Threshold, so the two "
               "features meet cleanly with no gap or overlap at their defaults. Lower it if you want "
               "Midground Pop to leave more of the near scene alone."))
         self.sld_stereo_midground_threshold_high = _build_stereo_slider(

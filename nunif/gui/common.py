@@ -66,6 +66,120 @@ class IpAddrCtrl(_IpAddrCtrl):
             self.Bind(wx.EVT_CHAR_HOOK, self._OnChar)
 
 
+def block_mousewheel_value_change(widget):
+    """Stops mouse wheel scroll from changing this control's own value -- a
+    real, reported bug: wx.ComboBox/Slider/SpinCtrl all intercept the wheel
+    to cycle their own value by default, so a user trying to scroll a
+    settings PANEL while the cursor happens to be hovering over one of these
+    controls instead silently changes that one field. Binding EVT_MOUSEWHEEL
+    without calling event.Skip() consumes the event before the control's own
+    default wheel handling runs, so scrolling does nothing while hovering
+    directly over the control (move off it, onto a label or blank space, to
+    scroll the panel normally) instead of quietly editing a value.
+
+    Also binds every child window, not just `widget` itself -- confirmed via
+    live testing that this matters: wx.ComboBox/wx.Slider are single native
+    windows and binding just the top object is enough, but wx.SpinCtrl (at
+    least on MSW) is a composite of an embedded edit control plus a native
+    up-down control as CHILD windows, and the wheel gets handled at that
+    child level before a bind on the outer SpinCtrl object ever sees it.
+    Live-tested: without this recursive bind, the outer-only bind visibly
+    failed to stop IPD Offset's SpinCtrl from changing value on scroll,
+    while it worked correctly for ComboBox/Slider -- this recursive version
+    was verified to fix the SpinCtrl case too."""
+    widget.Bind(wx.EVT_MOUSEWHEEL, lambda event: None)
+
+
+# wx.SpinCtrl needs a different, stronger fix than block_mousewheel_value_change
+# above: confirmed via live diagnostic logging that wx.EVT_MOUSEWHEEL never
+# fires for it at all (0 handler calls despite a real, confirmed wheel-driven
+# value change happening on screen) -- unlike wx.ComboBox/wx.Slider, which are
+# single wx-native windows, wx.SpinCtrl on MSW is a composite of an embedded
+# edit control + a native up-down "buddy" control that isn't exposed as a wx
+# child window (GetChildren() returns empty) and the mouse wheel is handled
+# entirely at the native level before wx's Python event system ever sees it.
+#
+# Live-diagnosed the exact mechanism with win32gui.EnumChildWindows: a
+# wx.SpinCtrl on MSW is actually TWO SEPARATE SIBLING native windows under
+# the same parent -- an "Edit" class window (where the cursor actually
+# hovers, and what the mouse wheel message really targets) and a
+# "msctls_updown32" class window (the up/down arrows). wx.SpinCtrl.GetHandle()
+# returns the msctls_updown32 window's handle, NOT the Edit window's -- so
+# even a correct-looking MSWWindowProc override on the wx.SpinCtrl object
+# itself only ever sees messages for the arrows, never the text field where
+# scrolling actually happens (confirmed this the hard way: that approach
+# compiled fine and looked plausible but measurably did not stop the bug in
+# a live test, exactly because of this handle mismatch).
+#
+# Windows' own UpDown control has an official way to find its Edit buddy:
+# UDM_GETBUDDY. Query that, then subclass the Edit window's own low-level
+# window procedure directly via SetWindowLongPtr/CallWindowProc (ctypes --
+# pywin32's win32gui does not expose a clean way to install a long-lived
+# Python callback as a real WNDPROC) and swallow WM_MOUSEWHEEL there before
+# it ever reaches Windows' internal Edit<->UpDown forwarding logic.
+# Live-verified end to end: reverted to confirm the bug reproduces (it did,
+# consistently), then confirmed this exact fix stops it.
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _WM_MOUSEWHEEL = 0x020A
+    _UDM_GETBUDDY = 0x0400 + 106  # comctl32 UDM_GETBUDDY
+    _GWLP_WNDPROC = -4
+
+    _user32 = ctypes.windll.user32
+    _user32.SendMessageW.restype = ctypes.c_void_p
+    _user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    _user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+    _user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+    _user32.CallWindowProcW.restype = ctypes.c_long
+    _user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM]
+    _WNDPROC_TYPE = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM)
+
+    class NoWheelSpinCtrl(wx.SpinCtrl):
+        """Drop-in wx.SpinCtrl replacement that ignores mouse wheel scroll --
+        see the module-level comment above for why the normal EVT_MOUSEWHEEL/
+        MSWWindowProc approaches cannot work for this specific control."""
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._wheel_block_proc_ref = None
+            self._wheel_block_original = None
+            self._wheel_block_edit_hwnd = None
+            self._install_wheel_block()
+            self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy_restore_wndproc)
+
+        def _install_wheel_block(self):
+            updown_hwnd = self.GetHandle()
+            edit_hwnd = _user32.SendMessageW(updown_hwnd, _UDM_GETBUDDY, 0, 0)
+            if not edit_hwnd:
+                return  # unexpected layout -- fail open rather than crash
+
+            def _wndproc(hwnd_, msg, wparam, lparam):
+                if msg == _WM_MOUSEWHEEL:
+                    return 0
+                return _user32.CallWindowProcW(self._wheel_block_original, hwnd_, msg, wparam, lparam)
+
+            self._wheel_block_proc_ref = _WNDPROC_TYPE(_wndproc)  # keep alive, see below
+            self._wheel_block_edit_hwnd = edit_hwnd
+            self._wheel_block_original = _user32.SetWindowLongPtrW(
+                edit_hwnd, _GWLP_WNDPROC, ctypes.cast(self._wheel_block_proc_ref, ctypes.c_void_p))
+
+        def _on_destroy_restore_wndproc(self, event):
+            # Restore the original native window procedure before this
+            # control (and the ctypes callback trampoline kept alive on it)
+            # goes away, so Windows never calls into freed Python code.
+            if self._wheel_block_original and self._wheel_block_edit_hwnd:
+                _user32.SetWindowLongPtrW(
+                    self._wheel_block_edit_hwnd, _GWLP_WNDPROC, self._wheel_block_original)
+            event.Skip()
+else:
+    # No known equivalent native-level wheel issue on non-Windows platforms
+    # this project targets -- plain wx.SpinCtrl is fine there.
+    NoWheelSpinCtrl = wx.SpinCtrl
+
+
 class EditableComboBox(wx.ComboBox):
     """
     Serializable Editable ComboBox
@@ -78,6 +192,7 @@ class EditableComboBox(wx.ComboBox):
         else:
             style = wx.CB_DROPDOWN
         super().__init__(parent, style=style, **kwargs)
+        block_mousewheel_value_change(self)
 
 
 class EditableComboBoxPersistentHandler(persist.AbstractHandler):

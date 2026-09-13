@@ -46,7 +46,7 @@ from nunif.utils.autocrop import AutoCrop
 import nunif.utils.pil_io as pil_io
 from nunif.gui import (
     TQDMGUI, FileDropCallback, EVT_TQDM, TimeCtrl,
-    EditableComboBox, EditableComboBoxPersistentHandler,
+    EditableComboBox, EditableComboBoxPersistentHandler, block_mousewheel_value_change, NoWheelSpinCtrl,
     persistent_manager_register_all, persistent_manager_unregister_all,
     persistent_manager_restore_all, persistent_manager_register,
     extension_list_to_wildcard, validate_number,
@@ -655,6 +655,7 @@ def _build_stereo_slider(parent, combo, min_val, max_val, multiplier):
     current = max(min_val, min(max_val, current))
     slider = wx.Slider(parent, minValue=round(min_val * multiplier), maxValue=round(max_val * multiplier))
     slider.SetValue(round(current * multiplier))
+    block_mousewheel_value_change(slider)
     return slider
 
 
@@ -1044,7 +1045,7 @@ class MainFrame(wx.Frame):
 
         self.lbl_ipd_offset = wx.StaticText(self.grp_stereo, label=T("Your Own Size"))
         # SpinCtrlDouble is better, but cannot save with PersistenceManager
-        self.sld_ipd_offset = wx.SpinCtrl(self.grp_stereo, value="0", min=-10, max=20, name="sld_ipd_offset")
+        self.sld_ipd_offset = NoWheelSpinCtrl(self.grp_stereo, value="0", min=-10, max=20, name="sld_ipd_offset")
         self.sld_ipd_offset.SetToolTip(
             T("Also called IPD Offset (interpupillary distance — the gap between your own eyes). Widens "
               "or narrows the simulated eye spacing used to build the 3D effect, separate from the main "

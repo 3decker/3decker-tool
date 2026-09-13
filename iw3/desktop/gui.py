@@ -23,7 +23,7 @@ from nunif.utils.filename import sanitize_filename
 from nunif.utils.home_dir import ensure_home_dir
 from nunif.gui import (
     IpAddrCtrl,
-    EditableComboBox, EditableComboBoxPersistentHandler,
+    EditableComboBox, EditableComboBoxPersistentHandler, NoWheelSpinCtrl,
     persistent_manager_register_all, persistent_manager_unregister_all,
     persistent_manager_restore_all, persistent_manager_register,
     validate_number,
@@ -741,8 +741,8 @@ class MainFrame(wx.Frame):
               "explanation) — positive sharpens the foreground while flattening the background, negative "
               "does the reverse."))
         self.lbl_adj_edge_dilation = wx.StaticText(self.grp_adjustment, label=T("Edge Fix"))
-        self.sld_adj_edge_dilation = wx.SpinCtrl(self.grp_adjustment, value="0", min=0, max=10,
-                                                 name="sld_adj_edge_dilation")
+        self.sld_adj_edge_dilation = NoWheelSpinCtrl(self.grp_adjustment, value="0", min=0, max=10,
+                                                     name="sld_adj_edge_dilation")
         self.sld_adj_edge_dilation.SetToolTip(
             T("Live nudge for Edge Fix's X (horizontal) value, adjustable while capture is running."))
         self.cbo_adj_edge_dilation_y = EditableComboBox(self.grp_adjustment,

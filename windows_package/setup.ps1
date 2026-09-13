@@ -377,6 +377,39 @@ if ($SkipModels) {
 }
 
 # ---------------------------------------------------------------------------
+Write-Step "Optional inpaint models"
+$inpaintConfigPath = Join-Path $nunifDir "iw3\inpaint_models.yml"
+if (Test-Path $inpaintConfigPath) {
+    Write-Host "  iw3\inpaint_models.yml already exists -- leaving your existing customization alone."
+} else {
+    # Registers 3 extra, optional video inpaint models (Large/Medium/Medium v2
+    # "Aether") alongside the built-in default (light_inpaint_v1) -- they become
+    # selectable in the GUI's "Inpainting Model" dropdown once this file exists.
+    # Only ~1KB of config is written here, nothing is downloaded yet: these use
+    # the exact same URL-based, lazy-download-on-first-use mechanism
+    # light_inpaint_v1 itself already uses (see iw3/inpaint_utils.py) -- the real
+    # .pth files (17-39MB each) download automatically the first time a user
+    # actually selects and uses one of these three models, not during setup.
+    @'
+# Optional extra inpaint models, written by setup.ps1 on first install. Safe to
+# edit or delete -- see inpaint_models.yml.sample in this same folder for the
+# full format. Note: real A/B testing on this project found Video_Large_Aether
+# looks WORSE than the default light_inpaint_v1 -- the two Medium variants are
+# untested. Treat light_inpaint_v1 as the recommended default; these three are
+# optional extras to experiment with, not proven upgrades.
+Video_Large_Aether:
+  video: https://github.com/3decker/3decker-tool/releases/download/inpaint-models-v1/video_inpaint_v1_large-aether.pth
+
+Video_Medium_Aether:
+  video: https://github.com/3decker/3decker-tool/releases/download/inpaint-models-v1/video_inpaint_v1_medium-aether.pth
+
+Video_Medium_Aether_v2:
+  video: https://github.com/3decker/3decker-tool/releases/download/inpaint-models-v1/video_inpaint_v1_medium_aether_20260222.pth
+'@ | Set-Content -Path $inpaintConfigPath -Encoding utf8
+    Write-Host "  Wrote iw3\inpaint_models.yml (3 optional inpaint models registered, not yet downloaded)."
+}
+
+# ---------------------------------------------------------------------------
 Write-Step "Done"
 Write-Host "Setup complete. Launch 3decker-gui.bat or waifu2x-gui.bat to get started." -ForegroundColor Green
 Write-Host "If you plan to use torch.compile, see nunif\windows_package\docs\torch_compile.md for the additional one-time setup it needs." -ForegroundColor Green

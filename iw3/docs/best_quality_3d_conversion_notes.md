@@ -283,6 +283,21 @@ film's longer continuous shots — most shots (median ~2.4–2.7 sec for both fi
 tested) will hit a cut and reset before the buffer fully fills, which is fine; it's
 still providing whatever stability is possible within each shot's actual length.
 
+**Real-world finding (2026-09-12, Hocus Pocus testing): a high Decay does NOT
+substitute for an adequately large Buffer.** Even at Decay `0.99` (above the
+documented `0.98` ceiling above), a too-small Buffer still produces bad flickering
+— confirmed via direct A/B testing on a difficult scene (heavy foliage over a
+cemetery gate, prone to depth-scale instability). Buffer `650` (well beyond the
+`120` extrapolation above) was needed alongside Decay `0.99` to substantially calm
+the flickering on that specific scene; Decay `0.99` alone, paired with a small
+buffer, was not enough by itself. Confirms Decay and Buffer are NOT
+interchangeable levers for the same problem: Decay controls how much any single
+new frame can move the scale, but Buffer controls how many frames the
+normalization range is computed from in the first place — a small buffer stays
+noisy/reactive regardless of how high Decay is set, because there simply isn't
+enough history to average over. For scenes that keep flickering despite a high
+Decay, raise Buffer significantly before assuming Decay needs to go even higher.
+
 ### How to visibly tell if EMA Decay/Buffer is too low or too high
 
 EMA Decay/Buffer sets the depth map's overall near/far *scale* for the current

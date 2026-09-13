@@ -130,7 +130,7 @@ def _save_layout_mode(config_path, mode):
 # Persisted the same way as Layout (ADR-037/038): a dedicated plain-text file, applied
 # live in the running window -- see docs/ai/AI_DECISIONS.md.
 ZOOM_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-zoom.cfg")
-ZOOM_LEVELS = (80, 90, 100, 110, 125, 150, 175, 200)
+ZOOM_LEVELS = (50, 60, 70, 80, 90, 100, 110, 125, 150, 175, 200)
 DEFAULT_ZOOM_LEVEL = 100
 BASE_NORMAL_FONT_PT = 10
 BASE_WARNING_FONT_PT = 8
@@ -5004,6 +5004,12 @@ class MainFrame(wx.Frame):
         # none of them are missed regardless of which line built them.
         block_mousewheel_recursively(self)
 
+        # ADR-130: let the window shrink much smaller than its natural content
+        # size -- see _update_frame_min_size()'s own docstring for why this was
+        # never actually possible before despite pnl_options already supporting
+        # it via scrolling.
+        self._update_frame_min_size()
+
     def _compose_options_layout_tabbed(self):
         """ADR-036/ADR-037/ADR-045/ADR-048 -- Tabbed layout: each category panel is
         wrapped in its own ScrolledPanel (self.tab_wrap_*) and that WRAPPER becomes the
@@ -5029,7 +5035,11 @@ class MainFrame(wx.Frame):
             wrap_sizer.Add(tab, 1, wx.EXPAND)
             wrap.SetSizer(wrap_sizer)
             wrap.SetAutoLayout(1)
-            wrap.SetupScrolling(scroll_x=False, scroll_y=True)
+            # scroll_x=True (was False) so Tabbed mode can shrink narrower than a
+            # tab's natural content width without clipping it, matching Single Page
+            # mode's pnl_single (already scroll_x=True below) -- see the frame-level
+            # MinSize override in _update_frame_min_size() this pairs with.
+            wrap.SetupScrolling(scroll_x=True, scroll_y=True)
             # Same reasoning as pnl_single's own explicit MinSize (ADR-045): a
             # ScrolledPanel's own GetBestSize() is deliberately tiny regardless of its
             # content, so without this every tab would collapse to near-zero height in
@@ -5226,7 +5236,50 @@ class MainFrame(wx.Frame):
                     wrap.SetMinSize(wrap_sizer.CalcMin())
 
         refresh_layouts(self)
+        # ADR-130: pnl_process's buttons resize with the zoom font too, so the
+        # frame's explicit MinSize floor (see _update_frame_min_size()) needs the
+        # same live recompute as pnl_single/wrap above, or a zoom-in could leave
+        # a stale, now-too-small floor that lets the button row itself clip.
+        self._update_frame_min_size()
         self._clamp_frame_to_screen()
+
+    def _update_frame_min_size(self):
+        """Real user report: the window has an effective minimum size the user
+        can't drag below, in both directions, and they want it genuinely
+        resizable down to something small (they run 4 monitors and want to
+        fit it into whatever space is available on any of them).
+
+        Root cause: this frame's own MinSize was never explicitly set, so wx
+        falls back to its attached sizer's CalcMin() as the interactive
+        drag-resize floor (this is real wx/MSW behavior -- WM_GETMINMAXINFO
+        consults GetMinSize(), which only returns an explicit smaller value if
+        one was actually set). pnl_options's ScrolledPanel content
+        (pnl_single / each tab wrap) pins its OWN MinSize to its full
+        unscrolled content size (see _compose_options_layout_*'s own MinSize
+        comments), and that large size propagates all the way up through the
+        sizer hierarchy to become the frame's floor too -- even though
+        pnl_options already correctly shows scrollbars and works fine when
+        forced smaller than that (already proven by _clamp_frame_to_screen,
+        which forces exactly that via a raw SetSize call that bypasses the
+        drag-resize floor).
+
+        Fix: give the frame an explicit, much smaller MinSize, derived from
+        pnl_process (the progress bar + Quick Preview/Start/Suspend/Cancel
+        button row) rather than a hardcoded guess, since that row is the one
+        thing NOT inside a scrollable panel and would visually clip if the
+        frame went narrower than its own natural minimum. pnl_options's
+        scrolling (both axes now -- see wrap.SetupScrolling in
+        _compose_options_layout_tabbed and pnl_single's own SetupScrolling)
+        absorbs everything else. Derived from CalcMin() rather than a fixed
+        number so it stays correct across zoom levels (button text grows
+        with the zoom font) and locales (translated button labels vary in
+        length) -- called once at the end of __init__ and again from
+        apply_zoom_level(), the same two points that already recompute
+        other zoom-sensitive MinSize values."""
+        process_min = self.pnl_process.GetSizer().CalcMin()
+        min_width = max(process_min.width + 24, 360)
+        min_height = 240
+        self.SetMinSize((min_width, min_height))
 
     def _clamp_frame_to_screen(self):
         """ADR-056 -- keeps pnl_process (the progress bar row plus Start/Suspend/

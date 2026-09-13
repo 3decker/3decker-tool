@@ -206,6 +206,32 @@ GENRE_PRESET_EMA_VALUES = {
 # see MainFrame.apply_quick_preset("3decker") and docs/ai/AI_DECISIONS.md ADR-057
 # Amendment 12.
 
+# ADR-132: Dual-Pass Depth Blend presets, transcribed directly from a real,
+# hands-on comparison against VisionDepth3D's own "Depth Blender" feature (its
+# closest equivalent -- see docs/ai/AI_DECISIONS.md) -- confirmed live, values
+# read directly off VD3D's own sliders per preset, not estimated. VD3D's
+# "White Strength" field allows values above 1.0 (Sharp Edges=1.17, High
+# Contrast=1.50); iw3's own Blend Strength field is hard-capped at 1.0
+# (validate_number(..., 0.0, 1.0)), so both are clamped to 1.0 here -- the
+# closest reachable value, not a transcription error.
+DEPTH_BLEND_PRESET_PLACEHOLDER = "-- Select --"
+DEPTH_BLEND_PRESET_CHOICES = [
+    DEPTH_BLEND_PRESET_PLACEHOLDER,
+    "Default (Balanced)",
+    "Sharp Edges",
+    "Smooth Blend",
+    "Metric + Mono",
+    "High Contrast",
+]
+# name: (strength, feather_blur, bilateral_d, bilateral_sigma_color, bilateral_sigma_space, clahe_clip, clahe_tile)
+DEPTH_BLEND_PRESET_VALUES = {
+    "Default (Balanced)": (1.0, 35, 12, 75, 75, 2.0, 8),
+    "Sharp Edges": (1.0, 20, 8, 52, 50, 3.0, 6),
+    "Smooth Blend": (0.8, 55, 16, 101, 101, 1.5, 12),
+    "Metric + Mono": (0.7, 50, 14, 80, 80, 2.0, 8),
+    "High Contrast": (1.0, 25, 6, 40, 40, 4.0, 4),
+}
+
 
 class StageChangeEvent(wx.PyCommandEvent):
     def __init__(self, etype, eid, name=None):
@@ -1434,6 +1460,31 @@ class MainFrame(wx.Frame):
               "disk space (a full frame dump, kept in a '<output>.depth_blend_work' folder you can delete "
               "afterward). Requires a single video file input; not compatible with Automated Scene Batch."))
 
+        self.lbl_depth_blend_preset = wx.StaticText(self.cpn_depth_blend.GetPane(), label=T("VD3D Preset"))
+        self.cbo_depth_blend_preset = wx.ComboBox(self.cpn_depth_blend.GetPane(),
+                                                   choices=DEPTH_BLEND_PRESET_CHOICES,
+                                                   name="cbo_depth_blend_preset")
+        self.cbo_depth_blend_preset.SetEditable(False)
+        self.cbo_depth_blend_preset.SetSelection(0)
+        depth_blend_preset_tooltip = (
+            T("What it's for: a quick-fill shortcut for the Feather Blur/Bilateral Denoise/CLAHE Contrast "
+              "fields below, transcribed directly from VisionDepth3D's own \"Depth Blender\" feature -- "
+              "its closest equivalent to this Dual-Pass Depth Blend section (confirmed live, values read "
+              "directly off VD3D's own sliders per preset).\n"
+              "How it works: selecting a preset immediately writes its numbers into Feather Blur, Bilateral "
+              "Denoise (d/sigmaColor/sigmaSpace, also turns Bilateral Denoise ON), and CLAHE Contrast (clip/"
+              "tile, also turns CLAHE Contrast ON) -- once, not a live link, so hand-editing any field "
+              "afterward is completely safe.\n"
+              "Note: VD3D's \"Sharp Edges\" and \"High Contrast\" presets use a blend strength above 1.0 "
+              "(1.17 and 1.50) -- this field is capped at 1.0 here, so both are clamped to that ceiling, "
+              "the closest reachable value.\n"
+              "Recommended: a starting point for comparison, not a guaranteed improvement over this "
+              "project's own defaults -- VD3D's Depth Blender lacks iw3's Edge Suppression/Depth Blend "
+              "Align, both added here specifically to fight the silhouette-ghosting problem a two-model "
+              "blend runs into either way."))
+        self.lbl_depth_blend_preset.SetToolTip(depth_blend_preset_tooltip)
+        self.cbo_depth_blend_preset.SetToolTip(depth_blend_preset_tooltip)
+
         self.cbo_depth_blend_model = wx.ComboBox(self.cpn_depth_blend.GetPane(),
                                                  choices=self.get_depth_models(),
                                                  name="cbo_depth_blend_model")
@@ -1653,6 +1704,12 @@ class MainFrame(wx.Frame):
         layout_depth_blend.Add(self.cbo_depth_blend_region_percent, (j, 2), flag=wx.EXPAND)
         layout_depth_blend.Add(self.sld_depth_blend_strength, (j := j + 1, 1), flag=wx.EXPAND)
         layout_depth_blend.Add(self.sld_depth_blend_region_percent, (j, 2), flag=wx.EXPAND)
+
+        layout_depth_blend.Add((0, 6), (j := j + 1, 0))
+        layout_depth_blend.Add(wx.StaticLine(self.cpn_depth_blend.GetPane()), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout_depth_blend.Add((0, 4), (j := j + 1, 0))
+        layout_depth_blend.Add(self.lbl_depth_blend_preset, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_depth_blend.Add(self.cbo_depth_blend_preset, (j, 1), flag=wx.EXPAND)
 
         layout_depth_blend.Add((0, 6), (j := j + 1, 0))
         layout_depth_blend.Add(wx.StaticLine(self.cpn_depth_blend.GetPane()), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -4930,6 +4987,7 @@ class MainFrame(wx.Frame):
         self.chk_ema_motion_adaptive.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_ema_motion_adaptive)
         self.chk_scene_batch_auto_ema.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_scene_batch_auto_ema)
         self.cbo_genre_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_genre_preset)
+        self.cbo_depth_blend_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_depth_blend_preset)
         self.chk_depth_blend.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend)
         self.chk_temporal_stabilize.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_temporal_stabilize)
         self.cbo_depth_blend_region.Bind(wx.EVT_TEXT, self.on_changed_chk_depth_blend)
@@ -6049,8 +6107,31 @@ class MainFrame(wx.Frame):
             self.cbo_ema_decay.SetValue(str(decay))
             self.cbo_ema_buffer.SetValue(str(buffer))
 
+    def on_changed_cbo_depth_blend_preset(self, event):
+        # One-time quick-fill only, same pattern as on_changed_cbo_genre_preset --
+        # writes values once into the plain fields below and keeps no live link
+        # back to this dropdown, so a later hand-edit of any field is always safe.
+        # The placeholder entry intentionally maps to nothing.
+        preset = self.cbo_depth_blend_preset.GetValue()
+        values = DEPTH_BLEND_PRESET_VALUES.get(preset)
+        if values is not None:
+            (strength, feather_blur, bilateral_d, bilateral_sigma_color,
+             bilateral_sigma_space, clahe_clip, clahe_tile) = values
+            self.cbo_depth_blend_strength.SetValue(str(strength))
+            self.cbo_depth_blend_feather_blur.SetValue(str(feather_blur))
+            self.chk_depth_blend_bilateral.SetValue(True)
+            self.cbo_depth_blend_bilateral_d.SetValue(str(bilateral_d))
+            self.cbo_depth_blend_bilateral_sigma_color.SetValue(str(bilateral_sigma_color))
+            self.cbo_depth_blend_bilateral_sigma_space.SetValue(str(bilateral_sigma_space))
+            self.chk_depth_blend_clahe.SetValue(True)
+            self.cbo_depth_blend_clahe_clip.SetValue(str(clahe_clip))
+            self.cbo_depth_blend_clahe_tile.SetValue(str(clahe_tile))
+            self.update_depth_blend_bilateral()
+            self.update_depth_blend_clahe()
+
     def update_depth_blend(self):
         if self.chk_depth_blend.IsChecked():
+            self.cbo_depth_blend_preset.Enable()
             self.cbo_depth_blend_model.Enable()
             self.cbo_depth_blend_strength.Enable()
             self.cbo_depth_blend_region.Enable()
@@ -6062,6 +6143,7 @@ class MainFrame(wx.Frame):
             self.chk_depth_blend_clahe.Enable()
             self.chk_depth_blend_align.Enable()
         else:
+            self.cbo_depth_blend_preset.Disable()
             self.cbo_depth_blend_model.Disable()
             self.cbo_depth_blend_strength.Disable()
             self.cbo_depth_blend_region.Disable()

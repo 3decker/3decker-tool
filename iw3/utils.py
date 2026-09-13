@@ -1311,6 +1311,17 @@ def make_output_filename(input_filename, args, video=False):
             bd = f"_bd{to_deciaml(args.background_divergence, 10, 2)}"
         else:
             bd = ""
+        if getattr(args, "midground_pop", 0.0) != 0.0:
+            mp_val = args.midground_pop
+            mp = f"_mp{'n' if mp_val < 0 else ''}{to_deciaml(abs(mp_val), 100, 2)}"
+            mg_low = getattr(args, "midground_threshold_low", 0.15)
+            mg_high = getattr(args, "midground_threshold_high", 0.85)
+            if mg_low != 0.15:
+                mp += f"lo{to_deciaml(mg_low, 100, 2)}"
+            if mg_high != 0.85:
+                mp += f"hi{to_deciaml(mg_high, 100, 2)}"
+        else:
+            mp = ""
         if getattr(args, "depth_refine", False):
             drefine = "_dr"
             dr_strength = getattr(args, "depth_refine_strength", 1.0) or 1.0
@@ -1453,7 +1464,7 @@ def make_output_filename(input_filename, args, video=False):
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}{fd}{bd}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}{bp}_"
+                    f"di{edge_dilation}_fs{args.foreground_scale}_fp{args.foreground_pop}{bp}{mp}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
                     f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{sharp_tag}{rife_tag}{smtag}{bitrate}")
     else:
@@ -1500,6 +1511,12 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append(f"iw3_background_pop={args.background_pop}")
         if getattr(args, "background_pop_coverage", 0.15) != 0.15:
             comment_parts.append(f"iw3_background_pop_coverage={args.background_pop_coverage}")
+    if getattr(args, "midground_pop", 0.0) != 0.0:
+        comment_parts.append(f"iw3_midground_pop={args.midground_pop}")
+        if getattr(args, "midground_threshold_low", 0.15) != 0.15:
+            comment_parts.append(f"iw3_midground_threshold_low={args.midground_threshold_low}")
+        if getattr(args, "midground_threshold_high", 0.85) != 0.85:
+            comment_parts.append(f"iw3_midground_threshold_high={args.midground_threshold_high}")
     comment_parts.append(f"iw3_ipd_offset={args.ipd_offset}")
     if video:
         if args.video_codec == "libopenh264":
@@ -1872,6 +1889,13 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
     background_divergence = getattr(args, "background_divergence", None)
     if background_divergence is not None:
         depth = DE.apply_background_divergence(depth, convergence, args.divergence, background_divergence)
+    midground_pop = getattr(args, "midground_pop", 0.0)
+    if midground_pop != 0.0:
+        midground_threshold_low = getattr(args, "midground_threshold_low", 0.15)
+        midground_threshold_high = getattr(args, "midground_threshold_high", 0.85)
+        depth = DE.apply_midground_pop(depth, midground_pop,
+                                       threshold_low=midground_threshold_low,
+                                       threshold_high=midground_threshold_high)
 
     if args.method == "NULL":
         left_eye, right_eye = im.clone(), im.clone()
@@ -5014,6 +5038,17 @@ def create_parser(required_true=True):
                         help="use a separate effective Divergence value for the farthest 15%% of pixels only "
                              "(same units/range as --divergence). unset = disabled, uses the same Divergence as "
                              "the rest of the scene")
+    parser.add_argument("--midground-pop", type=float, default=0.0,
+                        help="push the MIDDLE depth band (between --midground-threshold-low and "
+                             "--midground-threshold-high) toward the audience (positive) or away from it "
+                             "(negative), leaving true foreground/background alone. -1.0 to 1.0, 0.0=off")
+    parser.add_argument("--midground-threshold-low", type=float, default=0.15,
+                        help="lower edge (by depth percentile) of the band Midground Pop affects -- pixels "
+                             "below this are treated as background and left untouched. 0.0-1.0, default 0.15 "
+                             "(matches Background Pop's own default coverage)")
+    parser.add_argument("--midground-threshold-high", type=float, default=0.85,
+                        help="upper edge (by depth percentile) of the band Midground Pop affects -- pixels "
+                             "above this are treated as foreground and left untouched. 0.0-1.0, default 0.85")
     parser.add_argument("--edge-repair-strength", type=float, default=0.0,
                         help=("final cleanup pass on the RENDERED stereo output (after whichever stereo "
                               "method made it), gently smoothing only a thin band right around real depth "

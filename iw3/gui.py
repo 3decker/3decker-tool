@@ -5393,6 +5393,28 @@ class MainFrame(wx.Frame):
 
     def _set_font_recursive(self, window, font):
         window.SetFont(font)
+        # ADR-133: real user-reported bug -- changing Zoom left every field
+        # (TextCtrl/ComboBox alike, everywhere in the window, not scoped to any one
+        # section) permanently shown in a solid "selected text" state (system
+        # highlight blue background, regardless of this theme's own custom colors)
+        # until the whole app was restarted. Root cause, confirmed live: on MSW, a
+        # native Edit control (which both wx.TextCtrl and an editable wx.ComboBox's
+        # text field really are) auto-selects its ENTIRE text as a side effect of a
+        # SetFont() call (needed internally to recompute caret/text metrics) -- and
+        # that selection then renders with the OS's own COLOR_HIGHLIGHT/
+        # COLOR_HIGHLIGHTTEXT, which unconditionally overrides whatever
+        # SetForegroundColour/SetBackgroundColour this theme set, since those only
+        # ever govern the UNselected-text appearance. apply_accent_theme() (called
+        # right after this function, from the same apply_zoom_level()) re-asserts
+        # the theme's colors, but has no effect here because the problem was never
+        # the colors themselves -- it's a real, separate "text selected" state the
+        # font change silently created. Fix: explicitly clear it via
+        # SetSelection(0, 0) (wx's 2-argument text-range overload, not the
+        # 1-argument list-item-index overload wx.ComboBox also happens to define)
+        # on every text-editable control right after its font changes, restoring
+        # normal unselected rendering.
+        if isinstance(window, (wx.TextCtrl, wx.ComboBox)):
+            window.SetSelection(0, 0)
         for child in window.GetChildren():
             self._set_font_recursive(child, font)
 

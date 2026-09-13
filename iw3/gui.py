@@ -596,9 +596,10 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_depth_refine_strength", "sld_stereo_depth_refine_strength", 0.25, 1.5, 100, False, None),
     ("cbo_temporal_stabilize_strength", "sld_stereo_temporal_stabilize_strength", 0.3, 0.9, 100, False, None),
     ("cbo_ema_motion_spread", "sld_stereo_ema_motion_spread", 0.0, 0.3, 100, False, None),
-    ("cbo_foreground_pop", "sld_stereo_foreground_pop", 0.0, 1.0, 100, False, None),
-    ("cbo_background_pop", "sld_stereo_background_pop", 0.0, 1.0, 100, False, None),
-    ("cbo_background_pop_coverage", "sld_stereo_background_pop_coverage", 15, 40, 1, True, None),
+    ("cbo_foreground_pop", "sld_stereo_foreground_pop", -1.0, 1.0, 100, False, None),
+    ("cbo_foreground_pop_threshold", "sld_stereo_foreground_pop_threshold", 15, 40, 1, True, None),
+    ("cbo_background_pop", "sld_stereo_background_pop", -1.0, 1.0, 100, False, None),
+    ("cbo_background_pop_threshold", "sld_stereo_background_pop_threshold", 15, 40, 1, True, None),
     ("cbo_midground_pop", "sld_stereo_midground_pop", -1.0, 1.0, 100, False, None),
     ("cbo_midground_threshold_low", "sld_stereo_midground_threshold_low", 0, 50, 1, True, None),
     ("cbo_midground_threshold_high", "sld_stereo_midground_threshold_high", 50, 100, 1, True, None),
@@ -1701,19 +1702,39 @@ class MainFrame(wx.Frame):
         self.cpn_stereo_pop_divergence.GetPane().SetName("cpn_stereo_pop_divergence_pane")
         self.lbl_foreground_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Pop"))
         self.cbo_foreground_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
-                                                   choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
+                                                   choices=["-1.0", "-0.5", "0.0", "0.5", "1.0"],
                                                    name="cbo_foreground_pop")
-        self.cbo_foreground_pop.SetSelection(0)
+        self.cbo_foreground_pop.SetSelection(2)
         self.cbo_foreground_pop.SetToolTip(
-            T("What it's for: pushes ONLY the nearest pixels further toward the audience (0=off, 1=strong), "
-              "leaving the rest of the scene (midground/background) completely untouched. Different from "
-              "Foreground Scale, which redistributes the WHOLE depth curve and always trades foreground "
-              "against background.\n"
-              "Con: pushed too high, the very closest objects can pop hard enough to feel uncomfortable or "
-              "clash with the frame edges (pair with Preserve Screen Border to reduce that risk).\n"
+            T("What it's for: pushes ONLY the nearest pixels (see Foreground Pop Threshold % below) toward "
+              "the audience (positive) or pulls them back toward the midground (negative), leaving the "
+              "rest of the scene completely untouched. 0=off. Different from Foreground Scale, which "
+              "redistributes the WHOLE depth curve and always trades foreground against background.\n"
+              "Con: pushed too high (positive), the very closest objects can pop hard enough to feel "
+              "uncomfortable or clash with the frame edges (pair with Preserve Screen Border to reduce "
+              "that risk).\n"
               "Recommended: 0 (off) for a restrained, professional look; 0.25-0.5 for deliberate "
-              "\"poke at the audience\" moments; reserve 0.75-1.0 for a genuinely gimmicky effect."))
-        self.sld_stereo_foreground_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_foreground_pop, 0.0, 1.0, 100)
+              "\"poke at the audience\" moments; negative only if the foreground already feels too "
+              "aggressive and you want to pull it back."))
+        self.sld_stereo_foreground_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_foreground_pop, -1.0, 1.0, 100)
+
+        self.lbl_foreground_pop_threshold = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Pop Threshold %"))
+        self.cbo_foreground_pop_threshold = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+                                                             choices=["15", "20", "25", "30", "40"],
+                                                             name="cbo_foreground_pop_threshold")
+        self.cbo_foreground_pop_threshold.SetSelection(0)
+        self.cbo_foreground_pop_threshold.SetToolTip(
+            T("What it's for: how much of the scene Foreground Pop treats as \"foreground\" (default "
+              "15% = nearest 15% of pixels by depth). Mirror of Background Pop Threshold %, aimed at the "
+              "opposite end of the scene.\n"
+              "Con: larger values affect more of the scene, but push the transition line further into the "
+              "midground, where a sudden change in how much a subject pops is more likely to be "
+              "noticeable as an odd \"step\" in the depth.\n"
+              "Recommended: 15% (default) for a subtle, hard-to-notice effect; raise to 20-30% only if "
+              "you want the effect to reach further into the scene and don't mind it becoming more "
+              "visible."))
+        self.sld_stereo_foreground_pop_threshold = _build_stereo_slider(
+            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_foreground_pop_threshold, 15, 40, 1)
 
         self.lbl_foreground_divergence = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Divergence"))
         self.cbo_foreground_divergence = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
@@ -1732,27 +1753,29 @@ class MainFrame(wx.Frame):
 
         self.lbl_background_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Pop"))
         self.cbo_background_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
-                                                    choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
+                                                    choices=["-1.0", "-0.5", "0.0", "0.5", "1.0"],
                                                     name="cbo_background_pop")
-        self.cbo_background_pop.SetSelection(0)
+        self.cbo_background_pop.SetSelection(2)
         self.cbo_background_pop.SetToolTip(
-            T("What it's for: pushes ONLY the farthest pixels further away from the audience (0=off, "
-              "1=strong), leaving the foreground/midground completely untouched. Mirror image of "
-              "Foreground Pop, aimed at the opposite end of the scene.\n"
-              "How it helps: gives a deeper-feeling background without needing to redistribute the whole "
-              "depth curve (unlike negative Foreground Scale, which achieves a similar deep-background "
-              "feel but by taking separation away from the foreground at the same time).\n"
-              "Recommended: 0.15-0.25 for a modestly more immersive background on most content; go higher "
-              "for content with a genuinely deep, expansive background you want to emphasize (landscapes, "
-              "wide establishing shots)."))
-        self.sld_stereo_background_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop, 0.0, 1.0, 100)
+            T("What it's for: pulls ONLY the farthest pixels (see Background Pop Threshold % below) "
+              "toward the midground (positive) or pushes them further away (negative), leaving the "
+              "foreground/midground completely untouched. 0=off. Mirror image of Foreground Pop, aimed "
+              "at the opposite end of the scene.\n"
+              "How it helps: negative values give a deeper-feeling background without needing to "
+              "redistribute the whole depth curve (unlike negative Foreground Scale, which achieves a "
+              "similar deep-background feel but by taking separation away from the foreground at the "
+              "same time).\n"
+              "Recommended: 0 (off) for a natural look; -0.15 to -0.25 for a modestly more immersive "
+              "background on most content; positive only if the background already feels too distant "
+              "and you want to pull it forward."))
+        self.sld_stereo_background_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop, -1.0, 1.0, 100)
 
-        self.lbl_background_pop_coverage = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Pop Coverage %"))
-        self.cbo_background_pop_coverage = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+        self.lbl_background_pop_threshold = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Pop Threshold %"))
+        self.cbo_background_pop_threshold = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                              choices=["15", "20", "25", "30", "40"],
-                                                             name="cbo_background_pop_coverage")
-        self.cbo_background_pop_coverage.SetSelection(0)
-        self.cbo_background_pop_coverage.SetToolTip(
+                                                             name="cbo_background_pop_threshold")
+        self.cbo_background_pop_threshold.SetSelection(0)
+        self.cbo_background_pop_threshold.SetToolTip(
             T("What it's for: how much of the scene Background Pop treats as \"background\" (default "
               "15% = farthest 15% of pixels by depth).\n"
               "Con: larger values affect more of the scene, but push the transition line further into the "
@@ -1760,8 +1783,8 @@ class MainFrame(wx.Frame):
               "noticeable as an odd \"step\" in the depth.\n"
               "Recommended: 15% (default) for a subtle, hard-to-notice effect; raise to 20-30% only if "
               "you want the effect to reach further into the scene and don't mind it becoming more visible."))
-        self.sld_stereo_background_pop_coverage = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop_coverage, 15, 40, 1)
+        self.sld_stereo_background_pop_threshold = _build_stereo_slider(
+            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop_threshold, 15, 40, 1)
 
         self.lbl_midground_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Midground Pop"))
         self.cbo_midground_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
@@ -2520,14 +2543,17 @@ class MainFrame(wx.Frame):
         pane_layout.Add(self.lbl_foreground_pop, (k, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout.Add(self.cbo_foreground_pop, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.sld_stereo_foreground_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_foreground_pop_threshold, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_foreground_pop_threshold, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_foreground_pop_threshold, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.lbl_foreground_divergence, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout.Add(self.cbo_foreground_divergence, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.lbl_background_pop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout.Add(self.cbo_background_pop, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.sld_stereo_background_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_background_pop_coverage, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_background_pop_coverage, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_background_pop_coverage, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_background_pop_threshold, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_background_pop_threshold, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_background_pop_threshold, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.lbl_midground_pop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout.Add(self.cbo_midground_pop, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.sld_stereo_midground_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -5650,7 +5676,7 @@ class MainFrame(wx.Frame):
             self.cbo_foreground_pop,
             self.cbo_foreground_divergence,
             self.cbo_background_pop,
-            self.cbo_background_pop_coverage,
+            self.cbo_background_pop_threshold,
             self.cbo_midground_pop,
             self.cbo_midground_threshold_low,
             self.cbo_midground_threshold_high,
@@ -6426,9 +6452,10 @@ class MainFrame(wx.Frame):
             depth_model=depth_model_type,
             foreground_scale=float(self.cbo_foreground_scale.GetValue()),
             foreground_pop=float(self.cbo_foreground_pop.GetValue()),
+            foreground_pop_threshold=float(self.cbo_foreground_pop_threshold.GetValue()) / 100.0,
             foreground_divergence=foreground_divergence,
             background_pop=float(self.cbo_background_pop.GetValue()),
-            background_pop_coverage=float(self.cbo_background_pop_coverage.GetValue()) / 100.0,
+            background_pop_threshold=float(self.cbo_background_pop_threshold.GetValue()) / 100.0,
             midground_pop=float(self.cbo_midground_pop.GetValue()),
             midground_threshold_low=float(self.cbo_midground_threshold_low.GetValue()) / 100.0,
             midground_threshold_high=float(self.cbo_midground_threshold_high.GetValue()) / 100.0,
@@ -6888,7 +6915,7 @@ class MainFrame(wx.Frame):
             self.cbo_depth_model.SetStringSelection("Any_V3_Mono_01")
             self.cbo_divergence.SetValue("2.5")
             self.cbo_convergence.SetValue("0.5")
-            self.cbo_background_pop_coverage.SetValue("0.0")
+            self.cbo_background_pop_threshold.SetValue("0.0")
             self.cbo_stereo_format.SetStringSelection("Half SBS")
             self.cbo_resolution.SetValue("512")
 
@@ -7390,10 +7417,12 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_foreground_scale, args.foreground_scale)
         _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
         _apply_combo_value(
+            self.cbo_foreground_pop_threshold, getattr(args, "foreground_pop_threshold", 0.85) * 100.0)
+        _apply_combo_value(
             self.cbo_foreground_divergence,
             args.foreground_divergence if args.foreground_divergence is not None else "")
         _apply_combo_value(self.cbo_background_pop, args.background_pop)
-        _apply_combo_value(self.cbo_background_pop_coverage, args.background_pop_coverage * 100.0)
+        _apply_combo_value(self.cbo_background_pop_threshold, args.background_pop_threshold * 100.0)
         _apply_combo_value(self.cbo_midground_pop, getattr(args, "midground_pop", 0.0))
         _apply_combo_value(
             self.cbo_midground_threshold_low, getattr(args, "midground_threshold_low", 0.15) * 100.0)
@@ -11575,7 +11604,7 @@ def _self_test_3decker_quick_preset():
         assert frame.cbo_depth_model.GetValue() == "Any_V3_Mono_01", frame.cbo_depth_model.GetValue()
         assert frame.cbo_divergence.GetValue() == "2.5", frame.cbo_divergence.GetValue()
         assert frame.cbo_convergence.GetValue() == "0.5", frame.cbo_convergence.GetValue()
-        assert frame.cbo_background_pop_coverage.GetValue() == "0.0", frame.cbo_background_pop_coverage.GetValue()
+        assert frame.cbo_background_pop_threshold.GetValue() == "0.0", frame.cbo_background_pop_threshold.GetValue()
         assert frame.cbo_stereo_format.GetValue() == "Half SBS", frame.cbo_stereo_format.GetValue()
         assert frame.cbo_resolution.GetValue() == "512", frame.cbo_resolution.GetValue()
 
@@ -12529,7 +12558,7 @@ def _self_test_import_command_round_trip():
             'python -m iw3 -i "D:\\SSD  2\\2160P MOVIES\\Hocus Pocus 1993 UHD BluRay 2160p DV.mkv" '
             '-o "E:\\3d Movies\\test for error 2" --compile --method mlbw_l2_inpaint '
             '--preserve-screen-border --divergence 2.5 --max-fps 1000.0 --crf 15 '
-            '--depth-model Any_V3_Mono_01 --background-pop-coverage 0.0 --half-sbs '
+            '--depth-model Any_V3_Mono_01 --background-pop-threshold 0.0 --half-sbs '
             '--pix-fmt yuv420p10le --max-output-width 3840 --max-output-height 2160 '
             '--end-time 00:06:30 --resolution 512 --ema-normalize --ema-decay 0.94 '
             '--ema-buffer 60 --scene-detect --scene-batch-auto-ema '

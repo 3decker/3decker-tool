@@ -7,65 +7,29 @@ _BLUR3 = torch.tensor([[1., 2., 1.], [2., 4., 2.], [1., 2., 1.]])
 _BLUR3 = _BLUR3 / _BLUR3.sum()
 
 
-def apply_foreground_pop(depth, strength, threshold_percentile=0.85):
+def apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=1.0):
     """
-    Boost pixels already in the foreground, pushing them further toward the audience.
-    Pixels above threshold_percentile of depth get amplified proportionally.
-    Works on any depth scale — no [0,1] assumption needed.
-    strength: 0.0-1.0, how hard to push foreground pixels forward.
-    """
-    B = depth.shape[0]
-    result = []
-    for i in range(B):
-        d = depth[i]
-        threshold = d.flatten().quantile(threshold_percentile)
-        # How far each pixel is above the threshold (0 for background pixels)
-        above = (d - threshold).clamp(min=0)
-        # Boost: add proportional to how far above threshold × strength
-        d_boosted = d + above * strength * 2.0
-        result.append(d_boosted)
-    return torch.stack(result, dim=0)
+    Single shared primitive behind Foreground Pop, Midground Pop, and Background
+    Pop (all three call this same function with a different threshold_low/
+    threshold_high pair -- see the three thin wrappers below). Pushes pixels in
+    the depth band between threshold_low and threshold_high percentiles toward
+    the audience (strength > 0) or away from it (strength < 0), leaving anything
+    OUTSIDE that band completely untouched.
 
+    - Foreground Pop: threshold_low=<a threshold>, threshold_high=1.0 (band runs
+      open-ended up to the true nearest pixel -- "nearest X%").
+    - Background Pop: threshold_low=0.0, threshold_high=<a threshold> (band runs
+      open-ended down to the true farthest pixel -- "farthest X%").
+    - Midground Pop: both threshold_low and threshold_high independently set,
+      a genuine closed band with true foreground/background on either side left
+      alone.
 
-def apply_background_pop(depth, strength, threshold_percentile=0.15):
-    """
-    Push pixels already in the background further away from the audience.
-    Pixels below threshold_percentile of depth get suppressed proportionally.
-    Works on any depth scale — no [0,1] assumption needed.
-    strength: 0.0-1.0, how hard to push background pixels back.
-    """
-    B = depth.shape[0]
-    result = []
-    for i in range(B):
-        d = depth[i]
-        threshold = d.flatten().quantile(threshold_percentile)
-        # How far each pixel is below the threshold (0 for foreground pixels)
-        below = (threshold - d).clamp(min=0)
-        # Suppress: subtract proportional to how far below threshold × strength
-        d_suppressed = d - below * strength * 2.0
-        result.append(d_suppressed)
-    return torch.stack(result, dim=0)
-
-
-def apply_midground_pop(depth, strength, threshold_low=0.15, threshold_high=0.85):
-    """
-    Push pixels in the MIDDLE depth band (between threshold_low and threshold_high
-    percentiles) toward the audience (strength > 0) or away from it (strength < 0),
-    leaving true foreground (above threshold_high) and true background (below
-    threshold_low) completely untouched -- the band in between what
-    apply_foreground_pop/apply_background_pop each already claim at their own
-    (independently configurable) thresholds.
-
-    strength: -1.0 to 1.0. Positive amplifies each midground pixel's own distance
-    from the band's FAR edge (threshold_low, bordering true background) and adds
-    that as a boost, pushing it further toward the NEAR/foreground direction --
-    same proportional-amplification shape as apply_foreground_pop, just anchored
-    to the band's own far edge instead of the global threshold. Negative mirrors
-    this, amplifying distance from the band's NEAR edge (threshold_high, bordering
-    true foreground) and pushing toward the FAR/background direction, same shape
-    as apply_background_pop. strength == 0 is an exact no-op (mask still computed
-    harmlessly, callers should still guard with strength != 0 to skip the work
-    entirely).
+    strength: -1.0 to 1.0. Positive amplifies each in-band pixel's own distance
+    from the band's FAR edge (threshold_low) and adds that as a boost, pushing it
+    further toward the NEAR/foreground direction. Negative mirrors this off the
+    band's NEAR edge (threshold_high), pushing toward the FAR/background
+    direction. strength == 0 is an exact no-op (callers should still guard with
+    strength != 0 to skip the work entirely).
     """
     B = depth.shape[0]
     result = []
@@ -83,6 +47,22 @@ def apply_midground_pop(depth, strength, threshold_low=0.15, threshold_high=0.85
         d_out = d * (1 - mask) + d_shifted * mask
         result.append(d_out)
     return torch.stack(result, dim=0)
+
+
+def apply_foreground_pop(depth, strength, threshold=0.85):
+    """Foreground Pop: thin wrapper over apply_depth_band_pop with the band open-
+    ended up to the true nearest pixel. threshold=0.85 (default) means "nearest
+    15%". strength: -1.0 to 1.0, positive pushes toward the audience, negative
+    pulls the foreground band back toward the midground."""
+    return apply_depth_band_pop(depth, strength, threshold_low=threshold, threshold_high=1.0)
+
+
+def apply_background_pop(depth, strength, threshold=0.15):
+    """Background Pop: thin wrapper over apply_depth_band_pop with the band open-
+    ended down to the true farthest pixel. threshold=0.15 (default) means
+    "farthest 15%". strength: -1.0 to 1.0, positive pulls the background band
+    forward toward the midground, negative pushes it further away."""
+    return apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=threshold)
 
 
 def apply_background_divergence(depth, convergence, base_divergence, background_divergence,
@@ -293,12 +273,12 @@ def apply_sharpen(left_eye, right_eye, strength=0.0, detail_percentile=95.0):
     return _sharpen(left_eye), _sharpen(right_eye)
 
 
-def _test_apply_midground_pop():
-    """Synthetic, no-GPU regression test for apply_midground_pop's actual
+def _test_apply_depth_band_pop():
+    """Synthetic, no-GPU regression test for apply_depth_band_pop's actual
     directionality and band-isolation -- verifies the real behavior, not just
-    that it runs. Depth convention confirmed against apply_foreground_pop/
-    apply_background_pop's own code: HIGHER depth value = NEARER (foreground),
-    LOWER depth value = FARTHER (background). Built this way specifically
+    that it runs. Depth convention: HIGHER depth value = NEARER (foreground),
+    LOWER depth value = FARTHER (background) -- confirmed directly from this
+    same module's own quantile-anchoring logic. Built this way specifically
     because an earlier draft of this function's own docstring had the near/far
     edge labels backwards (caught and fixed before shipping) -- this test
     locks the real, code-verified direction down going forward."""
@@ -308,13 +288,13 @@ def _test_apply_midground_pop():
     ramp = torch.linspace(0.0, 1.0, steps=100).view(1, 1, 10, 10)
 
     # strength == 0 must be an exact no-op.
-    out = apply_midground_pop(ramp, 0.0)
+    out = apply_depth_band_pop(ramp, 0.0, threshold_low=0.15, threshold_high=0.85)
     assert torch.allclose(out, ramp), "strength=0 must not change anything"
 
     # True background (below threshold_low=0.15) and true foreground (above
     # threshold_high=0.85) must be untouched regardless of strength/sign.
     for strength in (0.5, -0.5):
-        out = apply_midground_pop(ramp, strength, threshold_low=0.15, threshold_high=0.85)
+        out = apply_depth_band_pop(ramp, strength, threshold_low=0.15, threshold_high=0.85)
         bg_mask = ramp < ramp.flatten().quantile(0.15)
         fg_mask = ramp > ramp.flatten().quantile(0.85)
         assert torch.allclose(out[bg_mask], ramp[bg_mask]), \
@@ -322,33 +302,82 @@ def _test_apply_midground_pop():
         assert torch.allclose(out[fg_mask], ramp[fg_mask]), \
             f"true foreground must be untouched at strength={strength}"
 
-    # Positive strength must push midground values UP (toward the near/
-    # foreground direction -- higher depth value), never down.
-    out_pos = apply_midground_pop(ramp, 0.5, threshold_low=0.15, threshold_high=0.85)
+    # Positive strength must push band values UP (toward the near/foreground
+    # direction -- higher depth value), never down.
+    out_pos = apply_depth_band_pop(ramp, 0.5, threshold_low=0.15, threshold_high=0.85)
     mid_mask = (ramp >= ramp.flatten().quantile(0.15)) & (ramp <= ramp.flatten().quantile(0.85))
     assert (out_pos[mid_mask] >= ramp[mid_mask]).all(), \
-        "positive strength must push midground pixels toward higher (nearer) values"
+        "positive strength must push band pixels toward higher (nearer) values"
     assert (out_pos[mid_mask] > ramp[mid_mask]).any(), \
-        "positive strength must actually change at least some midground pixels"
+        "positive strength must actually change at least some band pixels"
 
-    # Negative strength must push midground values DOWN (toward the far/
-    # background direction -- lower depth value), never up.
-    out_neg = apply_midground_pop(ramp, -0.5, threshold_low=0.15, threshold_high=0.85)
+    # Negative strength must push band values DOWN (toward the far/background
+    # direction -- lower depth value), never up.
+    out_neg = apply_depth_band_pop(ramp, -0.5, threshold_low=0.15, threshold_high=0.85)
     assert (out_neg[mid_mask] <= ramp[mid_mask]).all(), \
-        "negative strength must push midground pixels toward lower (farther) values"
+        "negative strength must push band pixels toward lower (farther) values"
     assert (out_neg[mid_mask] < ramp[mid_mask]).any(), \
-        "negative strength must actually change at least some midground pixels"
+        "negative strength must actually change at least some band pixels"
 
     # A custom, narrower threshold band must actually narrow which pixels get
     # touched -- confirms threshold_low/threshold_high are real, live inputs,
     # not silently ignored in favor of the function's own defaults.
-    out_narrow = apply_midground_pop(ramp, 0.5, threshold_low=0.4, threshold_high=0.6)
+    out_narrow = apply_depth_band_pop(ramp, 0.5, threshold_low=0.4, threshold_high=0.6)
     now_untouched = (ramp >= ramp.flatten().quantile(0.15)) & (ramp < ramp.flatten().quantile(0.4))
     assert torch.allclose(out_narrow[now_untouched], ramp[now_untouched]), \
         "a narrower threshold_low must exclude pixels the wider default band would have touched"
 
-    print("_test_apply_midground_pop: PASS")
+    print("_test_apply_depth_band_pop: PASS")
+
+
+def _test_apply_foreground_pop():
+    """apply_foreground_pop: band open-ended up to the true nearest pixel. At
+    threshold=0.85, everything below that quantile (background + midground)
+    must be untouched; everything above must only ever move UP (positive
+    strength) or only ever move DOWN (negative strength), same direction rule
+    as the shared primitive."""
+    ramp = torch.linspace(0.0, 1.0, steps=100).view(1, 1, 10, 10)
+    below_mask = ramp < ramp.flatten().quantile(0.85)
+    fg_mask = ramp >= ramp.flatten().quantile(0.85)
+
+    out_pos = apply_foreground_pop(ramp, 0.5, threshold=0.85)
+    assert torch.allclose(out_pos[below_mask], ramp[below_mask]), \
+        "foreground pop must not touch anything below its threshold"
+    assert (out_pos[fg_mask] >= ramp[fg_mask]).all(), \
+        "positive foreground pop must only ever push values up (nearer)"
+    assert (out_pos[fg_mask] > ramp[fg_mask]).any(), "positive foreground pop must change something"
+
+    out_neg = apply_foreground_pop(ramp, -0.5, threshold=0.85)
+    assert (out_neg[fg_mask] <= ramp[fg_mask]).all(), \
+        "negative foreground pop must only ever push values down (pull back toward midground)"
+    assert (out_neg[fg_mask] < ramp[fg_mask]).any(), "negative foreground pop must change something"
+
+    print("_test_apply_foreground_pop: PASS")
+
+
+def _test_apply_background_pop():
+    """apply_background_pop: band open-ended down to the true farthest pixel.
+    Mirror of the foreground test, opposite end."""
+    ramp = torch.linspace(0.0, 1.0, steps=100).view(1, 1, 10, 10)
+    above_mask = ramp > ramp.flatten().quantile(0.15)
+    bg_mask = ramp <= ramp.flatten().quantile(0.15)
+
+    out_pos = apply_background_pop(ramp, 0.5, threshold=0.15)
+    assert torch.allclose(out_pos[above_mask], ramp[above_mask]), \
+        "background pop must not touch anything above its threshold"
+    assert (out_pos[bg_mask] >= ramp[bg_mask]).all(), \
+        "positive background pop must only ever push values up (pull forward toward midground)"
+    assert (out_pos[bg_mask] > ramp[bg_mask]).any(), "positive background pop must change something"
+
+    out_neg = apply_background_pop(ramp, -0.5, threshold=0.15)
+    assert (out_neg[bg_mask] <= ramp[bg_mask]).all(), \
+        "negative background pop must only ever push values down (farther away)"
+    assert (out_neg[bg_mask] < ramp[bg_mask]).any(), "negative background pop must change something"
+
+    print("_test_apply_background_pop: PASS")
 
 
 if __name__ == "__main__":
-    _test_apply_midground_pop()
+    _test_apply_depth_band_pop()
+    _test_apply_foreground_pop()
+    _test_apply_background_pop()

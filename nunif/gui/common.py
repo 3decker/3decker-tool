@@ -127,6 +127,12 @@ if sys.platform == "win32":
     _UDM_GETBUDDY = 0x0400 + 106  # comctl32 UDM_GETBUDDY
     _GWLP_WNDPROC = -4
 
+    class _RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    _WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
     _user32 = ctypes.windll.user32
     _user32.SendMessageW.restype = ctypes.c_void_p
     _user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
@@ -135,49 +141,170 @@ if sys.platform == "win32":
     _user32.CallWindowProcW.restype = ctypes.c_long
     _user32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT,
                                         wintypes.WPARAM, wintypes.LPARAM]
+    _user32.GetParent.restype = wintypes.HWND
+    _user32.GetParent.argtypes = [wintypes.HWND]
+    _user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
+    _user32.EnumChildWindows.argtypes = [wintypes.HWND, _WNDENUMPROC, wintypes.LPARAM]
     _WNDPROC_TYPE = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, wintypes.UINT,
                                         wintypes.WPARAM, wintypes.LPARAM)
 
+    def _win_classname(hwnd):
+        buf = ctypes.create_unicode_buffer(256)
+        _user32.GetClassNameW(hwnd, buf, 256)
+        return buf.value
+
+    def _win_rect(hwnd):
+        r = _RECT()
+        _user32.GetWindowRect(hwnd, ctypes.byref(r))
+        return (r.left, r.top, r.right, r.bottom)
+
+    def _find_generic_spinctrldouble_edit_hwnd(spin_widget):
+        """wx.SpinCtrlDouble is NOT a native MSW composite the way wx.SpinCtrl
+        is -- confirmed via live diagnostic (GetHandle() returns a generic
+        "wxWindowNR" wrapper window, and WM_GETBUDDY on it, and even on the
+        real msctls_updown32 sibling, returns nothing -- wx's own generic
+        SpinCtrlDouble implementation wires the Edit and up-down windows
+        together itself rather than relying on the native buddy mechanism).
+        So there is no buddy relationship to query here at all -- instead,
+        find the real "Edit" sibling geometrically: enumerate every child of
+        the native parent and pick the "Edit"-class one whose screen rect
+        sits inside this control's own screen rect (confirmed via the same
+        diagnostic that the wrapper's rect is the union of the Edit and
+        up-down rects, so this reliably distinguishes it from unrelated
+        Edit controls elsewhere in the same panel)."""
+        own_hwnd = spin_widget.GetHandle()
+        own_rect = _win_rect(own_hwnd)
+        parent_hwnd = _user32.GetParent(own_hwnd)
+        if not parent_hwnd:
+            return None
+        candidates = []
+
+        def _enum(h, _lparam):
+            if _win_classname(h) == "Edit":
+                r = _win_rect(h)
+                if (r[0] >= own_rect[0] and r[1] >= own_rect[1]
+                        and r[2] <= own_rect[2] and r[3] <= own_rect[3]):
+                    candidates.append(h)
+            return True
+
+        _user32.EnumChildWindows(parent_hwnd, _WNDENUMPROC(_enum), 0)
+        return candidates[0] if candidates else None
+    # Keeps every installed ctypes callback trampoline alive for the life of
+    # the process (indexed by edit hwnd) -- required regardless of whether
+    # the caller itself keeps a reference, since block_mousewheel_recursively
+    # below applies this to widgets it does not otherwise hold onto.
+    _spinctrl_wheel_block_refs = {}
+
+    def install_spinctrl_wheel_block(spin_widget):
+        """Blocks mouse wheel scroll from changing a wx.SpinCtrl/
+        wx.SpinCtrlDouble's value -- callable on ANY already-constructed
+        instance, not just from inside a subclass __init__, so both
+        NoWheelSpinCtrl (below) and block_mousewheel_recursively (for
+        instances created directly as plain wx.SpinCtrl/SpinCtrlDouble
+        elsewhere in the codebase) can share this one implementation.
+
+        wx.SpinCtrl/SpinCtrlDouble need this stronger fix instead of the
+        plain block_mousewheel_value_change() above: confirmed via live
+        diagnostic logging that wx.EVT_MOUSEWHEEL never fires for them at
+        all -- unlike wx.ComboBox/wx.Slider (single wx-native windows), a
+        SpinCtrl on MSW is actually TWO SEPARATE SIBLING native windows
+        under the same parent (an "Edit" class window, where the cursor
+        actually hovers and the wheel message really targets, and a
+        "msctls_updown32" class window for the up/down arrows) -- confirmed
+        with win32gui.EnumChildWindows/GetClassName. wx.SpinCtrl.GetHandle()
+        returns the up-down control's handle, NOT the Edit window's, so even
+        a correct-looking MSWWindowProc override on the SpinCtrl object
+        itself only ever sees messages for the arrows, never the text field
+        (confirmed this failed live before landing on this fix).
+
+        Real fix: for a native wx.SpinCtrl, query the up-down control's
+        official buddy relationship via UDM_GETBUDDY (no guessing/enumeration
+        needed) to get the real Edit window handle. wx.SpinCtrlDouble has no
+        such native buddy relationship at all (confirmed live -- see
+        _find_generic_spinctrldouble_edit_hwnd's docstring), so for it the
+        Edit sibling is found geometrically instead. Either way, once found,
+        subclass THAT window's own native window procedure directly via
+        ctypes SetWindowLongPtr/CallWindowProc, swallowing WM_MOUSEWHEEL
+        there before Windows' internal Edit<->UpDown forwarding logic (or,
+        for SpinCtrlDouble, wx's own generic forwarding) ever sees it."""
+        own_hwnd = spin_widget.GetHandle()
+        edit_hwnd = _user32.SendMessageW(own_hwnd, _UDM_GETBUDDY, 0, 0)
+        if not edit_hwnd:
+            edit_hwnd = _find_generic_spinctrldouble_edit_hwnd(spin_widget)
+        if not edit_hwnd or edit_hwnd in _spinctrl_wheel_block_refs:
+            return  # unexpected layout, or already installed -- either way, nothing to do
+
+        original_proc_box = {}
+
+        def _wndproc(hwnd_, msg, wparam, lparam):
+            if msg == _WM_MOUSEWHEEL:
+                return 0
+            return _user32.CallWindowProcW(original_proc_box["orig"], hwnd_, msg, wparam, lparam)
+
+        proc_ref = _WNDPROC_TYPE(_wndproc)
+        original_proc_box["orig"] = _user32.SetWindowLongPtrW(
+            edit_hwnd, _GWLP_WNDPROC, ctypes.cast(proc_ref, ctypes.c_void_p))
+        _spinctrl_wheel_block_refs[edit_hwnd] = proc_ref  # keep the trampoline alive
+
+        def _on_destroy(event):
+            # Restore the original native window procedure before this
+            # control (and the ctypes callback trampoline kept alive for it)
+            # goes away, so Windows never calls into freed Python code.
+            _user32.SetWindowLongPtrW(edit_hwnd, _GWLP_WNDPROC, original_proc_box["orig"])
+            _spinctrl_wheel_block_refs.pop(edit_hwnd, None)
+            event.Skip()
+        spin_widget.Bind(wx.EVT_WINDOW_DESTROY, _on_destroy)
+
     class NoWheelSpinCtrl(wx.SpinCtrl):
         """Drop-in wx.SpinCtrl replacement that ignores mouse wheel scroll --
-        see the module-level comment above for why the normal EVT_MOUSEWHEEL/
-        MSWWindowProc approaches cannot work for this specific control."""
+        see install_spinctrl_wheel_block's docstring above for the mechanism.
+        Prefer calling install_spinctrl_wheel_block() directly on an
+        already-constructed wx.SpinCtrl/SpinCtrlDouble where swapping the
+        construction call isn't practical (e.g. retrofitting many existing
+        call sites) -- this subclass is for new code only."""
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self._wheel_block_proc_ref = None
-            self._wheel_block_original = None
-            self._wheel_block_edit_hwnd = None
-            self._install_wheel_block()
-            self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy_restore_wndproc)
-
-        def _install_wheel_block(self):
-            updown_hwnd = self.GetHandle()
-            edit_hwnd = _user32.SendMessageW(updown_hwnd, _UDM_GETBUDDY, 0, 0)
-            if not edit_hwnd:
-                return  # unexpected layout -- fail open rather than crash
-
-            def _wndproc(hwnd_, msg, wparam, lparam):
-                if msg == _WM_MOUSEWHEEL:
-                    return 0
-                return _user32.CallWindowProcW(self._wheel_block_original, hwnd_, msg, wparam, lparam)
-
-            self._wheel_block_proc_ref = _WNDPROC_TYPE(_wndproc)  # keep alive, see below
-            self._wheel_block_edit_hwnd = edit_hwnd
-            self._wheel_block_original = _user32.SetWindowLongPtrW(
-                edit_hwnd, _GWLP_WNDPROC, ctypes.cast(self._wheel_block_proc_ref, ctypes.c_void_p))
-
-        def _on_destroy_restore_wndproc(self, event):
-            # Restore the original native window procedure before this
-            # control (and the ctypes callback trampoline kept alive on it)
-            # goes away, so Windows never calls into freed Python code.
-            if self._wheel_block_original and self._wheel_block_edit_hwnd:
-                _user32.SetWindowLongPtrW(
-                    self._wheel_block_edit_hwnd, _GWLP_WNDPROC, self._wheel_block_original)
-            event.Skip()
+            install_spinctrl_wheel_block(self)
 else:
     # No known equivalent native-level wheel issue on non-Windows platforms
     # this project targets -- plain wx.SpinCtrl is fine there.
     NoWheelSpinCtrl = wx.SpinCtrl
+
+    def install_spinctrl_wheel_block(spin_widget):
+        pass
+
+
+def block_mousewheel_recursively(window):
+    """Applies the correct wheel-block fix to `window` itself (if it is a
+    type that needs one) and recursively to every descendant window --
+    catches every wx.ComboBox/wx.Slider/wx.SpinCtrl/wx.SpinCtrlDouble in an
+    entire window hierarchy in one call, regardless of how each individual
+    one was constructed.
+
+    Why this exists: block_mousewheel_value_change() and NoWheelSpinCtrl
+    above only protect widgets built through this project's own wrapper
+    classes (EditableComboBox) or the one shared slider helper
+    (_build_stereo_slider) -- but a live audit after shipping that fix found
+    dozens of settings across this app's GUIs still use PLAIN wx.ComboBox(...)
+    directly (closed-choice dropdowns like Depth Model, Method, Stereo
+    Format, Device, and many more), plus a few wx.SpinCtrlDouble instances,
+    none of which ever went through either fix -- confirmed as the actual
+    cause of a follow-up user report that some settings still changed value
+    on scroll after the first fix shipped. Retrofitting every one of those
+    construction call sites individually (tens of them, across iw3/gui.py,
+    iw3/desktop/gui.py, waifu2x/gui.py, and the shared VideoEncodingBox/
+    VideoDecodingBox panels) would be exactly the kind of error-prone,
+    easy-to-miss-one churn this recursive sweep avoids: call this ONCE, after
+    a frame's widgets are all constructed, and it finds and fixes every one
+    without needing to know how any of them were built."""
+    if isinstance(window, wx.SpinCtrlDouble) or (
+            sys.platform == "win32" and isinstance(window, wx.SpinCtrl)):
+        install_spinctrl_wheel_block(window)
+    elif isinstance(window, (wx.ComboBox, wx.Slider, wx.SpinCtrl)):
+        block_mousewheel_value_change(window)
+    for child in window.GetChildren():
+        block_mousewheel_recursively(child)
 
 
 class EditableComboBox(wx.ComboBox):

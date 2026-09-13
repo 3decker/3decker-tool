@@ -47,6 +47,7 @@ import nunif.utils.pil_io as pil_io
 from nunif.gui import (
     TQDMGUI, FileDropCallback, EVT_TQDM, TimeCtrl,
     EditableComboBox, EditableComboBoxPersistentHandler, block_mousewheel_value_change, NoWheelSpinCtrl,
+    block_mousewheel_recursively,
     persistent_manager_register_all, persistent_manager_unregister_all,
     persistent_manager_restore_all, persistent_manager_register,
     extension_list_to_wildcard, validate_number,
@@ -4995,6 +4996,13 @@ class MainFrame(wx.Frame):
         # previous session must not grab a CUDA context before the user does
         # anything. The checkbox/device handlers still probe on real interaction.
         self.update_controls(probe_compile=False)
+
+        # ADR-128: every remaining plain wx.ComboBox/wx.Slider/wx.SpinCtrl in the
+        # whole window (dozens of dropdowns never routed through EditableComboBox)
+        # still let mouse wheel scroll silently change their value -- sweep the
+        # entire widget tree once, now that every control above is constructed, so
+        # none of them are missed regardless of which line built them.
+        block_mousewheel_recursively(self)
 
     def _compose_options_layout_tabbed(self):
         """ADR-036/ADR-037/ADR-045/ADR-048 -- Tabbed layout: each category panel is

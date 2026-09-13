@@ -30,6 +30,7 @@ from nunif.utils.home_dir import ensure_home_dir
 from nunif.gui import (
     TQDMGUI, FileDropCallback, EVT_TQDM, TimeCtrl,
     EditableComboBox, EditableComboBoxPersistentHandler,
+    block_mousewheel_recursively,
     persistent_manager_register_all, persistent_manager_restore_all, persistent_manager_register,
     extension_list_to_wildcard,
     validate_number,
@@ -93,6 +94,11 @@ class MainFrame(wx.Frame):
         self.input_type = None
         self.stop_event = threading.Event()
         self.initialize_component()
+
+        # ADR-128: sweep the whole widget tree once initialize_component() has
+        # built every control, so plain wx.ComboBox instances (never routed
+        # through EditableComboBox) also stop changing value on wheel scroll.
+        block_mousewheel_recursively(self)
 
     def initialize_component(self):
         self.SetFont(wx.Font(10, wx.FONTFAMILY_MODERN, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))

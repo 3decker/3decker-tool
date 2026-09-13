@@ -24,6 +24,7 @@ from nunif.utils.home_dir import ensure_home_dir
 from nunif.gui import (
     IpAddrCtrl,
     EditableComboBox, EditableComboBoxPersistentHandler, NoWheelSpinCtrl,
+    block_mousewheel_recursively,
     persistent_manager_register_all, persistent_manager_unregister_all,
     persistent_manager_restore_all, persistent_manager_register,
     validate_number,
@@ -151,6 +152,12 @@ class MainFrame(wx.Frame):
         self.initialize_component()
         if is_dark_mode():
             apply_dark_mode(self)
+
+        # ADR-128: sweep the whole widget tree once initialize_component() has
+        # built every control, so plain wx.ComboBox/wx.SpinCtrlDouble instances
+        # (never routed through EditableComboBox/NoWheelSpinCtrl) also stop
+        # changing value on mouse wheel scroll.
+        block_mousewheel_recursively(self)
 
     def initialize_component(self):
         NORMAL_FONT = wx.Font(10, family=wx.FONTFAMILY_MODERN, style=wx.FONTSTYLE_NORMAL, weight=wx.FONTWEIGHT_NORMAL)

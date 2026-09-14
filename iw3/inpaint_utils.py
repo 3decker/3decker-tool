@@ -18,6 +18,46 @@ MASK_MLBW_L2_D1_URL = pth_url("iw3_mask_mlbw_l2_d1_20250903.pth")
 INPAINT_CONFIG_FILE = path.join(ensure_home_dir("iw3"), "inpaint_models.yml")
 INPAINT_MODEL_DEFAULT = "light_inpaint_v1"
 
+# Single source of truth for the 3 optional Aether inpaint models, written to
+# INPAINT_CONFIG_FILE by ensure_optional_inpaint_models_registered() below.
+# Called from both setup.ps1 (fresh installs) and update-3decker.bat (ADR-137:
+# existing installs that set up before these 3 models existed never got this
+# file written otherwise, since setup.ps1 only ever runs once, and
+# update-3decker.bat never touched it -- "Install Update Now" alone could
+# never make these appear for anyone who had already completed setup before
+# this feature shipped).
+OPTIONAL_INPAINT_MODELS_YAML = """\
+# Optional extra inpaint models, written by setup.ps1 / update-3decker.bat on
+# first install or first update after this feature shipped. Safe to edit or
+# delete -- see inpaint_models.yml.sample in windows_package/ for the full
+# format. Note: real A/B testing on this project found Video_Large_Aether
+# looks WORSE than the default light_inpaint_v1 -- the two Medium variants are
+# untested. Treat light_inpaint_v1 as the recommended default; these three are
+# optional extras to experiment with, not proven upgrades.
+Video_Large_Aether:
+  video: https://github.com/3decker/3decker-tool/releases/download/inpaint-models-v1/video_inpaint_v1_large-aether.pth
+
+Video_Medium_Aether:
+  video: https://github.com/3decker/3decker-tool/releases/download/inpaint-models-v1/video_inpaint_v1_medium-aether.pth
+
+Video_Medium_Aether_v2:
+  video: https://github.com/3decker/3decker-tool/releases/download/inpaint-models-v1/video_inpaint_v1_medium_aether_20260222.pth
+"""
+
+
+def ensure_optional_inpaint_models_registered():
+    """Write INPAINT_CONFIG_FILE with the 3 optional Aether models if it
+    doesn't already exist. Idempotent, safe to call on every setup/update
+    run -- never overwrites a file that's already there (which may hold a
+    user's own hand-edited customization)."""
+    if path.exists(INPAINT_CONFIG_FILE):
+        print(f"{INPAINT_CONFIG_FILE} already exists -- leaving it alone.")
+        return False
+    with open(INPAINT_CONFIG_FILE, "w", encoding="utf-8") as f:
+        f.write(OPTIONAL_INPAINT_MODELS_YAML)
+    print(f"Wrote {INPAINT_CONFIG_FILE} (3 optional inpaint models registered, not yet downloaded).")
+    return True
+
 
 def _resolve_path(path_or_url):
     if not path_or_url:

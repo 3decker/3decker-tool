@@ -72,6 +72,15 @@ if %ERRORLEVEL% neq 0 goto :on_error
 pushd "%NUNIF_DIR%" && python -m iw3.download_models && popd
 if %ERRORLEVEL% neq 0 goto :on_error
 
+@rem ADR-137: registers the 3 optional Aether inpaint models if they aren't
+@rem already registered -- covers installs that completed setup.ps1 BEFORE
+@rem this feature existed (setup.ps1 only ever runs once, so those installs
+@rem would otherwise never get this file no matter how many updates they run).
+@rem No-ops if iw3/inpaint_models.yml already exists (see
+@rem ensure_optional_inpaint_models_registered() in iw3/inpaint_utils.py).
+pushd "%NUNIF_DIR%" && python -m iw3.register_optional_inpaint_models && popd
+if %ERRORLEVEL% neq 0 goto :on_error
+
 
 @rem warmup, create pyc
 pushd "%NUNIF_DIR%" && python -m iw3.gui --help > nul && popd

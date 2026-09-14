@@ -1208,7 +1208,10 @@ class MainFrame(wx.Frame):
               "mlbw_l2_inpaint, monobw_inpaint) — picks which AI model fills in the hidden area behind "
               "objects that the 3D shift reveals.\n"
               "light_inpaint_v1 is the only model included out of the box, and is what this stays on for "
-              "almost everyone. Extra models only appear here if you've manually added entries to "
+              "almost everyone. Setup/Update also registers 3 optional extras (Video_Large_Aether, "
+              "Video_Medium_Aether, Video_Medium_Aether_v2) that download automatically the first time you "
+              "pick one — real A/B testing found Video_Large_Aether looks WORSE than the default, and the "
+              "Medium variants are untested. You can add further entries yourself in "
               "iw3/inpaint_models.yml (an advanced/optional customization, not needed for normal use).\n"
               "Recommended: leave on light_inpaint_v1 unless you've specifically installed an alternative "
               "model and know why you want it."))
@@ -5086,6 +5089,89 @@ class MainFrame(wx.Frame):
         # never actually possible before despite pnl_options already supporting
         # it via scrolling.
         self._update_frame_min_size()
+
+        # ADR-138: user request -- every setting's tooltip should also show when
+        # hovering the TITLE text (the wx.StaticText label), not only the value
+        # control next to it. Same "sweep the whole tree once, now that every
+        # control above is constructed" placement as ADR-128's
+        # block_mousewheel_recursively above.
+        self._propagate_tooltips_to_labels()
+
+    # ADR-138: widget types that count as a setting's "value" for tooltip
+    # propagation -- anything else (wx.Button, wx.StaticLine, plain wx.Panel,
+    # ...) stops the scan, so unrelated buttons/separators sharing a label's
+    # parent (e.g. the preset toolbar's Load/Save/Delete/quick-preset buttons)
+    # never get pulled into an unrelated label's tooltip.
+    _TOOLTIP_VALUE_WIDGET_TYPES = (wx.ComboBox, wx.TextCtrl, wx.CheckBox, wx.Slider,
+                                    wx.SpinCtrl, wx.SpinCtrlDouble, wx.RadioButton, wx.Choice)
+
+    def _propagate_tooltips_to_labels(self):
+        """ADR-138: real user request -- hovering a setting's title text (its
+        wx.StaticText label) should show the same tooltip as hovering its value
+        control, for every setting in the window, not just the control itself.
+
+        This file's own established convention is "label constructed right
+        before its value control(s), same parent, until the next label" (see
+        e.g. lbl_inpaint_model/cbo_inpaint_model, or lbl_overlap_frames followed
+        by BOTH cbo_overlap_frames_pre and cbo_overlap_frames_post) -- so rather
+        than guess from widget names (unreliable: e.g. cbo_overlap_frames_pre
+        doesn't end in "_overlap_frames"), this walks each parent's real
+        children in construction order and, for every label with non-empty text
+        and no tooltip of its own already, collects the tooltip(s) of every
+        immediately-following sibling that's a recognized "value" widget type
+        (_TOOLTIP_VALUE_WIDGET_TYPES), stopping at the next non-empty label or
+        the first sibling that ISN'T a value-type widget. Confirmed live this
+        stop condition is required, not optional: the preset toolbar
+        (pnl_preset) has lbl_preset -> cbo_app_preset -> btn_load_preset ->
+        btn_save_preset -> btn_delete_preset -> ... -> several quick-preset
+        buttons that DO have their own unrelated tooltips, all as siblings
+        with no intervening label before lbl_language -- without the
+        value-type-only stop rule, "Preset"'s label would have absorbed all of
+        those buttons' unrelated tooltip text.
+
+        A StaticText with EMPTY label text (e.g. lbl_divergence_warning, a
+        hidden warning message, not a real title) is treated as transparent --
+        skipped over rather than treated as its own label or as a scan-stopping
+        boundary -- so a real value control positioned after it (e.g.
+        sld_stereo_divergence, the slider mirroring cbo_divergence) still gets
+        considered for the PRECEDING real label's scan.
+
+        Multiple collected tooltips (e.g. Overlap Frames' Pre + Post, or Mask
+        Dilation's Inner + Outer) are joined with a blank line rather than only
+        keeping the first, so the label's tooltip doesn't silently drop half
+        the setting's real documentation.
+        """
+        self._propagate_tooltips_recursive(self)
+
+    def _propagate_tooltips_recursive(self, window):
+        children = list(window.GetChildren())
+        i = 0
+        while i < len(children):
+            child = children[i]
+            if (isinstance(child, wx.StaticText) and child.GetLabelText().strip()
+                    and child.GetToolTip() is None):
+                collected = []
+                j = i + 1
+                while j < len(children):
+                    sibling = children[j]
+                    if isinstance(sibling, wx.StaticText):
+                        if sibling.GetLabelText().strip():
+                            break
+                        j += 1
+                        continue
+                    if not isinstance(sibling, self._TOOLTIP_VALUE_WIDGET_TYPES):
+                        break
+                    tip = sibling.GetToolTip()
+                    if tip is not None:
+                        tip_text = tip.GetTip()
+                        if tip_text and tip_text not in collected:
+                            collected.append(tip_text)
+                    j += 1
+                if collected:
+                    child.SetToolTip("\n\n".join(collected))
+            i += 1
+        for child in children:
+            self._propagate_tooltips_recursive(child)
 
     def _compose_options_layout_tabbed(self):
         """ADR-036/ADR-037/ADR-045/ADR-048 -- Tabbed layout: each category panel is
@@ -9696,6 +9782,46 @@ def _self_test_device_dropdown_no_torch_cuda_touch():
     print("_self_test_device_dropdown_no_torch_cuda_touch: PASS")
 
 
+def _self_test_label_tooltips_propagated():
+    """ADR-138: hovering a setting's title label (wx.StaticText) must show the
+    same tooltip as hovering its value control -- confirms both the basic
+    single-control case (lbl_inpaint_model) and, critically, that the scan's
+    "stop at the first non-value-type widget" rule actually prevents the
+    preset toolbar's unrelated button tooltips (Movie/Action/3DECKER
+    Preferred/Compare Presets/Import Command, all siblings of lbl_preset with
+    no intervening label) from leaking onto lbl_preset's tooltip -- this is
+    the one thing that must never regress, since a wrong tooltip is worse
+    than a missing one."""
+    import iw3.gui as gui_mod
+
+    def tip_text(widget):
+        t = widget.GetToolTip()
+        return t.GetTip() if t is not None else None
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = gui_mod.MainFrame()
+
+        assert tip_text(frame.lbl_inpaint_model) == tip_text(frame.cbo_inpaint_model), \
+            "lbl_inpaint_model's tooltip should match cbo_inpaint_model's"
+
+        preset_tip = tip_text(frame.lbl_preset)
+        movie_tip = tip_text(frame.btn_quick_preset_movie)
+        assert movie_tip is not None, "test assumption broken: btn_quick_preset_movie has no tooltip anymore"
+        assert preset_tip is None or movie_tip not in preset_tip, \
+            "lbl_preset's tooltip leaked an unrelated quick-preset button's tooltip text"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_label_tooltips_propagated: PASS")
+
+
 def _self_test_compile_probe_crash_handled():
     """Regression test for a real crash: clicking the torch.compile checkbox with a
     specific GPU/CPU selected (not "All CUDA Device") used to throw a raw, uncaught
@@ -12974,6 +13100,7 @@ def _run_self_tests():
         _self_test_update_available_dialog_wiring,
         _self_test_import_command_round_trip,
         _self_test_device_dropdown_no_torch_cuda_touch,
+        _self_test_label_tooltips_propagated,
     ]
     failures = []
     for test in tests:

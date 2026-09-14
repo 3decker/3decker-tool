@@ -65,11 +65,8 @@ from .depth_anything_model import (
     DepthAnythingModel,
     AA_SUPPORTED_MODELS as DA_AA_SUPPORTED_MODELS
 )
-from .video_depth_anything_model import (
-    VideoDepthAnythingModel,
-    AA_SUPPORT_MODELS as VDA_AA_SUPPORTED_MODELS
-)
-from .video_depth_anything_streaming_model import VideoDepthAnythingStreamingModel, AA_SUPPORT_MODELS as VDA_STREAM_AA_SUPPORTED_MODELS
+from .video_depth_anything_model import AA_SUPPORT_MODELS as VDA_AA_SUPPORTED_MODELS
+from .video_depth_anything_streaming_model import AA_SUPPORT_MODELS as VDA_STREAM_AA_SUPPORTED_MODELS
 from .depth_anything_v3_model import AA_SUPPORTED_MODELS as DA3_AA_SUPPORTED_MODELS
 from .depth_pro_model import MODEL_FILES as DEPTH_PRO_MODELS
 from .zoedepth_model import MODEL_FILES as ZOEDPETH_MODELS
@@ -5764,55 +5761,44 @@ class MainFrame(wx.Frame):
             "Any_S", "Any_B", "Any_L",
             "Any_V2_S",
         ]
+        # ADR-142: Any_V2_B/Any_V2_L stay gated behind has_checkpoint_file --
+        # nagadomi's own hub code deliberately refuses to auto-download these two
+        # specifically (CC BY-NC 4.0 license: "Please place the checkpoint file for
+        # cc-by-nc-4.0 yourself"), so showing them before a user has consciously
+        # placed the file themselves would offer an option guaranteed to crash.
         if DepthAnythingModel.has_checkpoint_file("Any_V2_B"):
             depth_models.append("Any_V2_B")
         if DepthAnythingModel.has_checkpoint_file("Any_V2_L"):
             depth_models.append("Any_V2_L")
 
-        depth_models += ["Any_V2_N_S", "Any_V2_N_B"]
-        if DepthAnythingModel.has_checkpoint_file("Any_V2_N_L"):
-            depth_models.append("Any_V2_N_L")
-        depth_models += ["Any_V2_K_S", "Any_V2_K_B"]
-        if DepthAnythingModel.has_checkpoint_file("Any_V2_K_L"):
-            depth_models.append("Any_V2_K_L")
+        # ADR-142: Any_V2_N_L/Any_V2_K_L (Metric Hypersim/VKITTI Large) now
+        # unconditionally offered, same as the DA3 variants below -- confirmed no
+        # licensing restriction (unlike Any_V2_B/L above), and
+        # depth_anything_model.py's _ensure_checkpoint() now auto-downloads the
+        # real, verified checkpoint on first actual use.
+        depth_models += ["Any_V2_N_S", "Any_V2_N_B", "Any_V2_N_L"]
+        depth_models += ["Any_V2_K_S", "Any_V2_K_B", "Any_V2_K_L"]
 
-        depth_models += ["Distill_Any_S"]
-        if DepthAnythingModel.has_checkpoint_file("Distill_Any_B"):
-            depth_models.append("Distill_Any_B")
-        if DepthAnythingModel.has_checkpoint_file("Distill_Any_L"):
-            depth_models.append("Distill_Any_L")
+        # ADR-142: Distill_Any_B/L now unconditionally offered, same reasoning --
+        # no licensing restriction, auto-downloads on first use.
+        depth_models += ["Distill_Any_S", "Distill_Any_B", "Distill_Any_L"]
 
         depth_models += ["Any_V3_Mono", "Any_V3_Mono_01"]
         # ADR-135: 4 more Depth-Anything-3 variants -- same as Any_V3_Mono/
         # Any_V3_Mono_01 above, unconditionally offered (not gated on
-        # has_checkpoint_file the way Any_V2_B/L or Distill_Any_B/L are) since
-        # every DA3 variant downloads its own weights on first real use, not
-        # from a locally-pre-placed file a user must already have.
+        # has_checkpoint_file the way Any_V2_B/L is) since every DA3 variant
+        # downloads its own weights on first real use, not from a locally-
+        # pre-placed file a user must already have.
         depth_models += ["Any_V3_Small", "Any_V3_Base", "Any_V3_Large_1_1", "Any_V3_Metric_Large"]
 
-        depth_models += ["VDA_S"]
-        if VideoDepthAnythingModel.has_checkpoint_file("VDA_B"):
-            depth_models.append("VDA_B")
-        if VideoDepthAnythingModel.has_checkpoint_file("VDA_L"):
-            depth_models.append("VDA_L")
-
-        depth_models += ["VDA_Metric_S"]
-        if VideoDepthAnythingModel.has_checkpoint_file("VDA_Metric_B"):
-            depth_models.append("VDA_Metric_B")
-        if VideoDepthAnythingModel.has_checkpoint_file("VDA_Metric_L"):
-            depth_models.append("VDA_Metric_L")
-
-        depth_models += ["VDA_Stream_S"]
-        if VideoDepthAnythingStreamingModel.has_checkpoint_file("VDA_Stream_B"):
-            depth_models.append("VDA_Stream_B")
-        if VideoDepthAnythingStreamingModel.has_checkpoint_file("VDA_Stream_L"):
-            depth_models.append("VDA_Stream_L")
-
-        depth_models += ["VDA_Stream_Metric_S"]
-        if VideoDepthAnythingStreamingModel.has_checkpoint_file("VDA_Stream_Metric_B"):
-            depth_models.append("VDA_Stream_Metric_B")
-        if VideoDepthAnythingStreamingModel.has_checkpoint_file("VDA_Stream_Metric_L"):
-            depth_models.append("VDA_Stream_Metric_L")
+        # ADR-142: VDA_B/L, VDA_Metric_B/L, and their Streaming counterparts now
+        # unconditionally offered, same reasoning as Distill_Any_B/L above -- no
+        # licensing restriction, auto-downloads on first use via each model file's
+        # own _ensure_checkpoint().
+        depth_models += ["VDA_S", "VDA_B", "VDA_L"]
+        depth_models += ["VDA_Metric_S", "VDA_Metric_B", "VDA_Metric_L"]
+        depth_models += ["VDA_Stream_S", "VDA_Stream_B", "VDA_Stream_L"]
+        depth_models += ["VDA_Stream_Metric_S", "VDA_Stream_Metric_B", "VDA_Stream_Metric_L"]
 
         return depth_models
 

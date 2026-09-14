@@ -65,6 +65,40 @@ AA_SUPPORTED_MODELS = {
 }
 MIN_RESOLUTION = 224
 
+# ADR-142: real, confirmed bug -- Distill_Any_B/L and Any_V2_N_L/Any_V2_K_L never
+# appeared in the GUI dropdown for any install that hadn't already manually placed
+# their checkpoint file, and even once shown/selected, nagadomi's own hub's
+# _load_state_dict() has no download URL wired up for these specific sizes --
+# raises "Please place the checkpoint file yourself" (a real, confirmed live crash,
+# not a guess). This is NOT the CC-BY-NC-specific gate the plain Any_V2_B/Any_V2_L
+# checkpoints have (that one is deliberate, license-driven, and left untouched --
+# see MODEL_FILES/NAME_MAP above, still gated by has_checkpoint_file in
+# gui.py's get_depth_models()) -- these 4 simply never had a URL filled in.
+# Every URL below was verified live before use: HEAD-checked for a real HTTP 200,
+# and (for Distill_Any_B/L) additionally confirmed to be BYTE-IDENTICAL to an
+# already-existing local checkpoint file of unknown provenance, not guessed.
+EXTRA_CHECKPOINT_URLS = {
+    "Distill_Any_B": "https://huggingface.co/xingyang1/Distill-Any-Depth/resolve/main/base/model.safetensors?download=true",
+    "Distill_Any_L": "https://huggingface.co/xingyang1/Distill-Any-Depth/resolve/main/large/model.safetensors?download=true",
+    "Any_V2_N_L": "https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Hypersim-Large/resolve/main/depth_anything_v2_metric_hypersim_vitl.pth?download=true",
+    "Any_V2_K_L": "https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-VKITTI-Large/resolve/main/depth_anything_v2_metric_vkitti_vitl.pth?download=true",
+}
+
+
+def _ensure_checkpoint(model_type):
+    """Downloads the real checkpoint file to MODEL_FILES[model_type] first, if it
+    isn't already there and a verified URL is known for it (EXTRA_CHECKPOINT_URLS
+    above) -- lets nagadomi's own hub code do everything else unmodified, since its
+    _load_state_dict() already correctly loads straight from that path once it
+    exists; it just never had a URL to fetch it from itself for these sizes."""
+    if model_type not in EXTRA_CHECKPOINT_URLS:
+        return
+    checkpoint_path = MODEL_FILES[model_type]
+    if path.exists(checkpoint_path):
+        return
+    os.makedirs(path.dirname(checkpoint_path), exist_ok=True)
+    torch.hub.download_url_to_file(EXTRA_CHECKPOINT_URLS[model_type], checkpoint_path)
+
 
 def batch_preprocess(x, lower_bound=392, max_aspect_ratio=4, limit_resolution=False):
     # x: BCHW float32 0-1
@@ -187,6 +221,8 @@ class DepthAnythingModel(BaseDepthModel):
         super().__init__(model_type)
 
     def load_model(self, model_type, resolution=None, device=None):
+        _ensure_checkpoint(model_type)
+
         # load aa model
         if model_type in AA_SUPPORTED_MODELS:
             self.depth_aa = DepthAA().load().eval().to(device)

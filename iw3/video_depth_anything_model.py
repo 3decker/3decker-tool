@@ -47,6 +47,35 @@ METRIC_DEPTH_TYPES = {
     "VDA_Metric_L",
 }
 
+# ADR-142: same real gap as depth_anything_model.py's EXTRA_CHECKPOINT_URLS --
+# nagadomi's own hub's _load_state_dict() has no download URL wired up for vitb/vitl
+# in either the plain or Metric variant (confirmed by reading
+# nagadomi_Video-Depth-Anything_iw3_main/hubconf.py directly: only "vits" has a
+# url= assignment in either branch) -- "Please place the checkpoint file yourself"
+# on first select. No licensing restriction here (unlike Any_V2_B/Any_V2_L in
+# depth_anything_model.py). Every URL below HEAD-verified live (real HTTP 200) and
+# confirmed byte-identical to an already-existing local checkpoint of unknown
+# provenance before being hardcoded here, not guessed.
+EXTRA_CHECKPOINT_URLS = {
+    "VDA_B": "https://huggingface.co/depth-anything/Video-Depth-Anything-Base/resolve/main/video_depth_anything_vitb.pth?download=true",
+    "VDA_L": "https://huggingface.co/depth-anything/Video-Depth-Anything-Large/resolve/main/video_depth_anything_vitl.pth?download=true",
+    "VDA_Metric_B": "https://huggingface.co/depth-anything/Metric-Video-Depth-Anything-Base/resolve/main/metric_video_depth_anything_vitb.pth?download=true",
+    "VDA_Metric_L": "https://huggingface.co/depth-anything/Metric-Video-Depth-Anything-Large/resolve/main/metric_video_depth_anything_vitl.pth?download=true",
+}
+
+
+def _ensure_checkpoint(model_type):
+    """See depth_anything_model.py's identical helper -- same reasoning, same
+    approach: pre-place the file nagadomi's own hub code already knows how to load
+    once it exists, just never had a URL to fetch it from itself for these sizes."""
+    if model_type not in EXTRA_CHECKPOINT_URLS:
+        return
+    checkpoint_path = MODEL_FILES[model_type]
+    if path.exists(checkpoint_path):
+        return
+    os.makedirs(path.dirname(checkpoint_path), exist_ok=True)
+    torch.hub.download_url_to_file(EXTRA_CHECKPOINT_URLS[model_type], checkpoint_path)
+
 
 def batch_preprocess(x, lower_bound, metric_depth, limit_resolution=False):
     if metric_depth:
@@ -173,6 +202,8 @@ class VideoDepthAnythingModel(BaseDepthModel):
         self._flip_state = _fresh_online_state()
 
     def load_model(self, model_type, resolution=None, device=None):
+        _ensure_checkpoint(model_type)
+
         # load aa model
         self.depth_aa = DepthAA().load().eval().to(device)
         # load depth model

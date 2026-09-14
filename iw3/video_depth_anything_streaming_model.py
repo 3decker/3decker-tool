@@ -5,7 +5,9 @@ from torchvision.transforms import functional as TF
 from nunif.device import create_device, autocast, device_is_mps, device_is_xpu # noqa
 from nunif.models.utils import compile_model
 from .base_depth_model import BaseDepthModel, HUB_MODEL_DIR
-from .video_depth_anything_model import batch_preprocess, postprocess
+from .video_depth_anything_model import (
+    batch_preprocess, postprocess, EXTRA_CHECKPOINT_URLS as _VDA_EXTRA_CHECKPOINT_URLS,
+)
 from .models import DepthAA
 
 
@@ -33,6 +35,23 @@ AA_SUPPORT_MODELS = {
     "VDA_Stream_Metric_B",
     "VDA_Stream_Metric_L",
 }
+
+
+def _ensure_checkpoint(model_type):
+    """ADR-142: same checkpoint file as video_depth_anything_model.py's VDA_B/
+    VDA_L/VDA_Metric_B/VDA_Metric_L (see MODEL_FILES above -- identical paths),
+    just reached through this Streaming model's own separate load_model(), so it
+    needs the same pre-download fix independently. Reuses that file's own
+    EXTRA_CHECKPOINT_URLS (verified URLs, not duplicated here) via the naming
+    convention "VDA_Stream_X" -> "VDA_X"."""
+    vda_model_type = model_type.replace("VDA_Stream_", "VDA_")
+    if vda_model_type not in _VDA_EXTRA_CHECKPOINT_URLS:
+        return
+    checkpoint_path = MODEL_FILES[model_type]
+    if path.exists(checkpoint_path):
+        return
+    os.makedirs(path.dirname(checkpoint_path), exist_ok=True)
+    torch.hub.download_url_to_file(_VDA_EXTRA_CHECKPOINT_URLS[vda_model_type], checkpoint_path)
 METRIC_PADDING = 14
 METRIC_DEPTH_TYPES = {
     "VDA_Stream_Metric_S",
@@ -82,6 +101,8 @@ class VideoDepthAnythingStreamingModel(BaseDepthModel):
         return (out_main + torch.flip(out_flip, dims=[-1])) * 0.5
 
     def load_model(self, model_type, resolution=None, device=None):
+        _ensure_checkpoint(model_type)
+
         # load aa model
         self.depth_aa = DepthAA().load().eval().to(device)
         # load depth model

@@ -2967,6 +2967,10 @@ class MainFrame(wx.Frame):
         self.txt_scene_settings = wx.TextCtrl(self.cpn_video_filter_scene_batch.GetPane(), name="txt_scene_settings",
                                               style=wx.TE_READONLY)
         self.txt_scene_settings.SetValue("")
+        self.txt_scene_settings.SetToolTip(
+            T("Optional, for Automated Scene Batch. JSON file giving per-scene setting overrides "
+              "(e.g. a different Divergence for different stretches of the movie). Leave blank to "
+              "use the same settings for every scene. Use the \"...\" button to pick the file."))
         self.btn_scene_settings = wx.Button(self.cpn_video_filter_scene_batch.GetPane(), label=T("..."))
         self.btn_scene_settings.SetToolTip(
             T("Optional, for Automated Scene Batch. JSON file giving per-scene setting overrides "
@@ -4810,9 +4814,26 @@ class MainFrame(wx.Frame):
                                                size=self.FromDIP((200, -1)),
                                                name="cbo_app_preset")
         self.cbo_app_preset.SetSelection(0)
+        self.cbo_app_preset.SetToolTip(
+            T("What it's for: a named snapshot of every setting in this window, saved under whatever "
+              "name is typed/picked here -- not just the small fixed set the Movie/Action/3DECKER "
+              "Preferred quick-preset buttons apply. Pick an existing name from the dropdown, or type "
+              "a new one to save the current settings under it.\n"
+              "Recommended: use this for your own recurring setups (a specific source/quality combo "
+              "you return to often); use the quick-preset buttons for a fast one-click starting "
+              "point instead."))
         self.btn_load_preset = wx.Button(self.pnl_preset, label=T("Load"))
+        self.btn_load_preset.SetToolTip(
+            T("Applies every setting saved under the name currently in the Preset box, overwriting "
+              "what's in this window now."))
         self.btn_save_preset = wx.Button(self.pnl_preset, label=T("Save"))
+        self.btn_save_preset.SetToolTip(
+            T("Saves every current setting in this window under the name typed/picked in the Preset "
+              "box, creating it if new or overwriting it if it already exists."))
         self.btn_delete_preset = wx.Button(self.pnl_preset, label=T("Delete"))
+        self.btn_delete_preset.SetToolTip(
+            T("Permanently deletes the saved preset named in the Preset box. Does not affect the "
+              "settings currently shown in this window, only the saved copy."))
 
         # quick presets
         self.sep_quick_preset = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
@@ -4851,6 +4872,10 @@ class MainFrame(wx.Frame):
         # copy command / import command (ADR-074)
         self.sep_command = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
         self.btn_copy_command = wx.Button(self.pnl_preset, label=T("Copy Command"))
+        self.btn_copy_command.SetToolTip(
+            T("Copies the equivalent \"python -m iw3 ...\" command line for every setting currently "
+              "shown in this window to the clipboard -- useful for scripting, sharing your exact "
+              "settings with someone else as plain text, or pasting back in later via Import Command."))
         self.btn_import_command = wx.Button(self.pnl_preset, label=T("Import Command"))
         self.btn_import_command.SetToolTip(
             T("Paste a \"python -m iw3 ...\" command line (like the ones Copy Command produces) and "
@@ -4871,6 +4896,12 @@ class MainFrame(wx.Frame):
             if lang in LOCALE_DICT.get("_LOCALE", []):
                 lang_selection = i
         self.cbo_language.SetSelection(lang_selection)
+        self.cbo_language.SetToolTip(
+            T("Changes the language of this app's own interface (labels, tooltips, messages) -- has "
+              "no effect on your video/image content itself.\n"
+              "Note: unlike most settings here, this needs a restart to take effect (you'll see a "
+              "confirmation message after changing it), and it's deliberately excluded from Preset "
+              "save/load so loading someone else's preset can never silently change your language."))
 
         # GUI layout preference (ADR-037, live-switching ADR-045): Tabbed vs. Single
         # Page. Persisted like Language, in its own file (so the INITIAL layout is

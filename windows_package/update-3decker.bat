@@ -29,7 +29,7 @@ if %ERRORLEVEL% neq 0 goto :on_error
 git -C "%NUNIF_DIR%" merge --ff-only FETCH_HEAD
 if %ERRORLEVEL% neq 0 (
   git -C "%NUNIF_DIR%" reset --hard FETCH_HEAD
-  if %ERRORLEVEL% neq 0 goto :on_error
+  if !ERRORLEVEL! neq 0 goto :on_error
 )
 
 @rem update update-installer.bat (same as update.bat's own convention) -- must land

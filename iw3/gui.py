@@ -232,6 +232,66 @@ DEPTH_BLEND_PRESET_VALUES = {
     "High Contrast": (1.0, 25, 6, 40, 40, 4.0, 4),
 }
 
+# ADR-140: real values transcribed from a screenshot of VisionDepth3D's own
+# Resolution dropdown. VD3D's list is exact WIDTHxHEIGHT presets (34 entries,
+# several square, several 16:9-ish, several named quality tiers); iw3's own
+# Depth Resolution field is a single short-side number with aspect ratio
+# preserved automatically (see batch_preprocess() in depth_anything_model.py),
+# so a literal WxH pair doesn't translate 1:1. Deduplicated down to VD3D's
+# distinct SHORT-SIDE values instead (e.g. VD3D's "512x288", "896x512", and
+# "1920x512 (LBM Depth Cinematic Wide)" all become the same 512 short side in
+# iw3's model) -- combined every VD3D label that collapsed onto the same
+# number rather than silently dropping any of them. "Original" (VD3D's
+# no-resize option) has no single-number equivalent here and was left out.
+RESOLUTION_PRESET_PLACEHOLDER = "-- Select --"
+RESOLUTION_PRESET_CHOICES = [
+    RESOLUTION_PRESET_PLACEHOLDER,
+    "256 (Fastest)",
+    "288",
+    "352",
+    "384 (DPT Large / MiDaS v3.0 Default, ZoeDepth Native, Balanced)",
+    "432",
+    "504 (DA3 Native)",
+    "512 (BEiT / MiDaS v3.1 Native, LBM Depth Cinematic Wide)",
+    "518 (Depth Anything / Video Depth Anything Default, Widescreen)",
+    "540 (Good Quality)",
+    "560 (Distill-Any-Depth Train Size)",
+    "576 (Max Quality)",
+    "640",
+    "700 (Distill-Any-Depth Repo Example)",
+    "720 (720p HD)",
+    "768 (Marigold Depth v1.1 Diffusion Default, LBM Depth Widescreen)",
+    "864",
+    "896",
+    "1008",
+    "1080 (1080p HD)",
+    "1088",
+    "1536 (Depth Pro Native)",
+]
+RESOLUTION_PRESET_VALUES = {
+    "256 (Fastest)": 256,
+    "288": 288,
+    "352": 352,
+    "384 (DPT Large / MiDaS v3.0 Default, ZoeDepth Native, Balanced)": 384,
+    "432": 432,
+    "504 (DA3 Native)": 504,
+    "512 (BEiT / MiDaS v3.1 Native, LBM Depth Cinematic Wide)": 512,
+    "518 (Depth Anything / Video Depth Anything Default, Widescreen)": 518,
+    "540 (Good Quality)": 540,
+    "560 (Distill-Any-Depth Train Size)": 560,
+    "576 (Max Quality)": 576,
+    "640": 640,
+    "700 (Distill-Any-Depth Repo Example)": 700,
+    "720 (720p HD)": 720,
+    "768 (Marigold Depth v1.1 Diffusion Default, LBM Depth Widescreen)": 768,
+    "864": 864,
+    "896": 896,
+    "1008": 1008,
+    "1080 (1080p HD)": 1080,
+    "1088": 1088,
+    "1536 (Depth Pro Native)": 1536,
+}
+
 
 class StageChangeEvent(wx.PyCommandEvent):
     def __init__(self, etype, eid, name=None):
@@ -1334,6 +1394,26 @@ class MainFrame(wx.Frame):
             T("Safety cap only: if your typed Depth Resolution is HIGHER than the source video's own "
               "resolution, this brings it back down to match the source instead of wasting time asking "
               "for detail that doesn't exist. It never raises a lower value up. Recommended: on."))
+
+        self.lbl_resolution_preset = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Resolution Preset"))
+        self.cbo_resolution_preset = wx.ComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
+                                                 choices=RESOLUTION_PRESET_CHOICES,
+                                                 name="cbo_resolution_preset")
+        self.cbo_resolution_preset.SetEditable(False)
+        self.cbo_resolution_preset.SetSelection(0)
+        self.cbo_resolution_preset.SetToolTip(
+            T("What it's for: VisionDepth3D's own Resolution dropdown lists exact WIDTHxHEIGHT presets "
+              "(some tied to a specific depth model's native/default training size, some named quality "
+              "tiers). iw3's Depth Resolution field only needs ONE number — it already preserves aspect "
+              "ratio and figures out the other side itself — so this is that same set of VD3D presets, "
+              "collapsed down to their short-side number, with every VD3D label that landed on the same "
+              "number combined rather than dropped. Picking one just fills in the Depth Resolution field "
+              "above with a plain number — it's a one-time quick-fill, not a live link, so hand-editing "
+              "Depth Resolution afterward is always safe.\n"
+              "Recommended: match whichever entry names your chosen Depth Model's \"Default\"/\"Native\" "
+              "size (e.g. 518 for Depth Anything/Video Depth Anything, 504 for DA3) unless you have a "
+              "specific reason to go higher/lower — see the Depth Resolution field's own tooltip for the "
+              "higher-resolution eye-fatigue caveat."))
 
 
         self.cpn_stereo_stability_flicker = wx.CollapsiblePane(
@@ -2535,6 +2615,8 @@ class MainFrame(wx.Frame):
         pane_layout_inpaint.Add(self.lbl_resolution, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_inpaint.Add(self.cbo_resolution, (k, 1), flag=wx.EXPAND)
         pane_layout_inpaint.Add(self.chk_limit_resolution, (k, 2), flag=wx.EXPAND)
+        pane_layout_inpaint.Add(self.lbl_resolution_preset, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_inpaint.Add(self.cbo_resolution_preset, (k, 1), (1, 2), flag=wx.EXPAND)
         self.cpn_stereo_inpainting_depth.GetPane().SetSizer(pane_layout_inpaint)
 
         layout.Add((0, 8), (i := i + 1, 0))
@@ -5010,6 +5092,7 @@ class MainFrame(wx.Frame):
         self.chk_scene_batch_auto_ema.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_scene_batch_auto_ema)
         self.cbo_genre_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_genre_preset)
         self.cbo_depth_blend_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_depth_blend_preset)
+        self.cbo_resolution_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_resolution_preset)
         self.chk_depth_blend.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_depth_blend)
         self.chk_temporal_stabilize.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_temporal_stabilize)
         self.cbo_depth_blend_region.Bind(wx.EVT_TEXT, self.on_changed_chk_depth_blend)
@@ -6261,6 +6344,16 @@ class MainFrame(wx.Frame):
             self.cbo_depth_blend_clahe_tile.SetValue(str(clahe_tile))
             self.update_depth_blend_bilateral()
             self.update_depth_blend_clahe()
+
+    def on_changed_cbo_resolution_preset(self, event):
+        # ADR-140: same one-time quick-fill pattern as on_changed_cbo_depth_blend_preset
+        # -- writes the plain number into cbo_resolution and keeps no live link back to
+        # this dropdown, so a later hand-edit of Depth Resolution is always safe. The
+        # placeholder entry intentionally maps to nothing.
+        preset = self.cbo_resolution_preset.GetValue()
+        value = RESOLUTION_PRESET_VALUES.get(preset)
+        if value is not None:
+            self.cbo_resolution.SetValue(str(value))
 
     def update_depth_blend(self):
         if self.chk_depth_blend.IsChecked():
@@ -9822,6 +9915,45 @@ def _self_test_label_tooltips_propagated():
     print("_self_test_label_tooltips_propagated: PASS")
 
 
+def _self_test_resolution_preset_quick_fill():
+    """ADR-140: Resolution Preset dropdown (VisionDepth3D's own Resolution list,
+    deduplicated to short-side values since iw3's Depth Resolution field is a
+    single aspect-preserving number, not a WxH pair) must fill cbo_resolution
+    with a plain, validate_number-acceptable integer string for every real
+    entry -- not the descriptive label text -- and the placeholder must map to
+    nothing."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.cbo_resolution_preset.GetValue() == "-- Select --", \
+            "placeholder must be selected by default, no preset applied"
+
+        for preset_name, expected_value in RESOLUTION_PRESET_VALUES.items():
+            frame.cbo_resolution.SetValue("")
+            frame.cbo_resolution_preset.SetStringSelection(preset_name)
+            frame.on_changed_cbo_resolution_preset(None)
+            assert frame.cbo_resolution.GetValue() == str(expected_value), \
+                f"{preset_name}: expected {expected_value}, got {frame.cbo_resolution.GetValue()!r}"
+            assert validate_number(frame.cbo_resolution.GetValue(), 224, 8190, is_int=True, allow_empty=False), \
+                f"{preset_name}: filled value {frame.cbo_resolution.GetValue()!r} must pass Depth Resolution's own validation"
+
+        frame.cbo_resolution.SetValue("")
+        frame.cbo_resolution_preset.SetStringSelection(RESOLUTION_PRESET_PLACEHOLDER)
+        frame.on_changed_cbo_resolution_preset(None)
+        assert frame.cbo_resolution.GetValue() == "", "placeholder must not fill in any value"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_resolution_preset_quick_fill: PASS")
+
+
 def _self_test_compile_probe_crash_handled():
     """Regression test for a real crash: clicking the torch.compile checkbox with a
     specific GPU/CPU selected (not "All CUDA Device") used to throw a raw, uncaught
@@ -13101,6 +13233,7 @@ def _run_self_tests():
         _self_test_import_command_round_trip,
         _self_test_device_dropdown_no_torch_cuda_touch,
         _self_test_label_tooltips_propagated,
+        _self_test_resolution_preset_quick_fill,
     ]
     failures = []
     for test in tests:

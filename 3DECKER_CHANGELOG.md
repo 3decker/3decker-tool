@@ -13,7 +13,35 @@ it matters.
 
 ---
 
-## Latest Update — September 10, 2026
+## Latest Update — September 14, 2026
+
+**4 new Depth-Anything-3 depth models** (Small, Base, Large-1.1, and Metric-Large)
+join the depth model list, matching what VisionDepth3D already offered — plus 8
+more existing depth models (Video Depth Anything Base/Large, its Streaming
+counterparts, and Distill Any Depth Base/Large) that now download themselves
+automatically the first time you pick them. Previously several of these couldn't
+even be selected on a fresh install because there was no way for them to download
+in the first place.
+
+**A real GPU memory problem was tracked down and fixed.** If you used Flicker
+Reduction with a high Buffer setting, a large pool of GPU memory could build up
+during a conversion and never come back down afterward — only closing the whole
+app released it. This is now fixed and releases itself automatically the moment
+a job finishes, confirmed on a real clip: usage went from over 20GB stuck-forever
+down to under 100MB right after the fix.
+
+**Every setting's title now shows a tooltip on hover, not just its input box.**
+100% of this project's settings are documented now, both label and control.
+
+**Several confusing messages were fixed**, including updates that reported a
+false "Error" even after actually succeeding, and a leftover "Press any key to
+continue" message after updates that did nothing no matter what you pressed.
+torch.compile also now explains itself instead of silently refusing to turn on
+when your Device dropdown is set to "All CUDA Device."
+
+---
+
+## Update — September 10, 2026
 
 **A friendlier main screen.** The Stereo Generation tab (the one you use on every
 conversion) now has real sliders you can drag for the settings you adjust most — 3D
@@ -92,6 +120,29 @@ each object's own depth history along with it as it moves. This has extra dials 
 a hard cap on how much depth can jump frame to frame, extra smoothing in flat
 areas where flicker is most visible, and reduced smoothing right at real depth
 edges so fast motion doesn't lag or smear.
+
+---
+
+## Depth Models
+
+**4 new Depth-Anything-3 options.** Small, Base, Large-1.1, and Metric-Large join
+this project's existing depth model list, matching what VisionDepth3D already
+offered. A crash that happened when picking Large-1.1 on a real conversion was
+found and fixed shortly after adding it — it's now working correctly, alongside
+the also-new Metric-Large.
+
+**8 more depth models now download automatically when you pick them**, the same
+way the Depth-Anything-3 models above already did — the Base and Large sizes of
+Video Depth Anything (regular and Streaming), plus Distill Any Depth Base/Large.
+Previously these couldn't even be selected on a fresh install, since the file
+they needed had no way to download itself; now picking one just works, and the
+file downloads the first time you use it. (Two similarly-named, larger models
+stay manual-download-only, since their license specifically requires you to
+download them yourself rather than this app doing it for you.)
+
+**A new "Resolution Preset" quick-fill dropdown** sits next to Depth Resolution,
+letting you pick from the same 21 resolution values VisionDepth3D offers instead
+of needing to know the right number to type in yourself.
 
 ---
 
@@ -254,11 +305,38 @@ movie up to 48fps.
   metadata into an already-converted file, so 3D-aware players and TVs (VLC,
   Kodi, many smart TVs) can automatically detect and display it correctly
   instead of you having to select 3D mode by hand.
+- **Every setting's title now shows a tooltip on hover, not just its input
+  box.** Previously you had to hover exactly over the dropdown, checkbox, or
+  slider itself to see an explanation; now hovering the label text next to it
+  works too. All 87 setting labels in this app now have a tooltip.
 
 ---
 
 ## Bug Fixes
 
+- **Fixed GPU memory not releasing after a conversion finishes.** Two
+  separate memory problems were tracked down and fixed: dedicated GPU memory
+  ("VRAM") that stayed pinned at the same usage until you closed the whole
+  app, and a much larger, separate pool of "shared" GPU memory that grew
+  directly with your Flicker Reduction Buffer setting and never came back
+  down — confirmed on a real 30-second clip, this dropped from over 20GB
+  stuck-forever down to under 100MB right after the fix. Both now release
+  automatically when a job finishes, with nothing you need to turn on.
+- **Fixed torch.compile silently failing to check on** when the Device
+  dropdown was set to "All CUDA Device" — it now explains why instead of
+  just not responding.
+- **Fixed a false "Error" report during updates.** "Install Update Now"
+  could report failure and stop partway through even when the update had
+  actually succeeded, so packages and models would never get refreshed as a
+  result. It now correctly recognizes success in that situation.
+- **Fixed a confusing "Press any key to continue" message** left over at the
+  end of a successful update that did nothing no matter what you pressed —
+  the update had already finished; only "Close" ever worked. That message is
+  gone now.
+- **Fixed the 3 optional Aether inpainting models never appearing** for any
+  install that was originally set up before they were added — running an
+  update now registers them automatically instead of requiring a fresh
+  install.
 - **Fixed a crash when using torch.compile** (a performance-optimization
   option) on some systems — it now fails gracefully with a clear on-screen
   explanation and the conversion continues (just without that speed boost)
@@ -287,3 +365,9 @@ Not everything that got built stayed. In the interest of being transparent:
 - A couple of small visual experiments (an animated "still working" progress
   bar, an accent-colored progress fill) were tried and reverted after testing
   showed they didn't render correctly on this app's actual display setup.
+- A Single Page layout experiment (columns automatically rearranging as you
+  resize the window narrower, instead of staying a fixed 4-column grid) was
+  built, tested at several window sizes, and looked correct in that testing —
+  but real day-to-day use showed it could end up hiding part of the settings.
+  Reverted back to the reliable fixed 4-column layout rather than leave a
+  half-fixed version in place.

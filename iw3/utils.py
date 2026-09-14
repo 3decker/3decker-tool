@@ -5826,6 +5826,15 @@ def iw3_main(args):
     if not is_yaml(args.input):
         if not depth_model.loaded():
             depth_model.load(gpu=args.gpu, resolution=args.resolution, limit_resolution=args.limit_resolution)
+        else:
+            # ADR-141: a REUSED model (GUI keeps the last-loaded depth_model around
+            # across jobs with the same type/device/resolution to skip a slow
+            # reload -- see gui.py's on_exit_worker/on_click_btn_start) may have been
+            # moved to CPU by the "free GPU memory when idle" feature after the
+            # previous job finished. move_to() is a cheap no-op when already on the
+            # right device (torch.Tensor.to() checks first), so this is always safe
+            # to call, not just when actually needed.
+            depth_model.move_to(depth_model.device)
 
         is_metric = depth_model.is_metric()
         args.mapper = resolve_mapper_name(mapper=args.mapper, foreground_scale=args.foreground_scale,

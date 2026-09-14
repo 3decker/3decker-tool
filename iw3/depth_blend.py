@@ -817,6 +817,10 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
 
         if not depth_model.loaded():
             depth_model.load(gpu=args.gpu, resolution=args.resolution, limit_resolution=args.limit_resolution)
+        else:
+            # ADR-141: same reused-model device restore as iw3_main() in utils.py --
+            # a no-op if already on the right device.
+            depth_model.move_to(depth_model.device)
         args.state["depth_model"] = depth_model
         export_main(args_a)
         if cancelled():

@@ -22,7 +22,7 @@ import torch
 from .utils import (
     create_parser, set_state_args, iw3_main,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
-    _get_ffmpeg_bin, _find_mkvmerge,
+    _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram,
     STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
     STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
 )
@@ -3215,26 +3215,33 @@ class MainFrame(wx.Frame):
               "extra setup (see this project's torch_compile docs) to actually take effect."))
         self.chk_compile.SetValue(False)
 
-        self.chk_pause_frees_vram = wx.CheckBox(self.grp_processor, label=T("Free GPU memory while paused"),
+        self.chk_pause_frees_vram = wx.CheckBox(self.grp_processor, label=T("Free GPU memory while paused/idle"),
                                                 name="chk_pause_frees_vram")
         self.chk_pause_frees_vram.SetToolTip(
-            T("What: when you click Suspend, also move every loaded model (depth model, stereo/side "
-              "model, and the SOD_v1 auto-convergence model, if used) off the GPU and actually release "
-              "that VRAM back to Windows, instead of just pausing while everything stays loaded. Resume "
-              "moves them all back before continuing.\n"
-              "Why it helps: normally, pausing here does NOT free any VRAM -- every model just sits "
-              "loaded and idle the whole time you're paused, so nothing else can use that memory. This "
-              "lets you actually hand the GPU to something else (another program, a second conversion) "
-              "while paused.\n"
-              "Pros: real VRAM freed while paused; Resume still produces a correct, uninterrupted output.\n"
-              "Cons: Resume is no longer instant -- reloading the models back onto the GPU takes a few "
-              "seconds (longer if torch.compile is on, since it may recompile). No effect with multi-GPU "
-              "(\"All CUDA Device\") -- those models are already spread across every GPU and are left "
-              "as-is.\n"
-              "Values: off (default) = today's behavior, models stay resident, Resume is instant. On = "
-              "frees VRAM while paused, Resume takes a few seconds.\n"
-              "Recommended: off, unless you specifically need the GPU free for something else during a "
-              "long pause."))
+            T("What: when you click Suspend, OR when a conversion job finishes/is cancelled, move every "
+              "loaded model (depth model, stereo/side model, and the SOD_v1 auto-convergence model, if "
+              "used) off the GPU and actually release that VRAM back to Windows, instead of leaving "
+              "everything loaded and idle. The models stay cached in this window (so starting another "
+              "job with the same Depth Model/Device/Resolution still skips a fresh reload) -- they're "
+              "just moved off the GPU rather than discarded. Resume/the next job moves them back before "
+              "continuing.\n"
+              "Why it helps: normally, neither pausing NOR finishing a job frees any VRAM here -- every "
+              "model just sits loaded on the GPU until you close the whole app. This ADR-141 (2026-09-14) "
+              "finding was reported directly: a real user noticed VRAM usage stayed pinned at the same "
+              "level after a job finished, with no way to release it short of closing iw3 entirely. "
+              "This setting lets you actually hand the GPU back to Windows/another program between jobs "
+              "or while paused, without closing anything.\n"
+              "Pros: real VRAM freed while paused or idle between jobs; the next job/Resume still "
+              "produces a correct, uninterrupted output.\n"
+              "Cons: the next job's/Resume's start is no longer instant -- reloading the models back onto "
+              "the GPU takes a few seconds (longer if torch.compile is on, since it may recompile). No "
+              "effect with multi-GPU (\"All CUDA Device\") -- those models are already spread across "
+              "every GPU and are left as-is.\n"
+              "Values: off (default) = today's behavior, models stay resident, next job/Resume is "
+              "instant. On = frees VRAM while paused or between jobs, next job/Resume takes a few "
+              "seconds.\n"
+              "Recommended: off, unless you specifically need the GPU free for something else between "
+              "conversions or during a long pause."))
         self.chk_pause_frees_vram.SetValue(False)
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
@@ -7101,6 +7108,18 @@ class MainFrame(wx.Frame):
                 self.SetStatusText(f"{T('Finished')} ({total_elapsed})")
             else:
                 self.SetStatusText(T("Cancelled"))
+
+            if self.chk_pause_frees_vram.GetValue():
+                # ADR-141: real user report -- VRAM stayed pinned at the same usage
+                # after a job finished, with no way to release it short of closing
+                # the whole app. Reuses the exact same release step the "Free GPU
+                # memory while paused" feature (ADR-038) already proved for
+                # Suspend -- moves the cached depth/side/convergence models to CPU
+                # and empties the CUDA cache, while still keeping them cached on
+                # self.depth_model for a fast reload if the next job reuses the same
+                # Depth Model/Device/Resolution (see the matching move_to() restore
+                # added to iw3_main()/run_depth_blend() in utils.py/depth_blend.py).
+                _release_pause_vram(args)
         except: # noqa
             self.SetStatusText(T("Error"))
             e_type, e, tb = sys.exc_info()
@@ -9913,6 +9932,68 @@ def _self_test_label_tooltips_propagated():
             app.Destroy()
 
     print("_self_test_label_tooltips_propagated: PASS")
+
+
+def _self_test_free_vram_on_job_finish():
+    """ADR-141: real user report -- VRAM stayed pinned at whatever a job last used,
+    with no way to release it short of closing the whole app. on_exit_worker() now
+    calls _release_pause_vram(args) when "Free GPU memory while paused/idle" is
+    checked, reusing ADR-038's own release step. Confirms the wiring with a mocked
+    depth model (no real GPU/model load needed) -- move_to("cpu") is called when
+    the checkbox is on, and NOT called when it's off (today's behavior preserved)."""
+    import types
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        def make_fake_args():
+            calls = []
+
+            class FakeModel:
+                def loaded(self):
+                    return True
+
+                def move_to(self, device):
+                    calls.append(device)
+
+            fake_args = types.SimpleNamespace(
+                state={"depth_model": FakeModel(), "side_model": None, "convergence_model": None},
+                depth_model="Any_V3_Mono_01", gpu=[0], resolution=None, limit_resolution=False,
+            )
+            return fake_args, calls
+
+        class FakeResult:
+            def __init__(self, value):
+                self._value = value
+
+            def get(self):
+                return self._value
+
+        # (a) checkbox OFF -- today's behavior, no release call.
+        frame.chk_pause_frees_vram.SetValue(False)
+        frame.stop_event = threading.Event()
+        fake_args, calls = make_fake_args()
+        frame.job_start_time = time()
+        frame.on_exit_worker(FakeResult(fake_args))
+        assert calls == [], f"move_to() must not be called when the checkbox is off, got {calls}"
+
+        # (b) checkbox ON -- must release (move_to called with 'cpu').
+        frame.chk_pause_frees_vram.SetValue(True)
+        frame.stop_event = threading.Event()
+        fake_args, calls = make_fake_args()
+        frame.job_start_time = time()
+        frame.on_exit_worker(FakeResult(fake_args))
+        assert calls == ["cpu"], f"move_to('cpu') must be called when the checkbox is on, got {calls}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_free_vram_on_job_finish: PASS")
 
 
 def _self_test_resolution_preset_quick_fill():
@@ -13234,6 +13315,7 @@ def _run_self_tests():
         _self_test_device_dropdown_no_torch_cuda_touch,
         _self_test_label_tooltips_propagated,
         _self_test_resolution_preset_quick_fill,
+        _self_test_free_vram_on_job_finish,
     ]
     failures = []
     for test in tests:

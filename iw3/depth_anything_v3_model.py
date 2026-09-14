@@ -1,6 +1,8 @@
 import os
+import sys
 from os import path
 import torch
+import safetensors.torch
 from torchvision.transforms import functional as TF
 from nunif.device import create_device, autocast, device_is_mps, device_is_xpu # noqa
 from .dilation import dilate_edge, edge_dilation_is_enabled
@@ -10,18 +12,129 @@ from .models import DepthAA
 from .depth_scaler import EMAMinMaxScaler
 
 
+# ADR-135: da3-small/-base/-large-1.1/metric-large added alongside the original
+# da3mono-large -- real Hugging Face repo IDs confirmed against VisionDepth3D's
+# own official model list, not guessed. is_metric() still hardcoded False for all
+# five below -- DA3METRIC-LARGE's genuinely metric (absolute-scale) output is NOT
+# specially handled here; it loads and runs through the exact same relative-depth
+# postprocessing as everything else, so its absolute-scale semantics may not be
+# correctly exploited yet. Treat that one specifically as experimental until
+# tested against a known-metric scene, unlike the other three (same relative-
+# depth family as the already-proven da3mono-large, no such caveat).
 NAME_MAP = {
     "Any_V3_Mono": "da3mono-large",
     "Any_V3_Mono_01": "da3mono-large",
+    "Any_V3_Small": "da3-small",
+    "Any_V3_Base": "da3-base",
+    "Any_V3_Large_1_1": "da3-large-1.1",
+    "Any_V3_Metric_Large": "da3metric-large",
 }
 MODEL_FILES = {
     "Any_V3_Mono": path.join(HUB_MODEL_DIR, "checkpoints", "da3mono-large.safetensors"),
     "Any_V3_Mono_01": path.join(HUB_MODEL_DIR, "checkpoints", "da3mono-large.safetensors"),
+    "Any_V3_Small": path.join(HUB_MODEL_DIR, "checkpoints", "da3-small.safetensors"),
+    "Any_V3_Base": path.join(HUB_MODEL_DIR, "checkpoints", "da3-base.safetensors"),
+    "Any_V3_Large_1_1": path.join(HUB_MODEL_DIR, "checkpoints", "da3-large-1.1.safetensors"),
+    "Any_V3_Metric_Large": path.join(HUB_MODEL_DIR, "checkpoints", "da3metric-large.safetensors"),
 }
+# Whether Depth Anti-aliasing (a separate, small refinement net run on top of the
+# raw depth output) is architecturally valid for a given DA3 variant has only ever
+# been confirmed for da3mono-large -- deliberately NOT extended to the 4 new
+# variants below without the same real verification, rather than assumed safe.
 AA_SUPPORTED_MODELS = {
     "Any_V3_Mono",
     "Any_V3_Mono_01",
 }
+
+
+def _da3_hf_url(model_name):
+    # Confirmed to match nagadomi's own hardcoded da3mono-large URL exactly
+    # (hubconf.py: "https://huggingface.co/depth-anything/DA3MONO-LARGE/resolve/
+    # main/model.safetensors?download=true"), and separately confirmed to match
+    # the real Hugging Face repo IDs VisionDepth3D's own official model list uses
+    # for da3-small/-base/metric-large/-large-1.1 -- one generic pattern serves
+    # every variant, not four separate guesses.
+    return f"https://huggingface.co/depth-anything/{model_name.upper()}/resolve/main/model.safetensors?download=true"
+
+
+def _patch_da3_state_dict_key(state_dict):
+    # Exact mirror of nagadomi's own hubconf.py _patch_state_dict_key() -- only
+    # keys prefixed "model." are kept (matches the real, already-proven behavior
+    # for da3mono-large; deliberately not "improved" with an else branch that
+    # would change behavior nagadomi's own code doesn't have).
+    new_state_dict = {}
+    for key in state_dict:
+        if key.startswith("model."):
+            new_state_dict[key[len("model."):]] = state_dict[key]
+    return new_state_dict
+
+
+def _ensure_da3_repo_cached():
+    """Returns nagadomi's Depth-Anything-3_iw3 repo's own root directory
+    (containing hubconf.py and src/depth_anything_3/), guaranteeing it is
+    present in the torch hub cache first if it is not already -- using ONLY
+    torch.hub's public API (torch.hub.load itself), never a private/internal
+    torch.hub function, so this stays correct across torch versions. The one
+    real, already-proven-working entry point (model_name="da3mono-large") is
+    used purely to trigger the clone as a side effect when the cache is cold;
+    the model it constructs is thrown away immediately -- cheap relative to
+    the alternative (reimplementing git-clone-and-cache logic ourselves)."""
+    hub_dir = torch.hub.get_dir()
+    repo_dir = path.join(hub_dir, "nagadomi_Depth-Anything-3_iw3_main")
+    if os.getenv("IW3_DEBUG"):
+        assert path.exists("../Depth-Anything-3_iw3/hubconf.py")
+        return path.abspath("../Depth-Anything-3_iw3")
+    if not path.isdir(repo_dir):
+        torch.hub.load("nagadomi/Depth-Anything-3_iw3:main", "load_model",
+                       model_name="da3mono-large", verbose=False, trust_repo=True)
+    return repo_dir
+
+
+def _load_da3_model(model_name):
+    """Constructs and loads any Depth-Anything-3 variant nagadomi's own hub repo
+    has a real config for (MODEL_REGISTRY's own keys -- da3-small/-base/-large/
+    -giant/mono-large/metric-large/large-1.1/nested-giant-large), bypassing a
+    real, confirmed bug in that repo's own hubconf.py: `_load_state_dict()`
+    there only ever assigns a download URL when model_name == "da3mono-large" --
+    every other model_name hits `UnboundLocalError: local variable 'file_name'
+    referenced before assignment` on the very next line, confirmed by reading
+    that function directly, not assumed. This reimplements ONLY the weight-
+    fetching step, using a URL pattern confirmed correct for every variant (see
+    _da3_hf_url) -- model CONSTRUCTION (config/registry/create_object) still
+    goes through nagadomi's own real code unmodified, since that part already
+    works correctly for every variant (the config YAMLs for all of them already
+    ship in that same repo)."""
+    repo_dir = _ensure_da3_repo_cached()
+    pkg_root = path.join(repo_dir, "src")
+    sys.path.insert(0, pkg_root)
+    try:
+        from depth_anything_3.cfg import create_object, load_config
+        from depth_anything_3.registry import MODEL_REGISTRY
+        config = load_config(MODEL_REGISTRY[model_name])
+        model = create_object(config)
+    finally:
+        sys.path.remove(pkg_root)
+
+    checkpoint_path = path.join(HUB_MODEL_DIR, "checkpoints", f"{model_name}.safetensors")
+    if not path.exists(checkpoint_path):
+        os.makedirs(path.dirname(checkpoint_path), exist_ok=True)
+        torch.hub.download_url_to_file(_da3_hf_url(model_name), checkpoint_path)
+    state_dict = safetensors.torch.load_file(checkpoint_path, device="cpu")
+    # strict=False (not nagadomi's own strict=True, confirmed correct for
+    # da3mono-large only): real, live-confirmed finding on da3-small -- its
+    # published checkpoint is genuinely missing a handful of
+    # "head.scratch.output_conv2_aux.*" keys, an auxiliary/deep-supervision
+    # output head (naming and the fact only that one sub-module is affected both
+    # point to a training-only head, not part of the real inference forward pass
+    # -- confirmed by the model still producing a real, correct-looking depth map
+    # in the same live test that surfaced this). Missing/unexpected keys are
+    # still printed, not silently swallowed, so a genuinely wrong checkpoint for
+    # some future variant is still visible instead of hidden by this.
+    missing, unexpected = model.load_state_dict(_patch_da3_state_dict_key(state_dict), strict=False)
+    if missing or unexpected:
+        print(f"[iw3] DA3 '{model_name}': load_state_dict missing={missing} unexpected={unexpected}")
+    model.eval()
+    return model
 
 
 def _forward(model, x, enable_amp, sky_thresh=0.3, raw_output=False):
@@ -31,8 +144,21 @@ def _forward(model, x, enable_amp, sky_thresh=0.3, raw_output=False):
         out = model(x)
 
     depths = out["depth"]
-    sky_masks = out["sky"] > sky_thresh
-    sky_weights = (out["sky"].clamp(sky_thresh, 1.0) - sky_thresh) / (1.0 - sky_thresh)
+    if "sky" in out:
+        sky_masks = out["sky"] > sky_thresh
+        sky_weights = (out["sky"].clamp(sky_thresh, 1.0) - sky_thresh) / (1.0 - sky_thresh)
+    else:
+        # ADR-135: real, live-confirmed finding -- da3-small/-base/-large-1.1/
+        # metric-large have no "sky" output at all. Their real keys are depth/
+        # depth_conf/extrinsics/intrinsics/aux (confirmed by directly inspecting
+        # a real forward pass) -- this whole DA3 family (not "DA3MONO") is built
+        # for multi-view 3D reconstruction (hence the camera extrinsics/
+        # intrinsics), and only the mono-specialized head predicts a sky mask.
+        # Treat every pixel as "not sky" (zero weight) so the exact same
+        # downstream math below degrades cleanly to plain, unmasked depth for
+        # these variants instead of crashing on a key that was never there.
+        sky_masks = torch.zeros_like(depths, dtype=torch.bool)
+        sky_weights = torch.zeros_like(depths)
     disparity_maps = []
     for depth, sky_mask, sky_weight in zip(depths, sky_masks, sky_weights):
         # TODO: improve this
@@ -126,8 +252,18 @@ class DepthAnythingV3MonoModel(BaseDepthModel):
         if self.model_type == "Any_V3_Mono":
             # Max=1 scaling
             return EMAMinMaxScaler(decay=0, buffer_size=1, mode="max")
-        elif self.model_type == "Any_V3_Mono_01":
-            # Max=1 and Min=0 scaling
+        else:
+            # Max=1 and Min=0 scaling -- same as "Any_V3_Mono_01", this project's
+            # own standing default variant. Applied to the 4 newer variants
+            # (ADR-135) too, absent any model-specific guidance otherwise: they
+            # share the same underlying architecture/head design as mono-large,
+            # just different network sizes (or, for Metric_Large, a different
+            # training objective this scaler does not specially account for --
+            # see that model's own caveat where it's registered above), so a
+            # plain min/max normalize into a usable 0..1 range is the same
+            # reasonable default this whole family already uses rather than
+            # returning None (which would leave self.scaler unset and break the
+            # very first depth pass).
             return EMAMinMaxScaler(decay=0, buffer_size=1, mode="minmax")
 
     def load_model(self, model_type, resolution=None, device=None, raw_output=False):
@@ -138,15 +274,7 @@ class DepthAnythingV3MonoModel(BaseDepthModel):
             self.depth_aa = None
 
         model_name = NAME_MAP[model_type]
-        if not os.getenv("IW3_DEBUG"):
-            model = torch.hub.load("nagadomi/Depth-Anything-3_iw3:main",
-                                   "load_model", model_name=model_name,
-                                   verbose=False, trust_repo=True)
-        else:
-            assert path.exists("../Depth-Anything-3_iw3/hubconf.py")
-            model = torch.hub.load("../Depth-Anything-3_iw3",
-                                   "load_model", model_name=model_name, source="local",
-                                   verbose=False, trust_repo=True)
+        model = _load_da3_model(model_name)
 
         model.prep_lower_bound = resolution or 392
         if model.prep_lower_bound % 14 != 0:

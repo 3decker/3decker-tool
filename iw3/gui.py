@@ -5607,6 +5607,12 @@ class MainFrame(wx.Frame):
             depth_models.append("Distill_Any_L")
 
         depth_models += ["Any_V3_Mono", "Any_V3_Mono_01"]
+        # ADR-135: 4 more Depth-Anything-3 variants -- same as Any_V3_Mono/
+        # Any_V3_Mono_01 above, unconditionally offered (not gated on
+        # has_checkpoint_file the way Any_V2_B/L or Distill_Any_B/L are) since
+        # every DA3 variant downloads its own weights on first real use, not
+        # from a locally-pre-placed file a user must already have.
+        depth_models += ["Any_V3_Small", "Any_V3_Base", "Any_V3_Large_1_1", "Any_V3_Metric_Large"]
 
         depth_models += ["VDA_S"]
         if VideoDepthAnythingModel.has_checkpoint_file("VDA_B"):

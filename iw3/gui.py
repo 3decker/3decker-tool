@@ -7088,6 +7088,30 @@ class MainFrame(wx.Frame):
             self.depth_model_height = args.resolution
             self.depth_model_limit_resolution = args.limit_resolution
 
+            # ADR-145: real, user-reported and user-diagnosed bug -- GPU "shared"
+            # memory kept growing with a higher EMA Decay/Buffer setting and never
+            # came back down after a job finished, only after closing the whole
+            # app. Root cause, confirmed by reading EMAMinMaxScaler directly
+            # (depth_scaler.py): its `frame_queue` holds up to `buffer_size` REAL
+            # depth tensor frames (not just small min/max numbers) while the EMA
+            # window fills -- for buffer_size=650, that's up to 650 full-resolution
+            # depth frames genuinely resident on the GPU. Every enable_ema()/
+            # disable_ema() call elsewhere in this codebase (utils.py) only ever
+            # runs at the START of a job/segment (reset-then-reconfigure) -- there
+            # was no matching call at the true END of a job, so a finished job's
+            # fully-populated frame_queue just sat there until the whole process
+            # exited. disable_ema() is unconditional here (not gated behind the
+            # "Free GPU memory" checkbox like _release_pause_vram below) because
+            # it's a straightforward bug fix, not a performance tradeoff -- the
+            # next job that reuses this cached depth_model already calls
+            # enable_ema() again with fresh args before processing starts (see
+            # iw3_main()/process_video_with_resume() etc. in utils.py), so
+            # clearing it now costs nothing. Runs before the unconditional
+            # gc_collect() at the end of this method so that call's
+            # torch.cuda.empty_cache() actually reclaims the now-unreferenced
+            # frames instead of them still being held live.
+            self.depth_model.disable_ema()
+
             if not self.stop_event.is_set():
                 self.prg_tqdm.SetValue(self.prg_tqdm.GetRange())
                 total_elapsed = self._format_duration(time() - self.job_start_time)
@@ -9947,6 +9971,12 @@ def _self_test_free_vram_on_job_finish():
 
                 def move_to(self, device):
                     calls.append(device)
+
+                def disable_ema(self):
+                    # ADR-145: on_exit_worker() now calls this unconditionally
+                    # (real depth models always have it, via BaseDepthModel) --
+                    # a no-op here so this mock keeps standing in correctly.
+                    pass
 
             fake_args = types.SimpleNamespace(
                 state={"depth_model": FakeModel(), "side_model": None, "convergence_model": None},

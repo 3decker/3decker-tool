@@ -290,18 +290,6 @@ RESOLUTION_PRESET_VALUES = {
 }
 
 
-# ADR-144: which of the 7 category panels (tab_*) stack into which of Single Page's
-# 4 reflow-able column panels (pnl_col_*) -- same pairing ADR-037/045 already used
-# for the old fixed 4-column grid, just now expressed as groups a wx.WrapSizer can
-# wrap as whole units. Order within each tuple is top-to-bottom stacking order.
-SINGLE_PAGE_COLUMN_GROUPS = (
-    ("pnl_col_stereo", ("tab_stereo",)),
-    ("pnl_col_video", ("tab_video_dec", "tab_video_enc")),
-    ("pnl_col_filter_proc", ("tab_video_filter", "tab_processor")),
-    ("pnl_col_blend_tools", ("tab_depth_blend", "tab_tools")),
-)
-
-
 class StageChangeEvent(wx.PyCommandEvent):
     def __init__(self, etype, eid, name=None):
         super(StageChangeEvent, self).__init__(etype, eid)
@@ -1067,32 +1055,17 @@ class MainFrame(wx.Frame):
         self.tab_wrap_video_enc = scrolledpanel.ScrolledPanel(self.nb_options)
         self.tab_wrap_processor = scrolledpanel.ScrolledPanel(self.nb_options)
         self.tab_wrap_tools = scrolledpanel.ScrolledPanel(self.nb_options)
-        # ADR-144: real user request -- Single Page's 4-column arrangement should
-        # reflow (fewer columns as the window narrows) instead of staying a fixed
-        # 4-wide grid that just clips/needs horizontal scrolling. Each of these 4
-        # panels is one reflow-able UNIT (an atomic block holding 1-2 whole category
-        # panels stacked vertically, matching the same column pairing ADR-037/045
-        # already used) -- individual FIELDS never reflow independently, only whole
-        # categories, so nothing inside a category panel changes. Always constructed
-        # (ADR-045's "both containers always exist" pattern), parented to
-        # self.pnl_single -- see SINGLE_PAGE_COLUMN_GROUPS for which category panels
-        # stack into which column, and _compose_options_layout_single_page()/
-        # switch_layout_mode() for how they're actually populated/reflowed.
-        self.pnl_col_stereo = wx.Panel(self.pnl_single)
-        self.pnl_col_video = wx.Panel(self.pnl_single)
-        self.pnl_col_filter_proc = wx.Panel(self.pnl_single)
-        self.pnl_col_blend_tools = wx.Panel(self.pnl_single)
         # The 7 category panels themselves stay plain wx.Panel, unchanged -- only WHICH
-        # widget parents them (a per-tab wrapper, or Single Page's column panel above)
-        # depends on the initial Layout preference, same as before ADR-048.
+        # widget parents them (a per-tab wrapper vs. pnl_single directly) depends on
+        # the initial Layout preference, same as before ADR-048.
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
-            self.tab_stereo = wx.Panel(self.pnl_col_stereo)
-            self.tab_depth_blend = wx.Panel(self.pnl_col_blend_tools)
-            self.tab_video_filter = wx.Panel(self.pnl_col_filter_proc)
-            self.tab_video_dec = wx.Panel(self.pnl_col_video)
-            self.tab_video_enc = wx.Panel(self.pnl_col_video)
-            self.tab_processor = wx.Panel(self.pnl_col_filter_proc)
-            self.tab_tools = wx.Panel(self.pnl_col_blend_tools)
+            self.tab_stereo = wx.Panel(self.pnl_single)
+            self.tab_depth_blend = wx.Panel(self.pnl_single)
+            self.tab_video_filter = wx.Panel(self.pnl_single)
+            self.tab_video_dec = wx.Panel(self.pnl_single)
+            self.tab_video_enc = wx.Panel(self.pnl_single)
+            self.tab_processor = wx.Panel(self.pnl_single)
+            self.tab_tools = wx.Panel(self.pnl_single)
         else:
             self.tab_stereo = wx.Panel(self.tab_wrap_stereo)
             self.tab_depth_blend = wx.Panel(self.tab_wrap_depth_blend)
@@ -5342,62 +5315,43 @@ class MainFrame(wx.Frame):
         self.pnl_single.Hide()
 
     def _compose_options_layout_single_page(self):
-        """ADR-037/ADR-045, reflow added by ADR-144 -- Single Page layout: the same 7
-        category panels (each already built with its own StaticBoxSizer(s), identical
-        to the tabbed path) grouped into 4 column panels (SINGLE_PAGE_COLUMN_GROUPS --
-        same column pairing ADR-037 originally used: Stereo Generation alone; Video
-        Decoding+Video Encoding; Video Filter+Processor; Dual-Pass Depth Blend+
-        Standalone Tools) and those 4 column panels placed in a wx.WrapSizer instead
-        of a fixed-position GridBagSizer, so narrowing the window drops from 4 columns
-        to 3, 2, or 1 automatically instead of clipping or needing horizontal
-        scrolling -- confirmed live with an isolated probe before wiring in here (see
-        docs/ai/AI_DECISIONS.md ADR-144) that WrapSizer.CalcMin() correctly reports a
-        SINGLE item's size (not the full unwrapped 4-column width), so the existing
-        "pin an explicit MinSize so pnl_single's ScrolledPanel doesn't collapse"
-        pattern below still works exactly as before, and additionally now allows the
-        page to genuinely narrow to one column instead of being stuck at 4-wide.
-        Called both at startup and live, on every switch back to Single Page
-        (ADR-045, via switch_layout_mode() -- which Reparent()s the 7 panels onto
-        their column panel before this runs, and always builds fresh sizers here
-        rather than reusing stale ones from a previous switch)."""
-        for col_attr, tab_attrs in SINGLE_PAGE_COLUMN_GROUPS:
-            col_panel = getattr(self, col_attr)
-            col_sizer = wx.BoxSizer(wx.VERTICAL)
-            for tab_attr in tab_attrs:
-                col_sizer.Add(getattr(self, tab_attr), 0, wx.EXPAND | wx.BOTTOM, 8)
-            col_panel.SetSizer(col_sizer)
-            # Same reasoning as pnl_single's own MinSize just below -- a plain
-            # wx.Panel's GetBestSize() would normally derive correctly from its
-            # sizer, but pinning this explicitly keeps every column panel's own
-            # reported minimum stable across repeated live layout switches (matches
-            # the already-proven pattern used for tab_wrap_* in Tabbed mode).
-            col_panel.SetMinSize(col_sizer.CalcMin())
-
-        content = wx.WrapSizer(wx.HORIZONTAL, wx.WRAPSIZER_DEFAULT_FLAGS)
-        for col_attr, _ in SINGLE_PAGE_COLUMN_GROUPS:
-            content.Add(getattr(self, col_attr), 0, wx.ALL, 4)
+        """ADR-037/ADR-045 -- Single Page layout: the same 7 category panels (each
+        already built with its own StaticBoxSizer(s), identical to the tabbed path)
+        placed directly onto one scrollable page instead of behind tab clicks,
+        arranged in the same 4-column grid template this file used PRE-ADR-036 (the
+        "earlier pass" that added spacing/dividers/indentation within each StaticBox
+        group) -- see docs/ai/AI_DECISIONS.md ADR-037 for why this specific arrangement
+        was reused rather than invented fresh: column 0 is Stereo Generation (the most
+        used, tallest group); column 1 stacks Video Decoding/Video Encoding; column 2
+        stacks Video Filter/Processor; column 3 stacks Dual-Pass Depth Blend/
+        Standalone Tools -- the exact same column pairing this file used before the
+        tabs conversion, just with Processor+Post-Processing and the three standalone
+        tools already pre-combined into single panels per ADR-036. Called both at
+        startup and live, on every switch back to Single Page (ADR-045, via
+        switch_layout_mode() -- which Reparent()s the 7 panels onto self.pnl_single
+        before this runs, and always builds a brand-new GridBagSizer here rather than
+        reusing a stale one from a previous switch)."""
+        content = wx.GridBagSizer(vgap=0, hgap=0)
+        content.SetEmptyCellSize((0, 0))
+        content.Add(self.tab_stereo, pos=(0, 0), span=(2, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_video_dec, pos=(0, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_video_enc, pos=(1, 1), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_video_filter, pos=(0, 2), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_processor, pos=(1, 2), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_depth_blend, pos=(0, 3), flag=wx.ALL | wx.EXPAND, border=4)
+        content.Add(self.tab_tools, pos=(1, 3), flag=wx.ALL | wx.EXPAND, border=4)
         self.pnl_single.SetSizer(content)
         self.pnl_single.SetAutoLayout(1)
-        # ADR-144: scroll_x=False now (was True pre-reflow) -- confirmed live this
-        # matters, not just style: with scroll_x=True, the ScrolledPanel lets its
-        # virtual canvas extend past the visible viewport width, so the WrapSizer
-        # above never actually receives a narrow width to wrap against and the
-        # window grew a horizontal scrollbar instead of reflowing. Constraining to
-        # scroll_y-only forces the real visible width into the WrapSizer's Layout()
-        # call, which is what actually drives the reflow.
-        self.pnl_single.SetupScrolling(scroll_x=False, scroll_y=True)
+        self.pnl_single.SetupScrolling(scroll_x=True, scroll_y=True)
         # A ScrolledPanel's own GetBestSize() is deliberately tiny regardless of its
         # content (that's what lets a window shrink below its content and scroll) --
         # so nunif/gui/common.py:refresh_layouts's recursive InvalidateBestSize+Fit
         # pass (run both at startup by IW3App.OnInit and on every live switch by
         # switch_layout_mode, ADR-045) collapses the whole frame down to a few dozen
         # pixels tall unless pnl_single is given an explicit min size to fall back on.
-        # CalcMin() is this WrapSizer's own real computed minimum -- confirmed live
-        # (see docstring above) that it correctly reports a single column's size, not
-        # all 4 columns unwrapped, so the window can still open at its traditional
-        # "show one full column without scrolling" size while ALSO genuinely
-        # supporting narrower widths via reflow, rather than the old hard floor at
-        # the full 4-column width.
+        # CalcMin() is this GridBagSizer's own real computed minimum (not a hardcoded
+        # guess), so the window opens at a size that shows one full column without
+        # scrolling, while a user who shrinks it manually still gets real scrollbars.
         self.pnl_single.SetMinSize(content.CalcMin())
 
         layout = wx.BoxSizer(wx.VERTICAL)
@@ -5409,24 +5363,21 @@ class MainFrame(wx.Frame):
         self.nb_options.Hide()
 
     def switch_layout_mode(self, new_mode):
-        """ADR-045, wrapper handling added by ADR-048, column panels added by ADR-144
-        -- live layout switching: move the 7 category panels between their
-        ScrolledPanel wrappers (self.tab_wrap_*, Tabbed) and their reflow column
-        panel (self.pnl_col_*, Single Page -- see SINGLE_PAGE_COLUMN_GROUPS) in the
-        already-running window, instead of only applying the Layout preference on
-        next launch (ADR-037's original, more cautious choice). Verified safe on this
-        project's actual wx version (4.3.1 phoenix / wxWidgets 3.3.3) with an isolated
-        harness before being wired in here -- see docs/ai/AI_DECISIONS.md ADR-045: a
-        plain wx.Panel.Reparent() cleanly preserves a panel's children, their
-        Bind()s, and cross-control Enable/Disable relationships (e.g. Object
-        Stability's sub-settings), because only the 7 *category* panels ever move --
-        every wx.StaticBox/control inside them keeps the SAME parent (its category
-        panel) throughout, so none of them are ever reparented themselves. ADR-048
-        only changes WHERE a category panel lands in Tabbed mode (its own wrapper
-        instead of self.nb_options directly); ADR-144 only changes WHERE a category
-        panel lands in Single Page mode (its own reflow column panel instead of
-        self.pnl_single directly) -- the wrappers/column panels themselves never
-        move, only the 7 category panels do, same as before.
+        """ADR-045, wrapper handling added by ADR-048 -- live layout switching: move
+        the 7 category panels between their ScrolledPanel wrappers (self.tab_wrap_*,
+        Tabbed) and self.pnl_single (Single Page) in the already-running window,
+        instead of only applying the Layout preference on next launch (ADR-037's
+        original, more cautious choice). Verified safe on this project's actual wx
+        version (4.3.1 phoenix / wxWidgets 3.3.3) with an isolated harness before being
+        wired in here -- see docs/ai/AI_DECISIONS.md ADR-045: a plain
+        wx.Panel.Reparent() cleanly preserves a panel's children, their Bind()s, and
+        cross-control Enable/Disable relationships (e.g. Object Stability's
+        sub-settings), because only the 7 *category* panels ever move -- every
+        wx.StaticBox/control inside them keeps the SAME parent (its category panel)
+        throughout, so none of them are ever reparented themselves. ADR-048 only
+        changes WHERE a category panel lands in Tabbed mode (its own wrapper instead of
+        self.nb_options directly) -- the wrappers themselves never move, only the 7
+        category panels do, same as before.
 
         No-ops if new_mode already matches self.layout_mode (defensive -- the combo
         box shouldn't fire EVT_TEXT without an actual change, but this keeps a
@@ -5435,22 +5386,11 @@ class MainFrame(wx.Frame):
         if new_mode == self.layout_mode:
             return
 
-        tab_attrs = ("tab_stereo", "tab_depth_blend", "tab_video_filter",
-                     "tab_video_dec", "tab_video_enc", "tab_processor", "tab_tools")
-        tabs = tuple(getattr(self, attr) for attr in tab_attrs)
+        tabs = (self.tab_stereo, self.tab_depth_blend, self.tab_video_filter,
+                self.tab_video_dec, self.tab_video_enc, self.tab_processor, self.tab_tools)
         wraps = (self.tab_wrap_stereo, self.tab_wrap_depth_blend, self.tab_wrap_video_filter,
                  self.tab_wrap_video_dec, self.tab_wrap_video_enc, self.tab_wrap_processor,
                  self.tab_wrap_tools)
-        # ADR-144: which pnl_col_* each tab lands in/leaves when Single Page is
-        # involved -- derived from the same SINGLE_PAGE_COLUMN_GROUPS
-        # _compose_options_layout_single_page() uses, so the two can never drift
-        # out of sync with each other.
-        tab_attr_to_col_attr = {
-            tab_attr: col_attr
-            for col_attr, group_tab_attrs in SINGLE_PAGE_COLUMN_GROUPS
-            for tab_attr in group_tab_attrs
-        }
-        cols = tuple(getattr(self, tab_attr_to_col_attr[attr]) for attr in tab_attrs)
 
         # Detach every category panel from whichever container currently holds it,
         # WITHOUT destroying the panel or any of its children (RemovePage/Detach, never
@@ -5466,27 +5406,11 @@ class MainFrame(wx.Frame):
                 if wrap_sizer is not None:
                     wrap_sizer.Detach(tab)
         else:
-            # ADR-144: each tab is a child of its own COLUMN panel's sizer now (not
-            # pnl_single's sizer directly -- pnl_single's own WrapSizer only ever
-            # holds the 4 column panels), so detach from there instead.
-            for col, tab in zip(cols, tabs):
-                col_sizer = col.GetSizer()
-                if col_sizer is not None:
-                    col_sizer.Detach(tab)
-            # The 4 column panels themselves are never reparented (only the 7
-            # category panels move), but leaving them sitting in pnl_single's old
-            # WrapSizer here would be stale once we're back in Tabbed mode --
-            # _compose_options_layout_single_page() always rebuilds a fresh
-            # WrapSizer next time regardless, so this isn't load-bearing for
-            # correctness, but detaching them now keeps pnl_single's sizer honestly
-            # empty in the meantime, matching this function's own "detach cleanly"
-            # invariant for every other container it touches.
             single_page_sizer = self.pnl_single.GetSizer()
-            if single_page_sizer is not None:
-                for col_attr, _ in SINGLE_PAGE_COLUMN_GROUPS:
-                    single_page_sizer.Detach(getattr(self, col_attr))
+            for tab in tabs:
+                single_page_sizer.Detach(tab)
 
-        new_parents = wraps if new_mode == LAYOUT_MODE_TABS else cols
+        new_parents = wraps if new_mode == LAYOUT_MODE_TABS else (self.pnl_single,) * len(tabs)
         for tab, new_parent in zip(tabs, new_parents):
             tab.Reparent(new_parent)
             # A wx.Notebook auto-Hide()s every page except the currently selected one,
@@ -5547,16 +5471,6 @@ class MainFrame(wx.Frame):
             # font needed, and a zoom-in only becomes reachable by scrolling instead of
             # the window growing to actually show it, unlike a fresh Single Page
             # composition at the same zoom level would.
-            # ADR-144: the 4 pnl_col_* reflow column panels are plain wx.Panel (not
-            # ScrolledPanel), which don't share that "GetBestSize() stays tiny"
-            # quirk -- but their own MinSize was still explicitly pinned at compose
-            # time for consistency with the wrap-panel pattern below, so refresh it
-            # here too rather than leave any doubt about a stale pre-zoom floor.
-            for col_attr, _ in SINGLE_PAGE_COLUMN_GROUPS:
-                col_panel = getattr(self, col_attr)
-                col_sizer = col_panel.GetSizer()
-                if col_sizer is not None:
-                    col_panel.SetMinSize(col_sizer.CalcMin())
             self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
         else:
             # ADR-048: Tabbed mode's Notebook pages are now ScrolledPanel wrappers with
@@ -5604,32 +5518,16 @@ class MainFrame(wx.Frame):
         button row) rather than a hardcoded guess, since that row is the one
         thing NOT inside a scrollable panel and would visually clip if the
         frame went narrower than its own natural minimum. pnl_options's
-        scrolling (both axes for Tabbed -- see wrap.SetupScrolling in
-        _compose_options_layout_tabbed) absorbs everything else. Derived from
-        CalcMin() rather than a fixed number so it stays correct across zoom
-        levels (button text grows with the zoom font) and locales (translated
-        button labels vary in length) -- called once at the end of __init__
-        and again from apply_zoom_level(), the same two points that already
-        recompute other zoom-sensitive MinSize values.
-
-        ADR-144 amendment: Single Page's pnl_single dropped scroll_x (needed
-        for its 4 category columns to actually reflow instead of just
-        growing a horizontal scrollbar -- see _compose_options_layout_single_page's
-        own comment), so it no longer has Tabbed's horizontal-scroll safety net
-        for an arbitrarily narrow frame. Without scroll_x, dragging the frame
-        narrower than the widest single reflow column would clip that column
-        with no way to reach the clipped part. So in Single Page mode
-        specifically, the width floor also can't go below pnl_single's own
-        current CalcMin() width (confirmed live that a WrapSizer's CalcMin()
-        correctly reports the WIDEST child's width, not just the first/an
-        arbitrary one) -- still a real width-floor reduction from the old
-        fixed "all 4 columns must fit" requirement (now just "the single
-        widest column must fit"), not a regression back to it."""
+        scrolling (both axes now -- see wrap.SetupScrolling in
+        _compose_options_layout_tabbed and pnl_single's own SetupScrolling)
+        absorbs everything else. Derived from CalcMin() rather than a fixed
+        number so it stays correct across zoom levels (button text grows
+        with the zoom font) and locales (translated button labels vary in
+        length) -- called once at the end of __init__ and again from
+        apply_zoom_level(), the same two points that already recompute
+        other zoom-sensitive MinSize values."""
         process_min = self.pnl_process.GetSizer().CalcMin()
         min_width = max(process_min.width + 24, 360)
-        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE and self.pnl_single.GetSizer() is not None:
-            single_page_min = self.pnl_single.GetSizer().CalcMin()
-            min_width = max(min_width, single_page_min.width + 24)
         min_height = 240
         self.SetMinSize((min_width, min_height))
 
@@ -10219,14 +10117,8 @@ def _self_test_layout_modes():
                     assert frame.tab_wrap_tools.GetParent() is frame.nb_options
                 else:
                     assert frame.pnl_single.GetSizer() is not None
-                    # ADR-144: a category panel's parent in Single Page mode is now
-                    # its own reflow column panel (pnl_col_*), not pnl_single
-                    # directly -- pnl_single's WrapSizer holds the 4 column panels,
-                    # each of which holds 1-2 category panels stacked vertically.
-                    assert frame.tab_stereo.GetParent() is frame.pnl_col_stereo
-                    assert frame.tab_tools.GetParent() is frame.pnl_col_blend_tools
-                    assert frame.pnl_col_stereo.GetParent() is frame.pnl_single
-                    assert frame.pnl_col_blend_tools.GetParent() is frame.pnl_single
+                    assert frame.tab_stereo.GetParent() is frame.pnl_single
+                    assert frame.tab_tools.GetParent() is frame.pnl_single
 
                 # A representative control from each of a few categories, including
                 # one added well after the original tabs/grid split (RIFE), must exist
@@ -10281,29 +10173,12 @@ def _self_test_layout_mode_live_switch():
         assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS
         assert frame.nb_options.GetPageCount() == 7
 
-        # ADR-144: tab attr name -> expected column panel, derived from the same
-        # SINGLE_PAGE_COLUMN_GROUPS the real code uses, so this test can never
-        # silently drift out of sync with the actual grouping.
-        tab_obj_to_attr = {getattr(frame, attr): attr for attr in (
-            "tab_stereo", "tab_depth_blend", "tab_video_filter",
-            "tab_video_dec", "tab_video_enc", "tab_processor", "tab_tools")}
-        tab_to_expected_col = {
-            tab_attr: col_attr
-            for col_attr, group_tab_attrs in gui_mod.SINGLE_PAGE_COLUMN_GROUPS
-            for tab_attr in group_tab_attrs
-        }
-
         for i in range(3):
             frame.switch_layout_mode(gui_mod.LAYOUT_MODE_SINGLE_PAGE)
             assert frame.layout_mode == gui_mod.LAYOUT_MODE_SINGLE_PAGE
             assert frame.nb_options.GetPageCount() == 0, f"round {i}: notebook still has pages after switching away"
             for tab in tabs:
-                tab_attr = tab_obj_to_attr[tab]
-                expected_col = getattr(frame, tab_to_expected_col[tab_attr])
-                assert tab.GetParent() is expected_col, \
-                    f"round {i}: {tab_attr} not reparented to its expected column panel {tab_to_expected_col[tab_attr]}"
-                assert expected_col.GetParent() is frame.pnl_single, \
-                    f"round {i}: {tab_to_expected_col[tab_attr]} not parented to pnl_single"
+                assert tab.GetParent() is frame.pnl_single, f"round {i}: {tab} not reparented to pnl_single"
                 assert tab.IsShown(), f"round {i}: {tab} still Hidden after switching to Single Page " \
                     "(wx.Notebook leaves inactive pages Hidden -- collapses the whole window, see docstring)"
             # A collapsed pnl_single (the original bug) reports a near-zero computed

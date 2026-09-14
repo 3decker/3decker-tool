@@ -91,11 +91,25 @@ if %ERRORLEVEL% neq 0 goto :on_error
 
 @rem all succeeded
 echo Successfully installed 3DECKER update
-pause
 exit /b 0
 
 
+@rem ADR-143: real, user-reported confusion -- both this and the :on_error path
+@rem below used to end with `pause`. This script only ever runs unattended from
+@rem inside the GUI (see the note at the top of this file), whose RunUpdateDialog
+@rem is a read-only log window with no way to forward a keypress to this process.
+@rem Live-tested this directly (matching gui.py's exact subprocess.Popen(...,
+@rem stdin=subprocess.DEVNULL) invocation, launched from pythonw.exe with no
+@rem inherited console -- the same conditions the real GUI runs under): `pause`
+@rem does NOT actually hang the process here -- it exits immediately, and the
+@rem update genuinely finished (the log window's Close button really was already
+@rem enabled). The real bug is misleading leftover text: "Press any key to
+@rem continue . . ." stays visible in the log after the update already succeeded,
+@rem and pressing a key in that read-only window is a no-op no matter what --
+@rem a real user reported exactly this, describing it as "stuck" and only
+@rem discovering Close was the correct (and already working) action. Removed both
+@rem `pause` calls entirely -- nothing here was ever meant to be read from a real
+@rem interactive console, so the prompt never served a purpose.
 :on_error
   echo Error!
-  pause
   exit /b 1

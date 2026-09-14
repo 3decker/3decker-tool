@@ -82,11 +82,11 @@ if %ERRORLEVEL% neq 0 goto :on_error
 
 @rem all succeeded
 echo Successfully installed Nagadomi update
-pause
 exit /b 0
 
 
+@rem ADR-143: same real, user-reported confusion as update-3decker.bat's
+@rem identical fix -- see that file's comment for the full explanation.
 :on_error
   echo Error!
-  pause
   exit /b 1

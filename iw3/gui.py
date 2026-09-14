@@ -8215,15 +8215,19 @@ class MainFrame(wx.Frame):
 
     def run_update(self, cmd, cwd, nunif_dir, dlg):
         # Runs on a background thread via startWorker -- never blocks the GUI
-        # thread. update.bat can run long enough (package installs, model
-        # downloads, a source pull) that its output is streamed line-by-line to
-        # `dlg` via wx.CallAfter as it's produced, rather than captured and shown
-        # only at the end the way this file's other standalone-tool log boxes work
-        # (run_sharpen/run_rife_standalone/etc.) -- a run this long needs live
-        # visibility, not just a final dump. stdin is explicitly closed (DEVNULL):
-        # update.bat ends with `pause` on both its success and error paths, which
-        # would otherwise wait forever for a keypress this non-interactive
-        # subprocess can never provide (CS-SUBPROCESS-001: arg list, never
+        # thread. update-3decker.bat/update-nagadomi.bat can run long enough
+        # (package installs, model downloads, a source pull) that their output is
+        # streamed line-by-line to `dlg` via wx.CallAfter as it's produced, rather
+        # than captured and shown only at the end the way this file's other
+        # standalone-tool log boxes work (run_sharpen/run_rife_standalone/etc.) --
+        # a run this long needs live visibility, not just a final dump. stdin is
+        # explicitly closed (DEVNULL) as defense in depth for any stray interactive
+        # prompt a future edit might reintroduce -- ADR-143 removed the `pause`
+        # both scripts used to end with (confirmed live it didn't actually hang the
+        # process even without this, but its leftover "Press any key to
+        # continue . . ." text in this read-only log window was real, reported user
+        # confusion: nothing typed here does anything, Close is the only real
+        # action, see docs/ai/AI_DECISIONS.md) (CS-SUBPROCESS-001: arg list, never
         # shell=True; cmd.exe /c is the explicit, documented way to run a .bat file
         # via CreateProcess without shell=True's quoting/injection risk).
         #

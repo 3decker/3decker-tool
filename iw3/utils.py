@@ -4987,6 +4987,12 @@ def create_parser(required_true=True):
                                  "Any_V2_K_S", "Any_V2_K_B", "Any_V2_K_L",
                                  "Distill_Any_S", "Distill_Any_B", "Distill_Any_L",
                                  "Any_V3_Mono", "Any_V3_Mono_01",
+                                 # ADR-147: real, confirmed gap -- these 4 (ADR-135) were
+                                 # never added here, so `python -m iw3 --depth-model
+                                 # Any_V3_Large_1_1 ...` (and the other 3) always failed
+                                 # with argparse's "invalid choice" even though the GUI's
+                                 # own Depth Model dropdown has offered them since ADR-135.
+                                 "Any_V3_Small", "Any_V3_Base", "Any_V3_Large_1_1", "Any_V3_Metric_Large",
                                  "DepthPro", "DepthPro_S",
                                  "VDA_S", "VDA_B", "VDA_L",
                                  "VDA_Metric", "VDA_Metric_S", "VDA_Metric_B", "VDA_Metric_L",

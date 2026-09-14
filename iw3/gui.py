@@ -310,10 +310,29 @@ def _git_checkpoint_before_update(nunif_dir, log_fn):
         log_fn(T("No uncommitted changes -- nothing to check-point.") + "\n\n")
         return
 
+    # Real bug, confirmed live on a genuinely fresh install: git refuses to commit
+    # at all ("Author identity unknown ... fatal: unable to auto-detect email
+    # address") on ANY machine that has never had `git config user.name`/
+    # `user.email` set -- which is the normal, expected state for someone who just
+    # downloaded 3DECKER and has never used git for anything else. That hard-failed
+    # this whole safety checkpoint (and therefore blocked the update entirely) for
+    # every such user, not just this one. Fix: supply a fallback identity via `-c`
+    # overrides, scoped to ONLY this one commit invocation (never written to any
+    # config file, global or local) -- and only when a real identity genuinely
+    # isn't already configured, so an existing real identity is never shadowed.
+    identity_args = []
+    for key, fallback in (("user.name", "3DECKER"), ("user.email", "3decker@localhost")):
+        try:
+            configured = _run(["config", key]).stdout.strip()
+        except subprocess.CalledProcessError:
+            configured = ""
+        if not configured:
+            identity_args += ["-c", f"{key}={fallback}"]
+
     try:
         _run(["add", "-A"])
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _run(["commit", "-m", f"Auto-checkpoint before update ({timestamp})"])
+        _run(identity_args + ["commit", "-m", f"Auto-checkpoint before update ({timestamp})"])
         short_hash = _run(["rev-parse", "--short", "HEAD"]).stdout.strip()
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
@@ -12231,6 +12250,71 @@ def _self_test_run_update_git_checkpoint():
     print("_self_test_run_update_git_checkpoint: PASS")
 
 
+def _self_test_git_checkpoint_no_identity_configured():
+    """ADR-134: real bug, confirmed live on a genuinely fresh install -- a machine
+    that has never run `git config user.name`/`user.email` (the normal state for
+    someone who just downloaded 3DECKER and has never used git for anything else)
+    made `_git_checkpoint_before_update` hard-fail with git's own "Author identity
+    unknown" error, blocking the update entirely for every such user. Confirms the
+    fix: a disposable repo with NO identity configured at all (deliberately not
+    calling `git config user.name`/`user.email`, unlike `_self_test_run_update_
+    git_checkpoint`'s repo, which sets both) still checkpoints successfully."""
+    import iw3.gui as gui_mod
+
+    tmp = tempfile.mkdtemp(prefix="iw3_git_checkpoint_no_identity_selftest_")
+    try:
+        git_bin = update_check._find_git()
+        assert git_bin is not None, "bundled git binary must resolve for this test to be meaningful"
+
+        def _git(*args):
+            return subprocess.run([git_bin, "-C", tmp] + list(args),
+                                  check=True, capture_output=True, text=True)
+
+        _git("init", "-q")
+        # Deliberately no `git config user.name`/`user.email` here -- this is the
+        # exact real-world state that broke on a fresh install.
+        with open(path.join(tmp, "seed.txt"), "w") as f:
+            f.write("seed\n")
+        # A real "seed" commit needs SOME identity to exist at all, so make it with
+        # an explicit one-off override (same mechanism as the fix itself), keeping
+        # the repo's OWN config genuinely empty afterward.
+        subprocess.run([git_bin, "-C", tmp, "-c", "user.name=seed", "-c", "user.email=seed@local",
+                        "add", "-A"], check=True, capture_output=True, text=True)
+        subprocess.run([git_bin, "-C", tmp, "-c", "user.name=seed", "-c", "user.email=seed@local",
+                        "commit", "-q", "-m", "seed commit"], check=True, capture_output=True, text=True)
+
+        for key in ("user.name", "user.email"):
+            result = subprocess.run([git_bin, "-C", tmp, "config", key],
+                                    capture_output=True, text=True)
+            assert result.stdout.strip() == "", \
+                f"test repo must have no {key} configured for this test to be meaningful"
+
+        with open(path.join(tmp, "seed.txt"), "a") as f:
+            f.write("modified\n")
+
+        log_lines = []
+        gui_mod._git_checkpoint_before_update(tmp, log_lines.append)
+
+        status = _git("status", "--porcelain").stdout
+        assert status.strip() == "", "checkpoint commit must leave the tree clean even with no identity configured"
+        assert any("Committed" in line for line in log_lines), log_lines
+        author = _git("log", "-1", "--format=%an <%ae>").stdout.strip()
+        assert author == "3DECKER <3decker@localhost>", \
+            f"fallback identity must be used for the checkpoint commit, got: {author}"
+
+        # The repo's OWN config must still be untouched -- the fallback is scoped to
+        # this one commit invocation only, never written to any config file.
+        for key in ("user.name", "user.email"):
+            result = subprocess.run([git_bin, "-C", tmp, "config", key],
+                                    capture_output=True, text=True)
+            assert result.stdout.strip() == "", \
+                f"fallback identity must never be written to the repo's own {key} config"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("_self_test_git_checkpoint_no_identity_configured: PASS")
+
+
 def _self_test_install_3decker_update_button():
     """Regression test for "Install Update Now" (ADR-108/111): confirms (a) declining
     the confirmation never calls startWorker, (b) accepting it launches
@@ -12878,6 +12962,7 @@ def _run_self_tests():
         _self_test_rife_standalone_panel,
         _self_test_tool_log_clear_buttons,
         _self_test_run_update_git_checkpoint,
+        _self_test_git_checkpoint_no_identity_configured,
         _self_test_install_3decker_update_button,
         _self_test_install_nagadomi_update_button,
         _self_test_update_available_dialog_wiring,

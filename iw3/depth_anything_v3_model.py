@@ -47,6 +47,24 @@ AA_SUPPORTED_MODELS = {
 }
 
 
+# ADR-139: real, live-confirmed bug -- Any_V3_Large_1_1 crashed a real
+# conversion job with KeyError: 'da3-large-1.1'. MODEL_REGISTRY's real keys
+# (confirmed by importing it directly) are da3-small/-base/-large/-giant/
+# mono-large/metric-large/nested-giant-large -- there is NO "da3-large-1.1"
+# architecture entry. "1.1" is a Hugging Face CHECKPOINT release version for
+# the SAME "da3-large" architecture/config, not a separate architecture --
+# _da3_hf_url(model_name) is still correct using the full "da3-large-1.1"
+# name (that's the real checkpoint's HF repo ID), but MODEL_REGISTRY lookup
+# must use the underlying config name instead.
+DA3_CONFIG_NAME_OVERRIDES = {
+    "da3-large-1.1": "da3-large",
+}
+
+
+def _da3_config_name(model_name):
+    return DA3_CONFIG_NAME_OVERRIDES.get(model_name, model_name)
+
+
 def _da3_hf_url(model_name):
     # Confirmed to match nagadomi's own hardcoded da3mono-large URL exactly
     # (hubconf.py: "https://huggingface.co/depth-anything/DA3MONO-LARGE/resolve/
@@ -110,7 +128,7 @@ def _load_da3_model(model_name):
     try:
         from depth_anything_3.cfg import create_object, load_config
         from depth_anything_3.registry import MODEL_REGISTRY
-        config = load_config(MODEL_REGISTRY[model_name])
+        config = load_config(MODEL_REGISTRY[_da3_config_name(model_name)])
         model = create_object(config)
     finally:
         sys.path.remove(pkg_root)

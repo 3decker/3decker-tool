@@ -7626,8 +7626,16 @@ class MainFrame(wx.Frame):
     def update_compile(self, *args, probe=True, **kwargs):
         device_id = int(self.cbo_device.GetClientData(self.cbo_device.GetSelection()))
         if device_id == -2:
-            # currently "All CUDA" does not support compile
+            # ADR-149: currently "All CUDA Device" does not support compile -- this used
+            # to silently uncheck the box with zero explanation, the one failure path in
+            # this method that didn't show a status message like every other reason
+            # compile can fail (see the "not supported on this system" message below).
+            # Real, user-reported confusion: checking the box appeared to simply do
+            # nothing, with no visible reason why.
             self.chk_compile.SetValue(False)
+            self.SetStatusText(
+                T("torch.compile is not available with \"All CUDA Device\" -- select a "
+                  "specific GPU in the Device dropdown instead"))
         elif probe:
             # check_compile_support() actually builds and torch.compile()s a real
             # model on this device -- genuine CUDA context + VRAM work, not a cheap
@@ -10139,6 +10147,59 @@ def _self_test_compile_probe_crash_handled():
                 app.Destroy()
 
     print("_self_test_compile_probe_crash_handled: PASS")
+
+
+def _self_test_compile_all_cuda_device_shows_message():
+    """ADR-149: real user report -- checking the torch.compile box while "All CUDA
+    Device" is selected appeared to simply do nothing, with no visible explanation.
+    Root cause: this is the one failure path in update_compile() that unchecked the
+    box without calling SetStatusText, unlike every other reason compile can fail
+    (see _self_test_compile_probe_crash_handled just above). Confirms: no live GPU
+    probe runs for this path (check_compile_support must not be called -- "All CUDA
+    Device" is rejected before any probe), the checkbox ends up unchecked, and a
+    status-bar message actually appears now."""
+    import iw3.gui as gui_mod
+
+    probe_calls = []
+
+    def _tracking_check_compile_support(device):
+        probe_calls.append(device)
+        return True
+
+    orig_compile = gui_mod.check_compile_support
+    gui_mod.check_compile_support = _tracking_check_compile_support
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = gui_mod.MainFrame()
+
+        all_cuda_index = None
+        for i in range(frame.cbo_device.GetCount()):
+            if int(frame.cbo_device.GetClientData(i)) == -2:
+                all_cuda_index = i
+                break
+        assert all_cuda_index is not None, "no 'All CUDA Device' entry to select"
+        frame.cbo_device.SetSelection(all_cuda_index)
+
+        frame.chk_compile.SetValue(True)
+        frame.update_compile(probe=True)
+
+        assert not probe_calls, "must not run a live compile probe for 'All CUDA Device'"
+        assert not frame.chk_compile.IsChecked(), \
+            "checkbox must end up unchecked when 'All CUDA Device' is selected"
+        status = frame.GetStatusBar().GetStatusText()
+        assert "torch.compile" in status and "All CUDA Device" in status, \
+            f"expected an informative status message naming 'All CUDA Device', got: {status!r}"
+    finally:
+        gui_mod.check_compile_support = orig_compile
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_compile_all_cuda_device_shows_message: PASS")
 
 
 def _self_test_layout_modes():
@@ -13326,6 +13387,7 @@ def _run_self_tests():
     tests = [
         _self_test_no_eager_cuda_context,
         _self_test_compile_probe_crash_handled,
+        _self_test_compile_all_cuda_device_shows_message,
         _self_test_layout_modes,
         _self_test_layout_mode_live_switch,
         _self_test_tabbed_scrolling,

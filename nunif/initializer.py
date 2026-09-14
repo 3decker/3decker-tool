@@ -48,6 +48,24 @@ def gc_collect():
         torch._dynamo.reset()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        # ADR-148: torch.cuda.empty_cache() above only clears the DEVICE memory
+        # cache. Pinned ("page-locked") CPU memory -- used throughout iw3's video
+        # pipeline for fast GPU transfers (VU.OffloadFrame, one pinned buffer per
+        # frame) -- goes through PyTorch's own SEPARATE host-memory caching
+        # allocator, which this never touched. Freed pinned buffers stayed cached
+        # for reuse instead of being returned to the OS, which Windows keeps
+        # counting as GPU "shared" memory against the process indefinitely.
+        # Confirmed live: releasing every Python reference to ~700 pinned buffers
+        # (matching a real EMA-buffered job) left shared memory completely
+        # unchanged at ~22GB until this call ran, which dropped it to 0 instantly.
+        # No public torch.cuda equivalent exists as of torch 2.12, so this is a
+        # private API, guarded defensively in case a future torch build renames
+        # or removes it.
+        if hasattr(torch._C, "_host_emptyCache"):
+            try:
+                torch._C._host_emptyCache()
+            except Exception:
+                pass
     if torch.backends.mps.is_available():
         torch.mps.empty_cache()
     if hasattr(torch, "xpu") and torch.xpu.is_available():

@@ -39,6 +39,10 @@ continue" message after updates that did nothing no matter what you pressed.
 torch.compile also now explains itself instead of silently refusing to turn on
 when your Device dropdown is set to "All CUDA Device."
 
+**A new "What's New" button shows this changelog right inside the app**, next
+to the update-check buttons — no more needing to leave the app or hunt for
+this file on disk to see what's changed.
+
 ---
 
 ## Update — September 10, 2026
@@ -309,6 +313,9 @@ movie up to 48fps.
   box.** Previously you had to hover exactly over the dropdown, checkbox, or
   slider itself to see an explanation; now hovering the label text next to it
   works too. All 87 setting labels in this app now have a tooltip.
+- A new **"What's New"** button, next to the update-check buttons, shows this
+  changelog right inside the app — read-only, no download or network check
+  involved, just a quick way to see what's changed without leaving the app.
 
 ---
 

@@ -324,6 +324,16 @@ def _find_nagadomi_update_bat():
     return path.join(nunif_dir, "windows_package", "update-nagadomi.bat"), nunif_windows_root
 
 
+def _find_changelog_path():
+    """Resolve 3DECKER_CHANGELOG.md (ADR-150) -- the real, canonical copy lives
+    directly inside nunif/ (see CLAUDE.md's changelog-sync note); the outer
+    nunif-windows root copy is only ever a synced mirror for browsing outside the
+    app, not a second source of truth. Same path-from-__file__ pattern as
+    _find_3decker_update_bat()/_find_nagadomi_update_bat() above."""
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))  # nunif/
+    return path.join(nunif_dir, "3DECKER_CHANGELOG.md")
+
+
 def _git_checkpoint_before_update(nunif_dir, log_fn):
     """Safety-commit any uncommitted work in `nunif_dir` before update.bat runs (see
     docs/ai/AI_DECISIONS.md ADR-069's dated amendment). update.bat's own source-update
@@ -488,6 +498,33 @@ class UpdateAvailableDialog(wx.Dialog):
 
         self.btn_close.Bind(wx.EVT_BUTTON, lambda event: self.EndModal(wx.ID_CLOSE))
         self.btn_install.Bind(wx.EVT_BUTTON, lambda event: self.EndModal(wx.ID_OK))
+
+
+class ChangelogDialog(wx.Dialog):
+    """Shows this project's own 3DECKER_CHANGELOG.md (ADR-150) inside the app, so a
+    user can see what's changed without hunting for the file on disk. Pure
+    read-only presentation -- no editing, no network fetch, just the same
+    plain-language file this project already maintains by hand (see CLAUDE.md's
+    rule to keep it updated alongside every user-visible change). A plain
+    word-wrapped TextCtrl rather than a Markdown renderer: this file's headings/
+    bold markers (#, **) still read fine as plain text, and adding a Markdown-to-
+    HTML dependency for one read-only dialog isn't worth it."""
+
+    def __init__(self, parent, content):
+        super().__init__(parent, title=T("What's New in 3DECKER"),
+                          size=parent.FromDIP((700, 560)),
+                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self.txt_content = wx.TextCtrl(self, value=content,
+                                       style=wx.TE_MULTILINE | wx.TE_READONLY)
+        self.btn_close = wx.Button(self, id=wx.ID_CLOSE, label=T("Close"))
+
+        layout = wx.BoxSizer(wx.VERTICAL)
+        layout.Add(self.txt_content, 1, wx.EXPAND | wx.ALL, 8)
+        layout.Add(self.btn_close, 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        self.SetSizer(layout)
+
+        self.btn_close.Bind(wx.EVT_BUTTON, lambda event: self.EndModal(wx.ID_CLOSE))
+        self.txt_content.SetInsertionPoint(0)
 
 
 class SceneBatchAutoEMADialog(wx.Dialog):
@@ -4991,6 +5028,18 @@ class MainFrame(wx.Frame):
               "Recommended: safe to click any time -- checking alone never changes anything; only "
               "install if you specifically want upstream nunif's own latest changes."))
 
+        # what's new / changelog (ADR-150): shows this project's own
+        # 3DECKER_CHANGELOG.md inside the app -- pure read-only presentation, no
+        # network fetch, unlike the two update-check buttons above.
+        self.btn_whats_new = wx.Button(self.pnl_preset, label=T("What's New"))
+        self.btn_whats_new.SetToolTip(
+            T("What it's for: shows this project's own changelog -- everything added, "
+              "changed, or fixed in 3DECKER, written in plain language, grouped by what "
+              "each thing actually does for you.\n"
+              "How it helps: see what's new without leaving the app or hunting for the "
+              "file on disk.\n"
+              "Recommended: safe to click any time -- read-only, changes nothing."))
+
         layout = wx.BoxSizer(wx.HORIZONTAL)
         layout.Add(self.lbl_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
         layout.Add(self.cbo_app_preset, flag=wx.ALL, border=2)
@@ -5037,6 +5086,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_check_updates, flag=wx.ALL, border=2)
         layout.AddSpacer(2)
         layout.Add(self.btn_check_nagadomi_updates, flag=wx.ALL, border=2)
+        layout.AddSpacer(2)
+        layout.Add(self.btn_whats_new, flag=wx.ALL, border=2)
         layout.AddSpacer(8)
         self.pnl_preset.SetSizer(layout)
 
@@ -5158,6 +5209,7 @@ class MainFrame(wx.Frame):
         self.cbo_zoom.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_zoom)
         self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_updates)
         self.btn_check_nagadomi_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_nagadomi_updates)
+        self.btn_whats_new.Bind(wx.EVT_BUTTON, self.on_click_btn_whats_new)
 
         self.btn_autocrop_test.Bind(wx.EVT_BUTTON, self.on_click_btn_autocrop_test)
         self.btn_scene_settings.Bind(wx.EVT_BUTTON, self.on_click_btn_scene_settings)
@@ -8209,6 +8261,17 @@ class MainFrame(wx.Frame):
         with UpdateAvailableDialog(self, message, title=title) as dlg:
             if dlg.ShowModal() == wx.ID_OK:
                 on_install()
+
+    def on_click_btn_whats_new(self, event):
+        changelog_path = _find_changelog_path()
+        try:
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError:
+            content = T("Could not find 3DECKER_CHANGELOG.md on disk (expected at: "
+                        "{path}).").format(path=changelog_path)
+        with ChangelogDialog(self, content) as dlg:
+            dlg.ShowModal()
 
     def on_exit_check_updates_worker(self, result):
         self.btn_check_updates.Enable()
@@ -13182,6 +13245,70 @@ def _self_test_update_available_dialog_wiring():
     print("_self_test_update_available_dialog_wiring: PASS")
 
 
+def _self_test_whats_new_changelog_dialog():
+    """Regression test for the What's New button (ADR-150): clicking it must read
+    the REAL 3DECKER_CHANGELOG.md this project maintains (not a hardcoded string)
+    and hand its actual content to ChangelogDialog, and must degrade gracefully
+    (a friendly message, not a crash) if the file is ever missing -- e.g. a
+    packaging step that forgets to include it. ChangelogDialog itself is
+    monkeypatched to a fake context-manager (same convention as
+    _self_test_update_available_dialog_wiring's _FakeUpdateAvailableDialog) so no
+    real modal blocks this test."""
+    import iw3.gui as gui_mod
+
+    class _FakeChangelogDialog:
+        last_content = None
+
+        def __init__(self, parent, content):
+            _FakeChangelogDialog.last_content = content
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ShowModal(self):
+            return wx.ID_CLOSE
+
+    app = wx.App()
+    frame = None
+    orig_dialog_cls = gui_mod.ChangelogDialog
+    orig_find_changelog_path = gui_mod._find_changelog_path
+    try:
+        frame = gui_mod.MainFrame()
+        gui_mod.ChangelogDialog = _FakeChangelogDialog
+
+        # Real file case: must be the actual on-disk content, not a placeholder.
+        real_path = orig_find_changelog_path()
+        with open(real_path, "r", encoding="utf-8") as f:
+            expected_content = f.read()
+        frame.on_click_btn_whats_new(None)
+        assert _FakeChangelogDialog.last_content == expected_content, \
+            "What's New must show the real 3DECKER_CHANGELOG.md content, not a placeholder"
+        assert "3DECKER" in _FakeChangelogDialog.last_content, \
+            "sanity check: real changelog content must mention 3DECKER"
+
+        # Missing-file case: must degrade gracefully, never raise.
+        gui_mod._find_changelog_path = lambda: path.join(real_path, "does_not_exist.md")
+        _FakeChangelogDialog.last_content = None
+        frame.on_click_btn_whats_new(None)  # must not raise
+        assert _FakeChangelogDialog.last_content is not None, \
+            "missing changelog file must still show a dialog with a friendly message"
+        assert "3DECKER_CHANGELOG.md" in _FakeChangelogDialog.last_content, \
+            f"expected a message naming the missing file, got: {_FakeChangelogDialog.last_content!r}"
+    finally:
+        gui_mod.ChangelogDialog = orig_dialog_cls
+        gui_mod._find_changelog_path = orig_find_changelog_path
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_whats_new_changelog_dialog: PASS")
+
+
 def _self_test_import_command_round_trip():
     """Regression test for the new Import Command button (docs/ai/AI_DECISIONS.md
     ADR-074) -- the reverse of Copy Command. Three parts, all against the REAL,
@@ -13424,6 +13551,7 @@ def _run_self_tests():
         _self_test_install_3decker_update_button,
         _self_test_install_nagadomi_update_button,
         _self_test_update_available_dialog_wiring,
+        _self_test_whats_new_changelog_dialog,
         _self_test_import_command_round_trip,
         _self_test_device_dropdown_no_torch_cuda_touch,
         _self_test_label_tooltips_propagated,

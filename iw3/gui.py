@@ -1220,6 +1220,7 @@ class MainFrame(wx.Frame):
         self.lbl_method = wx.StaticText(self.grp_stereo, label=T("Method"))
         self.cbo_method = wx.ComboBox(self.grp_stereo,
                                       choices=["mlbw_l2", "mlbw_l4", "mlbw_l2s",
+                                               "mlbw_l2_cycle",
                                                "mlbw_l2_inpaint",
                                                "row_flow_v3", "row_flow_v3_sym", "row_flow_v2",
                                                "forward_fill", "forward_splat_fill", "forward_inpaint",
@@ -1242,6 +1243,13 @@ class MainFrame(wx.Frame):
               "extra GPU time/memory cost.\n"
               "mlbw_l2s: a smaller/lighter version of mlbw_l2 — faster and lower VRAM, at some quality "
               "cost versus the full mlbw_l2. Useful on lower-VRAM GPUs.\n"
+              "mlbw_l2_cycle: EXPERIMENTAL — an alternate-trained version of mlbw_l2, using the same "
+              "architecture but different training weights (a first-party file from nagadomi's own "
+              "release page that iw3 didn't previously expose). Real testing here found it produces "
+              "genuinely different output from mlbw_l2, but no consistent quality winner either way "
+              "across several test scenes — offered so you can compare it on your own footage, not "
+              "recommended as a replacement. Only has a low-3D-Strength (4 or below) checkpoint "
+              "available; higher values will show an error asking you to lower it or switch methods.\n"
               "mlbw_l2_inpaint / forward_inpaint / monobw_inpaint: any of the above families, PLUS an AI "
               "inpainting pass that fills in the hidden area behind objects instead of stretching/smearing "
               "it — real extra time cost, but noticeably cleaner edges around foreground objects.\n"
@@ -6556,7 +6564,7 @@ class MainFrame(wx.Frame):
 
     def update_preserve_screen_border(self):
         if self.cbo_method.GetValue() in {"row_flow_v2", "row_flow_v3", "row_flow_v3_sym",
-                                          "mlbw_l2", "mlbw_l2s", "mlbw_l4", "mlbw_l2_inpaint",
+                                          "mlbw_l2", "mlbw_l2s", "mlbw_l4", "mlbw_l2_cycle", "mlbw_l2_inpaint",
                                           "monobw", "monobw_inpaint"}:
             self.chk_preserve_screen_border.Enable()
         else:
@@ -8003,6 +8011,15 @@ class MainFrame(wx.Frame):
                     max_divergence = 10.0
                 else:
                     max_divergence = 10.0 * 0.5
+            elif method == "mlbw_l2_cycle":
+                # ADR-158: only a divergence<=4 (level 1) checkpoint exists for
+                # this method -- warn here, in addition to load_mlbw_model's
+                # own hard ValueError at actual job start, so the user sees
+                # this before starting a job that's guaranteed to fail.
+                if synthetic_view == "both":
+                    max_divergence = 4.0
+                else:
+                    max_divergence = 4.0 * 0.5
             elif method in {"forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"}:
                 if synthetic_view == "both":
                     max_divergence = 5.0
@@ -14183,6 +14200,54 @@ def _self_test_clear_all_button():
     print("_self_test_clear_all_button: PASS")
 
 
+def _self_test_mlbw_l2_cycle_method():
+    """ADR-158: mlbw_l2_cycle must be a real, selectable Method choice, must
+    warn (not silently accept) when Divergence is set above 4 (the only
+    checkpoint level this method has), and stereo_model_factory.load_mlbw_model
+    must fail fast and loudly (no network/GPU touch -- the ValueError is
+    raised before the checkpoint URL is even looked at) for any divergence
+    that maps to level != 1, confirmed directly against the real function
+    rather than assumed from reading it."""
+    from iw3.stereo_model_factory import load_mlbw_model
+
+    # The ValueError guard must fire before any network/GPU work -- device_id=-1
+    # and a divergence that resolves to level 2 would crash on model loading
+    # long before this if the guard weren't first.
+    try:
+        load_mlbw_model("mlbw_l2_cycle", divergence=8.0, device_id=-1)
+        raise AssertionError("expected ValueError for divergence=8.0 (level 2), got none")
+    except ValueError as e:
+        assert "mlbw_l2_cycle" in str(e) and "divergence<=4" in str(e), str(e)
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert "mlbw_l2_cycle" in frame.cbo_method.GetStrings(), \
+            "mlbw_l2_cycle missing from the Method dropdown"
+
+        frame.cbo_method.SetStringSelection("mlbw_l2_cycle")
+        _apply_combo_value(frame.cbo_divergence, "3.0")
+        frame.update_divergence_warning()
+        assert not frame.lbl_divergence_warning.IsShown(), \
+            "divergence=3.0 (level 1) must not warn for mlbw_l2_cycle"
+
+        _apply_combo_value(frame.cbo_divergence, "8.0")
+        frame.update_divergence_warning()
+        assert frame.lbl_divergence_warning.IsShown(), \
+            "divergence=8.0 (level 2, no checkpoint) must warn for mlbw_l2_cycle"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mlbw_l2_cycle_method: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -14249,6 +14314,7 @@ def _run_self_tests():
         _self_test_metric3d_model_selection,
         _self_test_moge3_model_selection,
         _self_test_clear_all_button,
+        _self_test_mlbw_l2_cycle_method,
     ]
     failures = []
     for test in tests:

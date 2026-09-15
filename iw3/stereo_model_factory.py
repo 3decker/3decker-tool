@@ -35,6 +35,24 @@ MLBW_L4_D3_WEAK_URL = pth_url("iw3_mlbw_l4_d3_weak_20250627.pth")
 # mlbw with hole mask estimation
 MASK_MLBW_L2_D1_URL = pth_url("iw3_mask_mlbw_l2_d1_20250903.pth")
 
+# ADR-158: alternate-trained weights for the exact same architecture as
+# MLBW_L2_D1_URL (confirmed by loading both: identical class/kwargs/param
+# count, 231560 params, cycle=False at inference either way since
+# load_mlbw_model always forces delta_output=True regardless of how the
+# checkpoint itself was trained -- so this is a genuine drop-in alternative,
+# not a different runtime architecture needing new inference code). Real,
+# first-party, hosted on nagadomi's own official release page -- found by
+# auditing that page's full asset list against what iw3 actually exposes.
+# Live A/B tested against the default across 2 different movie scenes and 3
+# timestamps each: genuinely different output every time (not a duplicate),
+# but no consistent visual quality winner either way -- offered here as an
+# experimental option to compare yourself, not a recommended replacement.
+# Only a "_d1" (divergence <= 4) variant exists on the release page -- no
+# _d2/_d3/_l4 cycle-trained checkpoints were found, so this method is only
+# meaningful at low divergence; see the ValueError below for what happens
+# above that.
+MLBW_L2_D1_CYCLE_URL = pth_url("iw3_mlbw_l2_d1_cycle_250703.pth")
+
 
 def get_mlbw_divergence_level(d):
     if d <= 4:
@@ -85,6 +103,13 @@ def load_mlbw_model(
 
     elif method in {"mask_mlbw_l2"}:
         url = MASK_MLBW_L2_D1_URL
+    elif method == "mlbw_l2_cycle":
+        if level != 1:
+            raise ValueError(
+                f"{method} only has a divergence<=4 (level 1) checkpoint available -- "
+                f"got divergence={divergence} (level {level}). Lower Divergence to 4 or "
+                f"below, or use the regular mlbw_l2 method instead.")
+        url = MLBW_L2_D1_CYCLE_URL
     else:
         raise ValueError(method)
 

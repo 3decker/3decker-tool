@@ -4976,6 +4976,8 @@ def create_parser(required_true=True):
                                  "forward", "forward_fill", "forward_splat_fill", "forward_inpaint",
                                  "mlbw_l2", "mlbw_l4", "mlbw_l2s", "mlbw_l4s",
                                  "mask_mlbw_l2", "mlbw_l2_inpaint",
+                                 # ADR-158
+                                 "mlbw_l2_cycle",
                                  "row_flow", "row_flow_sym",
                                  "row_flow_v3", "row_flow_v3_sym",
                                  "row_flow_v2",

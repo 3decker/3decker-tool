@@ -39,6 +39,14 @@ every setting back to the app's own defaults and empties the Input/Output boxes,
 after asking you to confirm — handy before taking a screenshot to share, or just to
 start fresh without closing the app.
 
+**A new experimental Method option: `mlbw_l2_cycle`.** Found by auditing the
+project's own official model host for anything real and unused — turned out to be
+an alternate-trained version of the existing mlbw_l2 warp method that was never
+exposed anywhere. Real side-by-side testing on real footage found it genuinely
+produces different results, but no consistent "better" either way — so it's offered
+as a choice to try for yourself, not a new recommended default. Only works at 3D
+Strength 4 or below (it'll tell you clearly if you go higher).
+
 ---
 
 ## Update — September 14, 2026

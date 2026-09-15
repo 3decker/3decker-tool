@@ -7890,6 +7890,38 @@ class MainFrame(wx.Frame):
         self.delete_preset(self.cbo_app_preset.GetValue())
         event.Skip()
 
+    # ADR-157 amendment: real, live-found gap -- the 7 Standalone Tools
+    # (HDR/DV Reinjection, Search Subtitles, Add Subtitle Track, Add Audio
+    # Track, Retroactively Tag MKV, Sharpen, RIFE Frame Interpolation) each
+    # keep their own file-path/text fields entirely outside create_parser()'s
+    # Namespace -- confirmed by reading apply_parsed_args_to_gui() (only ever
+    # reads args.* attributes, none of these) and each tool's own "Clear"
+    # button (confirmed: only ever clears that tool's *_log display, never
+    # its input/output path fields -- e.g. `lambda event:
+    # self.txt_sharpen_log.Clear()`). Found live via a real screenshot taken
+    # right after Clear All: the Sharpen tool's Converted 3D Video/Output File
+    # fields still showed a real path from the user's own saved config
+    # (E:\3d Movies\...) -- exactly the kind of thing this button exists to
+    # hide before a screenshot. *_log fields are included too (not just the
+    # path fields) since they're plain read-only text displays of past
+    # command output, which can just as easily echo a real path back.
+    _CLEAR_ALL_STANDALONE_TEXT_FIELDS = (
+        "txt_reinject_source", "txt_reinject_converted", "txt_reinject_output",
+        "txt_reinject_rife_manifest", "txt_reinject_log",
+        "txt_subsearch_source", "txt_subsearch_title", "txt_subsearch_imdb", "txt_subsearch_log",
+        "txt_submux_input", "txt_submux_srt", "txt_submux_output",
+        "txt_submux_language", "txt_submux_track_name", "txt_submux_font_size", "txt_submux_log",
+        "txt_audiomux_input", "txt_audiomux_audio", "txt_audiomux_output",
+        "txt_audiomux_track_name", "txt_audiomux_log",
+        "txt_stereotag_input", "txt_stereotag_log",
+        "txt_sharpen_input", "txt_sharpen_output", "txt_sharpen_log",
+        "txt_rife_standalone_input", "txt_rife_standalone_output",
+        "txt_rife_standalone_target_fps", "txt_rife_standalone_log",
+    )
+    # The one field in that list whose real default isn't blank -- confirmed
+    # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
+    _CLEAR_ALL_STANDALONE_TEXT_DEFAULTS = {"txt_submux_language": "en"}
+
     def on_click_btn_clear_all(self, event):
         """Resets every GUI setting to the app's own factory defaults (and
         empties Input/Output), asking for confirmation first since this
@@ -7898,7 +7930,12 @@ class MainFrame(wx.Frame):
         round trip Import Command already uses (ADR-121/074) -- a real,
         already-proven argparse.Namespace -> widgets path, rather than a new
         hand-maintained list of default values that could drift out of sync
-        with create_parser()'s own defaults as flags are added later."""
+        with create_parser()'s own defaults as flags are added later. Then
+        separately clears the Standalone Tools' own fields, which live
+        entirely outside that Namespace -- see
+        _CLEAR_ALL_STANDALONE_TEXT_FIELDS's own comment for why that's a
+        second, real step rather than something apply_parsed_args_to_gui
+        already covers."""
         with wx.MessageDialog(
                 None,
                 message=T("Reset every setting to defaults and clear Input/Output?"),
@@ -7907,6 +7944,10 @@ class MainFrame(wx.Frame):
                 return
         args = create_parser(required_true=False).parse_args([])
         self.apply_parsed_args_to_gui(args)
+        for name in self._CLEAR_ALL_STANDALONE_TEXT_FIELDS:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.SetValue(self._CLEAR_ALL_STANDALONE_TEXT_DEFAULTS.get(name, ""))
         self.SetStatusText(T("All settings reset to defaults"))
         if event is not None:
             event.Skip()
@@ -14099,18 +14140,28 @@ def _self_test_clear_all_button():
         frame = MainFrame()
         gui_mod.wx.MessageDialog = _FakeConfirmDialog
 
-        # Drive some fields away from their defaults first.
+        # Drive some fields away from their defaults first -- including a
+        # Standalone Tool field (ADR-157 amendment: these live entirely
+        # outside create_parser()'s Namespace and were found live to survive
+        # an earlier version of this button untouched, leaking a real path
+        # into a screenshot).
         frame.pnl_file.set_input_path("C:/some/private/movie.mkv")
         frame.pnl_file.set_output_path("C:/some/private/output")
         _apply_combo_value(frame.cbo_divergence, "4.5")
+        frame.txt_sharpen_input.SetValue("E:/3d Movies/some_private_title.mkv")
+        frame.txt_sharpen_log.SetValue("some previous run's output, may contain a path")
+        frame.txt_submux_language.SetValue("fr")
 
         # Declining must leave every one of those untouched.
         _FakeConfirmDialog.result = wx.ID_NO
         frame.on_click_btn_clear_all(None)
         assert frame.pnl_file.input_path == "C:/some/private/movie.mkv"
         assert frame.cbo_divergence.GetValue() == "4.5"
+        assert frame.txt_sharpen_input.GetValue() == "E:/3d Movies/some_private_title.mkv"
 
-        # Accepting resets to create_parser()'s own real defaults.
+        # Accepting resets to create_parser()'s own real defaults, AND clears
+        # the Standalone Tools' own fields (txt_submux_language's real
+        # default is "en", not blank -- confirmed by reading its constructor).
         _FakeConfirmDialog.result = wx.ID_YES
         frame.on_click_btn_clear_all(None)
         assert frame.pnl_file.input_path == "", frame.pnl_file.input_path
@@ -14118,6 +14169,9 @@ def _self_test_clear_all_button():
         default_args = create_parser(required_true=False).parse_args([])
         assert frame.cbo_divergence.GetValue() == str(default_args.divergence), \
             frame.cbo_divergence.GetValue()
+        assert frame.txt_sharpen_input.GetValue() == "", frame.txt_sharpen_input.GetValue()
+        assert frame.txt_sharpen_log.GetValue() == "", frame.txt_sharpen_log.GetValue()
+        assert frame.txt_submux_language.GetValue() == "en", frame.txt_submux_language.GetValue()
     finally:
         gui_mod.wx.MessageDialog = orig_message_dialog
         if frame is not None:

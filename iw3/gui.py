@@ -5070,62 +5070,37 @@ class MainFrame(wx.Frame):
               "file on disk.\n"
               "Recommended: safe to click any time -- read-only, changes nothing."))
 
-        layout = wx.BoxSizer(wx.HORIZONTAL)
-        layout.Add(self.lbl_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
-        layout.Add(self.cbo_app_preset, flag=wx.ALL, border=2)
-        layout.Add(self.btn_load_preset, flag=wx.ALL, border=2)
-        layout.Add(self.btn_save_preset, flag=wx.ALL, border=2)
-        layout.Add(self.btn_delete_preset, flag=wx.ALL, border=2)
-        layout.AddSpacer(2)
-        layout.Add(self.sep_quick_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
-        layout.AddSpacer(4)
-        layout.Add(self.btn_quick_preset_movie, flag=wx.ALL, border=2)
-        layout.Add(self.btn_quick_preset_action, flag=wx.ALL, border=2)
-        layout.Add(self.btn_quick_preset_3decker, flag=wx.ALL, border=2)
-        layout.AddSpacer(2)
-        layout.Add(self.sep_compare_preset, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
-        layout.AddSpacer(4)
-        layout.Add(self.btn_compare_presets, flag=wx.ALL, border=2)
-        layout.AddSpacer(2)
-        layout.Add(self.sep_command, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
-        layout.AddSpacer(4)
-        layout.Add(self.btn_copy_command, flag=wx.ALL, border=2)
-        layout.Add(self.btn_import_command, flag=wx.ALL, border=2)
-
-        layout.AddSpacer(2)
-        layout.Add(self.sep_language, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
-        layout.AddSpacer(4)
-        layout.Add(self.lbl_language, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
-        layout.Add(self.cbo_language, flag=wx.ALL, border=2)
-
-        layout.AddSpacer(2)
-        layout.Add(self.sep_layout, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
-        layout.AddSpacer(4)
-        layout.Add(self.lbl_layout, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
-        layout.Add(self.cbo_layout, flag=wx.ALL, border=2)
-
-        layout.AddSpacer(2)
-        layout.Add(self.sep_zoom, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
-        layout.AddSpacer(4)
-        layout.Add(self.lbl_zoom, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, border=2)
-        layout.Add(self.cbo_zoom, flag=wx.ALL, border=2)
-
-        layout.AddSpacer(2)
-        layout.Add(self.sep_update, flag=wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT)
-        layout.AddSpacer(4)
-        layout.Add(self.btn_check_updates, flag=wx.ALL, border=2)
-        layout.AddSpacer(2)
-        layout.Add(self.btn_check_nagadomi_updates, flag=wx.ALL, border=2)
-        layout.AddSpacer(2)
-        layout.Add(self.btn_whats_new, flag=wx.ALL, border=2)
-        layout.AddSpacer(8)
-        self.pnl_preset.SetSizer(layout)
+        # ADR-152: real user report -- this toolbar row gets cut off with no way to
+        # reach the clipped buttons when the window is narrower than its full
+        # natural width. A first attempt used wx.WrapSizer (same mechanism ADR-144
+        # used for the reverted Single Page column reflow) -- live-tested and found
+        # a real, reproducible bug: rows past the first collapsed to zero height
+        # (buttons became genuinely invisible) because WrapSizer never grows the
+        # height it's given to work with, and this panel (unlike ADR-144's
+        # ScrolledPanel-hosted one) has no pre-existing extra vertical room for it
+        # to expand into. Replaced with hand-rolled row-wrapping (_toolbar_items(),
+        # _relayout_preset_toolbar()) that explicitly recomputes real row heights
+        # itself -- verified via a standalone isolated script (not just in-app) at
+        # 8 widths from 1900px down to 300px, INCLUDING a repeated live-resize
+        # sequence (wide->narrow->wide, simulating a real window drag), zero
+        # zero-size/invisible buttons in any case, before ever touching this file.
+        self._toolbar_items_list = self._toolbar_items()
+        self.pnl_preset.Bind(wx.EVT_SIZE, self._on_size_pnl_preset)
+        self._relayout_preset_toolbar()
 
         # processing panel
         self.pnl_process = wx.Panel(self)
         if LAYOUT_DEBUG:
             self.pnl_process.SetBackgroundColour("#fcc")
         self.prg_tqdm = wx.Gauge(self.pnl_process, style=wx.GA_HORIZONTAL)
+        # ADR-153: real user request -- drag-resizing the window from the edges hit
+        # an early floor (this row's own natural width, ~618px, dominated mostly by
+        # the gauge's own "best size" of ~214px rather than the 4 buttons). Give it
+        # an explicit small true-minimum instead so it stops inflating the floor --
+        # it still visually stretches to fill whatever space is actually available
+        # at any normal width (proportion=1, unchanged), this only affects how
+        # little room it's willing to accept as a floor.
+        self.prg_tqdm.SetMinSize(self.FromDIP((40, -1)))
         self.btn_quick_preview = wx.Button(self.pnl_process, label=T("Quick Preview"))
         self.btn_quick_preview.SetToolTip(
             T("Process a short 45 second clip (or a single frame for images) with the "
@@ -5134,18 +5109,36 @@ class MainFrame(wx.Frame):
         self.btn_suspend = wx.Button(self.pnl_process, label=T("Suspend"))
         self.btn_cancel = wx.Button(self.pnl_process, label=T("Cancel"))
 
-        layout = wx.BoxSizer(wx.HORIZONTAL)
-        layout.Add(self.prg_tqdm, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
-        layout.Add(self.btn_quick_preview, 0, wx.ALL, 4)
-        layout.Add(self.btn_start, 0, wx.ALL, 4)
-        layout.Add(self.btn_suspend, 0, wx.ALL, 4)
-        layout.Add(self.btn_cancel, 0, wx.ALL, 4)
-        self.pnl_process.SetSizer(layout)
+        # ADR-153: same real limitation and same fix shape as ADR-152's toolbar --
+        # at normal widths this looks exactly like the plain single-row layout it
+        # replaces (gauge stretches to fill remaining space, all 4 buttons sit to
+        # its right); only when the window is dragged narrower than that natural
+        # width do the buttons wrap onto additional rows below the gauge (which
+        # stays pinned as the first item of row 1, always stretchy). Verified via
+        # an isolated probe (not just in-app) at widths from 700px down to 150px,
+        # zero zero-size/invisible buttons at any width, before this was written.
+        self._process_button_items_list = [
+            (self.btn_quick_preview, wx.ALL, 4),
+            (self.btn_start, wx.ALL, 4),
+            (self.btn_suspend, wx.ALL, 4),
+            (self.btn_cancel, wx.ALL, 4),
+        ]
+        self.pnl_process.Bind(wx.EVT_SIZE, self._on_size_pnl_process)
+        self._relayout_process_row()
 
         # main layout
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.AddSpacer(8)
-        layout.Add(self.pnl_preset, 0, wx.ALIGN_RIGHT, 2)
+        # ADR-152: wx.EXPAND (was wx.ALIGN_RIGHT-only) so pnl_preset receives the
+        # frame's real current width via its own EVT_SIZE, which
+        # _relayout_preset_toolbar() needs to decide where to wrap. Not a visible
+        # change at a typical/default window width -- the toolbar's own natural
+        # content width already spans nearly the full frame width at this app's
+        # normal usage sizes (confirmed via a live screenshot), so switching from
+        # right-aligned-with-empty-space to left-aligned-filling-the-row reads the
+        # same in the common case; the difference is only visible (in a good way)
+        # exactly when the window is narrower than the toolbar's natural width.
+        layout.Add(self.pnl_preset, 0, wx.EXPAND, 2)
         layout.Add(self.pnl_file.panel, 0, wx.ALL | wx.EXPAND, 8)
         layout.Add(self.pnl_file_option, 0, wx.ALL | wx.EXPAND, 4)
         layout.Add(self.pnl_options, 1, wx.ALL | wx.EXPAND, 8)
@@ -5606,6 +5599,212 @@ class MainFrame(wx.Frame):
         self._update_frame_min_size()
         self._clamp_frame_to_screen()
 
+    def _toolbar_items(self):
+        """Ordered list of pnl_preset's toolbar controls/spacers/separators (ADR-152)
+        -- exactly the same widgets, order, flags and borders a plain single-row
+        wx.BoxSizer used to Add() -- the single source of truth
+        _relayout_preset_toolbar() wraps into rows. Each entry is either
+        ("widget", window, flag, border) or ("spacer", width)."""
+        return [
+            ("widget", self.lbl_preset, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 2),
+            ("widget", self.cbo_app_preset, wx.ALL, 2),
+            ("widget", self.btn_load_preset, wx.ALL, 2),
+            ("widget", self.btn_save_preset, wx.ALL, 2),
+            ("widget", self.btn_delete_preset, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_quick_preset, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.btn_quick_preset_movie, wx.ALL, 2),
+            ("widget", self.btn_quick_preset_action, wx.ALL, 2),
+            ("widget", self.btn_quick_preset_3decker, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_compare_preset, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.btn_compare_presets, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_command, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.btn_copy_command, wx.ALL, 2),
+            ("widget", self.btn_import_command, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_language, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.lbl_language, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 2),
+            ("widget", self.cbo_language, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_layout, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.lbl_layout, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 2),
+            ("widget", self.cbo_layout, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_zoom, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.lbl_zoom, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 2),
+            ("widget", self.cbo_zoom, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_update, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.btn_check_updates, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.btn_check_nagadomi_updates, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.btn_whats_new, wx.ALL, 2),
+        ]
+
+    def _relayout_preset_toolbar(self):
+        """Rebuilds pnl_preset's row layout for its current width (ADR-152).
+        Detaches every widget from whatever sizer currently holds it before
+        rebuilding, so this is always safe to call repeatedly -- never hits wx's
+        "window already in a sizer" assertion on a second call (a real bug hit
+        and fixed while building this, confirmed via an isolated probe before
+        this code was written). Never lets a spacer or separator (a thin
+        StaticLine dividing two control groups) become the first thing on a new
+        row -- both are dropped in that position rather than left stranded with
+        nothing to their left.
+
+        The parent frame's own re-Layout (needed only when the toolbar's own
+        required height changes) is deferred via wx.CallAfter rather than called
+        synchronously -- calling it inline here caused a real, isolated-probe-
+        confirmed bug on a GROWING transition: the parent's synchronous Layout()
+        re-fired this same handler while still inside the first call, and a naive
+        reentrancy guard silently swallowed that necessary second pass instead of
+        letting it complete after this one, leaving the new row's buttons
+        zero-sized (invisible) until the NEXT unrelated resize happened to fix it
+        by accident."""
+        if getattr(self, "_relaying_out_preset_toolbar", False):
+            return
+        self._relaying_out_preset_toolbar = True
+        try:
+            available_width = self.pnl_preset.GetClientSize().width
+            if available_width <= 0:
+                return
+            items = self._toolbar_items_list
+            for entry in items:
+                if entry[0] == "widget":
+                    widget = entry[1]
+                    containing = widget.GetContainingSizer()
+                    if containing is not None:
+                        containing.Detach(widget)
+
+            vsizer = wx.BoxSizer(wx.VERTICAL)
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            row_width = 0
+            row_has_content = False
+            for entry in items:
+                if entry[0] == "spacer":
+                    width = entry[1]
+                    if not row_has_content:
+                        continue
+                    if row_width + width > available_width:
+                        vsizer.Add(row, 0, wx.EXPAND)
+                        row = wx.BoxSizer(wx.HORIZONTAL)
+                        row_width = 0
+                        row_has_content = False
+                        continue
+                    row.AddSpacer(width)
+                    row_width += width
+                    continue
+
+                _, widget, flag, border = entry
+                is_separator = isinstance(widget, wx.StaticLine)
+                if is_separator and not row_has_content:
+                    continue
+                item_width = widget.GetBestSize().width + border * 2
+                if row_has_content and row_width + item_width > available_width:
+                    vsizer.Add(row, 0, wx.EXPAND)
+                    row = wx.BoxSizer(wx.HORIZONTAL)
+                    row_width = 0
+                    row_has_content = False
+                    if is_separator:
+                        continue
+                row.Add(widget, 0, flag, border)
+                row_width += item_width
+                row_has_content = True
+            vsizer.Add(row, 0, wx.EXPAND)
+
+            old_sizer = self.pnl_preset.GetSizer()
+            self.pnl_preset.SetSizer(vsizer, deleteOld=False)
+            if old_sizer is not None:
+                old_sizer.Clear(delete_windows=False)
+                old_sizer.Destroy()
+            self.pnl_preset.Layout()
+
+            new_min = vsizer.CalcMin()
+            if self.pnl_preset.GetMinSize() != new_min:
+                self.pnl_preset.SetMinSize(new_min)
+                top_sizer = self.GetSizer()
+                if top_sizer is not None:
+                    wx.CallAfter(top_sizer.Layout)
+        finally:
+            self._relaying_out_preset_toolbar = False
+
+    def _on_size_pnl_preset(self, event):
+        event.Skip()
+        self._relayout_preset_toolbar()
+
+    def _relayout_process_row(self):
+        """Rebuilds pnl_process's row layout for its current width (ADR-153) --
+        same shape as _relayout_preset_toolbar()/ADR-152 (detach-first so this is
+        safe to call repeatedly, deferred wx.CallAfter for the parent's own
+        re-Layout so a growing transition can't leave a row zero-sized), except
+        the gauge (self.prg_tqdm) is not part of the wrappable item list -- it
+        always starts row 1, stretchy (proportion=1), exactly like the original
+        single-row layout; only the 4 buttons wrap onto additional rows below it
+        when they don't all fit alongside it."""
+        if getattr(self, "_relaying_out_process_row", False):
+            return
+        self._relaying_out_process_row = True
+        try:
+            available_width = self.pnl_process.GetClientSize().width
+            if available_width <= 0:
+                return
+            items = self._process_button_items_list
+            containing = self.prg_tqdm.GetContainingSizer()
+            if containing is not None:
+                containing.Detach(self.prg_tqdm)
+            for widget, _flag, _border in items:
+                containing = widget.GetContainingSizer()
+                if containing is not None:
+                    containing.Detach(widget)
+
+            vsizer = wx.BoxSizer(wx.VERTICAL)
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            gauge_min_width = self.prg_tqdm.GetMinSize().width
+            row.Add(self.prg_tqdm, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+            row_width = gauge_min_width + 8
+            row_has_content = True
+            for widget, flag, border in items:
+                item_width = widget.GetBestSize().width + border * 2
+                if row_has_content and row_width + item_width > available_width:
+                    vsizer.Add(row, 0, wx.EXPAND)
+                    row = wx.BoxSizer(wx.HORIZONTAL)
+                    row_width = 0
+                    row_has_content = False
+                row.Add(widget, 0, flag, border)
+                row_width += item_width
+                row_has_content = True
+            vsizer.Add(row, 0, wx.EXPAND)
+
+            old_sizer = self.pnl_process.GetSizer()
+            self.pnl_process.SetSizer(vsizer, deleteOld=False)
+            if old_sizer is not None:
+                old_sizer.Clear(delete_windows=False)
+                old_sizer.Destroy()
+            self.pnl_process.Layout()
+
+            new_min = vsizer.CalcMin()
+            if self.pnl_process.GetMinSize() != new_min:
+                self.pnl_process.SetMinSize(new_min)
+                top_sizer = self.GetSizer()
+                if top_sizer is not None:
+                    wx.CallAfter(top_sizer.Layout)
+        finally:
+            self._relaying_out_process_row = False
+
+    def _on_size_pnl_process(self, event):
+        event.Skip()
+        self._relayout_process_row()
+
     def _update_frame_min_size(self):
         """Real user report: the window has an effective minimum size the user
         can't drag below, in both directions, and they want it genuinely
@@ -5628,19 +5827,38 @@ class MainFrame(wx.Frame):
 
         Fix: give the frame an explicit, much smaller MinSize, derived from
         pnl_process (the progress bar + Quick Preview/Start/Suspend/Cancel
-        button row) rather than a hardcoded guess, since that row is the one
-        thing NOT inside a scrollable panel and would visually clip if the
-        frame went narrower than its own natural minimum. pnl_options's
-        scrolling (both axes now -- see wrap.SetupScrolling in
-        _compose_options_layout_tabbed and pnl_single's own SetupScrolling)
-        absorbs everything else. Derived from CalcMin() rather than a fixed
-        number so it stays correct across zoom levels (button text grows
-        with the zoom font) and locales (translated button labels vary in
-        length) -- called once at the end of __init__ and again from
-        apply_zoom_level(), the same two points that already recompute
-        other zoom-sensitive MinSize values."""
-        process_min = self.pnl_process.GetSizer().CalcMin()
-        min_width = max(process_min.width + 24, 360)
+        button row) and pnl_preset (the top toolbar) rather than a hardcoded
+        guess, since those two are the things NOT inside a scrollable panel
+        and would visually clip if the frame went narrower than their own
+        natural minimum. pnl_options's scrolling (both axes now -- see
+        wrap.SetupScrolling in _compose_options_layout_tabbed and
+        pnl_single's own SetupScrolling) absorbs everything else.
+
+        ADR-152/153: both pnl_preset and pnl_process now wrap their own
+        controls onto additional rows when narrower than their natural
+        content width (real user request: dragging the frame edges hit an
+        early, surprising floor). So the TRUE floor once wrapping is
+        available is no longer "every control fits on one line" -- it's
+        just "the single WIDEST individual control fits on its own line",
+        computed directly from each panel's own item list rather than
+        trusting whatever CalcMin() those panels currently happen to report
+        (which reflects whatever width they were last actually laid out at,
+        not the narrowest they're capable of). Still derived live rather
+        than a fixed number, so it stays correct across zoom levels (button
+        text grows with the zoom font) and locales (translated button
+        labels vary in length) -- called once at the end of __init__ and
+        again from apply_zoom_level(), the same two points that already
+        recompute other zoom-sensitive MinSize values."""
+        toolbar_widest = max(
+            (entry[1].GetBestSize().width + entry[3] * 2
+             for entry in self._toolbar_items_list if entry[0] == "widget"),
+            default=0)
+        process_widest = max(
+            [self.prg_tqdm.GetMinSize().width + 8]
+            + [widget.GetBestSize().width + border * 2
+               for widget, _flag, border in self._process_button_items_list])
+        min_width = max(toolbar_widest, process_widest) + 24
+        min_width = max(min_width, 200)
         min_height = 240
         self.SetMinSize((min_width, min_height))
 
@@ -13283,6 +13501,109 @@ def _self_test_update_available_dialog_wiring():
     print("_self_test_update_available_dialog_wiring: PASS")
 
 
+def _self_test_preset_toolbar_wraps_without_zero_size_controls():
+    """Regression test for ADR-152: pnl_preset's toolbar must wrap onto more rows
+    when the window is narrower than its natural content width, and every
+    wrapped control must stay a real, visible size. This is the exact bug a
+    first attempt (wx.WrapSizer) had -- rows past the first silently collapsed
+    to zero height, making those controls genuinely invisible -- confirmed via
+    isolated probes before ever touching this file, then fixed with hand-rolled
+    wrapping (_toolbar_items()/_relayout_preset_toolbar()). Real MainFrame, two
+    real resizes, no GPU needed."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        frame.Show(True)
+
+        frame.SetSize((1900, 900))
+        frame.SendSizeEvent()
+        for _ in range(5):
+            wx.SafeYield()
+        wide_rows = len(set(
+            entry[1].GetPosition().y for entry in frame._toolbar_items_list if entry[0] == "widget"))
+
+        frame.SetSize((700, 900))
+        frame.SendSizeEvent()
+        for _ in range(5):
+            wx.SafeYield()
+        narrow_rows = len(set(
+            entry[1].GetPosition().y for entry in frame._toolbar_items_list if entry[0] == "widget"))
+        zero_size = [
+            (entry[1].GetLabel() if hasattr(entry[1], "GetLabel") and entry[1].GetLabel() else "(separator)")
+            for entry in frame._toolbar_items_list
+            if entry[0] == "widget" and (entry[1].GetSize().width <= 0 or entry[1].GetSize().height <= 0)
+        ]
+
+        assert narrow_rows > wide_rows, \
+            f"a narrower window must use MORE toolbar rows, got narrow={narrow_rows} wide={wide_rows}"
+        assert not zero_size, f"toolbar controls must never collapse to zero size: {zero_size}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_preset_toolbar_wraps_without_zero_size_controls: PASS")
+
+
+def _self_test_process_row_wraps_and_frame_shrinks_further():
+    """Regression test for ADR-153: pnl_process (progress bar + Quick Preview/
+    Start/Suspend/Cancel) must wrap its buttons onto additional rows when
+    narrower than its natural content width, with the gauge staying pinned as
+    the stretchy first item of row 1 and no control ever collapsing to zero
+    size -- same discipline as ADR-152's toolbar test. Also confirms the real
+    point of this change: the frame's own drag-resize floor (SetMinSize) is
+    now meaningfully narrower than the old single-row-everything width, since
+    _update_frame_min_size() now derives it from each wrappable panel's single
+    WIDEST item rather than the full unwrapped row. Real MainFrame, no GPU
+    needed."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        frame.Show(True)
+
+        old_style_min_width = frame.pnl_process.GetSizer().CalcMin().width + 24
+        assert frame.GetMinSize().width < old_style_min_width, (
+            f"frame MinSize width ({frame.GetMinSize().width}) should be narrower than the old "
+            f"single-row-everything floor ({old_style_min_width}) now that pnl_process wraps")
+
+        frame.SetSize((900, 900))
+        frame.SendSizeEvent()
+        for _ in range(5):
+            wx.SafeYield()
+        wide_rows = len(set(
+            b.GetPosition().y for b in
+            [frame.prg_tqdm, frame.btn_quick_preview, frame.btn_start, frame.btn_suspend, frame.btn_cancel]))
+
+        frame.SetSize((300, 900))
+        frame.SendSizeEvent()
+        for _ in range(5):
+            wx.SafeYield()
+        widgets = [frame.prg_tqdm, frame.btn_quick_preview, frame.btn_start, frame.btn_suspend, frame.btn_cancel]
+        narrow_rows = len(set(w.GetPosition().y for w in widgets))
+        zero_size = [
+            (w.GetLabel() if hasattr(w, "GetLabel") and w.GetLabel() else "(gauge)")
+            for w in widgets if w.GetSize().width <= 0 or w.GetSize().height <= 0
+        ]
+
+        assert narrow_rows > wide_rows, \
+            f"a narrower window must use MORE process-row rows, got narrow={narrow_rows} wide={wide_rows}"
+        assert not zero_size, f"process-row controls must never collapse to zero size: {zero_size}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_process_row_wraps_and_frame_shrinks_further: PASS")
+
+
 def _self_test_whats_new_changelog_dialog():
     """Regression test for the What's New button (ADR-150): clicking it must read
     the REAL 3DECKER_CHANGELOG.md this project maintains (not a hardcoded string)
@@ -13592,6 +13913,8 @@ def _run_self_tests():
         _self_test_install_nagadomi_update_button,
         _self_test_update_available_dialog_wiring,
         _self_test_whats_new_changelog_dialog,
+        _self_test_preset_toolbar_wraps_without_zero_size_controls,
+        _self_test_process_row_wraps_and_frame_shrinks_further,
         _self_test_import_command_round_trip,
         _self_test_device_dropdown_no_torch_cuda_touch,
         _self_test_label_tooltips_propagated,

@@ -43,6 +43,14 @@ when your Device dropdown is set to "All CUDA Device."
 to the update-check buttons — no more needing to leave the app or hunt for
 this file on disk to see what's changed.
 
+**Object Stability got a new "Speed" option**, and the window can now be
+resized much smaller. Object Stability's motion tracking runs on your CPU
+and can noticeably slow a conversion down — a new Accurate/Fast choice lets
+you trade a little motion-tracking precision for real speed. Separately, the
+toolbar and the Start/Suspend/Cancel row now wrap onto extra rows instead of
+getting cut off, so the window can be dragged down to about 300px wide
+instead of stopping at over 640px.
+
 ---
 
 ## Update — September 10, 2026
@@ -300,6 +308,11 @@ movie up to 48fps.
   elapsed time, speed, and estimated time remaining) instead of one
   undifferentiated bar, and the window can no longer get stuck positioned
   off-screen.
+- **The toolbar and the Start/Suspend/Cancel row now wrap onto extra rows
+  instead of getting cut off** when the window is narrower than their usual
+  width, and the window itself can be dragged much narrower than before —
+  down to about 300px wide instead of needing over 640px, so it fits into a
+  small corner of your screen without hiding any button.
 - Two separate update buttons — **"Check for 3DECKER Updates"** and **"Check for
   Nagadomi Updates"** — let you see what's new from either project without changing
   anything, each with its own **"Install Update Now"** button right on the results

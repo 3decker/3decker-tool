@@ -28,6 +28,10 @@ NAME_MAP = {
     "Any_V3_Base": "da3-base",
     "Any_V3_Large_1_1": "da3-large-1.1",
     "Any_V3_Metric_Large": "da3metric-large",
+    # ADR-159: CC-BY-NC-4.0 -- gated behind has_checkpoint_file in gui.py's
+    # get_depth_models(), same treatment as Any_V2_B/Any_V2_L (ADR-142).
+    "Any_V3_Giant": "da3-giant-1.1",
+    "Any_V3_Nested_Giant_Large": "da3nested-giant-large-1.1",
 }
 MODEL_FILES = {
     "Any_V3_Mono": path.join(HUB_MODEL_DIR, "checkpoints", "da3mono-large.safetensors"),
@@ -36,6 +40,8 @@ MODEL_FILES = {
     "Any_V3_Base": path.join(HUB_MODEL_DIR, "checkpoints", "da3-base.safetensors"),
     "Any_V3_Large_1_1": path.join(HUB_MODEL_DIR, "checkpoints", "da3-large-1.1.safetensors"),
     "Any_V3_Metric_Large": path.join(HUB_MODEL_DIR, "checkpoints", "da3metric-large.safetensors"),
+    "Any_V3_Giant": path.join(HUB_MODEL_DIR, "checkpoints", "da3-giant-1.1.safetensors"),
+    "Any_V3_Nested_Giant_Large": path.join(HUB_MODEL_DIR, "checkpoints", "da3nested-giant-large-1.1.safetensors"),
 }
 # Whether Depth Anti-aliasing (a separate, small refinement net run on top of the
 # raw depth output) is architecturally valid for a given DA3 variant has only ever
@@ -58,6 +64,12 @@ AA_SUPPORTED_MODELS = {
 # must use the underlying config name instead.
 DA3_CONFIG_NAME_OVERRIDES = {
     "da3-large-1.1": "da3-large",
+    # ADR-159: same "-1.1 is a checkpoint release, not a separate config" story
+    # as da3-large-1.1 above -- confirmed by reading the real config filenames
+    # in nagadomi's own cached hub repo (configs/da3-giant.yaml, configs/
+    # da3nested-giant-large.yaml -- no "-1.1" in either filename).
+    "da3-giant-1.1": "da3-giant",
+    "da3nested-giant-large-1.1": "da3nested-giant-large",
 }
 
 

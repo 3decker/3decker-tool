@@ -5061,6 +5061,10 @@ def create_parser(required_true=True):
                                  # with argparse's "invalid choice" even though the GUI's
                                  # own Depth Model dropdown has offered them since ADR-135.
                                  "Any_V3_Small", "Any_V3_Base", "Any_V3_Large_1_1", "Any_V3_Metric_Large",
+                                 # ADR-159: CC-BY-NC-4.0, not shown in the GUI unless the checkpoint is
+                                 # already manually placed (same as Any_V2_B/Any_V2_L) -- still a real,
+                                 # valid CLI choice for anyone who has done that themselves.
+                                 "Any_V3_Giant", "Any_V3_Nested_Giant_Large",
                                  "DepthPro", "DepthPro_S",
                                  "VDA_S", "VDA_B", "VDA_L",
                                  "VDA_Metric", "VDA_Metric_S", "VDA_Metric_B", "VDA_Metric_L",

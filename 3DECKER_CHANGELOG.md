@@ -47,6 +47,14 @@ produces different results, but no consistent "better" either way — so it's of
 as a choice to try for yourself, not a new recommended default. Only works at 3D
 Strength 4 or below (it'll tell you clearly if you go higher).
 
+**Two more Depth-Anything-3 sizes: Giant and Nested-Giant-Large** — bigger than
+anything else in the Any_V3 family (1.15B/1.40B parameters). These stay hidden in
+the dropdown unless you've already downloaded the checkpoint yourself, because
+(unlike every other model here) they're licensed for personal/non-commercial use
+only, not for a shared distribution. Loading one for the first time needs one
+extra manual step (`pip install evo`) — the app will still auto-download the
+checkpoint itself once that's in place.
+
 ---
 
 ## Update — September 14, 2026

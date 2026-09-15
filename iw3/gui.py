@@ -67,7 +67,10 @@ from .depth_anything_model import (
 )
 from .video_depth_anything_model import AA_SUPPORT_MODELS as VDA_AA_SUPPORTED_MODELS
 from .video_depth_anything_streaming_model import AA_SUPPORT_MODELS as VDA_STREAM_AA_SUPPORTED_MODELS
-from .depth_anything_v3_model import AA_SUPPORTED_MODELS as DA3_AA_SUPPORTED_MODELS
+from .depth_anything_v3_model import (
+    DepthAnythingV3MonoModel,
+    AA_SUPPORTED_MODELS as DA3_AA_SUPPORTED_MODELS,
+)
 from .depth_pro_model import MODEL_FILES as DEPTH_PRO_MODELS
 from .zoedepth_model import MODEL_FILES as ZOEDPETH_MODELS
 from .metric3d_model import MODEL_FILES as METRIC3D_MODELS
@@ -1426,6 +1429,11 @@ class MainFrame(wx.Frame):
               "_ViT_G is the larger/slower/highest-detail variant, _ViT_L is lighter and faster.\n"
               "Size suffix (_S/_B/_L, small/base/large): bigger = noticeably better quality, but "
               "slower and more VRAM — roughly proportional to size, not free.\n"
+              "Any_V3_Giant / Any_V3_Nested_Giant_Large: only appear here once you've manually "
+              "downloaded their checkpoint yourself — bigger still than _L (1.15B/1.40B parameters), "
+              "and licensed CC BY-NC 4.0 (personal/non-commercial use only), unlike every other model "
+              "in this list. Not offered by default so a casual install never stumbles into a "
+              "restricted-license model without realizing it.\n"
               "Recommended: a VDA_* model for video (steadiest results with the least fiddling); an "
               "Any_V3_* model for single images or when you want maximum per-frame detail on video and are "
               "willing to tune EMA/Object Stability yourself."))
@@ -6142,6 +6150,24 @@ class MainFrame(wx.Frame):
         depth_models += ["Distill_Any_S", "Distill_Any_B", "Distill_Any_L"]
 
         depth_models += ["Any_V3_Mono", "Any_V3_Mono_01"]
+        # ADR-159: Any_V3_Giant/Any_V3_Nested_Giant_Large -- same has_checkpoint_file
+        # gating as Any_V2_B/Any_V2_L above, for the same reason: both are CC BY-NC
+        # 4.0 (confirmed directly on their real Hugging Face model cards -- unlike
+        # da3-large, whose "-1.1" checkpoint was specifically re-released under
+        # Apache-2.0, neither Giant variant got that same re-license at any version).
+        # Unlike Any_V2_B/L, iw3's own _load_da3_model() would happily auto-download
+        # these on first real use regardless of this gate (nagadomi's hub code isn't
+        # involved in that decision the way it is for Any_V2_B/L) -- downloading for
+        # personal non-commercial use is exactly what CC BY-NC 4.0 already permits,
+        # so that's not the point of gating here. The point is GUI discoverability:
+        # keeping a casual recipient of the shareable 3DECKER zip from stumbling into
+        # a restricted-license model by default. Once the checkpoint is actually
+        # downloaded once (personal use, this machine), it shows up here from then on.
+        if DepthAnythingV3MonoModel.has_checkpoint_file("Any_V3_Giant"):
+            depth_models.append("Any_V3_Giant")
+        if DepthAnythingV3MonoModel.has_checkpoint_file("Any_V3_Nested_Giant_Large"):
+            depth_models.append("Any_V3_Nested_Giant_Large")
+
         # ADR-135: 4 more Depth-Anything-3 variants -- same as Any_V3_Mono/
         # Any_V3_Mono_01 above, unconditionally offered (not gated on
         # has_checkpoint_file the way Any_V2_B/L is) since every DA3 variant
@@ -14248,6 +14274,37 @@ def _self_test_mlbw_l2_cycle_method():
     print("_self_test_mlbw_l2_cycle_method: PASS")
 
 
+def _self_test_da3_giant_variants_gated():
+    """ADR-159: Any_V3_Giant/Any_V3_Nested_Giant_Large must appear in
+    get_depth_models() if and only if their checkpoint is already present on
+    this machine -- same has_checkpoint_file gating Any_V2_B/Any_V2_L already
+    use (ADR-142), for the same CC-BY-NC-4.0 reason. Checks the real,
+    current has_checkpoint_file() state rather than assuming True or False,
+    since whether the checkpoint happens to be downloaded varies by machine
+    (this session's own live verification downloaded both here, but a CI
+    runner or fresh install would not have them)."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        models = frame.get_depth_models()
+        for name in ("Any_V3_Giant", "Any_V3_Nested_Giant_Large"):
+            expected = DepthAnythingV3MonoModel.has_checkpoint_file(name)
+            actual = name in models
+            assert actual == expected, (
+                f"{name}: has_checkpoint_file()={expected} but "
+                f"in get_depth_models()={actual} -- gate is not consistent")
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_da3_giant_variants_gated: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -14315,6 +14372,7 @@ def _run_self_tests():
         _self_test_moge3_model_selection,
         _self_test_clear_all_button,
         _self_test_mlbw_l2_cycle_method,
+        _self_test_da3_giant_variants_gated,
     ]
     failures = []
     for test in tests:

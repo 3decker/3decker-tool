@@ -34,6 +34,11 @@ LBM Depth's output came out flat/low-detail in real testing, and FlashDepth has 
 hard technical blocker (it needs an older, incompatible version of a core library
 this app can't safely install) — so neither was worth shipping.
 
+**A new "Clear All" button** sits next to Load/Save/Delete in the toolbar. It resets
+every setting back to the app's own defaults and empties the Input/Output boxes,
+after asking you to confirm — handy before taking a screenshot to share, or just to
+start fresh without closing the app.
+
 ---
 
 ## Update — September 14, 2026

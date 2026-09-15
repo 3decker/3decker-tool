@@ -4912,6 +4912,12 @@ class MainFrame(wx.Frame):
         self.btn_delete_preset.SetToolTip(
             T("Permanently deletes the saved preset named in the Preset box. Does not affect the "
               "settings currently shown in this window, only the saved copy."))
+        self.btn_clear_all = wx.Button(self.pnl_preset, label=T("Clear All"))
+        self.btn_clear_all.SetToolTip(
+            T("Resets every setting in this window back to the app's own factory defaults, and empties "
+              "the Input/Output boxes too. Does not touch any saved preset. Handy before taking a "
+              "screenshot to share, or just to start over from a clean slate.\n"
+              "Asks for confirmation first -- anything unsaved in this window is discarded."))
 
         # quick presets
         self.sep_quick_preset = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
@@ -5232,6 +5238,7 @@ class MainFrame(wx.Frame):
         self.btn_load_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_load_preset)
         self.btn_save_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_save_preset)
         self.btn_delete_preset.Bind(wx.EVT_BUTTON, self.on_click_btn_delete_preset)
+        self.btn_clear_all.Bind(wx.EVT_BUTTON, self.on_click_btn_clear_all)
         self.btn_quick_preset_movie.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("movie"))
         self.btn_quick_preset_action.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("action"))
         self.btn_quick_preset_3decker.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("3decker"))
@@ -5622,6 +5629,7 @@ class MainFrame(wx.Frame):
             ("widget", self.btn_load_preset, wx.ALL, 2),
             ("widget", self.btn_save_preset, wx.ALL, 2),
             ("widget", self.btn_delete_preset, wx.ALL, 2),
+            ("widget", self.btn_clear_all, wx.ALL, 2),
             ("spacer", 2),
             ("widget", self.sep_quick_preset, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
             ("spacer", 4),
@@ -7881,6 +7889,27 @@ class MainFrame(wx.Frame):
     def on_click_btn_delete_preset(self, event):
         self.delete_preset(self.cbo_app_preset.GetValue())
         event.Skip()
+
+    def on_click_btn_clear_all(self, event):
+        """Resets every GUI setting to the app's own factory defaults (and
+        empties Input/Output), asking for confirmation first since this
+        discards anything unsaved. Reuses the exact same create_parser(
+        required_true=False).parse_args([]) -> apply_parsed_args_to_gui()
+        round trip Import Command already uses (ADR-121/074) -- a real,
+        already-proven argparse.Namespace -> widgets path, rather than a new
+        hand-maintained list of default values that could drift out of sync
+        with create_parser()'s own defaults as flags are added later."""
+        with wx.MessageDialog(
+                None,
+                message=T("Reset every setting to defaults and clear Input/Output?"),
+                caption=T("Confirm"), style=wx.YES_NO) as dlg:
+            if dlg.ShowModal() != wx.ID_YES:
+                return
+        args = create_parser(required_true=False).parse_args([])
+        self.apply_parsed_args_to_gui(args)
+        self.SetStatusText(T("All settings reset to defaults"))
+        if event is not None:
+            event.Skip()
 
     def on_text_changed_cbo_language(self, event):
         lang = self.cbo_language.GetClientData(self.cbo_language.GetSelection())
@@ -14038,6 +14067,68 @@ def _self_test_moge3_model_selection():
     print("_self_test_moge3_model_selection: PASS")
 
 
+def _self_test_clear_all_button():
+    """Clear All (pnl_preset toolbar) must: (a) do nothing at all when the
+    confirmation is declined -- no widget touched; (b) reset every setting to
+    create_parser()'s own real defaults and empty Input/Output when accepted.
+    Mirrors the confirm-dialog-monkeypatch pattern _self_test_install_3decker
+    _update_button already established (fakes wx.MessageDialog so no real
+    modal blocks the test), rather than reinventing it."""
+    import iw3.gui as gui_mod
+
+    class _FakeConfirmDialog:
+        result = wx.ID_YES
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ShowModal(self):
+            return _FakeConfirmDialog.result
+
+    app = None
+    frame = None
+    orig_message_dialog = gui_mod.wx.MessageDialog
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        gui_mod.wx.MessageDialog = _FakeConfirmDialog
+
+        # Drive some fields away from their defaults first.
+        frame.pnl_file.set_input_path("C:/some/private/movie.mkv")
+        frame.pnl_file.set_output_path("C:/some/private/output")
+        _apply_combo_value(frame.cbo_divergence, "4.5")
+
+        # Declining must leave every one of those untouched.
+        _FakeConfirmDialog.result = wx.ID_NO
+        frame.on_click_btn_clear_all(None)
+        assert frame.pnl_file.input_path == "C:/some/private/movie.mkv"
+        assert frame.cbo_divergence.GetValue() == "4.5"
+
+        # Accepting resets to create_parser()'s own real defaults.
+        _FakeConfirmDialog.result = wx.ID_YES
+        frame.on_click_btn_clear_all(None)
+        assert frame.pnl_file.input_path == "", frame.pnl_file.input_path
+        assert frame.pnl_file.output_path == ""
+        default_args = create_parser(required_true=False).parse_args([])
+        assert frame.cbo_divergence.GetValue() == str(default_args.divergence), \
+            frame.cbo_divergence.GetValue()
+    finally:
+        gui_mod.wx.MessageDialog = orig_message_dialog
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_clear_all_button: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -14103,6 +14194,7 @@ def _run_self_tests():
         _self_test_free_vram_on_job_finish,
         _self_test_metric3d_model_selection,
         _self_test_moge3_model_selection,
+        _self_test_clear_all_button,
     ]
     failures = []
     for test in tests:

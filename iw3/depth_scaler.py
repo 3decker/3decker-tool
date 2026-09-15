@@ -7,8 +7,23 @@ import torch.nn.functional as F
 _UNSET = object()
 
 
+# ADR-151: two Farneback optical flow parameter presets -- "accurate" is the
+# original, unchanged values this feature always used; "fast" cuts pyramid
+# levels 3->2 and iterations 3->1 (the two params that scale flow computation
+# cost roughly linearly, since Farneback does one full pass per level per
+# iteration) and trims window/neighborhood size slightly too. Never changed
+# without the user opting in via the GUI's Speed dropdown / --temporal-
+# stabilize-fast -- "accurate" stays the default so nobody's existing results
+# change underneath them. Tuple order matches cv2.calcOpticalFlowFarneback's
+# own positional signature: (pyr_scale, levels, winsize, iterations, poly_n,
+# poly_sigma, flags).
+_FARNEBACK_PARAMS_ACCURATE = (0.5, 3, 15, 3, 5, 1.2, 0)
+_FARNEBACK_PARAMS_FAST = (0.5, 2, 13, 1, 5, 1.1, 0)
+
+
 def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
-                                  strength, max_shift_velocity, flat_region_boost, edge_protection):
+                                  strength, max_shift_velocity, flat_region_boost, edge_protection,
+                                  fast=False):
     """Core motion-warped blend shared by TemporalStabilizer (single-channel depth,
     (H,W) arrays) and RGBTemporalStabilizer (3-channel RGB, (H,W,3) arrays) below --
     extracted verbatim from TemporalStabilizer.stabilize()'s body so depth's existing,
@@ -29,8 +44,8 @@ def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
     Returns the blended (H,W) or (H,W,3) float32 array -- caller keeps prev_gray/
     prev_value bookkeeping (this function is stateless)."""
     h, w = gray.shape
-    flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None,
-                                         0.5, 3, 15, 3, 5, 1.2, 0)
+    farneback_params = _FARNEBACK_PARAMS_FAST if fast else _FARNEBACK_PARAMS_ACCURATE
+    flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, *farneback_params)
     grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
     map_x = grid_x + flow[..., 0]
     map_y = grid_y + flow[..., 1]
@@ -103,11 +118,19 @@ class TemporalStabilizer:
     motion), tapering blending back toward the fresh per-frame result there."""
 
     def __init__(self, enabled=False, strength=0.7,
-                 max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0):
+                 max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0, fast=False):
         self.enabled = enabled
         self.strength = strength
         self.prev_gray = None
         self.prev_depth = None
+        # ADR-151: real user report -- the CPU-bound optical flow computation below
+        # (cv2.calcOpticalFlowFarneback has no CUDA build available in this project's
+        # bundled OpenCV, confirmed live) measurably drops conversion speed (a real
+        # 6.90->4.20 fps case). fast=False (accurate, this feature's original
+        # parameters, unchanged) stays the default; fast=True trades some motion-
+        # tracking precision for a real, meaningful speedup -- see
+        # _FARNEBACK_PARAMS_FAST below for the exact tradeoff.
+        self.fast = bool(fast)
         # All three below default to their exact prior (no-op) behavior -- adding
         # these must never change existing jobs' output unless explicitly opted in.
         # max_shift_velocity=None: no cap on how much a pixel's stabilized depth
@@ -134,7 +157,7 @@ class TemporalStabilizer:
         self.edge_protection = float(edge_protection)
 
     def reset(self, enabled=None, strength=None,
-              max_shift_velocity=_UNSET, flat_region_boost=None, edge_protection=None):
+              max_shift_velocity=_UNSET, flat_region_boost=None, edge_protection=None, fast=None):
         # Clears frame-to-frame memory (used at every scene cut, alongside the EMA
         # scaler's own reset) without necessarily changing the enabled/strength config --
         # those only change when explicitly passed.
@@ -152,6 +175,8 @@ class TemporalStabilizer:
             self.flat_region_boost = float(flat_region_boost)
         if edge_protection is not None:
             self.edge_protection = float(edge_protection)
+        if fast is not None:
+            self.fast = bool(fast)
         self.prev_gray = None
         self.prev_depth = None
 
@@ -176,6 +201,7 @@ class TemporalStabilizer:
         stabilized = _optical_flow_temporal_blend(
             depth_np, gray, self.prev_gray, self.prev_depth,
             self.strength, self.max_shift_velocity, self.flat_region_boost, self.edge_protection,
+            fast=self.fast,
         )
 
         self.prev_gray = gray

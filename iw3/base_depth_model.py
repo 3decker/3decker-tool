@@ -210,11 +210,13 @@ class BaseDepthModel(metaclass=ABCMeta):
         self.refine_strength = float(strength) if strength is not None else 1.0
 
     def enable_temporal_stabilize(self, strength=0.7,
-                                   max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0):
+                                   max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0,
+                                   fast=False):
         self.temporal_stabilizer.reset(enabled=True, strength=strength,
                                         max_shift_velocity=max_shift_velocity,
                                         flat_region_boost=flat_region_boost,
-                                        edge_protection=edge_protection)
+                                        edge_protection=edge_protection,
+                                        fast=fast)
 
     def disable_temporal_stabilize(self):
         self.temporal_stabilizer.reset(enabled=False)

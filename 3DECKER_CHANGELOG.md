@@ -123,7 +123,11 @@ move (using real motion tracking on the picture, not the depth map) and carries
 each object's own depth history along with it as it moves. This has extra dials —
 a hard cap on how much depth can jump frame to frame, extra smoothing in flat
 areas where flicker is most visible, and reduced smoothing right at real depth
-edges so fast motion doesn't lag or smear.
+edges so fast motion doesn't lag or smear. A new **Speed** option (Accurate/Fast)
+lets you trade a bit of motion-tracking precision for real conversion speed —
+this motion tracking runs on your CPU rather than the graphics card, so it can
+meaningfully slow a conversion down; Fast eases that cost for anyone who wants
+Object Stability without the full time penalty.
 
 ---
 

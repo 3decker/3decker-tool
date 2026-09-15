@@ -1568,6 +1568,33 @@ class MainFrame(wx.Frame):
               "(an object's silhouette), so Object Stability's flicker reduction doesn't smear or lag "
               "behind a moving object's outline. 0 = no reduction (original behavior)."))
 
+        # ADR-151: real user report -- Object Stability's motion tracking runs on the
+        # CPU (no CUDA build available for cv2.calcOpticalFlowFarneback in this
+        # project's bundled OpenCV, confirmed live), and measurably drops conversion
+        # speed (a real 6.90->4.20 fps case). "Accurate" keeps the exact original
+        # computation everyone's results were already made with; "Fast" cuts
+        # pyramid levels/iterations for a real, meaningful speedup at the cost of
+        # some motion-tracking precision.
+        self.lbl_temporal_stabilize_quality = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Speed"))
+        self.cbo_temporal_stabilize_quality = wx.ComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(),
+            choices=[T("Accurate"), T("Fast")],
+            name="cbo_temporal_stabilize_quality")
+        self.cbo_temporal_stabilize_quality.SetEditable(False)
+        self.cbo_temporal_stabilize_quality.SetSelection(0)
+        self.cbo_temporal_stabilize_quality.SetToolTip(
+            T("What it's for: Object Stability's motion tracking runs a real optical flow "
+              "computation on the CPU every frame (no GPU acceleration is available for this step "
+              "in this build) -- this controls how much work that computation does.\n"
+              "Accurate (default): the original, unchanged computation this feature has always used.\n"
+              "Fast: fewer passes over the image -- a real, meaningful speedup (exact amount depends on "
+              "your content/hardware), at the cost of somewhat less precise motion tracking -- fast/"
+              "complex motion may be followed a little less accurately.\n"
+              "Recommended: Accurate unless conversion speed with Object Stability on is a real "
+              "bottleneck for you; Fast is a reasonable tradeoff to try first before turning Object "
+              "Stability off entirely."))
+
         self.grp_depth_blend = wx.StaticBox(self.tab_depth_blend, label=T("Dual-Pass Depth Blend"))
 
         # Guided Light (ADR-102): see cpn_sharpen (ADR-101) for the full pattern
@@ -2693,6 +2720,9 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.lbl_temporal_stabilize_edge_protect,
                                   (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         pane_layout_stability.Add(self.cbo_temporal_stabilize_edge_protect, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_temporal_stabilize_quality,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        pane_layout_stability.Add(self.cbo_temporal_stabilize_quality, (k, 1), flag=wx.EXPAND)
         pane_layout_stability.Add((0, 8), (k := k + 1, 0))
         pane_layout_stability.Add(wx.StaticLine(self.cpn_stereo_stability_flicker.GetPane()),
                                   (k := k + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -6528,11 +6558,13 @@ class MainFrame(wx.Frame):
             self.cbo_temporal_stabilize_max_shift.Enable()
             self.cbo_temporal_stabilize_flat_boost.Enable()
             self.cbo_temporal_stabilize_edge_protect.Enable()
+            self.cbo_temporal_stabilize_quality.Enable()
         else:
             self.cbo_temporal_stabilize_strength.Disable()
             self.cbo_temporal_stabilize_max_shift.Disable()
             self.cbo_temporal_stabilize_flat_boost.Disable()
             self.cbo_temporal_stabilize_edge_protect.Disable()
+            self.cbo_temporal_stabilize_quality.Disable()
 
     def on_changed_chk_temporal_stabilize(self, event):
         self.update_temporal_stabilize()
@@ -6940,6 +6972,7 @@ class MainFrame(wx.Frame):
                 if self.cbo_temporal_stabilize_max_shift.GetValue().strip() else None),
             temporal_stabilize_flat_region_boost=float(self.cbo_temporal_stabilize_flat_boost.GetValue()),
             temporal_stabilize_edge_protection=float(self.cbo_temporal_stabilize_edge_protect.GetValue()),
+            temporal_stabilize_fast=(self.cbo_temporal_stabilize_quality.GetValue() == T("Fast")),
             **depth_blend_options,
             waifu2x_upscale=self.chk_waifu2x_upscale.GetValue(),
             waifu2x_method=self.cbo_waifu2x_method.GetValue(),
@@ -7414,6 +7447,7 @@ class MainFrame(wx.Frame):
             self.cbo_temporal_stabilize_flat_boost.SetValue("0.0")
             self.cbo_temporal_stabilize_edge_protect.SetValue("0.0")
             self.cbo_temporal_stabilize_max_shift.SetValue("")
+            self.cbo_temporal_stabilize_quality.SetValue(T("Accurate"))
             self.update_temporal_stabilize()
 
             self.chk_scene_detect.SetValue(True)
@@ -7995,6 +8029,8 @@ class MainFrame(wx.Frame):
             self.cbo_temporal_stabilize_flat_boost, getattr(args, "temporal_stabilize_flat_region_boost", 0.0))
         _apply_combo_value(
             self.cbo_temporal_stabilize_edge_protect, getattr(args, "temporal_stabilize_edge_protection", 0.0))
+        self.cbo_temporal_stabilize_quality.SetValue(
+            T("Fast") if getattr(args, "temporal_stabilize_fast", False) else T("Accurate"))
 
         # depth_blend_* fields (feather blur, bilateral +d/sigma-color/sigma-space,
         # CLAHE +clip/tile, align +decay, edge suppression, edge hard-cutoff) all now
@@ -10332,7 +10368,7 @@ def _self_test_layout_mode_live_switch():
     category panels to the other container and back, repeatedly, in the same running
     window, without losing or duplicating any control, and without breaking a
     cross-control Enable/Disable relationship that lives inside one of those panels
-    (Object Stability's sub-settings, chk_temporal_stabilize -> its 4 dependent
+    (Object Stability's sub-settings, chk_temporal_stabilize -> its 5 dependent
     combos). Also guards against a real collapse bug found and fixed while building
     this: wx.Notebook leaves every non-selected page Hidden even after RemovePage(),
     which silently zeroed out GridBagSizer.CalcMin() for the Single Page layout (a
@@ -12333,6 +12369,8 @@ def _self_test_3decker_quick_preset():
             frame.cbo_temporal_stabilize_edge_protect.GetValue()
         assert frame.cbo_temporal_stabilize_max_shift.GetValue() == "", \
             frame.cbo_temporal_stabilize_max_shift.GetValue()
+        assert frame.cbo_temporal_stabilize_quality.GetValue() == T("Accurate"), \
+            frame.cbo_temporal_stabilize_quality.GetValue()
         assert frame.cbo_temporal_stabilize_strength.IsEnabled()
         assert frame.chk_scene_detect.GetValue() is True
         assert frame.cbo_autocrop.GetValue() == "BLACK", frame.cbo_autocrop.GetValue()
@@ -13439,6 +13477,8 @@ def _self_test_import_command_round_trip():
             assert frame3.chk_temporal_stabilize.GetValue() is True
             assert frame3.cbo_temporal_stabilize_strength.GetValue() == "0.3", \
                 frame3.cbo_temporal_stabilize_strength.GetValue()
+            assert frame3.cbo_temporal_stabilize_quality.GetValue() == T("Accurate"), \
+                frame3.cbo_temporal_stabilize_quality.GetValue()
             assert frame3.cbo_max_workers.GetValue() == "2", frame3.cbo_max_workers.GetValue()
             assert frame3.grp_video.cbo_video_format.GetValue() == "mkv", frame3.grp_video.cbo_video_format.GetValue()
             if frame3.grp_video.has_nvenc:

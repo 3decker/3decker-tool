@@ -1349,6 +1349,8 @@ def make_output_filename(input_filename, args, video=False):
             ts_edge_protect = getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0
             if ts_edge_protect != 0.0:
                 tstab += f"ep{to_deciaml(ts_edge_protect, 100, 2)}"
+            if getattr(args, "temporal_stabilize_fast", False):
+                tstab += "f"
         else:
             tstab = ""
         if getattr(args, "depth_blend", False):
@@ -1609,6 +1611,8 @@ def _build_iw3_comment_metadata(args, video=True):
         ts_edge_protect = getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0
         if ts_edge_protect != 0.0:
             comment_parts.append(f"iw3_temporal_stabilize_edge_protection={ts_edge_protect}")
+        if getattr(args, "temporal_stabilize_fast", False):
+            comment_parts.append("iw3_temporal_stabilize_fast=1")
     if args.ema_normalize and video:
         if _scene_auto_ema_active(args, args.ema_normalize, video):
             auto_model = getattr(args, "scene_batch_auto_ema_model", None) or "3DECKER VDA_L"
@@ -5468,6 +5472,12 @@ def create_parser(required_true=True):
                               "doesn't smear or lag behind a moving object's outline. 0 (default) is no "
                               "reduction, matching this feature's original behavior. This was previously "
                               "GUI-only, with no command-line equivalent."))
+    parser.add_argument("--temporal-stabilize-fast", action="store_true",
+                        help=("for --temporal-stabilize: use a faster, less precise optical flow "
+                              "computation (fewer pyramid levels/iterations) -- real, measurable speedup "
+                              "(this feature's optical flow step runs on CPU, no CUDA build available), "
+                              "trading some motion-tracking precision for it. Default (unset) is the "
+                              "original, unchanged accurate computation."))
     parser.add_argument("--max-workers", type=int, default=0, choices=[0, 1, 2, 3, 4, 8, 16],
                         help="max inference worker threads for video processing. 0 is disabled")
     parser.add_argument("--video-format", "-vf", type=str, default="mp4", choices=["mp4", "mkv", "avi"],
@@ -5632,7 +5642,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             strength=getattr(args, "temporal_stabilize_strength", 0.7) or 0.7,
             max_shift_velocity=getattr(args, "temporal_stabilize_max_shift_velocity", None),
             flat_region_boost=getattr(args, "temporal_stabilize_flat_region_boost", 0.0) or 0.0,
-            edge_protection=getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0)
+            edge_protection=getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0,
+            fast=getattr(args, "temporal_stabilize_fast", False))
     else:
         depth_model.disable_temporal_stabilize()
 

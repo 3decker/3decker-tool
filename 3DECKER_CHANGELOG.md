@@ -338,6 +338,14 @@ movie up to 48fps.
 
 ## Bug Fixes
 
+- **Auto Resume now warns you when it can't find a matching checkpoint**,
+  instead of silently starting your conversion over from scratch. If a
+  conversion was interrupted and you change a setting (like Depth
+  Anti-aliasing or Object Stability) before resuming, the app previously had
+  no way to tell you it couldn't find your earlier progress — it just quietly
+  began again from the beginning. Now it tells you exactly what it found and
+  what changed, so you can put the setting back and actually resume instead
+  of losing real, sometimes hours of, work without knowing it.
 - **Fixed GPU memory not releasing after a conversion finishes.** Two
   separate memory problems were tracked down and fixed: dedicated GPU memory
   ("VRAM") that stayed pinned at the same usage until you closed the whole

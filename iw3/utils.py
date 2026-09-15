@@ -3590,6 +3590,50 @@ def _probe_video_duration(path_str):
         return None
 
 
+def _find_other_resume_checkpoints(output_dir, input_filename, exclude_checkpoint_path):
+    """ADR-154: real, hours-costly bug found live -- checkpoint identity
+    (checkpoint_path = output_filename + ".iw3resume") is derived from the FULL
+    tag-encoded output filename, which bakes in every quality setting
+    (Divergence, Depth AA, Object Stability, EMA, ...) -- even though
+    process_video_with_resume()'s own fingerprint check (below) already documents
+    that quality settings are SUPPOSED to be freely changeable between resume
+    attempts; only format-critical settings (codec, pixel format, output shape)
+    actually need to match. The result: changing ANY quality setting, even
+    slightly, since an interrupted run silently computes a DIFFERENT
+    checkpoint_path, so the real, valid checkpoint sitting on disk is never found
+    -- the job just silently starts over from scratch, with zero indication
+    anything was missed. Confirmed live: a user's real ~31-minute-in crash was
+    invisible to auto-resume purely because Depth Anti-aliasing had been toggled
+    since, costing hours of confusion before the mismatch was found and manually
+    worked around.
+
+    This does not (yet) decouple checkpoint identity from the settings-encoded
+    filename -- that's a bigger change deferred pending more design/testing time
+    (see the ADR) -- but makes the failure LOUD instead of silent: scans the
+    output directory for any OTHER checkpoint or orphaned in-progress segment
+    file that looks like it's for this same input file, so the caller can warn
+    the user instead of silently losing real progress. Returns a list of full
+    paths (possibly empty); never raises -- a failure to *detect* a stale
+    checkpoint must never block the real job from proceeding."""
+    try:
+        input_basename = path.splitext(path.basename(input_filename))[0]
+        input_basename = input_basename.translate({ord(c): ord("_") for c in SMB_INVALID_CHARS})
+        entries = os.listdir(output_dir)
+    except Exception:
+        return []
+    candidates = []
+    tmp_prefix = "_tmp_" + input_basename
+    for entry in entries:
+        full = path.join(output_dir, entry)
+        if full == exclude_checkpoint_path:
+            continue
+        if entry.startswith(input_basename) and entry.endswith(".iw3resume"):
+            candidates.append(full)
+        elif entry.startswith(tmp_prefix) and "_resume_seg_" in entry:
+            candidates.append(full)
+    return candidates
+
+
 def process_video_with_resume(input_filename, output_path, args, depth_model, side_model):
     import json
     import copy
@@ -3631,6 +3675,24 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     ext = path.splitext(output_filename)[1]
     base = path.splitext(output_filename)[0]
     checkpoint_path = output_filename + ".iw3resume"
+
+    # ADR-154: real, hours-costly bug -- see _find_other_resume_checkpoints()'s own
+    # docstring. Only worth searching when the checkpoint we're actually about to use
+    # is missing; the common, working case (checkpoint found normally, or a genuinely
+    # fresh job with no prior attempt at all) never pays for this scan.
+    if not path.exists(checkpoint_path):
+        other_checkpoints = _find_other_resume_checkpoints(
+            path.dirname(output_filename), input_filename, checkpoint_path)
+        if other_checkpoints:
+            print(f"[auto-resume] WARNING: no checkpoint found for the CURRENT settings "
+                  f"({path.basename(checkpoint_path)}), but found {len(other_checkpoints)} "
+                  f"checkpoint/in-progress file(s) for this same source file under DIFFERENT "
+                  f"settings -- if you changed a setting (Divergence, Depth AA, Object "
+                  f"Stability, EMA, etc.) since an earlier interrupted run, THIS JOB WILL NOT "
+                  f"RESUME from that progress and will start over from the beginning instead. "
+                  f"Revert your settings to match the earlier run to actually resume, or "
+                  f"ignore this if starting fresh is intentional. Found: "
+                  f"{', '.join(path.basename(p) for p in other_checkpoints)}", file=sys.stderr)
 
     # Settings that change the actual video stream's format (codec, pixel format, frame
     # size/layout) can't safely differ between segments of the same job — the final merge

@@ -13501,6 +13501,70 @@ def _self_test_update_available_dialog_wiring():
     print("_self_test_update_available_dialog_wiring: PASS")
 
 
+def _self_test_find_other_resume_checkpoints_detects_mismatch():
+    """Regression test for ADR-154: a real, hours-costly bug where a checkpoint
+    from an interrupted job becomes silently unfindable the instant any quality
+    setting (Divergence, Depth AA, Object Stability, EMA, ...) differs from what
+    produced it, because checkpoint identity is derived from the full
+    settings-encoded output filename. _find_other_resume_checkpoints() (iw3/utils.py)
+    is the fix's detection half -- confirms it finds a same-source checkpoint file
+    under a DIFFERENT settings-encoded name, finds an orphaned in-progress segment
+    file the same way, correctly EXCLUDES the checkpoint path the caller says it's
+    already using (no false positive when everything's actually fine), and
+    correctly ignores files for a genuinely different source video. No GPU or real
+    conversion needed -- pure filesystem/string logic against real temp files."""
+    import tempfile
+    from iw3.utils import _find_other_resume_checkpoints
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        input_filename = path.join(tmp_dir, "My Movie (2026).mkv")
+        with open(input_filename, "w") as f:
+            f.write("x")
+
+        # A checkpoint from an interrupted run with DIFFERENT settings than what
+        # the caller is about to compute (simulating "Depth AA was on, now it's off").
+        other_settings_checkpoint = path.join(
+            tmp_dir, "My Movie (2026)_Any_V3_Mono_01_512_AA_mlbw_l2_inpaint_d25_c05.mkv.iw3resume")
+        with open(other_settings_checkpoint, "w") as f:
+            f.write("{}")
+
+        # An orphaned in-progress segment (crash mid-encode, never made it into any
+        # checkpoint at all) for a THIRD, also-different settings combination.
+        orphaned_segment = path.join(
+            tmp_dir, "_tmp_My Movie (2026)_Any_V3_Base_768_mlbw_l2_inpaint_d30_c05_resume_seg_0000.mkv")
+        with open(orphaned_segment, "w") as f:
+            f.write("x")
+
+        # A checkpoint for a COMPLETELY different source video -- must never match.
+        unrelated_checkpoint = path.join(tmp_dir, "Some Other Movie_Any_V3_Base_512.mkv.iw3resume")
+        with open(unrelated_checkpoint, "w") as f:
+            f.write("{}")
+
+        # The caller's OWN current checkpoint path (what it's already correctly
+        # using) -- must be excluded even though it matches the same-source prefix.
+        current_checkpoint = path.join(
+            tmp_dir, "My Movie (2026)_Any_V3_Mono_01_512_mlbw_l2_inpaint_d25_c05.mkv.iw3resume")
+
+        found = _find_other_resume_checkpoints(tmp_dir, input_filename, current_checkpoint)
+        found_names = {path.basename(f) for f in found}
+
+        assert path.basename(other_settings_checkpoint) in found_names, \
+            f"must detect a same-source checkpoint under different settings, got: {found_names}"
+        assert path.basename(orphaned_segment) in found_names, \
+            f"must detect an orphaned same-source in-progress segment, got: {found_names}"
+        assert path.basename(unrelated_checkpoint) not in found_names, \
+            f"must never match a different source video's checkpoint: {found_names}"
+        assert path.basename(current_checkpoint) not in found_names, \
+            f"must exclude the caller's own already-in-use checkpoint path: {found_names}"
+
+        # No stale checkpoints of any kind lying around -> nothing to warn about.
+        empty_dir_result = _find_other_resume_checkpoints(tmp_dir, path.join(tmp_dir, "Nothing Yet.mkv"),
+                                                            path.join(tmp_dir, "Nothing Yet.mkv.iw3resume"))
+        assert empty_dir_result == [], f"must not false-positive on an unrelated fresh input: {empty_dir_result}"
+
+    print("_self_test_find_other_resume_checkpoints_detects_mismatch: PASS")
+
+
 def _self_test_preset_toolbar_wraps_without_zero_size_controls():
     """Regression test for ADR-152: pnl_preset's toolbar must wrap onto more rows
     when the window is narrower than its natural content width, and every
@@ -13913,6 +13977,7 @@ def _run_self_tests():
         _self_test_install_nagadomi_update_button,
         _self_test_update_available_dialog_wiring,
         _self_test_whats_new_changelog_dialog,
+        _self_test_find_other_resume_checkpoints_detects_mismatch,
         _self_test_preset_toolbar_wraps_without_zero_size_controls,
         _self_test_process_row_wraps_and_frame_shrinks_further,
         _self_test_import_command_round_trip,

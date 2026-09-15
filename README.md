@@ -13,6 +13,9 @@ layered on top on the `my-customizations` branch.
 - **What's changed recently?** See [`3DECKER_CHANGELOG.md`](3DECKER_CHANGELOG.md).
 
 ![3DECKER main window](docs/screenshots/panels.png)
+![3DECKER with every settings section expanded, part 1](docs/screenshots/panels-expanded-1.png)
+![3DECKER with every settings section expanded, part 2](docs/screenshots/panels-expanded-2.png)
+![3DECKER with every settings section expanded, part 3](docs/screenshots/panels-expanded-3.png)
 
 Everything below this point is the original upstream project's own README,
 covering the underlying source code, dependencies, and license notes — still

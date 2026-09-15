@@ -13,7 +13,23 @@ it matters.
 
 ---
 
-## Latest Update — September 14, 2026
+## Latest Update — September 15, 2026
+
+**A new depth model family: Metric3D v2.** Five new choices in the Depth Model
+dropdown (Metric3D ConvNeXt Tiny/Large and Metric3D ViT Small/Large/Giant2), a
+model VisionDepth3D also offers that iw3 didn't have before. Downloads itself
+automatically the first time you pick it, same as the other newer models. Its
+working resolution is fixed by the model itself, so the Depth Resolution field
+greys out when one of these is selected — that's expected, not a bug.
+
+Two other candidates (LBM Depth and FlashDepth) were investigated and NOT added:
+LBM Depth's output came out flat/low-detail in real testing, and FlashDepth has a
+hard technical blocker (it needs an older, incompatible version of a core library
+this app can't safely install) — so neither was worth shipping.
+
+---
+
+## Update — September 14, 2026
 
 **4 new Depth-Anything-3 depth models** (Small, Base, Large-1.1, and Metric-Large)
 join the depth model list, matching what VisionDepth3D already offered — plus 8

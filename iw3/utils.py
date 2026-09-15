@@ -5064,6 +5064,9 @@ def create_parser(required_true=True):
                                  "VDA_Metric", "VDA_Metric_S", "VDA_Metric_B", "VDA_Metric_L",
                                  "VDA_Stream_S", "VDA_Stream_B", "VDA_Stream_L",
                                  "VDA_Stream_Metric_S", "VDA_Stream_Metric_B", "VDA_Stream_Metric_L",
+                                 # ADR-155
+                                 "Metric3D_ConvNeXt_Tiny", "Metric3D_ConvNeXt_Large",
+                                 "Metric3D_ViT_Small", "Metric3D_ViT_Large", "Metric3D_ViT_Giant2",
                                  "NULL",
                                  ],
                         help="depth model name")

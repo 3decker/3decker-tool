@@ -70,6 +70,7 @@ from .video_depth_anything_streaming_model import AA_SUPPORT_MODELS as VDA_STREA
 from .depth_anything_v3_model import AA_SUPPORTED_MODELS as DA3_AA_SUPPORTED_MODELS
 from .depth_pro_model import MODEL_FILES as DEPTH_PRO_MODELS
 from .zoedepth_model import MODEL_FILES as ZOEDPETH_MODELS
+from .metric3d_model import MODEL_FILES as METRIC3D_MODELS
 from . import export_config
 from .inpaint_utils import INPAINT_MODELS
 
@@ -1405,6 +1406,10 @@ class MainFrame(wx.Frame):
               "you also turn on EMA smoothing and/or Object Stability.\n"
               "*_Metric variants: estimate real-world distances (meters) instead of a relative near/far "
               "scale — a specialized option, not needed for normal stereo conversion.\n"
+              "Metric3D_*: a separate model family (not Depth-Anything/VDA-based) built for real-world-"
+              "scale estimation — single-image, no cross-frame memory like the Any_V2_*/Any_V3_* family, "
+              "so the same EMA/Object Stability advice applies on video. ConvNeXt variants are the older, "
+              "lighter architecture; ViT variants are newer and generally sharper.\n"
               "Size suffix (_S/_B/_L, small/base/large): bigger = noticeably better quality, but "
               "slower and more VRAM — roughly proportional to size, not free.\n"
               "Recommended: a VDA_* model for video (steadiest results with the least fiddling); an "
@@ -6131,6 +6136,12 @@ class MainFrame(wx.Frame):
         depth_models += ["VDA_Stream_S", "VDA_Stream_B", "VDA_Stream_L"]
         depth_models += ["VDA_Stream_Metric_S", "VDA_Stream_Metric_B", "VDA_Stream_Metric_L"]
 
+        # ADR-155: Metric3D v2 -- unconditionally offered, same reasoning as the
+        # DA3/VDA variants above (auto-downloads its own checkpoint on first real
+        # use, no licensing restriction requiring a manually-placed file first).
+        depth_models += ["Metric3D_ConvNeXt_Tiny", "Metric3D_ConvNeXt_Large",
+                          "Metric3D_ViT_Small", "Metric3D_ViT_Large", "Metric3D_ViT_Giant2"]
+
         return depth_models
 
     def _on_stereo_slider_scroll(self, event, combo, slider, min_val, max_val, multiplier, is_int, extra_sync):
@@ -6458,14 +6469,24 @@ class MainFrame(wx.Frame):
     def update_model_selection(self):
         name = self.cbo_depth_model.GetValue()
 
-        if name in DEPTH_PRO_MODELS:
+        if name in DEPTH_PRO_MODELS or name in METRIC3D_MODELS:
+            # ADR-155: Metric3D's working resolution is architecturally fixed
+            # per model family (616x1064 for ViT, 544x1216 for ConvNeXt) --
+            # same reasoning as DepthPro here, so it's grouped with it for the
+            # resolution field. Unlike DepthPro, Metric3D does NOT hardcode its
+            # own dtype (metric3d_model.py's infer() honors enable_amp via the
+            # normal autocast() wrapper same as ZoeDepth/DA3), so chk_fp16 stays
+            # a real, meaningful toggle for it -- not grouped in below.
             self.cbo_resolution.Disable()
-            self.chk_fp16.Disable()
         else:
             self.cbo_resolution.Enable()
+
+        if name in DEPTH_PRO_MODELS:
+            self.chk_fp16.Disable()
+        else:
             self.chk_fp16.Enable()
 
-        if name in ZOEDPETH_MODELS or name in DEPTH_PRO_MODELS:
+        if name in ZOEDPETH_MODELS or name in DEPTH_PRO_MODELS or name in METRIC3D_MODELS:
             self.chk_limit_resolution.Disable()
         else:
             self.chk_limit_resolution.Enable()
@@ -13922,6 +13943,48 @@ def _self_test_import_command_round_trip():
     print("_self_test_import_command_round_trip: PASS")
 
 
+def _self_test_metric3d_model_selection():
+    """ADR-155: all 5 Metric3D variants must be real, selectable choices in the
+    Depth Model dropdown, and picking one must disable the Depth Resolution field
+    (its working resolution is architecturally fixed per model family, unlike
+    every other model here) while leaving FP16 enabled (Metric3D does not force
+    its own dtype the way DepthPro does -- see update_model_selection's own
+    comment) -- and switching back to an unrestricted model must re-enable
+    Depth Resolution again, confirming this isn't a one-way/stuck state."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        for model_name in METRIC3D_MODELS:
+            assert model_name in frame.get_depth_models(), \
+                f"{model_name} missing from get_depth_models()"
+
+        frame.cbo_depth_model.SetStringSelection("Metric3D_ViT_Small")
+        frame.update_model_selection()
+        assert not frame.cbo_resolution.IsEnabled(), \
+            "Depth Resolution must be disabled for a fixed-resolution Metric3D model"
+        assert frame.chk_fp16.IsEnabled(), \
+            "FP16 must stay enabled for Metric3D -- it honors enable_amp normally, unlike DepthPro"
+        assert not frame.chk_limit_resolution.IsEnabled(), \
+            "Limit to source must be disabled too -- there is no user-facing resolution to limit"
+
+        frame.cbo_depth_model.SetStringSelection("Any_V3_Mono_01")
+        frame.update_model_selection()
+        assert frame.cbo_resolution.IsEnabled(), \
+            "switching away from Metric3D must re-enable Depth Resolution"
+        assert frame.chk_limit_resolution.IsEnabled()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_metric3d_model_selection: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -13985,6 +14048,7 @@ def _run_self_tests():
         _self_test_label_tooltips_propagated,
         _self_test_resolution_preset_quick_fill,
         _self_test_free_vram_on_job_finish,
+        _self_test_metric3d_model_selection,
     ]
     failures = []
     for test in tests:

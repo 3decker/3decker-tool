@@ -22,6 +22,13 @@ automatically the first time you pick it, same as the other newer models. Its
 working resolution is fixed by the model itself, so the Depth Resolution field
 greys out when one of these is selected — that's expected, not a bug.
 
+**And an even bigger one: MoGe-3, Microsoft's newest depth model (2 new choices:
+MoGe3 ViT-L and ViT-G).** In real side-by-side testing on your own footage, this
+one captured noticeably finer detail than anything else in the app — individual
+fingers, thin wire/branch structures that other models blur together. It's a bit
+heavier (more GPU memory, slightly slower) than most other options, so it's
+offered as a choice, not a replacement for the defaults.
+
 Two other candidates (LBM Depth and FlashDepth) were investigated and NOT added:
 LBM Depth's output came out flat/low-detail in real testing, and FlashDepth has a
 hard technical blocker (it needs an older, incompatible version of a core library

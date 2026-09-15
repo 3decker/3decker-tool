@@ -71,6 +71,7 @@ from .depth_anything_v3_model import AA_SUPPORTED_MODELS as DA3_AA_SUPPORTED_MOD
 from .depth_pro_model import MODEL_FILES as DEPTH_PRO_MODELS
 from .zoedepth_model import MODEL_FILES as ZOEDPETH_MODELS
 from .metric3d_model import MODEL_FILES as METRIC3D_MODELS
+from .moge_model import MODEL_TYPE as MOGE_MODELS
 from . import export_config
 from .inpaint_utils import INPAINT_MODELS
 
@@ -1410,6 +1411,11 @@ class MainFrame(wx.Frame):
               "scale estimation — single-image, no cross-frame memory like the Any_V2_*/Any_V3_* family, "
               "so the same EMA/Object Stability advice applies on video. ConvNeXt variants are the older, "
               "lighter architecture; ViT variants are newer and generally sharper.\n"
+              "MoGe3_*: Microsoft's newest model (2026), builds full 3D geometry per frame — in testing "
+              "it captured noticeably finer detail (individual fingers, thin wire/branch structures) than "
+              "every other single-image model here. Single-image, no cross-frame memory, same EMA/Object "
+              "Stability advice applies. Heavier than most other options (more VRAM, a bit slower) — "
+              "_ViT_G is the larger/slower/highest-detail variant, _ViT_L is lighter and faster.\n"
               "Size suffix (_S/_B/_L, small/base/large): bigger = noticeably better quality, but "
               "slower and more VRAM — roughly proportional to size, not free.\n"
               "Recommended: a VDA_* model for video (steadiest results with the least fiddling); an "
@@ -6142,6 +6148,11 @@ class MainFrame(wx.Frame):
         depth_models += ["Metric3D_ConvNeXt_Tiny", "Metric3D_ConvNeXt_Large",
                           "Metric3D_ViT_Small", "Metric3D_ViT_Large", "Metric3D_ViT_Giant2"]
 
+        # ADR-156: MoGe-3 -- unconditionally offered, same reasoning (MIT
+        # license, auto-downloads its own checkpoint via huggingface_hub on
+        # first real use).
+        depth_models += ["MoGe3_ViT_L", "MoGe3_ViT_G"]
+
         return depth_models
 
     def _on_stereo_slider_scroll(self, event, combo, slider, min_val, max_val, multiplier, is_int, extra_sync):
@@ -6469,14 +6480,16 @@ class MainFrame(wx.Frame):
     def update_model_selection(self):
         name = self.cbo_depth_model.GetValue()
 
-        if name in DEPTH_PRO_MODELS or name in METRIC3D_MODELS:
-            # ADR-155: Metric3D's working resolution is architecturally fixed
-            # per model family (616x1064 for ViT, 544x1216 for ConvNeXt) --
-            # same reasoning as DepthPro here, so it's grouped with it for the
-            # resolution field. Unlike DepthPro, Metric3D does NOT hardcode its
-            # own dtype (metric3d_model.py's infer() honors enable_amp via the
-            # normal autocast() wrapper same as ZoeDepth/DA3), so chk_fp16 stays
-            # a real, meaningful toggle for it -- not grouped in below.
+        if name in DEPTH_PRO_MODELS or name in METRIC3D_MODELS or name in MOGE_MODELS:
+            # ADR-155/156: Metric3D's working resolution is architecturally
+            # fixed per model family (616x1064 for ViT, 544x1216 for
+            # ConvNeXt); MoGe-3's own resolution knob is a discrete 0-9
+            # token-budget level, not a pixel target, and doesn't map onto
+            # this field either -- both grouped with DepthPro here for the
+            # resolution field. Unlike DepthPro, neither hardcodes its own
+            # dtype (their infer() honors enable_amp/use_fp16 normally), so
+            # chk_fp16 stays a real, meaningful toggle for both -- not grouped
+            # in below.
             self.cbo_resolution.Disable()
         else:
             self.cbo_resolution.Enable()
@@ -6486,7 +6499,7 @@ class MainFrame(wx.Frame):
         else:
             self.chk_fp16.Enable()
 
-        if name in ZOEDPETH_MODELS or name in DEPTH_PRO_MODELS or name in METRIC3D_MODELS:
+        if name in ZOEDPETH_MODELS or name in DEPTH_PRO_MODELS or name in METRIC3D_MODELS or name in MOGE_MODELS:
             self.chk_limit_resolution.Disable()
         else:
             self.chk_limit_resolution.Enable()
@@ -13985,6 +13998,46 @@ def _self_test_metric3d_model_selection():
     print("_self_test_metric3d_model_selection: PASS")
 
 
+def _self_test_moge3_model_selection():
+    """ADR-156: both MoGe-3 variants must be real, selectable choices in the
+    Depth Model dropdown, and picking one must disable Depth Resolution (its
+    own resolution_level knob is a discrete 0-9 token budget, not a pixel
+    target, and doesn't map onto this field) while leaving FP16 enabled (it
+    honors use_fp16 normally, unlike DepthPro) -- mirrors
+    _self_test_metric3d_model_selection's structure for the same reasons."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        for model_name in MOGE_MODELS:
+            assert model_name in frame.get_depth_models(), \
+                f"{model_name} missing from get_depth_models()"
+
+        frame.cbo_depth_model.SetStringSelection("MoGe3_ViT_L")
+        frame.update_model_selection()
+        assert not frame.cbo_resolution.IsEnabled(), \
+            "Depth Resolution must be disabled for MoGe-3 (no matching pixel-based knob)"
+        assert frame.chk_fp16.IsEnabled(), \
+            "FP16 must stay enabled for MoGe-3 -- it honors use_fp16 normally, unlike DepthPro"
+        assert not frame.chk_limit_resolution.IsEnabled()
+
+        frame.cbo_depth_model.SetStringSelection("Any_V3_Mono_01")
+        frame.update_model_selection()
+        assert frame.cbo_resolution.IsEnabled(), \
+            "switching away from MoGe-3 must re-enable Depth Resolution"
+        assert frame.chk_limit_resolution.IsEnabled()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_moge3_model_selection: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -14049,6 +14102,7 @@ def _run_self_tests():
         _self_test_resolution_preset_quick_fill,
         _self_test_free_vram_on_job_finish,
         _self_test_metric3d_model_selection,
+        _self_test_moge3_model_selection,
     ]
     failures = []
     for test in tests:

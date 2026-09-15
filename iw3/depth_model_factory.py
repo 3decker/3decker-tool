@@ -5,6 +5,7 @@ from .video_depth_anything_model import VideoDepthAnythingModel
 from .video_depth_anything_streaming_model import VideoDepthAnythingStreamingModel
 from .depth_anything_v3_model import DepthAnythingV3MonoModel
 from .metric3d_model import Metric3DModel
+from .moge_model import MoGeModel
 from .null_depth_model import NullDepthModel
 
 
@@ -20,6 +21,9 @@ def create_depth_model(model_type):
         return model
     elif Metric3DModel.supported(model_type):
         model = Metric3DModel(model_type)
+        return model
+    elif MoGeModel.supported(model_type):
+        model = MoGeModel(model_type)
         return model
     elif DepthProModel.supported(model_type):
         model = DepthProModel(model_type)

@@ -5067,6 +5067,8 @@ def create_parser(required_true=True):
                                  # ADR-155
                                  "Metric3D_ConvNeXt_Tiny", "Metric3D_ConvNeXt_Large",
                                  "Metric3D_ViT_Small", "Metric3D_ViT_Large", "Metric3D_ViT_Giant2",
+                                 # ADR-156
+                                 "MoGe3_ViT_L", "MoGe3_ViT_G",
                                  "NULL",
                                  ],
                         help="depth model name")

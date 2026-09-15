@@ -36,3 +36,19 @@ einops
 # da3
 omegaconf
 addict
+
+# metric3d (ADR-155) -- lighter substitute for mmcv, only used for Config
+# loading / a git-hash helper; the vendored iw3/thirdparty/metric3d/mono/
+# already has its own try/except fallback to this over mmcv.
+mmengine
+
+# moge3 (ADR-156)
+trimesh
+moderngl
+glcontext
+pipeline @ git+https://github.com/EasternJournalist/pipeline.git@1c511390d90226c00c101f34b84df26a0f8789b4
+utils3d_moge @ git+https://github.com/EasternJournalist/utils3d-moge.git@62f09d58509485564e24d5d9f6aac9ee9ebc0c37
+# real CUDAExtension source, but gracefully falls back to a pure-Triton
+# kernel path if the CUDA Toolkit isn't installed (confirmed working on this
+# machine without it) -- see moge_model.py's module docstring
+flex-gemm @ git+https://github.com/JeffreyXiang/FlexGEMM.git@b2fadb29d41846c7981ade6801ffc689fae119cf

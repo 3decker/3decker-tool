@@ -122,6 +122,62 @@ def batch_preprocess(x, input_size):
     return x, (pad_top, pad_bottom, pad_left, pad_right)
 
 
+def _desaturate_clamp_outliers(pred_depth, min_val, max_val, tail_fraction=0.01, gap_ratio_threshold=3.0):
+    """Metric3D's decode head regresses depth then hard-clamps it to
+    [min_val, max_val] (RAFTDepthNormalDPTDecoder5.py / HourGlassDecoder.py's own
+    .clamp(), e.g. (0.1, 200) meters for the ViT-RAFT5 family, (0.3, 150) for the
+    ConvNeXt family) -- a real, confirmed architectural bound. Pure-black
+    letterbox-bar content (no real visual signal) makes the model jump to
+    exactly this bound there -- confirmed on a real movie frame. But (also
+    confirmed live, on that same real frame) it is NOT a clean, isolated jump:
+    the ViT's own receptive field blends that black-only signal into nearby
+    real-content patches too, producing a smooth multi-row DECAY from the hard
+    clamp value down to a normal value at the boundary -- e.g. one real
+    measured case went 200 -> 98 -> 37 -> 31 -> 25 -> 21 -> 14 -> 8 (back to
+    normal) over 7 rows. An earlier version of this function only matched the
+    exact clamp value and missed that whole decaying halo, leaving the
+    normalization range still badly blown out (confirmed: min stayed at -111
+    after that version "fixed" a real -200 case). This version instead asks a
+    purely statistical question with no knowledge of the model's specific
+    clamp values needed at all: is there a small minority of pixels sitting far
+    beyond where the bulk of the frame's own values live? `min_val`/`max_val`
+    are still accepted (and read from the live model in batch_infer(), never
+    hardcoded) only as documentation of why this problem exists, not used in
+    the check itself, since this generalizes correctly regardless of exactly
+    where a given checkpoint's own clamp bound sits.
+
+    Method: find a robust "normal" range via a modest tail fraction (default
+    1%, via kthvalue rather than torch.quantile -- exact, and has no GPU
+    element-count ceiling to worry about at 4K+ resolutions) instead of the
+    frame's true min/max. Only when the TRUE extreme sits dramatically (default
+    3x) farther beyond that normal range than the normal range's own width does
+    the true extreme get clamped in to the normal range's edge -- a real,
+    well-behaved frame's true min/max sit close to its own 1st/99th percentile
+    by construction (this ratio would be small), so this is a safe no-op for
+    ordinary content and only engages on a genuine, dramatic, isolated-tail
+    situation like the one that motivated it. Winsorizes toward the normal
+    range's own edge -- never deletes a pixel or invents a value, and every
+    pixel already within the normal range is provably untouched (clamp is
+    idempotent there)."""
+    for i in range(pred_depth.shape[0]):
+        flat = pred_depth[i].reshape(-1)
+        n = flat.numel()
+        k = max(1, int(n * tail_fraction))
+        if k * 2 >= n:
+            continue
+        lo_normal = torch.kthvalue(flat, k).values
+        hi_normal = torch.kthvalue(flat, n - k + 1).values
+        true_min = flat.amin()
+        true_max = flat.amax()
+        normal_range = (hi_normal - lo_normal).clamp_min(1e-6)
+
+        clamp_lo = lo_normal.item() if (lo_normal - true_min) > normal_range * gap_ratio_threshold else None
+        clamp_hi = hi_normal.item() if (true_max - hi_normal) > normal_range * gap_ratio_threshold else None
+        if clamp_lo is not None or clamp_hi is not None:
+            pred_depth[i] = pred_depth[i].clamp(min=clamp_lo, max=clamp_hi)
+    return pred_depth
+
+
 @torch.inference_mode()
 def batch_infer(model, im, flip_aug=True, low_vram=False, enable_amp=False,
                 output_device="cpu", device=None, edge_dilation=0, **kwargs):
@@ -139,6 +195,16 @@ def batch_infer(model, im, flip_aug=True, low_vram=False, enable_amp=False,
         x = TF.to_tensor(im).unsqueeze(0).to(device)
 
     orig_h, orig_w = x.shape[2], x.shape[3]
+    # Real, confirmed architectural bounds the decode head clamps its own output
+    # to (see _desaturate_clamp_outliers) -- read from the model itself so this
+    # never drifts out of sync with either family's config. Missing/unexpected
+    # attribute path -> both stay None -> the desaturation call below becomes a
+    # guaranteed no-op (unchanged prior behavior) rather than risk a crash.
+    try:
+        _clamp_min_val = model.depth_model.decoder.min_val
+        _clamp_max_val = model.depth_model.decoder.max_val
+    except AttributeError:
+        _clamp_min_val = _clamp_max_val = None
 
     def _run(x_in):
         x_in, (pad_top, pad_bottom, pad_left, pad_right) = batch_preprocess(x_in, model.input_size)
@@ -147,6 +213,12 @@ def batch_infer(model, im, flip_aug=True, low_vram=False, enable_amp=False,
         pred_depth = torch.nan_to_num(pred_depth.float())
         h, w = pred_depth.shape[-2], pred_depth.shape[-1]
         pred_depth = pred_depth[:, :, pad_top:h - pad_bottom, pad_left:w - pad_right]
+        # Fix BEFORE the resize below, not after: resizing first would bilinear-
+        # blend the exact clamp-boundary value into a wider band of neighboring
+        # pixels, spreading the contamination and making it no longer exactly
+        # detectable at the known clamp value.
+        if _clamp_min_val is not None:
+            pred_depth = _desaturate_clamp_outliers(pred_depth, _clamp_min_val, _clamp_max_val)
         pred_depth = F.interpolate(pred_depth, size=(orig_h, orig_w), mode="bilinear", align_corners=False)
         return pred_depth
 

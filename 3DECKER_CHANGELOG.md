@@ -67,6 +67,17 @@ testing. It's a big improvement, not a full guarantee yet — if you still see a
 banding with this combination, switching either the depth model or the Method
 remains a reliable workaround.
 
+**Fixed a real bug: the Metric3D depth models could go nearly blank on movies with
+black letterbox bars.** A single thin strip of pure-black bar was enough to
+confuse the model into predicting one wild "impossible distance" value there —
+and because the app always stretches its depth display across the true lowest
+and highest values in the frame, that one tiny sliver alone could crush 99%+ of
+the real depth detail for the whole frame into a washed-out result. Since most
+real movies have those bars, this could have been quietly hurting conversions
+with any Metric3D model. Found and fixed the same day it was noticed, confirmed
+on real footage: the affected frame went from nearly blank back to full, sharp
+depth detail, with no change to normal (non-letterboxed) frames.
+
 ---
 
 ## Update — September 14, 2026

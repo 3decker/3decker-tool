@@ -4575,6 +4575,38 @@ class MainFrame(wx.Frame):
         self.sld_sharpen_strength_standalone = _build_stereo_slider(
             self.cpn_sharpen.GetPane(), self.cbo_sharpen_strength_standalone, 0.25, 1.0, 100)
 
+        # ADR-165 amendment: found live -- this tool always re-encoded with H.264
+        # (get_default_video_codec's own fallback, since _sharpen_video never set
+        # video_codec), which silently broke Retroactive DV/HDR10+ Reinjection
+        # afterward ("codec detected: 'h264' -- DV/HDR injection requires HEVC
+        # output") for anyone sharpening a file headed there next. Exact mirror of
+        # cbo_rife_standalone_codec just below (same ClientData convention, same
+        # choices, same default) -- see its tooltip for the fuller HEVC explanation.
+        self.lbl_sharpen_codec = wx.StaticText(self.cpn_sharpen.GetPane(), label=T("Output Codec"))
+        self.cbo_sharpen_codec = wx.ComboBox(self.cpn_sharpen.GetPane(), name="cbo_sharpen_codec")
+        self.cbo_sharpen_codec.SetEditable(False)
+        self.cbo_sharpen_codec.Append(T("H.264 (default)"), None)
+        self.cbo_sharpen_codec.Append(T("H.265/HEVC -- libx265 (CPU)"), "libx265")
+        self.cbo_sharpen_codec.Append(T("H.265/HEVC -- hevc_nvenc (GPU)"), "hevc_nvenc")
+        self.cbo_sharpen_codec.SetSelection(0)
+        self.cbo_sharpen_codec.SetToolTip(
+            T("What it's for: which video format this tool encodes its sharpened OUTPUT with.\n"
+              "Why you would change it: Sharpen's own output has always defaulted to H.264, unrelated "
+              "to Dolby Vision/HDR entirely -- leave this on the default for that. But if the file "
+              "you're sharpening has Dolby Vision or HDR10+ and you plan to (re-)run the Retroactive "
+              "HDR/DV Reinjection tool above afterward, that tool can ONLY inject into an HEVC (H.265) "
+              "file -- Sharpen's H.264 default output can NEVER accept that metadata, no matter what. "
+              "Pick an HEVC option here FIRST if that's your plan.\n"
+              "H.265/HEVC -- libx265 (CPU): software encode, works on any machine, slower and produces "
+              "a larger file than the H.264 default at the same quality setting.\n"
+              "H.265/HEVC -- hevc_nvenc (GPU): hardware encode on the GPU Sharpen runs on, much faster "
+              "than libx265, requires an NVIDIA GPU with NVENC support.\n"
+              "Con: HEVC output is somewhat less universally compatible with older/non-4K playback "
+              "devices than H.264.\n"
+              "Recommended: leave on the default (H.264) unless the file needs Dolby Vision/HDR10+ "
+              "reinjected into it afterward -- then pick libx265 (works everywhere) or hevc_nvenc "
+              "(faster, if your GPU supports it)."))
+
         self.btn_sharpen_run = wx.Button(self.cpn_sharpen.GetPane(), label=T("Run"))
         self.btn_sharpen_run.SetToolTip(
             T("What it's for: runs the sharpen pass as a separate background process "
@@ -4587,8 +4619,28 @@ class MainFrame(wx.Frame):
               "immediately with that exact message shown in the log box below, rather than "
               "guessing the layout. Re-encoding the video track takes time proportional to "
               "the video's length.\n"
+              "Dolby Vision / HDR10+ warning: sharpening fully re-decodes and re-encodes the "
+              "video track. If the input already has DV/HDR10+ metadata injected (via the "
+              "Retroactive HDR/DV Reinjection tool above), that metadata lives INSIDE the "
+              "video's own compressed bitstream, frame by frame -- it is NOT a separate file "
+              "attached to the container, so a full re-encode always wipes it, the same way "
+              "the main 3D conversion step does. Correct order: run Sharpen BEFORE Reinjection "
+              "(sharpen first, then inject DV/HDR as the true last step) -- sharpening doesn't "
+              "change frame count or timing, so it won't interfere with Reinjection's checks "
+              "afterward. If you already sharpened a file that had DV/HDR metadata on it, just "
+              "run Reinjection again on the sharpened output -- it's a fast fix, not a re-do of "
+              "the whole conversion. Also remember: Reinjection needs an HEVC (H.265) file -- "
+              "set Output Codec above to libx265/hevc_nvenc first if DV/HDR is part of your "
+              "plan.\n"
               "Recommended: check the log box below afterward to confirm it actually "
               "succeeded rather than refused."))
+
+        self.gauge_sharpen = wx.Gauge(self.cpn_sharpen.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_sharpen.SetToolTip(
+            T("Real progress of the currently running Sharpen job (frames processed so far), "
+              "read live from the background process as it runs -- not just a spinner. Empty/"
+              "hidden-looking when no job has run yet this session."))
+        self.lbl_sharpen_progress = wx.StaticText(self.cpn_sharpen.GetPane(), label="")
 
         self.txt_sharpen_log = wx.TextCtrl(self.cpn_sharpen.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                             size=self.FromDIP((-1, 60)), name="txt_sharpen_log")
@@ -4620,8 +4672,12 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_sharpen_strength, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_sharpen_strength_standalone, (h, 3), flag=wx.EXPAND)
         layout.Add(self.sld_sharpen_strength_standalone, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_sharpen_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sharpen_codec, (h, 1), flag=wx.EXPAND)
         layout.Add(self.btn_sharpen_run, (h := h + 1, 3), flag=wx.EXPAND)
-        layout.Add(self.txt_sharpen_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_sharpen, (h, 0), (0, 2), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_sharpen_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_sharpen_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_sharpen_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_sharpen.GetPane().SetSizer(layout)
 
@@ -10136,16 +10192,65 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_sharpen_output.SetValue(dlg.GetPath())
 
+    def _update_sharpen_progress(self, done, total):
+        # Called via wx.CallAfter from run_sharpen's background thread -- never
+        # touch these widgets directly from that thread.
+        if total > 0:
+            self.gauge_sharpen.SetRange(total)
+            self.gauge_sharpen.SetValue(min(done, total))
+            percent = min(100, int(done / total * 100))
+            self.lbl_sharpen_progress.SetLabel(f"{done}/{total} {T('frames')} ({percent}%)")
+        else:
+            # total unknown (e.g. a container sharpen_cli's own frame-count probe
+            # couldn't read) -- still show real per-frame movement via a pulsing
+            # bar rather than a stuck one.
+            self.gauge_sharpen.Pulse()
+            self.lbl_sharpen_progress.SetLabel(f"{done} {T('frames')}")
+
     def run_sharpen(self, cmd):
         # Runs on a background thread via startWorker -- never blocks the GUI thread.
         # This tool decodes/re-encodes the video track (conv2d ops on whatever GPU
         # --gpu selects), kept out-of-process anyway for the same convention as the
         # other standalone tools in this column -- this app's own GPU/model state is
-        # never touched. Captures combined stdout+stderr since sharpen_cli prints its
-        # resolved format, per-eye/RGBD/anaglyph handling note, and any refusal
-        # reason to stderr.
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        # never touched.
+        #
+        # Popen (not subprocess.run) with the two streams read SEPARATELY and live,
+        # not a single capture_output=True that only returns once the whole process
+        # exits (that was the real bug -- see docs/ai/AI_DECISIONS.md ADR-165 -- a
+        # user watching this run had literally no progress feedback at all beyond a
+        # static "Applying Sharpen..." for however long the job took). stdout is now
+        # a DEDICATED progress channel: sharpen_cli.py's _SubprocessProgressPrinter
+        # prints ONLY "IW3_SHARPEN_PROGRESS <done> <total>" lines there, nothing
+        # else, ever -- every human-readable status/refusal message sharpen_cli
+        # prints still goes to stderr exactly as before (unchanged on that side),
+        # captured here into the same combined log text this method has always
+        # returned. Reading progress on a separate stream from log text means no
+        # fragile "is this line a progress update or a log message" text matching.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, bufsize=1)
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("IW3_SHARPEN_PROGRESS "):
+                parts = line.split(" ")
+                if len(parts) == 3:
+                    try:
+                        done, total = int(parts[1]), int(parts[2])
+                    except ValueError:
+                        continue
+                    wx.CallAfter(self._update_sharpen_progress, done, total)
+
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
 
     def on_exit_sharpen_worker(self, result):
         self.btn_sharpen_run.Enable()
@@ -10164,6 +10269,14 @@ class MainFrame(wx.Frame):
         self.txt_sharpen_log.SetValue(output)
         self.txt_sharpen_log.ShowPosition(self.txt_sharpen_log.GetLastPosition())
         if returncode == 0:
+            # Force the bar/label to a clean 100% rather than trusting the last
+            # live update landed exactly on the final frame (it's throttled -- see
+            # sharpen_cli.py's _SubprocessProgressPrinter -- so the very last
+            # partial interval before the process exited might not have emitted).
+            total = self.gauge_sharpen.GetRange()
+            if total > 0:
+                self.gauge_sharpen.SetValue(total)
+                self.lbl_sharpen_progress.SetLabel(f"{total}/{total} {T('frames')} (100%)")
             self.SetStatusText(T("Sharpen applied successfully"))
         else:
             self.SetStatusText(T("Sharpen failed -- see the log below"))
@@ -10192,12 +10305,24 @@ class MainFrame(wx.Frame):
             self.show_validation_error_message(T("Strength"), 0.0, 1.0)
             return
 
+        video_codec = self.cbo_sharpen_codec.GetClientData(self.cbo_sharpen_codec.GetSelection())
+
         cmd = [sys.executable, "-m", "iw3.sharpen_cli",
                "--input", input_path, "--output", output_path,
                "--format", self.cbo_sharpen_format.GetValue(),
                "--sharpen-strength", strength]
+        # Only appended when a non-default codec is picked (ClientData None for the
+        # default "H.264 (default)" choice) -- omitting the flag entirely for anyone
+        # who doesn't touch this new control keeps today's exact existing command
+        # byte-for-byte, matching sharpen_cli.py's own --video-codec default=None
+        # backward-compat guarantee (ADR-165, same convention as cbo_rife_standalone_codec).
+        if video_codec:
+            cmd += ["--video-codec", str(video_codec)]
 
         self.txt_sharpen_log.SetValue(T("Running...\n"))
+        self.gauge_sharpen.SetRange(1)
+        self.gauge_sharpen.SetValue(0)
+        self.lbl_sharpen_progress.SetLabel("")
         self.btn_sharpen_run.Disable()
         self.btn_sharpen_clear.Disable()
         self.SetStatusText(T("Applying Sharpen..."))
@@ -13003,6 +13128,143 @@ def _self_test_rife_standalone_panel():
     print("_self_test_rife_standalone_panel: PASS")
 
 
+def _self_test_sharpen_progress_bar():
+    """Regression test for ADR-165 (Sharpen standalone tool progress bar): confirms
+    run_sharpen() actually parses live "IW3_SHARPEN_PROGRESS <done> <total>" lines from
+    a real subprocess's stdout (as sharpen_cli.py's _SubprocessProgressPrinter emits
+    them) and drives gauge_sharpen/lbl_sharpen_progress from them, while stderr log
+    text is captured separately and never leaks a raw progress line into the log box.
+    Uses a real, harmless `python -c` stand-in subprocess (same convention as
+    _self_test_run_update_git_checkpoint) rather than mocking subprocess.Popen, so this
+    proves the real stdout/stderr-splitting behavior, not just that some mock was
+    called correctly."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        script = (
+            "import sys\n"
+            "print('IW3_SHARPEN_PROGRESS 10 100')\n"
+            "print('IW3_SHARPEN_PROGRESS 50 100')\n"
+            "print('some log line', file=sys.stderr)\n"
+            "print('IW3_SHARPEN_PROGRESS 100 100')\n"
+            "print('another log line', file=sys.stderr)\n"
+        )
+        cmd = [sys.executable, "-c", script]
+        returncode, output = frame.run_sharpen(cmd)
+        wx.Yield()  # flush the wx.CallAfter-queued _update_sharpen_progress calls
+
+        assert returncode == 0, returncode
+        assert "some log line" in output, output
+        assert "another log line" in output, output
+        assert "IW3_SHARPEN_PROGRESS" not in output, \
+            "progress lines must never leak into the stderr log text"
+        assert frame.gauge_sharpen.GetRange() == 100, frame.gauge_sharpen.GetRange()
+        assert frame.gauge_sharpen.GetValue() == 100, frame.gauge_sharpen.GetValue()
+        assert frame.lbl_sharpen_progress.GetLabel() == f"100/100 {T('frames')} (100%)", \
+            frame.lbl_sharpen_progress.GetLabel()
+
+        # A fresh run must reset the gauge/label rather than showing the previous
+        # run's leftover values until the first live update arrives.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = path.join(tmpdir, "movie_3d.mp4")
+            with open(input_path, "wb") as f:
+                f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_sharp.mp4")
+            frame.txt_sharpen_input.SetValue(input_path)
+            frame.txt_sharpen_output.SetValue(output_path)
+            orig_start_worker = gui_mod.startWorker
+            gui_mod.startWorker = lambda *a, **kw: None
+            try:
+                frame.on_click_btn_sharpen_run(None)
+            finally:
+                gui_mod.startWorker = orig_start_worker
+            assert frame.gauge_sharpen.GetValue() == 0, \
+                "starting a new run must reset the gauge, not show the last run's value"
+            assert frame.lbl_sharpen_progress.GetLabel() == "", \
+                "starting a new run must clear the previous run's progress label"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_sharpen_progress_bar: PASS")
+
+
+def _self_test_sharpen_codec_option():
+    """Regression test for ADR-165's --video-codec fix: a real live DV reinjection
+    attempt on a Sharpen output failed with "codec detected: 'h264' -- DV/HDR
+    injection requires HEVC output", because Sharpen always re-encoded to H.264 with
+    no way to change that. Mirrors _self_test_rife_standalone_panel's identical
+    cbo_rife_standalone_codec coverage exactly, for the new cbo_sharpen_codec control:
+    default choice maps to ClientData None (today's unchanged H.264 behavior), and
+    picking an HEVC choice appends --video-codec to the constructed command while the
+    default omits it entirely (byte-for-byte the same command as before this option
+    existed, for anyone who doesn't touch the new control)."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+
+        assert frame.cbo_sharpen_codec.GetParent() is frame.cpn_sharpen.GetPane()
+        assert frame.cbo_sharpen_codec.GetValue() == T("H.264 (default)")
+        default_index = frame.cbo_sharpen_codec.GetSelection()
+        assert frame.cbo_sharpen_codec.GetClientData(default_index) is None
+
+        run_tip = frame.cbo_sharpen_codec.GetToolTip().GetTip()
+        assert "Retroactive HDR/DV Reinjection" in run_tip, run_tip
+        assert "Dolby Vision" in run_tip, run_tip
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["cmd"] = wargs[0]
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = path.join(tmpdir, "movie_3d_LR.mkv")
+            with open(input_path, "wb") as f:
+                f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_sharp.mkv")
+            frame.txt_sharpen_input.SetValue(input_path)
+            frame.txt_sharpen_output.SetValue(output_path)
+
+            # Default codec -> --video-codec omitted entirely.
+            frame.on_click_btn_sharpen_run(None)
+            cmd = captured["cmd"]
+            assert "--video-codec" not in cmd, cmd
+
+            # Picking an HEVC choice appends --video-codec with the real flag value.
+            captured.clear()
+            frame.cbo_sharpen_codec.SetSelection(
+                frame.cbo_sharpen_codec.FindString(T("H.265/HEVC -- libx265 (CPU)")))
+            frame.on_click_btn_sharpen_run(None)
+            cmd = captured["cmd"]
+            assert cmd[-2:] == ["--video-codec", "libx265"], cmd
+
+            # Reset to default -> --video-codec disappears again (not sticky/broken).
+            captured.clear()
+            frame.cbo_sharpen_codec.SetSelection(default_index)
+            frame.on_click_btn_sharpen_run(None)
+            cmd = captured["cmd"]
+            assert "--video-codec" not in cmd, cmd
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_sharpen_codec_option: PASS")
+
+
 def _self_test_tool_log_clear_buttons():
     """Regression test for the "Clear" button added next to each standalone tool's
     log/output box on the Tools tab (Retroactive HDR/DV Reinjection, Search
@@ -14394,6 +14656,8 @@ def _run_self_tests():
         _self_test_3decker_quick_preset,
         _self_test_hdr_reinject_rife_manifest_field,
         _self_test_rife_standalone_panel,
+        _self_test_sharpen_progress_bar,
+        _self_test_sharpen_codec_option,
         _self_test_tool_log_clear_buttons,
         _self_test_run_update_git_checkpoint,
         _self_test_git_checkpoint_no_identity_configured,

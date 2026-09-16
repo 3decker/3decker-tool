@@ -65,6 +65,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from os import path
 
 import torch
@@ -281,14 +282,104 @@ def create_parser():
                               "(lower = higher quality/larger file).")
     parser.add_argument("--preset", type=str, default="medium",
                          help="x264/x265 encoder preset for the re-encoded video track.")
+    parser.add_argument("--video-codec", "-vc", type=str, default=None,
+                         help="output video codec (same flag name/convention as the main iw3 "
+                              "conversion pipeline's own --video-codec/-vc, and iw3.rife_cli's "
+                              "identical option -- see docs/ai/AI_DECISIONS.md ADR-165). "
+                              "Default: unset, which keeps this tool's original, unchanged "
+                              "behavior (libx264/H.264) -- most Sharpen use cases have nothing "
+                              "to do with Dolby Vision/HDR and don't need HEVC's larger file "
+                              "size/slower encode. Set this to an HEVC-family codec (e.g. "
+                              "libx265, or hevc_nvenc for GPU encoding) when the sharpened "
+                              "output still needs to go through Retroactive DV/HDR10+ "
+                              "Reinjection afterward (python -m iw3.reinject_hdr_cli) -- that "
+                              "step requires HEVC output and always refuses H.264.")
     parser.add_argument("--gpu", type=int, default=0,
                          help="GPU device index to run the sharpen filter's conv2d ops on. "
                               "-1 forces CPU.")
     return parser
 
 
+class _SubprocessProgressPrinter:
+    """tqdm-compatible progress reporter (same minimal interface VU.process_video's
+    tqdm_fn expects: constructed with desc=/total=, then .update(n) per frame,
+    .close() at the end -- see nunif.gui.common.TQDMGUI, which this deliberately
+    does NOT reuse) for use ACROSS a process boundary.
+
+    TQDMGUI itself only works IN-PROCESS -- it posts a wx event directly into the
+    calling process's own event loop via wx.PostEvent, which a separate subprocess
+    (this tool's whole reason for existing -- see module docstring's "never
+    sharing state with the main app" convention) cannot do into its PARENT
+    process's event loop. The only real channel across that boundary is this
+    process's own stdout/stderr, so instead this prints a single, deliberately
+    plain, machine-parseable line to STDOUT (never stderr, which
+    iw3.gui.run_sharpen -- and every other standalone tool's log box -- already
+    uses for real human-readable status/error text; keeping progress on a
+    separate stream lets a caller tell the two apart without fragile text
+    matching) every time it updates: "IW3_SHARPEN_PROGRESS <done> <total>",
+    flushed immediately so a caller reading the pipe live sees it promptly rather
+    than whenever Python's own stdout buffering next flushes on its own."""
+
+    # Throttled, not emitted on every single .update(n=1) call -- at ~300fps
+    # (a real observed rate for this pipeline) that would mean a flushed print
+    # (a real syscall each time) on every frame, adding per-frame overhead to
+    # the actual work for no real UI benefit (nothing refreshes a progress
+    # display faster than a human can perceive it anyway). Matches tqdm's own
+    # default ~0.1s update throttle (mininterval), not a value invented here.
+    _MIN_INTERVAL_SEC = 0.1
+
+    def __init__(self, **kwargs):
+        self.total = kwargs.get("total") or 0
+        self.done = 0
+        self._last_emit = 0.0
+        self._emit(force=True)
+
+    def update(self, n=1):
+        self.done += n
+        self._emit()
+
+    def close(self):
+        self._emit(force=True)  # always show the true final count once done
+
+    def _emit(self, force=False):
+        now = time.monotonic()
+        if not force and (now - self._last_emit) < self._MIN_INTERVAL_SEC:
+            return
+        self._last_emit = now
+        print(f"IW3_SHARPEN_PROGRESS {self.done} {self.total}", flush=True)
+
+
+def _resolve_encoder_options(video_codec, crf, preset, gpu):
+    """ffmpeg encoder options for the re-encoded video track, keyed by --video-codec
+    (see create_parser) -- mirrors iw3.rife_cli._resolve_encoder_options exactly (same
+    per-codec-family option-naming convention as iw3.utils.make_video_codec_option):
+    libx264/libx265 take preset+crf, hevc_nvenc/h264_nvenc need constant-QP (rc/qp)
+    instead of crf, hevc_qsv/h264_qsv use global_quality. Unlike rife_cli's version,
+    crf/preset come from this tool's own pre-existing --crf/--preset flags rather than
+    a hardcoded "16"/"medium" -- this tool already exposed those as user-configurable,
+    so --video-codec (ADR-165) only adds the missing codec-family dimension, it
+    doesn't take away the existing quality controls.
+
+    None/"libx264"/"libx265" (the default family, unchanged from before this option
+    existed) keeps the exact original {"preset": preset, "crf": crf} shape -- backward
+    compatible for every existing caller that doesn't pass --video-codec at all."""
+    if video_codec in (None, "libx264", "libx265"):
+        return {"preset": preset, "crf": crf}
+    if video_codec in ("hevc_nvenc", "h264_nvenc"):
+        options = {"rc": "constqp", "qp": crf}
+        if gpu is not None and gpu >= 0:
+            options["gpu"] = str(gpu)
+        return options
+    if video_codec in ("hevc_qsv", "h264_qsv"):
+        return {"preset": preset, "global_quality": crf}
+    # Unknown/other codec -- pass through with no extra options rather than guessing
+    # at option names that can't be verified against real hardware here; ffmpeg's own
+    # default settings for that encoder apply.
+    return {}
+
+
 def _sharpen_video(input_path, output_path, resolved_format, strength, detail_percentile,
-                    device, crf, preset):
+                    device, crf, preset, video_codec=None, gpu=0):
     """Single-pass decode -> sharpen (per resolved_format's geometry) -> encode, for
     the ENTIRE input video. Writes output_path as a full container (any extraneous
     audio track VU.process_video may also copy into it is irrelevant -- the caller
@@ -306,13 +397,15 @@ def _sharpen_video(input_path, output_path, resolved_format, strength, detail_pe
         return VU.VideoOutputConfig(
             fps=None,
             output_fps=None,
-            options={"preset": preset, "crf": crf},
+            video_codec=video_codec,
+            options=_resolve_encoder_options(video_codec, crf, preset, gpu),
         )
 
     VU.process_video(
         input_path, output_path, frame_callback,
         config_callback=config_callback,
         title="Sharpen", device=device,
+        tqdm_fn=_SubprocessProgressPrinter,
     )
 
 
@@ -391,7 +484,8 @@ def run(args):
         print(f"[sharpen] [1/2] decoding, sharpening (strength={strength}), and "
               f"re-encoding the video track...", file=sys.stderr)
         _sharpen_video(input_path, sharpened_video_tmp, resolved_format, strength,
-                        95.0, device, args.crf, args.preset)
+                        95.0, device, args.crf, args.preset,
+                        video_codec=args.video_codec, gpu=args.gpu)
 
         print("[sharpen] [2/2] remuxing the sharpened video track back together with "
               "every other original track (audio/subtitles/chapters/attachments) "
@@ -617,7 +711,8 @@ def _self_test_run_gating():
 
         def _args(**overrides):
             base = dict(input=mkv_input, output=output, format="auto",
-                        sharpen_strength=0.5, crf="16", preset="medium", gpu=0)
+                        sharpen_strength=0.5, crf="16", preset="medium", gpu=0,
+                        video_codec=None)
             base.update(overrides)
             return argparse.Namespace(**base)
 
@@ -684,6 +779,66 @@ def _self_test_run_gating():
     print("_self_test_run_gating: PASS")
 
 
+def _self_test_video_codec_options():
+    """Regression test for ADR-165: a real live DV reinjection attempt on a Sharpen
+    output failed with "codec detected: 'h264' -- DV/HDR injection requires HEVC
+    output" -- root-caused to this exact same bug iw3.rife_cli already had and fixed
+    (no --video-codec option, VideoOutputConfig never setting video_codec, so
+    nunif.utils.video.utils.get_default_video_codec always filled in libx264). Confirms
+    the default (--video-codec not passed -- every existing caller/script) keeps the
+    original libx264-implied {"preset": preset, "crf": crf} options with video_codec
+    staying None (so get_default_video_codec's own existing libx264 fallback is
+    untouched), and that libx265/hevc_nvenc/hevc_qsv each produce the right
+    codec-family option shape."""
+    # Default/unset: video_codec stays None, crf/preset pass straight through --
+    # exactly this tool's own pre-existing (pre-ADR-165) behavior, byte-for-byte.
+    assert _resolve_encoder_options(None, "16", "medium", 0) == {"preset": "medium", "crf": "16"}
+    assert _resolve_encoder_options("libx264", "20", "fast", 0) == {"preset": "fast", "crf": "20"}
+    assert _resolve_encoder_options("libx265", "16", "medium", 0) == {"preset": "medium", "crf": "16"}
+
+    # nvenc: constant-QP, not crf -- and only attaches a `gpu` option for a real
+    # (non-negative) GPU index, matching rife_cli's identical convention.
+    assert _resolve_encoder_options("hevc_nvenc", "18", "medium", 0) == {
+        "rc": "constqp", "qp": "18", "gpu": "0"}
+    assert _resolve_encoder_options("h264_nvenc", "18", "medium", -1) == {
+        "rc": "constqp", "qp": "18"}
+
+    # qsv: global_quality, not crf.
+    assert _resolve_encoder_options("hevc_qsv", "16", "medium", 0) == {
+        "preset": "medium", "global_quality": "16"}
+
+    # Unknown/untuned codec -- no guessed options, ffmpeg's own defaults apply.
+    assert _resolve_encoder_options("hevc_amf", "16", "medium", 0) == {}
+
+    # _sharpen_video's config_callback: video_codec passes straight through to
+    # VideoOutputConfig (None when unset, matching the pre-ADR-165 default).
+    from unittest.mock import patch
+    captured = {}
+
+    def _fake_process_video(input_path, output_path, frame_callback, config_callback,
+                             title, device, tqdm_fn):
+        captured["config"] = config_callback(None)
+
+    with patch.object(VU, "process_video", _fake_process_video):
+        _sharpen_video("in.mkv", "out.mkv", "half_sbs", 0.5, 95.0,
+                        torch.device("cpu"), "16", "medium")
+        assert captured["config"].video_codec is None
+        assert captured["config"].options == {"preset": "medium", "crf": "16"}
+
+        _sharpen_video("in.mkv", "out.mkv", "half_sbs", 0.5, 95.0,
+                        torch.device("cpu"), "16", "medium",
+                        video_codec="libx265", gpu=0)
+        assert captured["config"].video_codec == "libx265"
+
+        _sharpen_video("in.mkv", "out.mkv", "half_sbs", 0.5, 95.0,
+                        torch.device("cpu"), "18", "medium",
+                        video_codec="hevc_nvenc", gpu=1)
+        assert captured["config"].video_codec == "hevc_nvenc"
+        assert captured["config"].options == {"rc": "constqp", "qp": "18", "gpu": "1"}
+
+    print("_self_test_video_codec_options: PASS")
+
+
 def _run_self_tests():
     _self_test_format_detection()
     _self_test_split_join_round_trip()
@@ -692,6 +847,7 @@ def _run_self_tests():
     _self_test_sharpen_frame_tensor_anaglyph_whole_frame()
     _self_test_sharpen_frame_tensor_seam_independence()
     _self_test_run_gating()
+    _self_test_video_codec_options()
     print("All sharpen_cli self-tests PASSED")
 
 

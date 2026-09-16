@@ -51,6 +51,21 @@ this, the correct fix is converting the movie 3D directly from the real HDR
 source with "Preserve Dolby Vision" turned on, not grafting metadata after the
 fact.
 
+**The standalone Sharpen tool now shows real progress — a bar, a frame count, and
+a live percentage — instead of just a frozen "Applying Sharpen..." message.**
+Previously there was no way to tell how far along a Sharpen job was or how much
+longer it would take; now it updates live as the job runs, and settles cleanly
+at 100% when it finishes.
+
+**And a real bug found while building that: Sharpen always produced an H.264
+video, with no way to change that — which silently broke Dolby Vision/HDR10+
+reinjection afterward, no matter what order you ran the two tools in.** A new
+"Output Codec" option (same choices as the RIFE Frame Interpolation tool
+already offers: H.264 default, or H.265/HEVC via CPU or GPU) lets you pick
+HEVC output when you plan to reinject DV/HDR metadata into a sharpened file
+afterward. Leave it on the default if you don't need that — nothing changes
+for anyone who doesn't touch this new control.
+
 ## Update — September 15, 2026
 
 **A new depth model family: Metric3D v2.** Five new choices in the Depth Model

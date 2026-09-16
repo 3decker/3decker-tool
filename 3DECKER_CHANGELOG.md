@@ -55,6 +55,18 @@ only, not for a shared distribution. Loading one for the first time needs one
 extra manual step (`pip install evo`) — the app will still auto-download the
 checkpoint itself once that's in place.
 
+**Fixed a real bug: large washed-out/striped patches when using the MoGe3 depth
+models with the `mlbw_l2_inpaint` Method.** Tracked down to a real quirk in the
+small helper network that method uses to predict where to fill in gaps — it could
+get confused by unusually smooth/flat areas of depth (which MoGe3's cleaner depth
+maps produce a lot more of than other models) and paint a wide banded patch
+instead of a real gap. Reproduced the bug on a real scene from actual footage,
+confirmed the exact mechanism, and shipped a fix that cut the affected area
+roughly in half and eliminated the worst, whole-background version of it in
+testing. It's a big improvement, not a full guarantee yet — if you still see any
+banding with this combination, switching either the depth model or the Method
+remains a reliable workaround.
+
 ---
 
 ## Update — September 14, 2026

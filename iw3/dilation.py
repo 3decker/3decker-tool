@@ -64,6 +64,48 @@ def closing(mask, kernel_size=3, n_iter=2):
     return mask
 
 
+def remove_periodic_banding(x, period=8.0, half_bandwidth=0.035):
+    # MLBW's mask-prediction head (mask_mlbw) processes the image via
+    # pixel_unshuffle(downscaling_factor=(1, 8)) + windowed attention, i.e. in
+    # vertical strips 8px wide. Over large, very flat/low-variance regions of
+    # the depth input, this can make the network's output dominated by its own
+    # learned per-window positional bias instead of real content, which leaks
+    # through as a periodic ~8px-period vertical banding artifact in the
+    # predicted hole logits -- confirmed via FFT: a sharp, narrow spectral
+    # spike at exactly 1/8 cycles/px, present regardless of depth source but
+    # far more extensive with depth models that produce unusually large flat
+    # regions (e.g. MoGe3). Real hole shapes are low-frequency (broad object
+    # silhouettes); this artifact sits at one specific, known, content-
+    # independent frequency, so a narrow notch filter removes it without
+    # touching genuine hole predictions.
+    w = x.shape[-1]
+    if w < 32:
+        return x
+    orig_dtype = x.dtype
+    x = x.float()
+    target_freq = 1.0 / period
+    freqs = torch.fft.rfftfreq(w, d=1.0).to(x.device)
+    notch = (freqs > target_freq - half_bandwidth) & (freqs < target_freq + half_bandwidth)
+    spectrum = torch.fft.rfft(x, dim=-1)
+    spectrum[..., notch] = 0
+    x = torch.fft.irfft(spectrum, n=w, dim=-1)
+    return x.to(orig_dtype)
+
+
+def opening(mask, kernel_size=3, n_iter=1):
+    # erode then dilate: drops thin, isolated high-value spikes (spurious
+    # single/near-single-pixel hole predictions) while leaving wider, genuine
+    # hole regions intact. Complementary to closing() above, which fills small
+    # gaps instead of removing small spurious protrusions.
+    mask = mask.float()
+    for _ in range(n_iter):
+        mask = erode(mask, kernel_size=kernel_size)
+    for _ in range(n_iter):
+        mask = dilate(mask, kernel_size=kernel_size)
+
+    return mask
+
+
 def dilate_outer(mask, n_iter, base_width=None):
     # right view base
     if n_iter <= 0:

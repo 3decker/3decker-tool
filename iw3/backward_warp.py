@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from nunif.device import autocast, device_is_mps
 from .mapper import get_mapper
-from .dilation import closing, dilate_inner, dilate_outer
+from .dilation import closing, opening, remove_periodic_banding, dilate_inner, dilate_outer
 
 
 def make_divergence_feature_value(divergence, convergence, image_width):
@@ -432,6 +432,15 @@ def apply_divergence_nn_symmetric(model, c, depth, divergence, convergence,
 def postprocess_hole_mask(mask_logits, target_size, threshold, inner_dilation=0, outer_dilation=0):
     base_width = mask_logits.shape[-1]
     mask_logits = closing(mask_logits, n_iter=1)
+    # Remove mask_mlbw's own periodic ~8px vertical banding artifact (see
+    # remove_periodic_banding docstring) before it gets bilinear-upsampled
+    # into large-scale visible striping in the final frame.
+    mask_logits = remove_periodic_banding(mask_logits, period=8.0)
+    # A handful of genuinely isolated, near-single-pixel spurious hole spikes
+    # can remain at native resolution (thin high-frequency depth detail some
+    # models resolve, e.g. fine branches); opening drops those while leaving
+    # wider, genuine hole regions untouched.
+    mask_logits = opening(mask_logits, kernel_size=3, n_iter=1)
     if target_size != mask_logits.shape[-2:]:
         mask_logits = F.interpolate(mask_logits, size=target_size,
                                     mode="bilinear", align_corners=True, antialias=False)

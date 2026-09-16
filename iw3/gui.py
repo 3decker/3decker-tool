@@ -3652,6 +3652,29 @@ class MainFrame(wx.Frame):
         self.txt_reinject_end_time = TimeCtrl(self.cpn_hdr_reinject.GetPane(), value="00:00:00", fmt24hr=True,
                                                name="txt_reinject_end_time")
 
+        self.chk_reinject_allow_longer_converted = wx.CheckBox(
+            self.cpn_hdr_reinject.GetPane(), label=T("Allow Converted To Run Longer (different release)"),
+            name="chk_reinject_allow_longer_converted")
+        self.chk_reinject_allow_longer_converted.SetValue(False)
+        self.chk_reinject_allow_longer_converted.SetToolTip(
+            T("What it's for: Original Source and Converted sometimes come from genuinely different "
+              "releases of the same film (e.g. a Dolby Vision UHD disc vs. the 1080p file that was "
+              "actually converted) -- they can have a different TAIL length (extra/fewer seconds of end "
+              "credits, a different distributor leader) on top of Start Time already accounting for a "
+              "different head length. Checking this allows Converted to decode MORE frames than Source "
+              "(trimmed) instead of refusing outright, up to a generous sanity bound.\n"
+              "How it's handled: dovi_tool's own real, tested behavior (not something this app fakes) "
+              "duplicates its last RPU frame to cover Converted's excess tail frames -- verified for "
+              "Dolby Vision. HDR10+'s behavior on a mismatch has not been independently verified, so "
+              "treat that combination with extra caution.\n"
+              "Con: only fixes Converted being LONGER than Source -- Source having MORE frames than "
+              "Converted still always refuses (that almost always means real source content was never "
+              "actually converted, a different and more serious problem this checkbox must not paper "
+              "over).\n"
+              "Recommended: only check this after you've independently confirmed (e.g. by comparing real "
+              "frame content between the two files) that the gap is a genuine tail-length difference "
+              "between releases, not a wrong Start/End Time."))
+
         self.btn_reinject_run = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("Run"))
         self.btn_reinject_run.SetToolTip(
             T("What it's for: runs the reinjection as a separate background process (python -m "
@@ -3706,6 +3729,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_reinject_start_time, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_reinject_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_reinject_end_time, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.chk_reinject_allow_longer_converted, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.txt_reinject_log, (h, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_clear, (h := h + 1, 3), flag=wx.EXPAND)
@@ -9597,6 +9621,8 @@ class MainFrame(wx.Frame):
             cmd += ["--start-time", self.txt_reinject_start_time.GetValue()]
         if self.chk_reinject_end_time.GetValue():
             cmd += ["--end-time", self.txt_reinject_end_time.GetValue()]
+        if self.chk_reinject_allow_longer_converted.GetValue():
+            cmd += ["--allow-longer-converted"]
         if rife_manifest:
             cmd += ["--rife-manifest", rife_manifest]
 
@@ -12587,6 +12613,21 @@ def _self_test_hdr_reinject_rife_manifest_field():
             frame.on_click_btn_reinject_run(None)
             cmd = captured["cmd"]
             assert "--rife-manifest" in cmd and manifest_path in cmd, cmd
+
+            # (b.5) ADR-162: "Allow Converted To Run Longer" checkbox -> --allow-
+            # longer-converted, unchecked (default) -> omitted entirely.
+            frame.txt_reinject_rife_manifest.SetValue("")
+            captured.clear()
+            assert frame.chk_reinject_allow_longer_converted.GetValue() is False, \
+                "must default to unchecked"
+            frame.on_click_btn_reinject_run(None)
+            assert "--allow-longer-converted" not in captured["cmd"], captured["cmd"]
+
+            captured.clear()
+            frame.chk_reinject_allow_longer_converted.SetValue(True)
+            frame.on_click_btn_reinject_run(None)
+            assert "--allow-longer-converted" in captured["cmd"], captured["cmd"]
+            frame.chk_reinject_allow_longer_converted.SetValue(False)
 
             # (c) Non-blank but non-existent manifest path -> refuses with a warning
             # (no command built at all), rather than silently passing a bad path

@@ -13,7 +13,32 @@ it matters.
 
 ---
 
-## Latest Update — September 15, 2026
+## Latest Update — September 16, 2026
+
+**The Retroactive HDR/DV Reinjection tool now handles a real, tricky case: your
+Dolby Vision source and the file you actually converted are different releases
+of the same movie.** A UHD Dolby Vision disc and, say, a 1080p REMUX of the
+same film often don't start (or end) at exactly the same point — different
+leader/logo lengths, different end-credit lengths. A new checkbox, "Allow
+Converted To Run Longer (different release)," lets the tool accept a converted
+file that runs a bit longer than the source once trimmed, instead of refusing
+outright. It relies on dovi_tool's own real, tested behavior for the gap: the
+last few seconds just repeat the closest real Dolby Vision metadata instead of
+being left ungraded. Only allows the converted file to run longer, never the
+reverse — if your source has extra content that never made it into the
+converted file, that's still treated as a likely wrong Start/End Time and
+refused, same as before.
+
+**That same tool's pre-flight check is also a lot faster now.** It compares
+your source and converted files frame-by-frame before doing anything, which
+means fully decoding both — that step was using a slower method than it
+needed to. Switched to a faster one (same exact frame-count check, just
+quicker to run) — confirmed roughly 6.5x faster in real testing. GPU
+decoding was tested too but deliberately NOT made the default: real timing
+showed it wasn't reliably faster, and was actually slower whenever your GPU
+was already busy with another job.
+
+## Update — September 15, 2026
 
 **A new depth model family: Metric3D v2.** Five new choices in the Depth Model
 dropdown (Metric3D ConvNeXt Tiny/Large and Metric3D ViT Small/Large/Giant2), a

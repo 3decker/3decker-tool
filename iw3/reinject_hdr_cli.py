@@ -307,6 +307,78 @@ def _check_rife_guard(converted_path, ffprobe_bin):
     return reasons
 
 
+# ADR-164: real, confirmed incident -- grafting a real Dolby Vision RPU (extracted from a
+# genuinely HDR/PQ-graded source) onto pixel data that was never actually HDR-graded (e.g.
+# --converted made from a plain SDR release) produces a file whose RPU and actual picture
+# disagree. A DV RPU is not generic "make it look HDR" instructions -- it's a sequence of
+# per-scene tone-mapping curves Dolby's mastering tools computed against one specific HDR
+# master's real pixel values. Confirmed via a real end-to-end run (the same Hocus Pocus
+# UHD-source/1080p-REMUX-converted pairing ADR-162 was built for): a DV-aware player badly
+# overbrightened the result. This is NOT a frame-alignment problem -- ADR-162's own gate is
+# unrelated and unaffected, and correctly let this specific pairing through, since frame
+# counts and offsets were genuinely right; the picture and the metadata just described two
+# different masters. Not fixable by retagging color metadata alone either (confirmed by
+# direct reasoning, not just observation): tags describe what the stored numbers mean, they
+# don't change the numbers -- relabeling SDR pixel values as PQ makes a player decode them
+# through PQ's much steeper curve instead, producing a different, not smaller, error. The
+# only correct fixes are converting directly from the real HDR source with
+# --preserve-dowi (this tool's OWN sibling capability, iw3/utils.py), or a genuine SDR-to-
+# HDR regrade of the picture itself -- both outside what a metadata-only tool should
+# attempt, so this refuses instead of trying either.
+_HDR_TRANSFER_CHARACTERISTICS = {"smpte2084", "arib-std-b67"}  # PQ (HDR10/Dolby Vision), HLG
+
+
+def _get_color_transfer(input_path, ffprobe_bin, timeout=30):
+    """Returns the video stream's color_transfer tag (e.g. 'bt709', 'smpte2084'), or None if
+    it's missing/unrecognized/couldn't be read -- deliberately returns None rather than
+    guessing, so an undetermined tag never gets treated as a confirmed SDR/HDR answer."""
+    try:
+        proc = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=color_transfer", "-of", "default=nw=1:nk=1", str(input_path)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        value = (proc.stdout or "").strip()
+        return value if value and value not in ("unknown", "N/A") else None
+    except Exception:
+        return None
+
+
+def _check_hdr_transfer_compatibility(source, converted, ffprobe_bin):
+    """Returns a human-readable refusal reason, or None if --source and --converted agree on
+    whether they're HDR (PQ/HLG) or not -- see the ADR-164 comment above this function for
+    the real incident and reasoning behind this check. Deliberately lenient about an
+    UNDETERMINED transfer characteristic on either side (a missing/unrecognized tag is not
+    proof of a mismatch, and refusing on it would block legitimate real files this check
+    simply can't read) -- only refuses on a CONFIRMED HDR-vs-not-HDR disagreement. No
+    tolerance/override flag for this one, unlike --frame-count-tolerance or
+    --allow-longer-converted -- there is no legitimate reason to want to inject a real DV RPU
+    onto pixel data with a different dynamic range than the one it was computed against."""
+    source_transfer = _get_color_transfer(source, ffprobe_bin)
+    converted_transfer = _get_color_transfer(converted, ffprobe_bin)
+    source_hdr = source_transfer in _HDR_TRANSFER_CHARACTERISTICS if source_transfer else None
+    converted_hdr = converted_transfer in _HDR_TRANSFER_CHARACTERISTICS if converted_transfer else None
+    if source_hdr is None or converted_hdr is None:
+        return None
+    if source_hdr != converted_hdr:
+        source_desc = f"HDR ({source_transfer})" if source_hdr else f"not HDR ({source_transfer})"
+        converted_desc = f"HDR ({converted_transfer})" if converted_hdr else f"not HDR ({converted_transfer})"
+        return (
+            f"--source's video is {source_desc}, but --converted's video is {converted_desc} -- "
+            "refusing to inject. A Dolby Vision RPU's tone-mapping curves are computed against "
+            "one specific HDR-graded master's real pixel values; grafting one onto pixel data "
+            "with a different dynamic range produces a file whose metadata and actual picture "
+            "disagree -- a real DV-aware player will badly mis-render it (typically far too "
+            "bright), confirmed by a real incident, not a theoretical concern (see "
+            "docs/ai/AI_DECISIONS.md ADR-164). This is not fixable by changing color tags alone "
+            "-- they describe the stored pixel values, they don't change them. The correct fix "
+            "is converting directly from the real HDR source with --preserve-dowi (a separate, "
+            "existing capability -- see iw3/utils.py), or a genuine SDR-to-HDR regrade of the "
+            "picture itself, which this tool does not perform."
+        )
+    return None
+
+
 def run(args):
     """Dispatches to the RIFE-manifest-aware path (ADR-051) when --rife-manifest
     is given, or the original strict exact-frame-count path (ADR-031)
@@ -533,6 +605,14 @@ def _run_with_rife_manifest(args):
               "this tool never overwrites either input.", file=sys.stderr)
         return 1
 
+    # --- ADR-164: HDR/SDR transfer-characteristic compatibility guard -- see
+    # _check_hdr_transfer_compatibility's own docstring. RIFE only changes frame
+    # timing, never color grading, so the same real risk applies here too. ---
+    hdr_mismatch_reason = _check_hdr_transfer_compatibility(source, converted, ffprobe_bin)
+    if hdr_mismatch_reason:
+        print(f"ERROR: {hdr_mismatch_reason}", file=sys.stderr)
+        return 1
+
     try:
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -707,6 +787,13 @@ def _run_strict(args):
               file=sys.stderr)
         for reason in rife_reasons:
             print(f"  - {reason}", file=sys.stderr)
+        return 1
+
+    # --- ADR-164: HDR/SDR transfer-characteristic compatibility guard -- also fast (a
+    # metadata read, not a decode), so run before the slow frame-count probe below too. ---
+    hdr_mismatch_reason = _check_hdr_transfer_compatibility(source, converted, ffprobe_bin)
+    if hdr_mismatch_reason:
+        print(f"ERROR: {hdr_mismatch_reason}", file=sys.stderr)
         return 1
 
     # --- required pre-flight: exact (by default) decoded frame-count match ---
@@ -930,6 +1017,56 @@ def _self_test_rife_guard():
     print("_self_test_rife_guard: PASS")
 
 
+def _self_test_hdr_transfer_compatibility():
+    """Synthetic/mocked test of ADR-164's HDR/SDR mismatch guard -- see
+    _check_hdr_transfer_compatibility's own docstring for the real incident this
+    exists to catch."""
+    from unittest.mock import patch, MagicMock
+
+    def _run_side_effect(transfers):
+        # subprocess.run is called once per _get_color_transfer() call (source, then
+        # converted) -- returns each in turn.
+        it = iter(transfers)
+
+        def _fake_run(*a, **kw):
+            return MagicMock(stdout=next(it), returncode=0)
+        return _fake_run
+
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.side_effect = _run_side_effect(["bt709\n", "bt709\n"])
+        assert _check_hdr_transfer_compatibility("src.mkv", "conv.mkv", "ffprobe") is None
+
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.side_effect = _run_side_effect(["smpte2084\n", "smpte2084\n"])
+        assert _check_hdr_transfer_compatibility("src.mkv", "conv.mkv", "ffprobe") is None
+
+    # The real incident's exact shape: HDR source, non-HDR converted -- must refuse
+    # with a clear, specific reason naming both sides' actual transfer characteristics.
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.side_effect = _run_side_effect(["smpte2084\n", "bt709\n"])
+        reason = _check_hdr_transfer_compatibility("src.mkv", "conv.mkv", "ffprobe")
+        assert reason is not None
+        assert "smpte2084" in reason and "bt709" in reason, reason
+
+    # The opposite direction must also refuse -- the check is symmetric.
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.side_effect = _run_side_effect(["bt709\n", "arib-std-b67\n"])
+        reason = _check_hdr_transfer_compatibility("src.mkv", "conv.mkv", "ffprobe")
+        assert reason is not None
+
+    # Undetermined on either side must NOT refuse -- an unreadable/missing tag is not
+    # proof of a mismatch (this must never block a real file this check simply can't read).
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.side_effect = _run_side_effect(["", "bt709\n"])
+        assert _check_hdr_transfer_compatibility("src.mkv", "conv.mkv", "ffprobe") is None
+
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.side_effect = Exception("ffprobe not found")
+        assert _check_hdr_transfer_compatibility("src.mkv", "conv.mkv", "ffprobe") is None
+
+    print("_self_test_hdr_transfer_compatibility: PASS")
+
+
 def _self_test_run_preflight_gating():
     """Synthetic/mocked test of run()'s hard-gate ORDER: RIFE guard -> frame-count
     comparison -> only then extraction/injection. Uses a real tempdir with placeholder
@@ -963,6 +1100,18 @@ def _self_test_run_preflight_gating():
 
         # 2) RIFE guard fires -> refuse immediately, never even reaches the frame probe
         with patch(f"{__name__}._check_rife_guard", return_value=["container comment metadata contains 'iw3_rife_interpolate=1'"]), \
+             patch(f"{__name__}._probe_frames_and_duration") as mock_probe:
+            rc = run(_args())
+            assert rc == 1, rc
+            mock_probe.assert_not_called()
+
+        # 2.5) ADR-164: HDR/SDR transfer mismatch fires -> refuse immediately, before
+        # even the RIFE-guard-passed frame probe (same "fast checks before slow decode"
+        # ordering the RIFE guard itself gets, case 2 above).
+        with patch(f"{__name__}._check_rife_guard", return_value=[]), \
+             patch(f"{__name__}._check_hdr_transfer_compatibility",
+                   return_value="--source's video is HDR (smpte2084), but --converted's "
+                                 "video is not HDR (bt709)"), \
              patch(f"{__name__}._probe_frames_and_duration") as mock_probe:
             rc = run(_args())
             assert rc == 1, rc
@@ -1515,6 +1664,7 @@ def _run_self_tests():
     _self_test_probe_frames_and_duration()
     _self_test_read_intervals_for_range()
     _self_test_rife_guard()
+    _self_test_hdr_transfer_compatibility()
     _self_test_run_preflight_gating()
     _self_test_build_duplicate_ops_from_manifest()
     _self_test_expand_rpu_for_rife()

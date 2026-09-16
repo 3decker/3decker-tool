@@ -38,6 +38,19 @@ decoding was tested too but deliberately NOT made the default: real timing
 showed it wasn't reliably faster, and was actually slower whenever your GPU
 was already busy with another job.
 
+**And a real safety fix for that same tool, found the same day: it will now refuse
+if your source and converted files don't actually match in dynamic range (one is
+HDR, the other isn't).** A real Dolby Vision RPU only makes sense grafted onto the
+exact picture it was created for — if your converted file was made from a plain
+SDR release while your source is a genuinely HDR-graded disc, injecting the HDR
+disc's Dolby Vision metadata onto it doesn't just risk a small quality hit, it
+produces a badly overbright, wrong-looking result on any Dolby Vision-aware
+screen. The tool now checks this up front (in seconds, no waiting) and refuses
+with a clear explanation instead of quietly producing a broken file. If you hit
+this, the correct fix is converting the movie 3D directly from the real HDR
+source with "Preserve Dolby Vision" turned on, not grafting metadata after the
+fact.
+
 ## Update — September 15, 2026
 
 **A new depth model family: Metric3D v2.** Five new choices in the Depth Model

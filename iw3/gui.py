@@ -3675,6 +3675,31 @@ class MainFrame(wx.Frame):
               "frame content between the two files) that the gap is a genuine tail-length difference "
               "between releases, not a wrong Start/End Time."))
 
+        self.lbl_reinject_frame_count_tolerance = wx.StaticText(
+            self.cpn_hdr_reinject.GetPane(), label=T("Frame Count Tolerance"))
+        self.txt_reinject_frame_count_tolerance = EditableComboBox(
+            self.cpn_hdr_reinject.GetPane(), choices=["0", "2", "5", "10"],
+            name="txt_reinject_frame_count_tolerance")
+        self.txt_reinject_frame_count_tolerance.SetSelection(2)
+        self.txt_reinject_frame_count_tolerance.SetToolTip(
+            T("DELIBERATE ESCAPE HATCH -- not a normal setting. What it's for: how many frames of "
+              "mismatch to allow between Source (trimmed) and Converted before refusing to inject, "
+              "instead of requiring an exact match.\n"
+              "Why it defaults to 5 (not 0): a genuinely correct Start/End Time can still probe a few "
+              "frames off from Converted's real count -- ffmpeg's -ss/-t trim seeking is timestamp-"
+              "approximate, not frame-exact, so a small boundary-frame gap can happen even when the range "
+              "itself is right. 5 covers that routine rounding automatically so you don't have to raise "
+              "it by hand every time you hit it.\n"
+              "Con: it does NOT fix a genuinely wrong Start/End Time range -- raising it high enough to "
+              "paper over a real mismatch just injects DV/HDR metadata at the wrong frames instead of "
+              "refusing, which is worse than refusing. A mismatch of dozens of frames or more almost "
+              "always means a wrong range or an incomplete conversion, not trim rounding -- fix that "
+              "instead of raising this further.\n"
+              "Recommended: 5 (default) covers routine trim rounding automatically. Set to 0 if you want "
+              "an exact match required every time with no automatic slack. If a real run still refuses "
+              "with a mismatch in the dozens or more, that's not this field's job -- check your Start/End "
+              "Time instead."))
+
         self.btn_reinject_run = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("Run"))
         self.btn_reinject_run.SetToolTip(
             T("What it's for: runs the reinjection as a separate background process (python -m "
@@ -3744,6 +3769,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_reinject_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_reinject_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.chk_reinject_allow_longer_converted, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_reinject_frame_count_tolerance, (h := h + 1, 0), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_frame_count_tolerance, (h, 2), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_reinject, (h, 0), (0, 2), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_reinject_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -9748,6 +9775,12 @@ class MainFrame(wx.Frame):
                           T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
             return
 
+        frame_count_tolerance = self.txt_reinject_frame_count_tolerance.GetValue().strip()
+        if frame_count_tolerance and not validate_number(frame_count_tolerance, 0, 100000, is_int=True):
+            wx.MessageBox(T("`Frame Count Tolerance` must be a whole number 0 - 100000."),
+                          T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+            return
+
         cmd = [sys.executable, "-m", "iw3.reinject_hdr_cli",
                "--source", source, "--converted", converted, "--output", output]
         if self.chk_reinject_start_time.GetValue():
@@ -9756,6 +9789,13 @@ class MainFrame(wx.Frame):
             cmd += ["--end-time", self.txt_reinject_end_time.GetValue()]
         if self.chk_reinject_allow_longer_converted.GetValue():
             cmd += ["--allow-longer-converted"]
+        # Only appended when non-zero -- the field's own GUI default is "5" (deliberately
+        # NOT the CLI's own default=0, per explicit user request: routine 1-5 frame trim
+        # rounding should pass automatically without hand-raising this every time), so most
+        # runs through the GUI DO carry this flag now; typing "0" in explicitly still omits
+        # it, matching an exact-match-required run byte-for-byte.
+        if frame_count_tolerance and int(frame_count_tolerance) != 0:
+            cmd += ["--frame-count-tolerance", frame_count_tolerance]
         if rife_manifest:
             cmd += ["--rife-manifest", rife_manifest]
 
@@ -12800,14 +12840,17 @@ def _self_test_hdr_reinject_rife_manifest_field():
             frame.chk_reinject_end_time.SetValue(False)
 
             # (a) Blank manifest field -> --rife-manifest omitted entirely (existing
-            # behavior for anyone not using RIFE, unchanged).
+            # behavior for anyone not using RIFE, unchanged). Frame Count Tolerance's
+            # own default is "5" (see case (b.6) below), so it's present here too --
+            # this is the real default command a fresh panel actually sends.
             frame.txt_reinject_rife_manifest.SetValue("")
             frame.on_click_btn_reinject_run(None)
             cmd = captured["cmd"]
             assert "--rife-manifest" not in cmd, cmd
             assert cmd == [sys.executable, "-m", "iw3.reinject_hdr_cli",
                             "--source", source_path, "--converted", converted_path,
-                            "--output", output_path], cmd
+                            "--output", output_path,
+                            "--frame-count-tolerance", "5"], cmd
 
             # (b) Filled-in, existing manifest path -> passed through verbatim.
             manifest_path = path.join(tmpdir, "movie_3d_rife.mkv.rife_manifest.json")
@@ -12833,6 +12876,38 @@ def _self_test_hdr_reinject_rife_manifest_field():
             frame.on_click_btn_reinject_run(None)
             assert "--allow-longer-converted" in captured["cmd"], captured["cmd"]
             frame.chk_reinject_allow_longer_converted.SetValue(False)
+
+            # (b.6) ADR-167: "Frame Count Tolerance" field -> --frame-count-tolerance.
+            # Default is "5", not the CLI's own default=0 -- a deliberate GUI-only choice
+            # (explicit user request) so routine 1-5 frame trim rounding passes
+            # automatically; explicitly setting it to "0" still omits the flag (exact
+            # match required, byte-for-byte the tool's own original behavior).
+            assert frame.txt_reinject_frame_count_tolerance.GetValue() == "5", \
+                "must default to 5 (routine trim rounding allowed automatically)"
+            captured.clear()
+            frame.on_click_btn_reinject_run(None)
+            assert "--frame-count-tolerance" in captured["cmd"] and "5" in captured["cmd"], \
+                captured["cmd"]
+
+            captured.clear()
+            frame.txt_reinject_frame_count_tolerance.SetValue("0")
+            frame.on_click_btn_reinject_run(None)
+            assert "--frame-count-tolerance" not in captured["cmd"], captured["cmd"]
+
+            captured.clear()
+            frame.txt_reinject_frame_count_tolerance.SetValue("2")
+            frame.on_click_btn_reinject_run(None)
+            assert "--frame-count-tolerance" in captured["cmd"] and "2" in captured["cmd"], \
+                captured["cmd"]
+
+            # Invalid (non-integer) value -> refuses with a warning, no command built.
+            captured.clear()
+            message_box_calls.clear()
+            frame.txt_reinject_frame_count_tolerance.SetValue("abc")
+            frame.on_click_btn_reinject_run(None)
+            assert "cmd" not in captured, "must refuse before building a command for an invalid tolerance"
+            assert len(message_box_calls) == 1, "must warn the user exactly once about the bad value"
+            frame.txt_reinject_frame_count_tolerance.SetValue("5")
 
             # (c) Non-blank but non-existent manifest path -> refuses with a warning
             # (no command built at all), rather than silently passing a bad path

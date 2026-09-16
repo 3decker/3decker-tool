@@ -73,6 +73,15 @@ step now shows a live bar, elapsed/total time, and percentage for each file
 being checked, instead of a frozen "Running..." message for however many
 minutes that takes on a long movie.
 
+**And a new "Frame Count Tolerance" field on that same tool.** Your Start/End
+Time can be exactly right and the tool can still see a source/converted frame
+count off by a couple of frames — that's just ffmpeg's trim seeking being
+timestamp-approximate, not a real problem, but until now it required manually
+running a command-line flag to get past it. This new field (defaults to 5)
+lets small, routine gaps like that through automatically. It's not a fix for
+an actually wrong time range or an incomplete conversion — those still refuse
+as before, exactly as they should.
+
 ## Update — September 15, 2026
 
 **A new depth model family: Metric3D v2.** Five new choices in the Depth Model

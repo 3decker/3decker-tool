@@ -3688,6 +3688,20 @@ class MainFrame(wx.Frame):
               "Recommended: run once per conversion you want retroactively HDR-corrected; always check "
               "the log box below afterward to confirm it actually succeeded rather than refused."))
 
+        # ADR-166: this tool's pre-flight frame-count check decodes the FULL source and
+        # converted clips (see btn_reinject_run's own tooltip Con above) with no progress
+        # feedback at all beyond a static "Running..." message -- the same complaint that
+        # led to ADR-165's Sharpen progress bar, reported separately for this tool. Two
+        # stages (source, then converted), each shown as its own gauge/label pass rather
+        # than one combined bar, since they're two genuinely separate ffmpeg decodes with
+        # their own totals.
+        self.gauge_reinject = wx.Gauge(self.cpn_hdr_reinject.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_reinject.SetToolTip(
+            T("Real progress of the current pre-flight decode pass (source or converted), read "
+              "live from the background process as it runs -- not just a spinner. Empty/hidden-"
+              "looking when no job has run yet this session."))
+        self.lbl_reinject_progress = wx.StaticText(self.cpn_hdr_reinject.GetPane(), label="")
+
         self.txt_reinject_log = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
                                              size=self.FromDIP((-1, 60)), name="txt_reinject_log")
         self.txt_reinject_log.SetToolTip(
@@ -3731,7 +3745,9 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_reinject_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.chk_reinject_allow_longer_converted, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
-        layout.Add(self.txt_reinject_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_reinject, (h, 0), (0, 2), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_reinject_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_reinject_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_hdr_reinject.GetPane().SetSizer(layout)
 
@@ -9610,15 +9626,69 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_reinject_rife_manifest.SetValue(dlg.GetPath())
 
+    def _update_reinject_progress(self, stage, current, total):
+        # Called via wx.CallAfter from run_reinject_hdr's background thread -- never touch
+        # wx widgets directly from that thread. Two stages exist (source, then converted --
+        # see reinject_hdr_cli.py's _probe_frames_and_duration ADR-166), each its own decode
+        # pass with its own total, so the label always names which one is in progress rather
+        # than implying a single combined percentage across both.
+        stage_label = {"source": T("Source"), "converted": T("Converted")}.get(stage, stage)
+        if total is not None and total > 0:
+            total_i = max(1, int(round(total)))
+            self.gauge_reinject.SetRange(total_i)
+            self.gauge_reinject.SetValue(min(total_i, int(round(current))))
+            percent = min(100, int(current / total * 100))
+            self.lbl_reinject_progress.SetLabel(
+                f"{stage_label}: {current:.0f}s / {total:.0f}s ({percent}%)")
+        else:
+            # total unknown (the container's own duration metadata couldn't be read) --
+            # still shows real live elapsed time, just no percent/ETA to compute it from.
+            self.gauge_reinject.Pulse()
+            self.lbl_reinject_progress.SetLabel(f"{stage_label}: {current:.0f}s")
+
     def run_reinject_hdr(self, cmd):
         # Runs on a background thread via startWorker -- never blocks the GUI thread,
         # and this tool needs no GPU at all (pure ffmpeg/dovi_tool/hdr10plus_tool
         # subprocess orchestration), unlike RIFE/waifu2x post-processing which is kept
-        # out-of-process specifically to avoid sharing GPU memory. Captures combined
-        # stdout+stderr since reinject_hdr_cli prints all of its pre-flight
-        # frame-count/duration numbers and refusal reasons to stderr.
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        # out-of-process specifically to avoid sharing GPU memory.
+        #
+        # ADR-166: Popen (not subprocess.run) with the two streams read SEPARATELY and
+        # live, same convention as run_sharpen (ADR-165) -- that was the real bug: a
+        # user watching this run had no progress feedback at all beyond a static
+        # "Running..." message for however long the two full-clip decode passes took.
+        # stdout is now a DEDICATED progress channel: reinject_hdr_cli.py's
+        # _probe_frames_and_duration prints ONLY "IW3_REINJECT_PROGRESS <stage> <current>
+        # <total>" lines there when given a stage, nothing else, ever -- every
+        # human-readable status/refusal message this tool prints still goes to stderr
+        # exactly as before (unchanged), captured here into the same log text this
+        # method has always returned.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, bufsize=1)
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("IW3_REINJECT_PROGRESS "):
+                parts = line.split(" ")
+                if len(parts) == 4:
+                    stage = parts[1]
+                    try:
+                        current = float(parts[2])
+                    except ValueError:
+                        continue
+                    total = None if parts[3] == "unknown" else float(parts[3])
+                    wx.CallAfter(self._update_reinject_progress, stage, current, total)
+
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
 
     def on_exit_reinject_worker(self, result):
         self.btn_reinject_run.Enable()
@@ -9637,6 +9707,13 @@ class MainFrame(wx.Frame):
         self.txt_reinject_log.SetValue(output)
         self.txt_reinject_log.ShowPosition(self.txt_reinject_log.GetLastPosition())
         if returncode == 0:
+            # Force the bar to a clean full state on the last stage reached, rather than
+            # trusting the last live update already landed there (it should have, since
+            # wx.CallAfter preserves order and reinject_hdr_cli's own final flush is
+            # unthrottled -- this is a defensive no-op in the normal case).
+            total = self.gauge_reinject.GetRange()
+            if total > 0:
+                self.gauge_reinject.SetValue(total)
             self.SetStatusText(T("HDR reinjection finished successfully"))
         else:
             self.SetStatusText(T("HDR reinjection failed -- see the log below"))
@@ -9684,6 +9761,9 @@ class MainFrame(wx.Frame):
 
         self.txt_reinject_log.SetValue(
             T("Running -- this decodes the full clip to verify frame counts, so it may take a while...\n"))
+        self.gauge_reinject.SetRange(1)
+        self.gauge_reinject.SetValue(0)
+        self.lbl_reinject_progress.SetLabel("")
         self.btn_reinject_run.Disable()
         self.btn_reinject_clear.Disable()
         self.SetStatusText(T("Running HDR reinjection..."))
@@ -13265,6 +13345,78 @@ def _self_test_sharpen_codec_option():
     print("_self_test_sharpen_codec_option: PASS")
 
 
+def _self_test_reinject_progress_bar():
+    """Regression test for ADR-166 (Retroactive HDR/DV Reinjection progress bar): same
+    complaint and same fix pattern as ADR-165's Sharpen progress bar, reported separately
+    for this tool -- confirms run_reinject_hdr() parses live "IW3_REINJECT_PROGRESS <stage>
+    <current> <total>" lines from a real subprocess's stdout (as reinject_hdr_cli.py's
+    _probe_frames_and_duration emits them when given a stage) and drives gauge_reinject/
+    lbl_reinject_progress from them -- including the two-stage case (source, then converted,
+    each its own gauge/label pass with its own total) -- while stderr log text is captured
+    separately and never leaks a raw progress line into the log box. Uses a real, harmless
+    `python -c` stand-in subprocess (same convention as _self_test_sharpen_progress_bar/
+    _self_test_run_update_git_checkpoint) rather than mocking subprocess.Popen."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        script = (
+            "import sys\n"
+            "print('IW3_REINJECT_PROGRESS source 5.00 10.00')\n"
+            "print('IW3_REINJECT_PROGRESS source 10.00 10.00')\n"
+            "print('some log line', file=sys.stderr)\n"
+            "print('IW3_REINJECT_PROGRESS converted 3.00 6.00')\n"
+            "print('IW3_REINJECT_PROGRESS converted 6.00 6.00')\n"
+            "print('another log line', file=sys.stderr)\n"
+        )
+        cmd = [sys.executable, "-c", script]
+        returncode, output = frame.run_reinject_hdr(cmd)
+        wx.Yield()  # flush the wx.CallAfter-queued _update_reinject_progress calls
+
+        assert returncode == 0, returncode
+        assert "some log line" in output, output
+        assert "another log line" in output, output
+        assert "IW3_REINJECT_PROGRESS" not in output, \
+            "progress lines must never leak into the stderr log text"
+        # Last update received wins -- "converted" stage, fully complete.
+        assert frame.gauge_reinject.GetRange() == 6, frame.gauge_reinject.GetRange()
+        assert frame.gauge_reinject.GetValue() == 6, frame.gauge_reinject.GetValue()
+        assert frame.lbl_reinject_progress.GetLabel() == f"{T('Converted')}: 6s / 6s (100%)", \
+            frame.lbl_reinject_progress.GetLabel()
+
+        # A fresh run must reset the gauge/label rather than showing the previous
+        # run's leftover values until the first live update arrives.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = path.join(tmpdir, "source.mkv")
+            converted_path = path.join(tmpdir, "converted.mkv")
+            output_path = path.join(tmpdir, "output.mkv")
+            for p in (source_path, converted_path):
+                with open(p, "wb") as f:
+                    f.write(b"fake")
+            frame.txt_reinject_source.SetValue(source_path)
+            frame.txt_reinject_converted.SetValue(converted_path)
+            frame.txt_reinject_output.SetValue(output_path)
+            orig_start_worker = gui_mod.startWorker
+            gui_mod.startWorker = lambda *a, **kw: None
+            try:
+                frame.on_click_btn_reinject_run(None)
+            finally:
+                gui_mod.startWorker = orig_start_worker
+            assert frame.gauge_reinject.GetValue() == 0, \
+                "starting a new run must reset the gauge, not show the last run's value"
+            assert frame.lbl_reinject_progress.GetLabel() == "", \
+                "starting a new run must clear the previous run's progress label"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_reinject_progress_bar: PASS")
+
+
 def _self_test_tool_log_clear_buttons():
     """Regression test for the "Clear" button added next to each standalone tool's
     log/output box on the Tools tab (Retroactive HDR/DV Reinjection, Search
@@ -14658,6 +14810,7 @@ def _run_self_tests():
         _self_test_rife_standalone_panel,
         _self_test_sharpen_progress_bar,
         _self_test_sharpen_codec_option,
+        _self_test_reinject_progress_bar,
         _self_test_tool_log_clear_buttons,
         _self_test_run_update_git_checkpoint,
         _self_test_git_checkpoint_no_identity_configured,

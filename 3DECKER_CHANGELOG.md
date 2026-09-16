@@ -66,6 +66,13 @@ HEVC output when you plan to reinject DV/HDR metadata into a sharpened file
 afterward. Leave it on the default if you don't need that — nothing changes
 for anyone who doesn't touch this new control.
 
+**The Retroactive HDR/DV Reinjection tool now shows real progress too, the same
+day it was asked about.** Its pre-flight check decodes your full source and
+converted files before doing anything (to verify they actually match) — that
+step now shows a live bar, elapsed/total time, and percentage for each file
+being checked, instead of a frozen "Running..." message for however many
+minutes that takes on a long movie.
+
 ## Update — September 15, 2026
 
 **A new depth model family: Metric3D v2.** Five new choices in the Depth Model

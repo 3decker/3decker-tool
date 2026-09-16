@@ -3638,19 +3638,26 @@ class MainFrame(wx.Frame):
             T("What it's for: which point in the ORIGINAL SOURCE file the converted file's first frame "
               "actually starts at -- only needed when the converted file covers just part of the source "
               "(e.g. a clip, not the whole movie). Leave unchecked to use the whole source.\n"
+              "Format: hh:mm:ss, with OPTIONAL fractional seconds (e.g. 00:03:13.73) -- this plain text "
+              "field accepts anything reinject_hdr_cli.py's own --start-time/--end-time flags do, unlike "
+              "a masked time-of-day control which would round to whole seconds. Real decoded clip "
+              "durations are almost never a whole number of seconds, so typing the exact fractional value "
+              "here (rather than rounding it yourself) avoids a small, avoidable frame-count mismatch.\n"
               "Con: there is no auto-detection of this -- you must know and enter the exact range that "
               "was actually converted. If it's wrong, the tool refuses to proceed (an exact decoded "
               "frame-count check) rather than silently producing misaligned HDR metadata.\n"
               "Recommended: the exact --start-time you used for the original iw3 conversion, if any."))
-        self.txt_reinject_start_time = TimeCtrl(self.cpn_hdr_reinject.GetPane(), value="00:00:00", fmt24hr=True,
-                                                 name="txt_reinject_start_time")
+        self.txt_reinject_start_time = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), value="00:00:00",
+                                                     name="txt_reinject_start_time")
         self.chk_reinject_end_time = wx.CheckBox(self.cpn_hdr_reinject.GetPane(), label=T("End"),
                                                   name="chk_reinject_end_time")
         self.chk_reinject_end_time.SetToolTip(
             T("Same idea as Start Time, but for where the converted file's last frame ends within the "
-              "original source. Leave unchecked to use the end of the source."))
-        self.txt_reinject_end_time = TimeCtrl(self.cpn_hdr_reinject.GetPane(), value="00:00:00", fmt24hr=True,
-                                               name="txt_reinject_end_time")
+              "original source. Leave unchecked to use the end of the source.\n"
+              "Format: hh:mm:ss, with OPTIONAL fractional seconds (e.g. 00:03:13.73) -- see Start Time's "
+              "own tooltip for why typing the exact fractional value matters here."))
+        self.txt_reinject_end_time = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), value="00:00:00",
+                                                   name="txt_reinject_end_time")
 
         self.chk_reinject_allow_longer_converted = wx.CheckBox(
             self.cpn_hdr_reinject.GetPane(), label=T("Allow Converted To Run Longer (different release)"),
@@ -9781,12 +9788,35 @@ class MainFrame(wx.Frame):
                           T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
             return
 
+        # Free-text fields now (not a masked hh:mm:ss-only TimeCtrl -- see ADR-168), so
+        # validate with the exact same parse_time() reinject_hdr_cli.py itself uses,
+        # rather than let an unparseable string fail deep inside the subprocess with a
+        # less legible error.
+        start_time_str = self.txt_reinject_start_time.GetValue().strip()
+        if self.chk_reinject_start_time.GetValue():
+            try:
+                parse_time(start_time_str)
+            except ValueError:
+                wx.MessageBox(T("`Start` must be in hh:mm:ss format (fractional seconds allowed, "
+                                 "e.g. 00:03:13.73)."),
+                              T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+                return
+        end_time_str = self.txt_reinject_end_time.GetValue().strip()
+        if self.chk_reinject_end_time.GetValue():
+            try:
+                parse_time(end_time_str)
+            except ValueError:
+                wx.MessageBox(T("`End` must be in hh:mm:ss format (fractional seconds allowed, "
+                                 "e.g. 00:03:13.73)."),
+                              T("Retroactive HDR/DV Reinjection"), wx.OK | wx.ICON_WARNING)
+                return
+
         cmd = [sys.executable, "-m", "iw3.reinject_hdr_cli",
                "--source", source, "--converted", converted, "--output", output]
         if self.chk_reinject_start_time.GetValue():
-            cmd += ["--start-time", self.txt_reinject_start_time.GetValue()]
+            cmd += ["--start-time", start_time_str]
         if self.chk_reinject_end_time.GetValue():
-            cmd += ["--end-time", self.txt_reinject_end_time.GetValue()]
+            cmd += ["--end-time", end_time_str]
         if self.chk_reinject_allow_longer_converted.GetValue():
             cmd += ["--allow-longer-converted"]
         # Only appended when non-zero -- the field's own GUI default is "5" (deliberately
@@ -12991,6 +13021,88 @@ def _self_test_hdr_reinject_rife_manifest_field():
     print("_self_test_hdr_reinject_rife_manifest_field: PASS")
 
 
+def _self_test_reinject_fractional_time_fields():
+    """Regression test for ADR-168: txt_reinject_start_time/txt_reinject_end_time switched
+    from a masked hh:mm:ss-only TimeCtrl to a plain wx.TextCtrl, after a real, live incident
+    where a user was told to round a real fractional-second converted-clip duration (193.73s)
+    down to a whole second for the old TimeCtrl field, which then produced its own small (17
+    frame) avoidable mismatch -- entirely a GUI input-precision gap, not a real error. The
+    underlying tool (reinject_hdr_cli.py's --start-time/--end-time, via parse_time()) always
+    supported fractional seconds; only the GUI widget couldn't accept them. Confirms: the
+    fields are genuinely plain TextCtrl now (not the masked control); a fractional value like
+    "00:03:13.73" passes through to the built command completely unmodified/unrounded; an
+    unparseable value refuses via wx.MessageBox with exactly one warning and builds no
+    command, using the exact same parse_time() reinject_hdr_cli.py itself uses rather than a
+    separate, potentially-inconsistent regex; and the existing unchecked-omits-the-flag
+    behavior is unaffected."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_message_box = gui_mod.wx.MessageBox
+    message_box_calls = []
+    gui_mod.wx.MessageBox = lambda *a, **kw: message_box_calls.append(a)
+    try:
+        frame = gui_mod.MainFrame()
+
+        assert not isinstance(frame.txt_reinject_start_time, TimeCtrl), \
+            "must be a plain TextCtrl now, not the masked hh:mm:ss-only TimeCtrl"
+        assert not isinstance(frame.txt_reinject_end_time, TimeCtrl)
+        assert isinstance(frame.txt_reinject_start_time, wx.TextCtrl)
+        assert isinstance(frame.txt_reinject_end_time, wx.TextCtrl)
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["cmd"] = wargs[0]
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = path.join(tmpdir, "source.mkv")
+            converted_path = path.join(tmpdir, "movie_3d.mkv")
+            output_path = path.join(tmpdir, "movie_3d_hdr_reinjected.mkv")
+            for p in (source_path, converted_path):
+                with open(p, "wb") as f:
+                    f.write(b"fake")
+            frame.txt_reinject_source.SetValue(source_path)
+            frame.txt_reinject_converted.SetValue(converted_path)
+            frame.txt_reinject_output.SetValue(output_path)
+
+            # A real fractional-second duration -- must pass through EXACTLY, no rounding.
+            frame.chk_reinject_start_time.SetValue(False)
+            frame.chk_reinject_end_time.SetValue(True)
+            frame.txt_reinject_end_time.SetValue("00:03:13.73")
+            frame.on_click_btn_reinject_run(None)
+            cmd = captured["cmd"]
+            assert cmd[cmd.index("--end-time") + 1] == "00:03:13.73", cmd
+
+            # An unparseable value refuses with exactly one warning, no command built.
+            captured.clear()
+            message_box_calls.clear()
+            frame.txt_reinject_end_time.SetValue("not-a-time")
+            frame.on_click_btn_reinject_run(None)
+            assert "cmd" not in captured, "must refuse before building a command for an unparseable time"
+            assert len(message_box_calls) == 1, "must warn the user exactly once about the bad value"
+
+            # Unchecked still omits the flag entirely, unaffected by the widget change.
+            frame.txt_reinject_end_time.SetValue("00:03:13.73")
+            frame.chk_reinject_end_time.SetValue(False)
+            captured.clear()
+            frame.on_click_btn_reinject_run(None)
+            assert "--end-time" not in captured["cmd"], captured["cmd"]
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        gui_mod.wx.MessageBox = orig_message_box
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_reinject_fractional_time_fields: PASS")
+
+
 def _self_test_3decker_quick_preset():
     """Regression test for the "3DECKER Preferred" top-bar quick-preset button
     (docs/ai/AI_DECISIONS.md ADR-057 Amendment 12, updated ADR-076) -- moved here
@@ -14882,6 +14994,7 @@ def _run_self_tests():
         _self_test_genre_preset_quick_fill,
         _self_test_3decker_quick_preset,
         _self_test_hdr_reinject_rife_manifest_field,
+        _self_test_reinject_fractional_time_fields,
         _self_test_rife_standalone_panel,
         _self_test_sharpen_progress_bar,
         _self_test_sharpen_codec_option,

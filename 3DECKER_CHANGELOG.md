@@ -82,6 +82,12 @@ lets small, routine gaps like that through automatically. It's not a fix for
 an actually wrong time range or an incomplete conversion — those still refuse
 as before, exactly as they should.
 
+**And the Start/End Time fields on that same tool now accept fractional
+seconds (e.g. 00:03:13.73), not just whole seconds.** Real clip durations are
+almost never an exact whole number of seconds — previously you had to round,
+which could itself cause a small, entirely avoidable frame-count mismatch.
+Typing the exact value now avoids that altogether.
+
 ## Update — September 15, 2026
 
 **A new depth model family: Metric3D v2.** Five new choices in the Depth Model

@@ -1844,17 +1844,54 @@ amplifies small raw depth-value noise disproportionately at close range; Native'
 direct negated real distance doesn't have that singularity, so it's calmer
 frame-to-frame too, independent of any EMA smoothing.
 
-### 13.6 Overall read
+### 13.6 Dark/hard scene stability + crispness (13:57 dark forest scene, 720 real frames, no EMA)
 
-Every single metric tested points the same direction: Native is crisper, more
-temporally stable, and gives a real, measured stronger pop — genuinely not just
-"different," a real improvement on the numbers available so far. Whether it's
-*better* for a given viewer is still a matter of taste (the original's extra pop
-could be exactly what someone wants even knowing it's not fully correct), but
-there's no longer a technical reason to prefer the original's depth handling over
-Native's on quality grounds alone. Not yet tested: a full movie conversion,
-EMA buffer/decay behavior specifically for Native (inherits Metric_Large's own
-still-incomplete buffer sweep from Section 12.5), and Edge Dilation.
+Same crop region as the earlier VDA_L/Giant/Metric_Large dark-scene comparison
+(`1056, 384, 1920, 1440`) — a low-contrast, backlit figure with tangled branches,
+the "hard content" test case used throughout this session.
+
+| Model | Mean Δ% | Median Δ% | P95 Δ% |
+|---|---|---|---|
+| Any_V3_Metric_Large | 3.5369 | 2.8835 | 7.2518 |
+| Any_V3_Metric_Large_Native | 3.6695 | 3.1588 | 7.3018 |
+
+**This flips from the bright-scene result (13.5).** On hard, dark content, Native
+is slightly LESS stable, not more (+3.8% mean, +9.5% median, roughly tied on P95)
+— small but real, not noise. The bright scene's clear 32-36% stability advantage
+for Native does NOT generalize to harder content.
+
+| Model | Laplacian | GradMag |
+|---|---|---|
+| Any_V3_Metric_Large | 21,231,746 | 3736.19 |
+| Any_V3_Metric_Large_Native | 30,320,412 | 3791.71 |
+
+Crispness still favors Native here (+1.5% GradMag), same direction as the bright
+scene, but a much smaller margin than 13.1's 3.5-7% (raw Laplacian magnitudes
+aren't comparable across models here either, same caveat as 13.2). Disparity/pop
+was NOT re-tested on this dark scene — only stability and crispness, matching the
+original dark-scene test's own scope from earlier this session.
+
+### 13.7 Overall read (revised after 13.6 — scene-dependent, not a clean sweep)
+
+On easy, well-lit content (13.1-13.5), Native won across the board — crisper,
+more stable, stronger real pop. On hard, dark content (13.6), that flips on
+stability specifically: original edges Native out slightly there, and the
+crispness advantage shrinks to nearly a tie. **The honest verdict: Native's
+advantage is real but scene-dependent, not universal** — don't assume the bright-
+scene sweep carries over to every scene in a real movie. The near-field
+pop/disparity advantage (13.4) is likely scene-independent (it's driven by the
+depth-value transform itself, not scene difficulty) but was only actually
+measured on the bright scene — not yet confirmed on dark content specifically.
+
+Given this, the choice between the two models isn't a clear "always use Native"
+call the way 13.1-13.5's bright-scene sweep initially looked before the
+dark-scene data came in. For a real
+movie with a mix of easy and hard scenes, either could plausibly edge out
+depending on how much of the runtime is hard content — worth a real full-scene or
+multi-scene test before committing to one over the other for an actual film.
+Not yet tested: a full movie conversion, EMA buffer/decay behavior specifically
+for Native (inherits Metric_Large's own still-incomplete buffer sweep from
+Section 12.5), Edge Dilation, and dark-scene disparity/pop.
 
 **Recommended CLI for Any_V3_Metric_Large_Native** (same tuning as Section 12.6's
 Metric_Large recipe, with the one setting 13.2 says should flip):

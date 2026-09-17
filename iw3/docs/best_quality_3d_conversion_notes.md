@@ -1397,3 +1397,349 @@ Root cause, traced through `postprocess_image()` in `utils.py`:
 Given this project has no VRAM/speed constraint, Full SBS (max per-eye detail)
 is the better match for the "match professional Blu-ray 3D" goal — so Output
 Size Limit should be `7680x2160` or blank, not `3840x2160`.
+
+---
+
+## 11. VDA_L Real-World Tuning Session (2026-09-16) — Crispness, Stability, Speed, VRAM
+
+Full real-testing pass on `VDA_L` specifically, triggered by real wobble/lag
+complaints on `Any_V3_Giant` (see Section 1's "flat cardboard"/saturation notes for
+the same underlying single-frame-model weakness). Every number below is from a real
+render + measurement (Laplacian variance / Sobel gradient magnitude on actual depth
+or RGB output, or real per-frame pixel diffs), not estimated — see method note at
+the end of this section.
+
+### 11.1 Model comparison: VDA_L vs Any_V3_Metric_Large vs Distill_Any_L
+
+Tested on two real scenes from Hocus Pocus: a well-lit classroom scene (easy) and a
+dark, low-contrast forest scene at night (hard — tangled branches, backlit figure).
+
+| Metric | Distill_Any_L | Any_V3_Metric_Large | VDA_L |
+|---|---|---|---|
+| Crispness (Gradient Magnitude, bright scene) | 1341.6 | 1079.9 (weakest) | **1413.1 (best)** |
+| Stability, bright scene (median frame-to-frame delta) | 0.25% | 0.42% | **0.08% (best)** |
+| Stability, dark scene (median delta) | 0.44% | 0.56% (worst) | **0.16% (best)** |
+| Conversion speed (720 frames, full settings) | 174-177s (fastest) | 178-180s | 193-197s (slowest) |
+| Peak VRAM (same settings) | ~22.4GB | ~23.9GB | **~31.7GB (heaviest)** |
+
+**Important catch:** in the dark scene, Metric_Large showed both the *highest*
+spatial-noise numbers and the *worst* temporal stability simultaneously — that
+combination (high spatial variance + high temporal instability together) is the
+signature of amplified noise, not real detail, especially in low light. Its
+apparent "detail" there isn't trustworthy.
+
+**Verdict: VDA_L wins on quality (crispness + stability, on both easy and hard
+content) but costs ~10% more time and ~40% more VRAM than the other two.** Worth it
+given 32GB VRAM headroom and no hard speed constraint (matches this doc's own
+stated hardware assumption in the header).
+
+### 11.2 Why Object Stability should be OFF for VDA_L
+
+Code-verified (`depth_scaler.py`'s `TemporalStabilizer` docstring): this feature
+"*approximates what a real video-aware depth model (VDA_L) gets for free from its
+own architecture*" — it exists specifically to fake VDA_L-style temporal
+consistency for single-frame models like `Any_V3_Mono_01`. Stacking it on top of
+VDA_L itself is redundant by design, not just untested.
+
+Real incident that surfaced this: `Any_V3_Giant` + Object Stability (Strength 0.50,
+no Edge Protection/Flat-Area Boost) still showed real wobble AND lag simultaneously
+on a real conversion. Root-caused via direct optical-flow measurement
+(`cv2.calcOpticalFlowFarneback`, same params the code uses) on the actual footage:
+flow magnitude never got close to the 15px/frame threshold that triggers Object
+Stability's own automatic motion-taper, so that wasn't the cause. Direct raw-depth
+measurement (single-frame independent estimates, zero stabilization) showed the
+real culprit: `Any_V3_Giant`'s own per-frame depth estimate for a face genuinely
+oscillates a few % of the full depth range frame-to-frame (real trace over 15
+frames: `3.7 → 3.8 → 4.9 → 2.6 → 3.1 → 3.2 → 3.2 → 4.0 → 4.4 → 5.0 → ...`) — this
+is raw model noise Object Stability's blending can dampen but never fully remove
+without pushing smoothing high enough to reintroduce lag. **VDA_L doesn't have this
+raw noise problem in the first place** (same measurement on VDA_L: essentially flat,
+`0.4 → 0.4 → 0.4 → ... → 0.5`, ~17x tighter range) — so there's nothing for Object
+Stability to usefully fix, and no lag/flicker tradeoff to fight.
+
+### 11.3 Depth Resolution sweep
+
+Real crispness (Gradient Magnitude, the reliable metric — Laplacian variance alone
+is misleading here, see method note) across 384/518/648/718/1080, same real frame,
+normalized to a common pixel size before measuring (raw comparison across different
+debug-image sizes is invalid — the same real edge spread over more pixels shows a
+smaller per-pixel gradient purely from sampling density, not less real detail):
+
+| Resolution | 384 | 518 | 648 | 718 | 1080 |
+|---|---|---|---|---|---|
+| VDA_L GradMag | 8.46 | 9.14 | **9.32 (peak)** | 9.18 | 8.76 (worse than 518!) |
+
+**648 is VDA_L's real sweet spot.** Real gain from 384→518 (~8%), tiny further gain
+518→648 (~2%), then it actively declines — 1080 measures *worse* than 518. Same
+"Laplacian keeps climbing while Gradient Magnitude plateaus/declines past native
+size = noise, not detail" pattern holds for all three models tested (Distill,
+Metric_Large, VDA_L) — matches Section 9's DepthAnything V2 community finding
+(pushing past native trained resolution can degrade quality, not just cost more
+compute) generalizing to the DA3/VDA families too.
+
+### 11.4 Sharpen — real, confirmed crispness gain
+
+Tested on the actual rendered RGB output (not the depth map — Sharpen only touches
+the final image, see Section 3). Laplacian AND Gradient Magnitude both rose
+together, monotonically, confirming real detail enhancement, not noise (contrast
+with 11.3's resolution result, where they diverged):
+
+| Sharpen | Laplacian | GradMag |
+|---|---|---|
+| Off | 15.31 | 10.39 |
+| 0.5 | 20.00 (+31%) | 10.71 (+3%) |
+| **1.0** | **25.61 (+67% over off)** | **11.04 (+6% over off)** |
+
+**Use Sharpen 1.0 with VDA_L** — clean win, no noise-amplification risk seen.
+
+### 11.5 Edge Repair — zero measurable effect for VDA_L
+
+Tested 0.0/0.5/1.0 on the real, full 15-frame clip (720p classroom scene, paired
+with Divergence 2.5 + Midground Pop 0.25). **Every single frame was byte-for-byte
+pixel-identical across all three strengths** (`max_diff=0` for all 15 frames).
+VDA_L's edges are already clean enough on this content that this cleanup pass has
+nothing to do. **Leave at 0 (off)** — no benefit found, not worth the (small) extra
+processing.
+
+### 11.6 Depth Anti-Aliasing — real crispness LOSS for VDA_L
+
+Confirmed `VDA_L` is in `video_depth_anything_model.py`'s `AA_SUPPORT_MODELS` (so
+this setting is real/applicable, not silently inert like it is for `Distill_Any_*`
+— see Section 1). Real depth-map measurement, on vs off:
+
+| | Laplacian | GradMag |
+|---|---|---|
+| AA off | 7,465,766 | 1760.96 |
+| AA on | 2,981,909 (**-60%**) | 1744.89 (**-1%**) |
+
+Both metrics dropped together — that's real detail loss, not just noise removal
+(contrast with 11.7 below, where Laplacian drops but GradMag barely moves). Real
+pixel diff confirms it's substantial: mean 39.9, max 10,845 (of 65535 range).
+**Leave Depth Anti-Aliasing OFF for VDA_L** — it's a net loss on this content, not
+the cleanup its name implies.
+
+### 11.7 Depth Detail Refinement — lower beats the 1.0 default for VDA_L
+
+Full range tested, 0.25 through 1.50, on real depth-map output:
+
+| Strength | 0.25 | 0.5 | 0.75 | 1.0 (default) | 1.25 | 1.50 |
+|---|---|---|---|---|---|---|
+| Laplacian | 7,206,019 | **7,465,766 (peak)** | 7,398,503 | 7,020,496 | 6,371,586 | 5,494,210 |
+| GradMag | **1765.0 (highest)** | 1761.0 | 1757.7 | 1754.3 | 1751.1 | 1748.1 |
+
+Gradient Magnitude decreases smoothly and monotonically across the *entire* range
+— the lowest tested value (0.25) preserves the most real edge sharpness, not the
+default. Makes sense given 11.2's finding: this is an edge-preserving *denoising*
+filter (bilateral smoothing on the raw depth map, see Section 3), and VDA_L already
+has little raw noise to usefully clean up — so even mild smoothing mostly just
+softens real edges a little, with nothing to make up for it in useful noise
+removal. **Recommend 0.5 for VDA_L** (near-peak Laplacian, still close to peak
+GradMag) — a real reversal from the tool's own 1.0 default being optimal.
+
+### 11.8 Edge Dilation ("Edge Fix" in the GUI) — no measurable effect on this content
+
+**Not the same setting as Edge Repair** (11.5) — this one smooths the depth map
+*before* the 3D shift/Divergence sees it, specifically to reduce halo/distortion at
+object silhouettes (see Section 3's own catalog entry). GUI tooltip gives a real
+pairing guide: Divergence ~2.0-2.25 pairs with dilation 2/1 (old default),
+Divergence ~3.0-3.5 pairs with 3/2.
+
+Full sweep tested at Divergence 2.5 (between those reference points): 0/0, 1/1,
+2/1, 3/2 — all four measured within 0.5% of each other on both Laplacian and
+GradMag, on both the interior-texture region and a tight crop right on the
+subject's hair silhouette against a plain background (the exact case this setting
+targets). Real, non-zero pixel differences exist between every pair (mean
+1.2-1.4/255, confirming the depth-map smoothing genuinely shifts the warp field
+everywhere via subtle depth-value changes, consistent with it running *before*
+Divergence) — but none of it showed up as a visible or measurable
+crispness/artifact difference on this content.
+
+**Honest conclusion: this specific test scene didn't have strong enough depth
+discontinuities to make the setting matter.** No evidence either way on real
+footage — defaulting to **3/2** (matching the tool's own documented Divergence
+2.5 pairing) is a reasonable choice, but not a proven-better one from this test.
+Worth re-testing on a scene with a hand held against a busy/cluttered background,
+where halo artifacts would be much more likely to show up clearly.
+
+**Important clarification also confirmed:** Edge Dilation does NOT reduce overall
+3D strength/spatial separation — Divergence and Pop compute separation from the
+depth map's *broad* values (foreground mass, midground, background), which this
+setting never touches. It only affects a thin band right at silhouette boundaries.
+
+### 11.9 Divergence + Midground Pop — spatial layering, not just "more/less 3D"
+
+Real disparity measured via template-matching (near/mid/far points, left vs right
+eye) on actual rendered stereo output, at fixed Divergence/Pop combos:
+
+| Config | Near | Mid | Far | Total spread |
+|---|---|---|---|---|
+| 2.75, Pop 0.00 | +19 | −16 | −43 | 62 |
+| 2.25, Pop 0.15 | +33 | −4 | −34 | 67 |
+| **2.50, Pop 0.15** | +36 | **−5 (clean screen anchor)** | −39 | 75 |
+| 2.75, Pop 0.25 | +54 | +2 | −39 | **93 (most)** |
+| 2.25, Pop 0.25 | +44 | +1 | −33 | 77 |
+
+**Key finding: Pop is a far more efficient lever for spatial spread than raising
+Divergence alone** (going from Pop 0→0.25 at fixed Divergence 2.75 jumps spread
+62→93, a 50% increase from one setting). But more spread ≠ automatically better
+*feel* — at Pop 0.15, the midground lands almost exactly at the screen plane
+(clean "subject out front / midground at screen / background receded" three-layer
+read). At Pop 0.25, midground crosses slightly *in front* of the screen (+1/+2),
+blurring that clean three-tier anchor into more of a two-layer near/far split.
+
+**Recommendation used for VDA_L testing: Divergence 2.5 + Pop 0.25** (the user's
+own real choice, going for maximum spread over the cleanest anchor) — both are
+legitimate, defensible choices depending on whether you want maximum "pop" or the
+cleanest layered read.
+
+### 11.10 Full SBS not playing correctly — see Section 10's own "Output Size Limit"
+gotcha above, which already covers WHY (7680x2160 double-width frame isn't
+recognized as 3D by most players). Two real fixes exist:
+1. Use `--half-sbs` directly at conversion time (the clean way — avoids the whole
+   rescue workflow below entirely).
+2. If you already have a Full SBS file: `ffmpeg -i in.mkv -fps_mode passthrough -vf
+   "scale=3840:2160" -c:v hevc_nvenc -c:a copy out.mkv` (width-only squeeze,
+   mathematically equivalent to Half SBS) — **must** include `-fps_mode
+   passthrough` or ffmpeg's default retiming can silently drop frames (confirmed:
+   lost 17 of 4316 frames without it in one real case). Re-inject Dolby Vision
+   afterward (any re-encode strips RPU, see the Retroactive HDR/DV Reinjection
+   tool) — `--frame-count-tolerance` may be needed if the *original* conversion
+   itself had encoder timestamp irregularities (`non monotonically increasing
+   dts`, a real observed artifact from Object Stability's variable per-frame CPU
+   timing interacting with encoder pacing) independent of the rescale step.
+
+### Method note (for reproducing any of the above)
+
+- **Crispness**: Laplacian variance (`cv2.Laplacian(...).var()`) AND Sobel gradient
+  magnitude mean (`sqrt(sobel_x² + sobel_y²).mean()`) on a fixed crop, computed
+  together — Laplacian alone is unreliable (sensitive to fine noise, inflates with
+  resolution/instability even when real edges aren't sharper); Gradient Magnitude
+  is the more trustworthy one when they disagree.
+- **Stability**: frame-to-frame absolute delta on raw exported depth (`--export`),
+  as % of the full uint16 range, on a fixed near-subject crop — mean/median/p95
+  across the whole clip, not just one frame pair (a single frame pair can badly
+  misrepresent a whole scene — confirmed directly in this session).
+- **Different-resolution debug images must be resized to a common size before
+  comparing** — raw per-pixel gradient comparison across different image
+  dimensions is invalid (confirmed directly: an inverted, wrong-conclusion result
+  without this fix, corrected the same session).
+- **VDA_L requires real video input** (a clip, not a folder of independent
+  images) to get its actual temporal-consistency behavior — testing it via
+  separate single-image files defeats the entire point of a video-native model.
+
+---
+
+## 12. Any_V3_Metric_Large Real-World Tuning Session (2026-09-17)
+
+Same methodology as Section 11 (see its Method note), applied to
+`Any_V3_Metric_Large` specifically, after the user asked to give it a real fair
+shot for a scene where VDA_L still showed minor wobble/lag. All numbers below are
+real renders + real measurements on the same bright classroom scene used in
+Section 11, crop region `(1900, 1200, 3400, 2160)`.
+
+### 12.1 Depth Resolution sweep
+
+| Resolution | Laplacian | Gradient Magnitude |
+|---|---|---|
+| 384 | 9.43 | **8.302 (peak)** |
+| 518 | 16.68 | 8.121 |
+| 648 | 17.08 | 8.010 |
+| 718 | 21.11 | 8.053 |
+| 1080 | 37.09 | 7.997 (lowest) |
+
+Laplacian nearly quadruples from 384→1080 while Gradient Magnitude *declines*
+slightly the whole way — the same noise signature seen with VDA_L past its own
+peak, except here it starts right from the bottom of the tested range.
+**Metric_Large gets no real detail gain from raising resolution at all.** The
+real difference across the whole range is small (~4%), so 384–518 is the
+practical choice (faster, less VRAM, no measured quality cost); no reason to go
+to 648+ for this model specifically (unlike VDA_L, which peaks at 648).
+
+### 12.2 Sharpen
+
+| Sharpen | Laplacian | Gradient Magnitude |
+|---|---|---|
+| Off | 14.79 | 11.296 |
+| 1.0 | 25.39 | **11.826** |
+
+Both metrics rise together — a real crispness gain, same conclusion as VDA_L.
+**Sharpen 1.0 recommended.**
+
+### 12.3 Depth Detail Refinement — full 0.25–1.50 sweep
+
+| Strength | Laplacian | Gradient Magnitude |
+|---|---|---|
+| 0.25 | 6,773,032 | 1482.86 |
+| 0.5 | 7,295,498 | 1490.93 |
+| 0.75 | 7,655,380 | 1512.99 |
+| 1.0 (default) | 7,827,892 (peak) | 1542.26 |
+| 1.25 | 7,486,978 | 1548.03 |
+| 1.50 | 6,910,445 | **1556.15 (peak)** |
+
+**Opposite finding from VDA_L.** Gradient Magnitude rises the entire way from
+0.25 to 1.50 — Metric_Large has real noise for this filter to clean up (unlike
+VDA_L, which had little to clean and got worse with more refinement). Laplacian
+peaks at 1.0 then eases off, which together with a still-rising Gradient
+Magnitude reads as: real detail keeps resolving while some noise gets smoothed
+out at the same time — a good combination, not a red flag. **Recommend 1.25–1.50
+for Metric_Large**, the opposite direction from VDA_L's 0.5.
+
+### 12.4 Divergence + Midground Pop disparity (near−far spread, px)
+
+Same 5 configs as Section 11.9, so directly comparable to VDA_L's own numbers.
+
+| Config | Near | Mid | Far | Spread |
+|---|---|---|---|---|
+| A: div 2.75 / pop 0 | 33 | 31 | 30 | 3 |
+| B: div 2.25 / pop 0.15 | 48 | 46 | 44 | 4 |
+| C: div 2.5 / pop 0.15 | 54 | 51 | 48 | 6 |
+| D: div 2.75 / pop 0.25 | 76 | 74 | 65 | **11 (max)** |
+| E: div 2.25 / pop 0.25 | 62 | 60 | 55 | 7 |
+
+Same shape as VDA_L (Pop is the stronger lever, D wins on spread), but the
+**absolute spread numbers are far smaller than VDA_L's at identical settings** —
+Metric_Large's 3D effect reads noticeably shallower than VDA_L at the same
+Divergence/Pop values. If matching VDA_L's felt depth strength matters more than
+matching the numbers, Metric_Large needs Divergence/Pop pushed harder than the
+VDA_L recipe, not the same values.
+
+### 12.5 EMA Buffer — partial result (session interrupted by VRAM contention)
+
+Built a real 36-second/864-frame clip specifically so buffers up to 800 would
+actually get exercised (the earlier 15-frame-clip mistake from Section 2/11 is
+documented precisely to avoid repeating it). Only buffer `90` completed before
+the GPU ran out of memory (a separate 3DECKER instance running from
+`Downloads\3decker new test\` was already holding ~23GB of the 32.6GB card at
+the time) — buffers `150/220/350/650/800` are **not yet tested**, pending free
+VRAM. This also confirms a real, separate finding: **EMA Buffer size itself has
+a real VRAM cost that scales with the buffer value** (it holds that many past
+frames' state for the normalization window), independent of whatever else is
+using the GPU.
+
+| Buffer | Mean Δ% | Median Δ% | P95 Δ% | Frames |
+|---|---|---|---|---|
+| 90 | 1.1032 | 0.6630 | 2.6261 | 864 |
+
+No conclusion yet on the right buffer size for Metric_Large — this row is a
+baseline only. Revisit once the higher buffers can actually run.
+
+### 12.6 Recommended CLI for Metric_Large (current best data, buffer sweep incomplete)
+
+```
+--depth-model Any_V3_Metric_Large --resolution 518 --method mlbw_l2_inpaint
+--divergence 2.75 --convergence 0.5
+--midground-pop 0.25 --midground-threshold-low 0.0 --midground-threshold-high 1.0
+--depth-refine --depth-refine-strength 1.25
+--ema-normalize --ema-decay 0.99 --ema-buffer 90
+--sharpen --sharpen-strength 1.0
+--scene-detect --preserve-screen-border --stereo-mode-tag --half-sbs
+--video-codec hevc_nvenc --crf 15 --metadata filename
+```
+
+Resolution kept at 518 rather than the technical 384 peak (small measured
+difference, and 518 already has disparity/stereo data behind it in this
+session). EMA Buffer left at the only value actually tested (`90`) — treat this
+as provisional until 12.5 is completed. Object Stability and Edge Dilation were
+not tested for Metric_Large this session (Object Stability skipped on explicit
+request; redundant for temporally-aware models per 11.2's reasoning; Edge
+Dilation untested — carry VDA_L's `3 2` default if used).

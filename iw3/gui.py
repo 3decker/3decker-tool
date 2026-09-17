@@ -4424,6 +4424,155 @@ class MainFrame(wx.Frame):
         sizer_audiomux = wx.StaticBoxSizer(self.grp_audiomux, wx.VERTICAL)
         sizer_audiomux.Add(pane_header_row_audiomux, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone utility: restore every audio track from the original source
+        # movie (ADR-169) ---
+        # NOT part of the main conversion pipeline -- iw3's own conversion always
+        # carries only the FIRST audio track from the source into its output (see
+        # nunif/utils/video/processor.py's export_audio(), which reads
+        # `streams.audio[0]` unconditionally) -- a source with multiple language
+        # tracks silently loses every track after the first. This tool takes an
+        # already-converted 3D video and REPLACES its one audio track with EVERY
+        # audio track found in the original source movie, preserving each track's own
+        # language/name metadata automatically (unlike Add Audio Track above, no
+        # --language/--track-name fields exist here -- there's nothing to override,
+        # the source's own tags are just carried through). Optional Source Start/End
+        # Time trims (and shifts to start at 0) the source's audio the same way Add
+        # Audio Track already does, for when --input is only a short clip of the full
+        # source movie. Launches python -m iw3.audio_restore_cli as its own
+        # subprocess, same out-of-process convention as the other standalone tools.
+        self.grp_audiorestore = wx.StaticBox(
+            self.tab_tools, label=T("Restore All Audio Tracks (Standalone Tool)"))
+
+        # Guided Light (ADR-101): see cpn_sharpen for the full pattern explanation.
+        self.cpn_audiorestore = wx.CollapsiblePane(
+            self.grp_audiorestore, label=T("Settings"), name="cpn_audiorestore")
+        self.cpn_audiorestore.Collapse(True)
+        self.cpn_audiorestore.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                    self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_audiorestore.GetPane().SetName("cpn_audiorestore_pane")
+
+        self.lbl_audiorestore_input = wx.StaticText(
+            self.cpn_audiorestore.GetPane(), label=T("Converted 3D Video (.mkv)"))
+        self.txt_audiorestore_input = wx.TextCtrl(self.cpn_audiorestore.GetPane(), name="txt_audiorestore_input")
+        self.txt_audiorestore_input.SetToolTip(
+            T("What it's for: the already-converted 3D video whose audio track(s) should be "
+              "replaced with the full set from the original source movie. Must be an .mkv file -- "
+              "this tool does not convert containers, so an .mp4 output must first be remuxed to "
+              ".mkv by some other tool.\n"
+              "Con: read-only -- never modified. A new file is always written to Output File "
+              "below.\n"
+              "Recommended: the direct iw3 output file."))
+        self.btn_audiorestore_input = wx.Button(self.cpn_audiorestore.GetPane(), label=T("..."))
+
+        self.lbl_audiorestore_source = wx.StaticText(
+            self.cpn_audiorestore.GetPane(), label=T("Original Source Movie"))
+        self.txt_audiorestore_source = wx.TextCtrl(self.cpn_audiorestore.GetPane(), name="txt_audiorestore_source")
+        self.txt_audiorestore_source.SetToolTip(
+            T("What it's for: the original movie file iw3 converted from -- every audio track "
+              "found in it (all languages) is carried into Output File, each with its own "
+              "language/name metadata preserved automatically. Any container ffmpeg/mkvmerge "
+              "already read directly works here.\n"
+              "Con: read-only -- never modified. If the converted video above is only a short "
+              "clip of this full movie, use Source Start/End Time below to trim the audio "
+              "automatically rather than pre-cutting it by hand.\n"
+              "Recommended: the exact same source file iw3 originally converted from."))
+        self.btn_audiorestore_source = wx.Button(self.cpn_audiorestore.GetPane(), label=T("..."))
+
+        self.lbl_audiorestore_output = wx.StaticText(self.cpn_audiorestore.GetPane(), label=T("Output File"))
+        self.txt_audiorestore_output = wx.TextCtrl(self.cpn_audiorestore.GetPane(), name="txt_audiorestore_output")
+        self.txt_audiorestore_output.SetToolTip(
+            T("Where to write the new file with all audio tracks restored. Auto-filled with "
+              "'<converted file name>_alldub.mkv' in the same folder once you pick the converted "
+              "video above -- change it if you want it saved somewhere else.\n"
+              "How it's safe: this tool never overwrites the input video or the source movie, "
+              "only ever writes here."))
+        self.btn_audiorestore_output = wx.Button(self.cpn_audiorestore.GetPane(), label=T("..."))
+
+        self.chk_audiorestore_start_time = wx.CheckBox(self.cpn_audiorestore.GetPane(), label=T("Source Start"),
+                                                         name="chk_audiorestore_start_time")
+        self.chk_audiorestore_start_time.SetToolTip(
+            T("What it's for: trims the Original Source Movie's audio tracks to start at this "
+              "point, for when the source covers more content than the converted video above "
+              "(e.g. a full-movie source for a short converted clip). The trimmed audio is also "
+              "automatically shifted to start at t=0 so it lines up with the video's first frame "
+              "-- you do not need to cut or shift it by hand. Leave unchecked to use the whole "
+              "source's audio as-is.\n"
+              "Con: there is no auto-detection of this -- you must know and enter the exact range "
+              "within the source that matches the converted video above (the same Start/End Time "
+              "you used for the original conversion, if any)."))
+        self.txt_audiorestore_start_time = TimeCtrl(self.cpn_audiorestore.GetPane(), value="00:00:00", fmt24hr=True,
+                                                      name="txt_audiorestore_start_time")
+        self.chk_audiorestore_end_time = wx.CheckBox(self.cpn_audiorestore.GetPane(), label=T("Source End"),
+                                                       name="chk_audiorestore_end_time")
+        self.chk_audiorestore_end_time.SetToolTip(
+            T("Same idea as Source Start, but for where the trimmed audio should end. Leave "
+              "unchecked to use the end of the source's audio."))
+        self.txt_audiorestore_end_time = TimeCtrl(self.cpn_audiorestore.GetPane(), value="00:00:00", fmt24hr=True,
+                                                    name="txt_audiorestore_end_time")
+
+        self.btn_audiorestore_run = wx.Button(self.cpn_audiorestore.GetPane(), label=T("Run"))
+        self.btn_audiorestore_run.SetToolTip(
+            T("What it's for: runs the restore as a separate background process (python -m "
+              "iw3.audio_restore_cli) -- this app's own GPU/model state is never touched, and "
+              "neither input file is ever modified.\n"
+              "How it's safe: the converted video's own picture and subtitle tracks are copied "
+              "into the output completely unchanged -- only its audio track(s) are replaced with "
+              "the source's full set.\n"
+              "Con: if Source Start/End Time is set, trimming re-runs ffmpeg first, which can "
+              "take a little longer than an untrimmed run.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded "
+              "rather than refused."))
+
+        self.txt_audiorestore_log = wx.TextCtrl(
+            self.cpn_audiorestore.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=self.FromDIP((-1, 60)), name="txt_audiorestore_log")
+        self.txt_audiorestore_log.SetToolTip(
+            T("Shows this tool's own output verbatim, including how many audio tracks were found "
+              "in the source, the exact ffmpeg trim command(s) when Source Start/End Time is "
+              "used, and the exact refusal reason if anything fails -- not just a generic "
+              "pass/fail toast."))
+        self.btn_audiorestore_clear = wx.Button(self.cpn_audiorestore.GetPane(), label=T("Clear"))
+        self.btn_audiorestore_clear.SetToolTip(
+            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
+
+        self.btn_audiorestore_input.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_input)
+        self.btn_audiorestore_source.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_source)
+        self.btn_audiorestore_output.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_output)
+        self.btn_audiorestore_run.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_run)
+        self.btn_audiorestore_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_audiorestore_log.Clear())
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_audiorestore_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiorestore_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_audiorestore_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_audiorestore_source, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiorestore_source, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_audiorestore_source, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_audiorestore_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiorestore_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_audiorestore_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.chk_audiorestore_start_time, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiorestore_start_time, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_audiorestore_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_audiorestore_end_time, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_audiorestore_run, (h := h + 1, 3), flag=wx.EXPAND)
+        layout.Add(self.txt_audiorestore_log, (h, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_audiorestore_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_audiorestore.GetPane().SetSizer(layout)
+
+        self.pnl_audiorestore_dot = wx.Panel(self.grp_audiorestore, size=self.FromDIP((10, 10)))
+        self.pnl_audiorestore_dot.SetBackgroundColour(wx.Colour(251, 146, 60))
+        pane_header_row_audiorestore = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_audiorestore.Add(self.pnl_audiorestore_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_audiorestore.Add(self.cpn_audiorestore, 1, wx.EXPAND)
+
+        sizer_audiorestore = wx.StaticBoxSizer(self.grp_audiorestore, wx.VERTICAL)
+        sizer_audiorestore.Add(pane_header_row_audiorestore, 0, wx.ALL | wx.EXPAND, 4)
+
         # --- standalone utility: retroactive MKV StereoMode tagging (ADR-033) ---
         # NOT part of the main conversion pipeline -- takes an already-converted iw3
         # .mkv output that was made before "Tag MKV as 3D (StereoMode)" existed (or
@@ -5017,6 +5166,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_subsearch, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_submux, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_audiomux, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_audiorestore, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_sharpen, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
@@ -6405,11 +6555,11 @@ class MainFrame(wx.Frame):
         panes added to Standalone Tools. ADR-100 originally judged per-tool panes not
         worth it (each group already small); ADR-101 reverses that per explicit user
         request -- one collapsed-by-default pane per tool (HDR/DV Reinjection,
-        Subtitle Search, Add Subtitle Track, Add Audio Track, Retroactively Tag MKV as
-        3D, Sharpen, RIFE Frame Interpolation) so only the tool actually in use needs
-        to be expanded."""
+        Subtitle Search, Add Subtitle Track, Add Audio Track, Restore All Audio
+        Tracks, Retroactively Tag MKV as 3D, Sharpen, RIFE Frame Interpolation) so
+        only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
-                      "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone")
+                      "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -6477,13 +6627,14 @@ class MainFrame(wx.Frame):
         event.Skip()
 
     def on_toggled_standalone_tools_collapsible_pane(self, event):
-        """Same fix as on_toggled_stereo_collapsible_pane(), for the 7 Guided Light
+        """Same fix as on_toggled_stereo_collapsible_pane(), for the 8 Guided Light
         panes added to Standalone Tools (ADR-101, one per tool -- HDR/DV Reinjection,
-        Subtitle Search, Add Subtitle Track, Add Audio Track, Retroactively Tag MKV as
-        3D, Sharpen, RIFE Frame Interpolation) -- tab_tools/tab_wrap_tools in place of
-        tab_stereo/tab_wrap_stereo. One shared handler for all 7 (unlike the
-        one-per-tab convention elsewhere in this file) since they all live on the same
-        tab and need the exact same tab_tools/tab_wrap_tools targets."""
+        Subtitle Search, Add Subtitle Track, Add Audio Track, Restore All Audio
+        Tracks (ADR-169), Retroactively Tag MKV as 3D, Sharpen, RIFE Frame
+        Interpolation) -- tab_tools/tab_wrap_tools in place of tab_stereo/
+        tab_wrap_stereo. One shared handler for all 8 (unlike the one-per-tab
+        convention elsewhere in this file) since they all live on the same tab and
+        need the exact same tab_tools/tab_wrap_tools targets."""
         refresh_layouts(self)
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
             self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
@@ -8054,9 +8205,10 @@ class MainFrame(wx.Frame):
         self.delete_preset(self.cbo_app_preset.GetValue())
         event.Skip()
 
-    # ADR-157 amendment: real, live-found gap -- the 7 Standalone Tools
-    # (HDR/DV Reinjection, Search Subtitles, Add Subtitle Track, Add Audio
-    # Track, Retroactively Tag MKV, Sharpen, RIFE Frame Interpolation) each
+    # ADR-157 amendment (ADR-169 adds Restore All Audio Tracks to the list):
+    # real, live-found gap -- the Standalone Tools (HDR/DV Reinjection, Search
+    # Subtitles, Add Subtitle Track, Add Audio Track, Restore All Audio
+    # Tracks, Retroactively Tag MKV, Sharpen, RIFE Frame Interpolation) each
     # keep their own file-path/text fields entirely outside create_parser()'s
     # Namespace -- confirmed by reading apply_parsed_args_to_gui() (only ever
     # reads args.* attributes, none of these) and each tool's own "Clear"
@@ -8077,6 +8229,8 @@ class MainFrame(wx.Frame):
         "txt_submux_language", "txt_submux_track_name", "txt_submux_font_size", "txt_submux_log",
         "txt_audiomux_input", "txt_audiomux_audio", "txt_audiomux_output",
         "txt_audiomux_track_name", "txt_audiomux_log",
+        "txt_audiorestore_input", "txt_audiorestore_source", "txt_audiorestore_output",
+        "txt_audiorestore_log",
         "txt_stereotag_input", "txt_stereotag_log",
         "txt_sharpen_input", "txt_sharpen_output", "txt_sharpen_log",
         "txt_rife_standalone_input", "txt_rife_standalone_output",
@@ -10256,6 +10410,109 @@ class MainFrame(wx.Frame):
         self.SetStatusText(T("Adding audio track..."))
         startWorker(self.on_exit_audiomux_worker, self.run_audiomux, wargs=(cmd,))
 
+    # --- Restore All Audio Tracks (standalone tool, see ADR-169) ---
+
+    def on_click_btn_audiorestore_input(self, event):
+        with wx.FileDialog(self, message=T("Select Converted 3D Video (.mkv)"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_audiorestore_input.GetValue():
+                dlg.SetPath(self.txt_audiorestore_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                input_path = dlg.GetPath()
+                self.txt_audiorestore_input.SetValue(input_path)
+                if not self.txt_audiorestore_output.GetValue():
+                    base = path.splitext(input_path)[0]
+                    self.txt_audiorestore_output.SetValue(f"{base}_alldub.mkv")
+
+    def on_click_btn_audiorestore_source(self, event):
+        with wx.FileDialog(self, message=T("Select Original Source Movie"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_audiorestore_source.GetValue():
+                dlg.SetPath(self.txt_audiorestore_source.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_audiorestore_source.SetValue(dlg.GetPath())
+
+    def on_click_btn_audiorestore_output(self, event):
+        with wx.FileDialog(self, message=T("Save Restored Output As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_audiorestore_output.GetValue():
+                dlg.SetPath(self.txt_audiorestore_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_audiorestore_output.SetValue(dlg.GetPath())
+
+    def run_audiorestore(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread.
+        # This tool needs no GPU at all (ffmpeg trim + mkvmerge subprocess
+        # orchestration), kept out-of-process anyway for the same convention as
+        # Add Audio Track/RIFE/HDR reinjection. Captures combined stdout+stderr since
+        # audio_restore_cli prints the source's audio track count, the ffmpeg trim
+        # command(s) (when used), the mkvmerge command line, and any refusal reason
+        # to stderr.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+    def on_exit_audiorestore_worker(self, result):
+        self.btn_audiorestore_run.Enable()
+        self.btn_audiorestore_clear.Enable()
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_audiorestore_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self.txt_audiorestore_log.SetValue(output)
+        self.txt_audiorestore_log.ShowPosition(self.txt_audiorestore_log.GetLastPosition())
+        if returncode == 0:
+            self.SetStatusText(T("Audio tracks restored successfully"))
+        else:
+            self.SetStatusText(T("Restoring audio tracks failed -- see the log below"))
+            wx.MessageBox(T("Restoring the audio tracks failed or refused -- see the log box for "
+                             "the exact reason."),
+                          T("Restore All Audio Tracks"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_audiorestore_run(self, event):
+        input_path = self.txt_audiorestore_input.GetValue().strip()
+        source_path = self.txt_audiorestore_source.GetValue().strip()
+        output_path = self.txt_audiorestore_output.GetValue().strip()
+
+        if not input_path or not path.exists(input_path):
+            wx.MessageBox(T("Select a valid Converted 3D Video file first."),
+                          T("Restore All Audio Tracks"), wx.OK | wx.ICON_WARNING)
+            return
+        if not source_path or not path.exists(source_path):
+            wx.MessageBox(T("Select a valid Original Source Movie file first."),
+                          T("Restore All Audio Tracks"), wx.OK | wx.ICON_WARNING)
+            return
+        if not output_path:
+            wx.MessageBox(T("Set an Output File path first."),
+                          T("Restore All Audio Tracks"), wx.OK | wx.ICON_WARNING)
+            return
+        if path.abspath(output_path) == path.abspath(input_path):
+            wx.MessageBox(T("Output File must be different from the input video."),
+                          T("Restore All Audio Tracks"), wx.OK | wx.ICON_WARNING)
+            return
+
+        cmd = [sys.executable, "-m", "iw3.audio_restore_cli",
+               "--input", input_path, "--source", source_path, "--output", output_path]
+        if self.chk_audiorestore_start_time.GetValue():
+            cmd += ["--source-start-time", self.txt_audiorestore_start_time.GetValue()]
+        if self.chk_audiorestore_end_time.GetValue():
+            cmd += ["--source-end-time", self.txt_audiorestore_end_time.GetValue()]
+
+        self.txt_audiorestore_log.SetValue(T("Running...\n"))
+        self.btn_audiorestore_run.Disable()
+        self.btn_audiorestore_clear.Disable()
+        self.SetStatusText(T("Restoring audio tracks..."))
+        startWorker(self.on_exit_audiorestore_worker, self.run_audiorestore, wargs=(cmd,))
+
     def on_click_btn_stereotag_input(self, event):
         with wx.FileDialog(self, message=T("Select Converted 3D Video (.mkv)"),
                            wildcard=VIDEO_EXTENSIONS,
@@ -11456,8 +11713,9 @@ def _self_test_video_filter_collapsible_section():
 
 
 def _self_test_standalone_tools_collapsible_sections():
-    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 7
-    Guided Light panes added to Standalone Tools (ADR-101, one per tool) --
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 8
+    Guided Light panes added to Standalone Tools (ADR-101, one per tool; ADR-169
+    adds Restore All Audio Tracks as the 8th) --
     tab_tools/tab_wrap_tools/on_toggled_standalone_tools_collapsible_pane in place of
     the Stereo Generation equivalents. Also checks each pane has a real, unique
     name (the exact bug class this pattern already broke once with 2+ panes sharing
@@ -11475,9 +11733,9 @@ def _self_test_standalone_tools_collapsible_sections():
         frame = gui_mod.MainFrame()
         panes = frame.get_standalone_tools_sliders_and_panes()
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
-        assert len(panes) == 7, f"expected 7 Standalone Tools panes, found {len(panes)}"
+        assert len(panes) == 8, f"expected 8 Standalone Tools panes, found {len(panes)}"
         names = [p.GetName() for p in panes]
-        assert len(set(names)) == 7, f"pane names are not all unique: {names}"
+        assert len(set(names)) == 8, f"pane names are not all unique: {names}"
         for p in panes:
             assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
 
@@ -13607,10 +13865,11 @@ def _self_test_reinject_progress_bar():
 def _self_test_tool_log_clear_buttons():
     """Regression test for the "Clear" button added next to each standalone tool's
     log/output box on the Tools tab (Retroactive HDR/DV Reinjection, Search
-    Subtitles, Add Subtitle Track, Add Audio Track, Stereo Mode Tag, Sharpen, RIFE
-    Frame Interpolation), so a finished run's output doesn't just accumulate run
-    after run with no way to empty it. Confirms every one of the 7 new Clear buttons
-    exists next to its real log box and is enabled by default (a fresh GUI has no job
+    Subtitles, Add Subtitle Track, Add Audio Track, Restore All Audio Tracks (ADR-169),
+    Stereo Mode Tag, Sharpen, RIFE Frame Interpolation), so a finished run's output
+    doesn't just accumulate run after run with no way to empty it. Confirms every one
+    of the 8 new Clear buttons exists next to its real log box and is enabled by
+    default (a fresh GUI has no job
     running); that clicking it -- a real fired wx.EVT_BUTTON event, not just calling
     TextCtrl.Clear() directly -- empties exactly that log box and no other; and, for
     two representative panels using different underlying tools (Sharpen, Retroactive
@@ -13639,7 +13898,7 @@ def _self_test_tool_log_clear_buttons():
     try:
         frame = gui_mod.MainFrame()
 
-        # ADR-101 wrapped each of these 7 tools' fields in its own collapsible pane
+        # ADR-101 wrapped each of these 8 tools' fields in its own collapsible pane
         # (cpn_*) -- the real parent is each pane's content area now, not the
         # grp_* StaticBox directly (the StaticBox itself still holds the pane).
         pairs = [
@@ -13647,6 +13906,7 @@ def _self_test_tool_log_clear_buttons():
             ("txt_subsearch_log", "btn_subsearch_clear", "cpn_subsearch"),
             ("txt_submux_log", "btn_submux_clear", "cpn_submux"),
             ("txt_audiomux_log", "btn_audiomux_clear", "cpn_audiomux"),
+            ("txt_audiorestore_log", "btn_audiorestore_clear", "cpn_audiorestore"),
             ("txt_stereotag_log", "btn_stereotag_clear", "cpn_stereotag"),
             ("txt_sharpen_log", "btn_sharpen_clear", "cpn_sharpen"),
             ("txt_rife_standalone_log", "btn_rife_standalone_clear", "cpn_rife_standalone"),

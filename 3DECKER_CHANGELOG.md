@@ -13,7 +13,21 @@ it matters.
 
 ---
 
-## Latest Update — September 16, 2026
+## Latest Update — September 17, 2026
+
+**New standalone tool: "Restore All Audio Tracks."** iw3's own conversion has
+always kept only the FIRST audio track from your source movie — if your source
+has multiple languages, the rest silently didn't make it into the converted file.
+That's not something the main conversion changes (it's just not its job), but you
+can now fix it afterward: point this new tool at your converted 3D video and your
+original source movie, and it replaces the converted file's one audio track with
+every track from the source, each keeping its own language and name automatically
+— no need to pick languages or re-type track names by hand. If your converted
+video is only a short clip of a longer source movie, optional Source Start/End
+Time fields trim the source's audio to match, the same way Add Audio Track's own
+trimming already works. Find it on the Tools tab, right below Add Audio Track.
+
+## Update — September 16, 2026
 
 **The Retroactive HDR/DV Reinjection tool now handles a real, tricky case: your
 Dolby Vision source and the file you actually converted are different releases

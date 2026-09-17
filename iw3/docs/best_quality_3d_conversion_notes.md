@@ -1743,3 +1743,128 @@ as provisional until 12.5 is completed. Object Stability and Edge Dilation were
 not tested for Metric_Large this session (Object Stability skipped on explicit
 request; redundant for temporally-aware models per 11.2's reasoning; Edge
 Dilation untested — carry VDA_L's `3 2` default if used).
+
+---
+
+## 13. Any_V3_Metric_Large_Native — a genuinely metric-aware fix, added as a separate model (2026-09-17)
+
+**Why this exists:** user noticed a real VDA_L-vs-Metric_Large conversion where
+Metric_Large's 3D read noticeably closer/stronger-popped than VDA_L at the same
+tuned settings, and asked why. Investigated the real code rather than guessing:
+`Any_V3_Metric_Large` is a genuinely metric (absolute-scale) checkpoint
+(`da3metric-large`), but `iw3/depth_anything_v3_model.py`'s `is_metric()` was
+hardcoded `False` for every Any_V3 variant, and its `_forward()` unconditionally
+applies a `depth = 1.0/(depth+0.2)` reciprocal meant for relative-depth models to
+EVERY variant regardless of type — so Metric_Large's real distance values were
+being run through a transform that was never meant for them.
+
+User explicitly wanted to keep `Any_V3_Metric_Large`'s current look (loves the
+stronger pop) and asked for the fix to be added as a **separate, additive model**
+instead of changing the existing one. Built exactly that: `Any_V3_Metric_Large_Native`
+(same `da3metric-large` checkpoint, no separate download) with `is_metric()`
+returning `True` only for that name, and the forward pass negating raw depth
+directly instead of applying the reciprocal — matching `depth_pro_model.py`'s own
+already-proven metric convention (`out = -out`), not a newly-invented one.
+**`Any_V3_Metric_Large` itself is completely unchanged** — confirmed by a
+dedicated self-test asserting every other model name's behavior stayed identical
+(see `docs/ai/AI_DECISIONS.md` ADR-171 for the full technical writeup).
+
+### 13.1 Resolution sweep (Gradient Magnitude, common-size normalized)
+
+| Resolution | Original | Native | Native vs Original |
+|---|---|---|---|
+| 384 | 8.302 (peak) | **8.894 (peak)** | +7.1% |
+| 518 | 8.121 | 8.539 | +5.1% |
+| 648 | 8.010 | 8.305 | +3.7% |
+| 718 | 8.053 | 8.130 | +1.0% |
+| 1080 | 7.997 (lowest) | 8.278 | +3.5% |
+
+Native reads consistently sharper at every single resolution point tested — same
+overall shape (no benefit from going past 384-518), just uniformly higher. Real,
+not noise: consistent across the whole range, not one lucky data point.
+
+### 13.2 Depth Detail Refinement — direction flips entirely
+
+| Strength | Original GradMag | Native GradMag |
+|---|---|---|
+| 0.25 | 1482.86 (lowest) | **674.87 (peak)** |
+| 0.5 | 1490.93 | 674.10 |
+| 0.75 | 1512.99 | 673.40 |
+| 1.0 | 1542.26 | 671.95 |
+| 1.25 | 1548.03 | 670.57 |
+| 1.50 | 1556.15 (peak) | 669.64 (lowest) |
+
+Raw magnitudes aren't comparable across models (the underlying depth scale
+changed completely — real negated distance vs a reciprocal-compressed range) —
+only the *direction* matters. Original wants more refinement (1.25-1.5); Native
+wants less (0.25-0.5) — the **exact opposite**, and now matches VDA_L's own
+pattern instead of Metric_Large's old one. Consistent with Native having real,
+smooth distance values with less inherent noise for the filter to clean up (no
+reciprocal singularity amplifying small depth errors at close range the way the
+original's transform does).
+
+### 13.3 Sharpen
+
+| Sharpen | Original GradMag | Native GradMag |
+|---|---|---|
+| Off | 11.296 | 11.187 |
+| 1.0 | 11.826 (+4.7%) | 11.720 (+4.8%) |
+
+No meaningful difference — both get essentially the same real gain from Sharpen
+1.0. Keep it on for either model.
+
+### 13.4 Divergence + Pop — near-field disparity, consistently higher
+
+| Config | Original (near px) | Native (near px) | Difference |
+|---|---|---|---|
+| A: div2.75/pop0 | 33 | 41 | +24% |
+| B: div2.25/pop0.15 | 48 | 56 | +17% |
+| C: div2.5/pop0.15 | 54 | 63 | +17% |
+| D: div2.75/pop0.25 | 76 | 88 | +16% |
+| E: div2.25/pop0.25 | 62 | 72 | +16% |
+
+Far-point/spread numbers omitted here — the far sample point in this specific
+test frame is a low-texture area that broke the template-matching measurement
+for both models (confirmed via match-confidence scores, not just a bad-looking
+number) — not a real finding, just a limit of this crude single-point method on
+this content. The near-point result above is solid: consistently 16-24% more
+near-field disparity at every tested config, directly explaining the "stronger
+pop" the user noticed on real footage.
+
+### 13.5 Video stability (no EMA, raw per-model noise, 864 real frames from a 36s/3840x2160 clip)
+
+| Model | Mean Δ% | Median Δ% | P95 Δ% |
+|---|---|---|---|
+| Any_V3_Metric_Large | 1.3308 | 0.7900 | 3.2526 |
+| **Any_V3_Metric_Large_Native** | **0.9058** | **0.5081** | **2.2040** |
+
+Native is ~32-36% MORE stable across every metric, not just crisper/stronger-pop.
+Same underlying mechanism as 13.2's finding: the original's reciprocal transform
+amplifies small raw depth-value noise disproportionately at close range; Native's
+direct negated real distance doesn't have that singularity, so it's calmer
+frame-to-frame too, independent of any EMA smoothing.
+
+### 13.6 Overall read
+
+Every single metric tested points the same direction: Native is crisper, more
+temporally stable, and gives a real, measured stronger pop — genuinely not just
+"different," a real improvement on the numbers available so far. Whether it's
+*better* for a given viewer is still a matter of taste (the original's extra pop
+could be exactly what someone wants even knowing it's not fully correct), but
+there's no longer a technical reason to prefer the original's depth handling over
+Native's on quality grounds alone. Not yet tested: a full movie conversion,
+EMA buffer/decay behavior specifically for Native (inherits Metric_Large's own
+still-incomplete buffer sweep from Section 12.5), and Edge Dilation.
+
+**Recommended CLI for Any_V3_Metric_Large_Native** (same tuning as Section 12.6's
+Metric_Large recipe, with the one setting 13.2 says should flip):
+```
+--depth-model Any_V3_Metric_Large_Native --resolution 518 --method mlbw_l2_inpaint
+--divergence 2.75 --convergence 0.5
+--midground-pop 0.25 --midground-threshold-low 0.0 --midground-threshold-high 1.0
+--depth-refine --depth-refine-strength 0.5
+--ema-normalize --ema-decay 0.99 --ema-buffer 90
+--sharpen --sharpen-strength 1.0
+--scene-detect --preserve-screen-border --stereo-mode-tag --half-sbs
+--video-codec hevc_nvenc --crf 15 --metadata filename
+```

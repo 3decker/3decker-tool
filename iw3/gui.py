@@ -6470,7 +6470,11 @@ class MainFrame(wx.Frame):
         # has_checkpoint_file the way Any_V2_B/L is) since every DA3 variant
         # downloads its own weights on first real use, not from a locally-
         # pre-placed file a user must already have.
-        depth_models += ["Any_V3_Small", "Any_V3_Base", "Any_V3_Large_1_1", "Any_V3_Metric_Large"]
+        depth_models += ["Any_V3_Small", "Any_V3_Base", "Any_V3_Large_1_1", "Any_V3_Metric_Large",
+                          # ADR-171: same checkpoint as Any_V3_Metric_Large, genuinely metric-aware
+                          # forward-pass handling (see that ADR) instead of the relative-depth
+                          # postprocessing Any_V3_Metric_Large itself keeps unchanged.
+                          "Any_V3_Metric_Large_Native"]
 
         # ADR-142: VDA_B/L, VDA_Metric_B/L, and their Streaming counterparts now
         # unconditionally offered, same reasoning as Distill_Any_B/L above -- no

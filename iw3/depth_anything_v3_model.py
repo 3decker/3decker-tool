@@ -14,13 +14,15 @@ from .depth_scaler import EMAMinMaxScaler
 
 # ADR-135: da3-small/-base/-large-1.1/metric-large added alongside the original
 # da3mono-large -- real Hugging Face repo IDs confirmed against VisionDepth3D's
-# own official model list, not guessed. is_metric() still hardcoded False for all
-# five below -- DA3METRIC-LARGE's genuinely metric (absolute-scale) output is NOT
-# specially handled here; it loads and runs through the exact same relative-depth
-# postprocessing as everything else, so its absolute-scale semantics may not be
-# correctly exploited yet. Treat that one specifically as experimental until
-# tested against a known-metric scene, unlike the other three (same relative-
-# depth family as the already-proven da3mono-large, no such caveat).
+# own official model list, not guessed. is_metric() was hardcoded False for all
+# five below when this landed -- DA3METRIC-LARGE's genuinely metric (absolute-
+# scale) output was NOT specially handled: it loaded and ran through the exact
+# same relative-depth postprocessing as everything else, so its absolute-scale
+# semantics were not correctly exploited. See ADR-171 for "Any_V3_Metric_Large_Native"
+# below, added specifically to close that gap WITHOUT changing
+# "Any_V3_Metric_Large"'s own existing (still relative-postprocessing) behavior --
+# a user who already tuned settings around it keeps that exact behavior, and gets
+# a genuinely metric-aware alternative under a new name to compare against instead.
 NAME_MAP = {
     "Any_V3_Mono": "da3mono-large",
     "Any_V3_Mono_01": "da3mono-large",
@@ -28,6 +30,11 @@ NAME_MAP = {
     "Any_V3_Base": "da3-base",
     "Any_V3_Large_1_1": "da3-large-1.1",
     "Any_V3_Metric_Large": "da3metric-large",
+    # ADR-171: same underlying checkpoint as "Any_V3_Metric_Large" above (loads/
+    # caches the identical da3metric-large.safetensors file -- no separate
+    # download) -- only is_metric()/the forward-pass depth transform differ for
+    # this name, see that ADR for the full reasoning.
+    "Any_V3_Metric_Large_Native": "da3metric-large",
     # ADR-159: CC-BY-NC-4.0 -- gated behind has_checkpoint_file in gui.py's
     # get_depth_models(), same treatment as Any_V2_B/Any_V2_L (ADR-142).
     "Any_V3_Giant": "da3-giant-1.1",
@@ -40,6 +47,7 @@ MODEL_FILES = {
     "Any_V3_Base": path.join(HUB_MODEL_DIR, "checkpoints", "da3-base.safetensors"),
     "Any_V3_Large_1_1": path.join(HUB_MODEL_DIR, "checkpoints", "da3-large-1.1.safetensors"),
     "Any_V3_Metric_Large": path.join(HUB_MODEL_DIR, "checkpoints", "da3metric-large.safetensors"),
+    "Any_V3_Metric_Large_Native": path.join(HUB_MODEL_DIR, "checkpoints", "da3metric-large.safetensors"),
     "Any_V3_Giant": path.join(HUB_MODEL_DIR, "checkpoints", "da3-giant-1.1.safetensors"),
     "Any_V3_Nested_Giant_Large": path.join(HUB_MODEL_DIR, "checkpoints", "da3nested-giant-large-1.1.safetensors"),
 }
@@ -167,7 +175,7 @@ def _load_da3_model(model_name):
     return model
 
 
-def _forward(model, x, enable_amp, sky_thresh=0.3, raw_output=False):
+def _forward(model, x, enable_amp, sky_thresh=0.3, raw_output=False, metric_depth=False):
     amp_dtype = torch.bfloat16 if (x.device.type == "cuda" and torch.cuda.is_bf16_supported()) else None
     with autocast(device=x.device, enabled=enable_amp, dtype=amp_dtype):
         x = x.unsqueeze(1)  # (B, S, C, H, W)
@@ -197,6 +205,20 @@ def _forward(model, x, enable_amp, sky_thresh=0.3, raw_output=False):
             if non_sky_pixels < 10:
                 # all sky
                 depth = torch.zeros_like(depth)
+            elif metric_depth:
+                # ADR-171: "depth" here is already real-world absolute distance
+                # for a genuinely metric checkpoint (da3metric-large) -- the
+                # 1.0/(depth+shift) reciprocal below is a relative-depth-specific
+                # transform (turns an ambiguous-scale value into a bounded
+                # disparity-like range), and applying it to already-real distances
+                # would just be an arbitrary extra transform, not a meaningful one.
+                # Negate instead (farther = more negative, near zero = close) --
+                # this is the exact convention depth_pro_model.py's own proven
+                # metric branch already uses (`out = -out` when
+                # `not force_disparity`, i.e. when is_metric() is True there too)
+                # -- matching an already-working pattern in this codebase rather
+                # than inventing a new one.
+                depth = -depth * (1 - sky_weight)
             else:
                 # TODO: This value should ideally be adjustable via the foreground scale option,
                 #       but currently it is not possible.
@@ -219,6 +241,7 @@ def batch_infer(model, im, flip_aug=True, low_vram=False, enable_amp=False,
                 output_device="cpu", device=None, edge_dilation=2, depth_aa=None,
                 limit_resolution=False,
                 raw_output=False,
+                metric_depth=False,
                 **kwargs):
     device = device if device is not None else model.device
     batch = False
@@ -238,19 +261,27 @@ def batch_infer(model, im, flip_aug=True, low_vram=False, enable_amp=False,
     if not low_vram:
         if flip_aug:
             x = torch.cat([x, torch.flip(x, dims=[3])], dim=0)
-        out = _forward(model, x, enable_amp, raw_output=raw_output)
+        out = _forward(model, x, enable_amp, raw_output=raw_output, metric_depth=metric_depth)
     else:
         x_org = x
-        out = _forward(model, x, enable_amp, raw_output=raw_output)
+        out = _forward(model, x, enable_amp, raw_output=raw_output, metric_depth=metric_depth)
         if flip_aug:
             x = torch.flip(x_org, dims=[3])
-            out2 = _forward(model, x, enable_amp, raw_output=raw_output)
+            out2 = _forward(model, x, enable_amp, raw_output=raw_output, metric_depth=metric_depth)
             out = torch.cat([out, out2], dim=0)
     if depth_aa is not None:
         out = depth_aa.infer(out)
 
     if edge_dilation_is_enabled(edge_dilation):
-        if not raw_output:
+        # ADR-171: the metric_depth branch above negates depth (farther = more
+        # negative), same sign convention raw_output's own branch already uses --
+        # dilate_edge must run on that same "-dilate_edge(-out)" shape for either
+        # case, or it would dilate toward the wrong (far, not near) extreme.
+        # raw_output's own branch is unaffected by metric_depth (see _forward --
+        # metric_depth only changes the `not raw_output` branch), so this only
+        # adds one new case (not raw_output and metric_depth) without touching
+        # the other three.
+        if not raw_output and not metric_depth:
             out = dilate_edge(out, edge_dilation)
         else:
             out = -dilate_edge(-out, edge_dilation)
@@ -327,6 +358,7 @@ class DepthAnythingV3MonoModel(BaseDepthModel):
             depth_aa=self.depth_aa if depth_aa else None,
             raw_output=self.raw_output,
             limit_resolution=self.limit_resolution,
+            metric_depth=self.is_metric(),
         )
 
     @classmethod
@@ -346,7 +378,13 @@ class DepthAnythingV3MonoModel(BaseDepthModel):
         return MODEL_FILES[model_type]
 
     def is_metric(self):
-        return False
+        # ADR-171: "Any_V3_Metric_Large" itself deliberately stays False here --
+        # its existing (relative-postprocessing) behavior must not change for
+        # anyone already using it. Only the new "Any_V3_Metric_Large_Native" name
+        # (same checkpoint, see NAME_MAP) reports True, which is what actually
+        # switches on the metric-aware forward-pass handling in _forward()/
+        # batch_infer() above.
+        return self.model_type == "Any_V3_Metric_Large_Native"
 
     @classmethod
     def multi_gpu_supported(cls, model_type):
@@ -392,6 +430,70 @@ def _bench(resolution=504, do_compile=False):
     print(f"GPU Max Memory Allocated {max_vram_mb}MB")
 
 
+def _self_test_metric_native_registration():
+    """ADR-171: "Any_V3_Metric_Large_Native" must map to the exact same underlying
+    checkpoint as "Any_V3_Metric_Large" (no separate download), and every OTHER
+    model name's is_metric()/NAME_MAP/MODEL_FILES entry must be completely
+    unaffected -- proves the new name is a pure addition, not a change to
+    anything that already existed."""
+    assert NAME_MAP["Any_V3_Metric_Large_Native"] == NAME_MAP["Any_V3_Metric_Large"] == "da3metric-large"
+    assert MODEL_FILES["Any_V3_Metric_Large_Native"] == MODEL_FILES["Any_V3_Metric_Large"]
+
+    for model_type in NAME_MAP:
+        model = DepthAnythingV3MonoModel(model_type)
+        expected = (model_type == "Any_V3_Metric_Large_Native")
+        assert model.is_metric() == expected, (model_type, model.is_metric(), expected)
+
+    print("_self_test_metric_native_registration: PASS")
+
+
+def _self_test_metric_forward_transform():
+    """ADR-171: synthetic (no GPU, no real checkpoint) proof that _forward()'s
+    metric_depth branch does what the code comment claims -- negates raw depth
+    (matching depth_pro_model.py's own proven `out = -out` metric convention)
+    instead of the 1.0/(depth+shift) reciprocal every non-metric Any_V3 variant
+    still gets -- and that passing metric_depth=False (every existing model's
+    real call shape, unchanged) reproduces the exact pre-ADR-171 math bit-for-bit.
+    `model` is a plain callable stand-in returning a fixed depth/sky tensor pair
+    -- _forward() only ever calls `model(x)` once and reads out["depth"]/out["sky"],
+    so a real DA3 network is not needed to test this math in isolation."""
+    torch.manual_seed(0)
+    depth = torch.rand(1, 1, 8, 8) * 5.0 + 0.5  # plausible "meters" range, all > 0
+    sky = torch.zeros(1, 1, 8, 8)  # no sky -- isolates the depth transform itself
+
+    def fake_model(x):
+        return {"depth": depth.clone(), "sky": sky.clone()}
+
+    fake_model.device = torch.device("cpu")
+
+    out_relative = _forward(fake_model, torch.zeros(1, 3, 8, 8), enable_amp=False, metric_depth=False)
+    expected_relative = 1.0 / (depth.squeeze(0).squeeze(0) + 0.2)
+    assert torch.allclose(out_relative.squeeze(0), expected_relative, atol=1e-5), \
+        "metric_depth=False must reproduce the original 1.0/(depth+shift) math unchanged"
+
+    out_metric = _forward(fake_model, torch.zeros(1, 3, 8, 8), enable_amp=False, metric_depth=True)
+    expected_metric = -depth.squeeze(0).squeeze(0)
+    assert torch.allclose(out_metric.squeeze(0), expected_metric, atol=1e-5), \
+        "metric_depth=True must negate raw depth directly, not apply the reciprocal"
+
+    # The two branches must genuinely diverge on the same input -- not an
+    # accidental match that would hide a real bug in either branch.
+    assert not torch.allclose(out_relative, out_metric), \
+        "metric_depth=True and metric_depth=False produced identical output -- the branch isn't real"
+
+    print("_self_test_metric_forward_transform: PASS")
+
+
+def _run_self_tests():
+    _self_test_metric_native_registration()
+    _self_test_metric_forward_transform()
+    print("All iw3.depth_anything_v3_model self-tests PASSED")
+
+
 if __name__ == "__main__":
-    _bench(do_compile=False)
-    _bench(do_compile=True)
+    import sys
+    if "--self-test" in sys.argv[1:]:
+        _run_self_tests()
+    else:
+        _bench(do_compile=False)
+        _bench(do_compile=True)

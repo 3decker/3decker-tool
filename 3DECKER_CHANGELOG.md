@@ -15,6 +15,18 @@ it matters.
 
 ## Latest Update — September 17, 2026
 
+**New depth model option: "Any_V3_Metric_Large_Native."** A real gap was found in
+how the existing `Any_V3_Metric_Large` model works: it's genuinely a "metric"
+depth model (predicts real-world distances), but internally it was being
+processed the same way as every non-metric model — never specially handling its
+absolute-scale output. This new option is a duplicate that fixes that specifically
+— same underlying model/download, but with its real distance values handled
+correctly instead of run through a transform meant for a different kind of
+model. **Your existing `Any_V3_Metric_Large` option is completely untouched** —
+same behavior as always, nothing changes for it. This is purely a new, additional
+choice in the Depth Model dropdown for anyone who wants to try the
+properly-corrected version alongside the original.
+
 **New standalone tool: "Restore All Audio Tracks."** iw3's own conversion has
 always kept only the FIRST audio track from your source movie — if your source
 has multiple languages, the rest silently didn't make it into the converted file.

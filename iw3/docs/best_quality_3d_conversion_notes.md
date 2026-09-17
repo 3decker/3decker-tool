@@ -1949,6 +1949,13 @@ original dark-scene test's own scope from earlier this session.
 
 ### 13.7 Overall read (revised after 13.6 — scene-dependent, not a clean sweep)
 
+**SUPERSEDED — see Section 13.13 for the final, current verdict** (this
+section's read was itself revised again after 13.8's EMA finding seemed to
+narrow the gap, and then revised a THIRD time after 13.11/13.12 found the EMA
+narrowing was specific to resolution 518 and didn't survive the later switch
+to 384, and that near-field pop parity holds on dark content too. Kept here
+for the reasoning trail, not as the current answer.)
+
 On easy, well-lit content (13.1-13.5), Native won across the board — crisper,
 more stable, stronger real pop. On hard, dark content (13.6), that flips on
 stability specifically: original edges Native out slightly there, and the
@@ -1970,6 +1977,10 @@ for Native (inherits Metric_Large's own still-incomplete buffer sweep from
 Section 12.5), Edge Dilation, and dark-scene disparity/pop.
 
 ### 13.8 EMA Buffer sweep — NOW COMPLETE for both models, both scenes (supersedes Section 12.5's "incomplete" note)
+
+**All numbers below are at resolution 518. See Section 13.11 for the same
+sweep re-run at 384 (the now-recommended resolution) — the dark-scene numbers
+below do NOT hold at 384; the bright-scene numbers do.**
 
 Completed the buffer sweep (90/150/220/350/650/800, decay 0.99) that was left
 incomplete in Section 12.5 for `Any_V3_Metric_Large`, and ran the identical
@@ -2040,6 +2051,13 @@ the technical peak, 384** — same reasoning/verification as Section 12.8's
 update for the original model. `0.5` remains Depth Detail Refinement's real
 peak at 384 too (unlike the original, whose peak shifted slightly).
 
+**FURTHER UPDATE (see Section 13.13, the current final verdict): this CLI
+(Native @384) is the right choice for bright/easy content, but is measurably
+LESS stable than the plain `Any_V3_Metric_Large` on dark/hard content — for a
+movie with meaningful dark footage, prefer the original model's own CLI
+(Section 12.6) instead, or Native at resolution 518 rather than 384 if you
+specifically want Native's other properties.**
+
 ### 13.9 Edge Dilation + Edge Repair (2026-09-17)
 
 Same test as Section 12.7, run in parallel for Native on the same frame/crop/
@@ -2099,3 +2117,106 @@ anything else.
 
 **Conclusion: resolution switched to `384` in the recommended CLI (this
 section, above) — matches the original model's own Section 12.8 update.**
+
+**IMPORTANT — this conclusion was later partially reversed by real video data.
+See Section 13.11: the video-stability sweep (which 13.10 did NOT re-test,
+only single-frame disparity/crispness) shows a real, consistent DARK-SCENE
+regression at 384, for both models, that flips which model is more stable on
+hard content. Read 13.11 before treating 384 as a clean win.**
+
+### 13.11 Video stability re-test at resolution 384 — real reversal on dark content (2026-09-17)
+
+13.10 only re-tested single-frame disparity/crispness at 384, not the EMA
+buffer/stability sweep (which needs real video, not a still frame). Re-ran the
+FULL EMA buffer sweep (90/150/220/350/650/800, decay 0.99) at 384, for both
+models, on BOTH the bright classroom clip and the dark forest clip, to check
+against the 518-based stability numbers Section 13.5/13.6/13.8 relied on.
+
+**Bright scene: holds essentially unchanged** (mean Δ%, differences within
+noise, ~1-3%):
+
+| Buffer | Orig @384 | Native @384 | Orig @518 | Native @518 |
+|---|---|---|---|---|
+| 90 | 1.1159 | 0.5601 | 1.1032 | 0.5575 |
+| 350 | 0.9811 | 0.4326 | 0.9751 | 0.4241 |
+| 650 | 0.9102 | 0.3467 | 0.9148 | 0.3362 |
+| 800 | 0.8934 | 0.3459 | 0.9039 | 0.3352 |
+
+Native still clearly, substantially more stable than the original here — same
+conclusion as before, unaffected by the resolution change.
+
+**Dark scene: a real, consistent reversal.** BOTH models get less stable at
+384 than they were at 518 (every buffer, both models — not noise). More
+importantly, **Native is now WORSE than the original at every buffer,
+including with EMA smoothing on**:
+
+| Buffer | Orig @384 | Native @384 | Orig @518 | Native @518 |
+|---|---|---|---|---|
+| 90 | 2.3011 | **2.4161** | 2.1592 | 2.1076 |
+| 150 | 2.1094 | **2.2019** | 2.0062 | 1.8609 |
+| 220 | 1.9838 | **2.0520** | 1.8887 | 1.7029 |
+| 350 | 1.8429 | **1.9434** | 1.7929 | 1.6035 |
+| 650 | 1.6340 | **1.7156** | 1.5892 | 1.3906 |
+| 800 | 1.5674 | **1.7156** | 1.4996 | 1.3906 |
+
+This directly REVERSES Section 13.8's headline finding ("with EMA smoothing
+on, Native pulls ahead of the original at every buffer size on BOTH scenes").
+That conclusion was specific to resolution 518 and does not survive the switch
+to 384 — at 384, on dark/hard content, the ORIGINAL model is the more stable
+choice at every buffer tested.
+
+**Why this matters for the recommended CLI:** 384 is still the right call for
+crispness and for bright-scene stability. But for a movie with meaningful
+dark/hard content, `Any_V3_Metric_Large_Native` at 384 is measurably LESS
+stable than the plain original — the resolution choice and the model choice
+are no longer independent decisions once dark content is involved.
+
+### 13.12 Dark-scene Divergence + Pop disparity — first time tested (2026-09-17)
+
+Neither model had EVER had dark-scene disparity/pop tested before (Section
+12.4/13.4 were both bright-scene only) — a real gap, closed here. Tested both
+models, both resolutions (384/518), all 5 configs (A-E), on the dark forest
+scene.
+
+**Near-field disparity, both models — essentially IDENTICAL** (unlike the
+bright scene's clear 16-24% gap):
+
+| Config | Orig @384 | Native @384 | Orig @518 | Native @518 |
+|---|---|---|---|---|
+| A: div2.75/pop0 | 40 | 40 | 38 | 38 |
+| B: div2.25/pop0.15 | 55 | 56 | 53 | 53 |
+| C: div2.5/pop0.15 | 61 | 62 | 59 | 59 |
+| D: div2.75/pop0.25 | 87 | 87 | 84 | 84 |
+| E: div2.25/pop0.25 | 71 | 71 | 68 | 68 |
+
+Within 1px at every config, both resolutions (match confidence 0.75-0.86,
+lower than the bright scene's 0.97-1.00 but still reliable — dark, lower-
+contrast content is inherently harder to template-match, not a methodology
+failure). Resolution itself has a small, consistent effect (384 gives ~2-3px
+more than 518 for BOTH models equally), but **the model choice barely matters
+for near-field pop on dark content** — the bright scene's "Native pops 16-24%
+stronger" finding does NOT transfer to hard/dark scenes.
+
+### 13.13 Revised overall verdict (supersedes 13.7's original "mostly a real win" read)
+
+Putting 13.6 (no-EMA dark stability), 13.8 (EMA dark stability @518), 13.11
+(EMA dark stability @384), and 13.12 (dark disparity) together:
+
+| Finding | Bright/easy scene | Dark/hard scene |
+|---|---|---|
+| Crispness | Native wins clearly | Native wins slightly |
+| Near-field pop/disparity | Native +16-24% stronger | Essentially identical |
+| Stability @518, with EMA | Native wins clearly | Native wins (narrowly) |
+| Stability @384, with EMA | Native wins clearly | **Original wins** |
+
+**Native's real advantages are concentrated on bright/easy content
+specifically.** On hard/dark scenes it doesn't deliver the stronger pop seen
+on bright content, and at the crisper 384 resolution it's measurably LESS
+stable than the original. For a movie with meaningful dark/hard footage, the
+plain `Any_V3_Metric_Large` is the safer, more consistent choice — Native's
+wins don't reliably carry over to that content. For an all-bright/easy movie,
+Native at 384 remains the clear best pick. There is no single answer that's
+correct for every film — the right choice now genuinely depends on how much
+of the runtime is hard content, which the user has to judge per-film (scene
+detection/EMA-by-duration tooling elsewhere in this doc can help estimate shot
+difficulty, but there's no automated "is this scene hard" classifier here).

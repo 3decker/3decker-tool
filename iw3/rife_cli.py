@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from fractions import Fraction
 
 import torch
@@ -44,6 +45,39 @@ import nunif.utils.video as VU
 from nunif.device import create_device
 from nunif.utils.video.metadata import convert_fps_fraction
 from .rife_model import DEFAULT_RIFE_MODEL, RIFE_TIERS, interpolate_frame, load_rife_model
+
+
+class _SubprocessProgressPrinter:
+    """tqdm-compatible progress reporter for use ACROSS a process boundary -- exact
+    copy of sharpen_cli.py's own _SubprocessProgressPrinter (see that module's own
+    docstring for the full "why a separate stdout channel, why throttled at
+    ~0.1s" reasoning, ADR-170), with only the line prefix changed
+    so a caller reading both tools' output at once (e.g. iw3.gui, in principle)
+    could never confuse one tool's progress line for the other's: "IW3_RIFE_PROGRESS
+    <done> <total>", to stdout, flushed immediately, never mixed with the
+    human-readable status/refusal text this tool has always printed to stderr."""
+
+    _MIN_INTERVAL_SEC = 0.1
+
+    def __init__(self, **kwargs):
+        self.total = kwargs.get("total") or 0
+        self.done = 0
+        self._last_emit = 0.0
+        self._emit(force=True)
+
+    def update(self, n=1):
+        self.done += n
+        self._emit()
+
+    def close(self):
+        self._emit(force=True)
+
+    def _emit(self, force=False):
+        now = time.monotonic()
+        if not force and (now - self._last_emit) < self._MIN_INTERVAL_SEC:
+            return
+        self._last_emit = now
+        print(f"IW3_RIFE_PROGRESS {self.done} {self.total}", flush=True)
 
 
 def create_parser():
@@ -340,6 +374,7 @@ def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         config_callback=config_callback,
         title="RIFE",
         device=device,
+        tqdm_fn=_SubprocessProgressPrinter,
     )
 
     _write_rife_manifest(output_path, input_path, manifest_frames, rife_model,

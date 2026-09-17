@@ -27,6 +27,13 @@ video is only a short clip of a longer source movie, optional Source Start/End
 Time fields trim the source's audio to match, the same way Add Audio Track's own
 trimming already works. Find it on the Tools tab, right below Add Audio Track.
 
+**RIFE Frame Interpolation (Standalone Tool) now shows real progress too — frames,
+percentage, FPS, elapsed time, and ETA — instead of a frozen "Running..." message
+for however long the interpolation takes.** Same fix Sharpen and Retroactive
+HDR/DV Reinjection already got, now extended to RIFE. Nothing else about how RIFE
+works changed — this is purely visibility into a job that was already running,
+now with a live bar and live numbers instead of silence.
+
 ## Update — September 16, 2026
 
 **The Retroactive HDR/DV Reinjection tool now handles a real, tricky case: your

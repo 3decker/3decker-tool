@@ -5090,6 +5090,21 @@ class MainFrame(wx.Frame):
               "while a job is running so it can't wipe output you may still be reading mid-run; "
               "re-enabled once the job finishes."))
 
+        # ADR-170: live progress bar, same cross-process stdout-channel
+        # convention as Sharpen (ADR-165)/HDR Reinjection (ADR-166) --
+        # iw3.rife_cli's own _SubprocessProgressPrinter prints ONLY
+        # "IW3_RIFE_PROGRESS <done> <total>" lines to stdout, parsed live in
+        # run_rife_standalone below. Unlike Sharpen's simpler done/total/percent
+        # label, this also shows FPS/elapsed/ETA -- the same formula the MAIN
+        # conversion's own status bar already uses (see on_progress's `type == 1`
+        # branch) -- per explicit user request for RIFE specifically.
+        self.gauge_rife_standalone = wx.Gauge(self.cpn_rife_standalone.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_rife_standalone.SetToolTip(
+            T("Real progress of the currently running RIFE job (frames processed so far), "
+              "read live from the background process as it runs -- not just a spinner. Empty/"
+              "hidden-looking when no job has run yet this session."))
+        self.lbl_rife_standalone_progress = wx.StaticText(self.cpn_rife_standalone.GetPane(), label="")
+
         self.btn_rife_standalone_input.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_input)
         self.btn_rife_standalone_output.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_output)
         self.cbo_rife_standalone_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_standalone_mode)
@@ -5116,6 +5131,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_rife_standalone_mode, (h, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_standalone_target_fps, (h, 2), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_run, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_rife_standalone, (h := h + 1, 0), (0, 3), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_rife_standalone_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_rife_standalone.GetPane().SetSizer(layout)
@@ -10769,14 +10786,75 @@ class MainFrame(wx.Frame):
     def on_changed_cbo_rife_standalone_mode(self, event):
         self.update_rife_standalone_mode()
 
+    def _update_rife_standalone_progress(self, done, total):
+        # Called via wx.CallAfter from run_rife_standalone's background thread --
+        # never touch these widgets directly from that thread. Unlike Sharpen's
+        # simpler done/total/percent label, this also computes FPS/elapsed/ETA --
+        # the exact same formula the main conversion's own status bar uses (see
+        # on_progress's `type == 1` branch: fps = frames_done / elapsed_seconds,
+        # remaining = (total - done) / fps) -- per explicit user request for RIFE
+        # specifically to show elapsed time and ETA, not just a frame count.
+        if total > 0:
+            self.gauge_rife_standalone.SetRange(total)
+            self.gauge_rife_standalone.SetValue(min(done, total))
+            percent = min(100, int(done / total * 100))
+            elapsed = time() - self.rife_standalone_start_time
+            fps = done / (elapsed + 1e-6)
+            if fps > 0 and done > 0:
+                eta = self._format_duration((total - done) / fps)
+                elapsed_str = self._format_duration(elapsed)
+                self.lbl_rife_standalone_progress.SetLabel(
+                    f"{done}/{total} {T('frames')} ({percent}%) "
+                    f"[{fps:.2f} FPS, {T('elapsed')} {elapsed_str}, ETA {eta}]")
+            else:
+                self.lbl_rife_standalone_progress.SetLabel(f"{done}/{total} {T('frames')} ({percent}%)")
+        else:
+            # total unknown -- still shows real per-frame movement via a pulsing bar
+            # rather than a stuck one, same fallback Sharpen's own bar uses.
+            self.gauge_rife_standalone.Pulse()
+            elapsed_str = self._format_duration(time() - self.rife_standalone_start_time)
+            self.lbl_rife_standalone_progress.SetLabel(
+                f"{done} {T('frames')} [{T('elapsed')} {elapsed_str}]")
+
     def run_rife_standalone(self, cmd):
         # Runs on a background thread via startWorker -- never blocks the GUI thread.
         # Kept out-of-process the same way the other standalone tools in this column
-        # are (this app's own GPU/model state is never touched). Captures combined
-        # stdout+stderr since rife_cli prints its resolved fps/validation refusal
-        # reason and the written manifest path to stderr.
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        # are (this app's own GPU/model state is never touched).
+        #
+        # ADR-170: Popen (not subprocess.run) with the two streams read
+        # SEPARATELY and live, same convention as run_sharpen (ADR-165)/
+        # run_reinject_hdr (ADR-166) -- stdout is now a DEDICATED progress channel:
+        # rife_cli.py's _SubprocessProgressPrinter prints ONLY "IW3_RIFE_PROGRESS
+        # <done> <total>" lines there, nothing else, ever -- every human-readable
+        # status/refusal message rife_cli prints (resolved fps, validation refusal
+        # reason, written manifest path) still goes to stderr exactly as before,
+        # captured here into the same combined log text this method has always
+        # returned.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, bufsize=1)
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("IW3_RIFE_PROGRESS "):
+                parts = line.split(" ")
+                if len(parts) == 3:
+                    try:
+                        done, total = int(parts[1]), int(parts[2])
+                    except ValueError:
+                        continue
+                    wx.CallAfter(self._update_rife_standalone_progress, done, total)
+
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
 
     def on_exit_rife_standalone_worker(self, result):
         self.btn_rife_standalone_run.Enable()
@@ -10795,6 +10873,16 @@ class MainFrame(wx.Frame):
         self.txt_rife_standalone_log.SetValue(output)
         self.txt_rife_standalone_log.ShowPosition(self.txt_rife_standalone_log.GetLastPosition())
         if returncode == 0:
+            # Force the bar/label to a clean 100% rather than trusting the last
+            # live update landed exactly on the final frame (it's throttled -- see
+            # rife_cli.py's _SubprocessProgressPrinter -- so the very last partial
+            # interval before the process exited might not have emitted).
+            total = self.gauge_rife_standalone.GetRange()
+            if total > 0:
+                self.gauge_rife_standalone.SetValue(total)
+                elapsed_str = self._format_duration(time() - self.rife_standalone_start_time)
+                self.lbl_rife_standalone_progress.SetLabel(
+                    f"{total}/{total} {T('frames')} (100%) [{T('elapsed')} {elapsed_str}]")
             self.SetStatusText(T("RIFE interpolation applied successfully"))
         else:
             self.SetStatusText(T("RIFE interpolation failed -- see the log below"))
@@ -10851,6 +10939,10 @@ class MainFrame(wx.Frame):
             cmd += ["--video-codec", str(video_codec)]
 
         self.txt_rife_standalone_log.SetValue(T("Running...\n"))
+        self.gauge_rife_standalone.SetRange(1)
+        self.gauge_rife_standalone.SetValue(0)
+        self.lbl_rife_standalone_progress.SetLabel("")
+        self.rife_standalone_start_time = time()
         self.btn_rife_standalone_run.Disable()
         self.btn_rife_standalone_clear.Disable()
         self.SetStatusText(T("Applying RIFE interpolation..."))
@@ -13719,6 +13811,76 @@ def _self_test_sharpen_progress_bar():
     print("_self_test_sharpen_progress_bar: PASS")
 
 
+def _self_test_rife_standalone_progress_bar():
+    """Regression test for ADR-170's RIFE Frame Interpolation (Standalone Tool)
+    progress bar -- mirrors _self_test_sharpen_progress_bar exactly (same real
+    `python -c` stand-in subprocess convention, same stdout/stderr-splitting
+    proof), for run_rife_standalone()'s parsing of "IW3_RIFE_PROGRESS <done>
+    <total>" lines (as rife_cli.py's own _SubprocessProgressPrinter emits them)
+    into gauge_rife_standalone/lbl_rife_standalone_progress. Additionally confirms
+    the FPS/elapsed/ETA text this tool's label includes beyond Sharpen's simpler
+    done/total/percent-only label (per explicit user request), and that a fresh
+    run resets the gauge/label rather than showing the previous run's leftover
+    values."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        script = (
+            "import sys\n"
+            "print('IW3_RIFE_PROGRESS 10 100')\n"
+            "print('IW3_RIFE_PROGRESS 50 100')\n"
+            "print('some log line', file=sys.stderr)\n"
+            "print('IW3_RIFE_PROGRESS 100 100')\n"
+            "print('another log line', file=sys.stderr)\n"
+        )
+        cmd = [sys.executable, "-c", script]
+        frame.rife_standalone_start_time = time()
+        returncode, output = frame.run_rife_standalone(cmd)
+        wx.Yield()  # flush the wx.CallAfter-queued _update_rife_standalone_progress calls
+
+        assert returncode == 0, returncode
+        assert "some log line" in output, output
+        assert "another log line" in output, output
+        assert "IW3_RIFE_PROGRESS" not in output, \
+            "progress lines must never leak into the stderr log text"
+        assert frame.gauge_rife_standalone.GetRange() == 100, frame.gauge_rife_standalone.GetRange()
+        assert frame.gauge_rife_standalone.GetValue() == 100, frame.gauge_rife_standalone.GetValue()
+        label = frame.lbl_rife_standalone_progress.GetLabel()
+        assert label.startswith(f"100/100 {T('frames')} (100%)"), label
+        assert "FPS" in label and "ETA" in label, \
+            f"label must include FPS/ETA beyond Sharpen's simpler done/total/percent: {label}"
+
+        # A fresh run must reset the gauge/label rather than showing the previous
+        # run's leftover values until the first live update arrives.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = path.join(tmpdir, "movie_3d.mkv")
+            with open(input_path, "wb") as f:
+                f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_rife.mkv")
+            frame.txt_rife_standalone_input.SetValue(input_path)
+            frame.txt_rife_standalone_output.SetValue(output_path)
+            orig_start_worker = gui_mod.startWorker
+            gui_mod.startWorker = lambda *a, **kw: None
+            try:
+                frame.on_click_btn_rife_standalone_run(None)
+            finally:
+                gui_mod.startWorker = orig_start_worker
+            assert frame.gauge_rife_standalone.GetValue() == 0, \
+                "starting a new run must reset the gauge, not show the last run's value"
+            assert frame.lbl_rife_standalone_progress.GetLabel() == "", \
+                "starting a new run must clear the previous run's progress label"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_progress_bar: PASS")
+
+
 def _self_test_sharpen_codec_option():
     """Regression test for ADR-165's --video-codec fix: a real live DV reinjection
     attempt on a Sharpen output failed with "codec detected: 'h264' -- DV/HDR
@@ -15256,6 +15418,7 @@ def _run_self_tests():
         _self_test_hdr_reinject_rife_manifest_field,
         _self_test_reinject_fractional_time_fields,
         _self_test_rife_standalone_panel,
+        _self_test_rife_standalone_progress_bar,
         _self_test_sharpen_progress_bar,
         _self_test_sharpen_codec_option,
         _self_test_reinject_progress_bar,

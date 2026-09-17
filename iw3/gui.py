@@ -3543,7 +3543,12 @@ class MainFrame(wx.Frame):
         # already known from the conversion job itself.
         self.chk_restore_audio_subtitles = wx.CheckBox(
             self.grp_postprocess,
-            label=T("Restore Audio & Subtitles from Source after conversion"),
+            # ADR-172 amendment: a single "&" in a wx label is a keyboard-accelerator
+            # marker (underlines the next letter), not a literal ampersand -- real,
+            # live-found bug (screenshot showed "Restore Audio _Subtitles", the "&"
+            # silently eaten and "S" marked as the accelerator instead). "&&" is wx's
+            # own escape for a literal "&" in a label.
+            label=T("Restore Audio && Subtitles from Source after conversion"),
             name="chk_restore_audio_subtitles")
         self.chk_restore_audio_subtitles.SetValue(False)
         self.chk_restore_audio_subtitles.SetToolTip(

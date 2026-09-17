@@ -1730,7 +1730,7 @@ is updated accordingly.
 ### 12.6 Recommended CLI for Metric_Large
 
 ```
---depth-model Any_V3_Metric_Large --resolution 518 --method mlbw_l2_inpaint
+--depth-model Any_V3_Metric_Large --resolution 384 --method mlbw_l2_inpaint
 --divergence 2.75 --convergence 0.5
 --midground-pop 0.25 --midground-threshold-low 0.0 --midground-threshold-high 1.0
 --depth-refine --depth-refine-strength 1.25
@@ -1740,14 +1740,85 @@ is updated accordingly.
 --video-codec hevc_nvenc --crf 15 --metadata filename
 ```
 
-Resolution kept at 518 rather than the technical 384 peak (small measured
-difference, and 518 already has disparity/stereo data behind it in this
-session). EMA Buffer updated to `650` per Section 13.8's completed sweep
-(supersedes this section's earlier "90, provisional" note). Object Stability
-and Edge Dilation were not tested for Metric_Large this session (Object
-Stability skipped on explicit request; redundant for temporally-aware models
-per 11.2's reasoning; Edge Dilation untested — carry VDA_L's `3 2` default if
-used).
+**UPDATE (2026-09-17, see Section 12.8): resolution switched from 518 to the
+technical peak, 384**, after re-running the FULL recipe (Depth Detail
+Refinement, Sharpen, Divergence+Pop, Edge Dilation, Edge Repair) at 384 to
+confirm nothing else needed to change to support it — nothing did. `1.25`
+(not `1.50`) confirmed as Depth Detail Refinement's real peak once measured at
+384 specifically. EMA Buffer at `650` per Section 13.8's completed sweep.
+Object Stability was not tested for Metric_Large this session (skipped on
+explicit request).
+
+### 12.7 Edge Dilation + Edge Repair (2026-09-17) — real, different from VDA_L
+
+Same test frame/crop region as the rest of Section 12. Divergence 2.75, Pop
+0.25, resolution 518 (the recommended recipe), Edge Dilation/Edge Repair swept
+independently with the rest held at defaults.
+
+**Edge Dilation** (GradMag on the rendered stereo output):
+
+| Config | Laplacian | GradMag |
+|---|---|---|
+| 0/0 | 14.64 | 11.173 |
+| 1/1 | 14.64 | 11.215 |
+| 2/1 | 14.62 | 11.224 |
+| 3/2 | 14.60 | 11.229 |
+
+Small but real gain with more dilation (+0.5% GradMag total, 0/0 → 3/2) — not
+nothing, but not a strong lever either. Different from VDA_L, which found
+genuinely zero measurable effect across the same range. See Section 13.9 for
+Native's own numbers — they move the OPPOSITE direction.
+
+**Edge Repair** (real, measurable — unlike VDA_L, where it had zero effect):
+
+| Strength | Laplacian | GradMag | Pixel diff vs Off (mean/max) |
+|---|---|---|---|
+| 0.0 (off) | 14.62 | 11.224 | — |
+| 0.5 | 11.72 (-20%) | 10.996 | 0.0658 / 10 |
+| 1.0 | 9.37 (-36%) | 10.751 | 0.1384 / 19 |
+
+A real, consistent softening effect as strength increases — VDA_L's edges were
+already clean enough that Edge Repair had nothing to act on; Metric_Large's
+inpaint/warp edges apparently do. Visually subtle in a general crop (checked a
+direct Off-vs-1.0 side-by-side, couldn't spot it without the numbers) — this is
+a real but modest tradeoff, not dramatic. **Recommend leaving at 0 (off) by
+default**, same conclusion as VDA_L but for a different reason: here it's an
+active crispness-vs-cleanup tradeoff, not a free "no downside" choice. Worth
+trying 0.5 specifically if you see visible ghosting/fringing at edges in real
+footage.
+
+### 12.8 Resolution 384 vs 518 — full recipe re-test (2026-09-17)
+
+Section 12.1 found 384 measures crisper than 518 (GradMag 8.302 vs 8.121, a
+real -2.2% loss at 518), but 518 had been kept in the recommended CLI for
+practical reasons (already had disparity/stereo/EMA data built around it). Ran
+the FULL recipe again at 384 — Depth Detail Refinement, Sharpen, Divergence+Pop,
+Edge Dilation, Edge Repair — to confirm switching to 384 doesn't require
+changing anything else.
+
+**Result: every directional finding holds at 384.** Nothing flips.
+
+- **Depth Detail Refinement**: still favors higher strength, same as 518 —
+  but the REAL peak at 384 is `1.25` (GradMag 2214.32), not `1.50` (2211.36,
+  already just past peak). At 518 the data looked like it was still climbing
+  at 1.50; measuring at 384 specifically clarifies the true peak is 1.25.
+  Recommended CLI (12.6) already used 1.25, so no change needed there.
+- **Sharpen**: +4.8% at 384 vs +4.7% at 518 — no real difference.
+- **Divergence+Pop disparity (near point)**: within 1px of the 518 numbers at
+  every config (A: 32 vs 33, B: 48 vs 48, C: 53 vs 54, D: 75 vs 76, E: 61 vs
+  62) — disparity is essentially resolution-independent, since Divergence
+  scales real depth values directly rather than depending on the depth map's
+  own resolution. All of Section 12.4's disparity conclusions carry over to
+  384 unchanged.
+- **Edge Dilation**: same small real gain direction as 518 (+0.5%-ish,
+  0/0 → 3/2).
+- **Edge Repair**: same real softening effect confirmed (-33% Laplacian at
+  strength 1.0 vs 518's -36% — consistent magnitude).
+
+**Conclusion: resolution switched to `384` in the recommended CLI (12.6).**
+Faster, less VRAM, and now confirmed the better choice with the rest of the
+recipe fully re-validated around it — not just a resolution-sweep number taken
+in isolation.
 
 ---
 
@@ -1954,7 +2025,7 @@ the provisional `90` to the now-confirmed `650`):
 
 **Recommended CLI for Any_V3_Metric_Large_Native** (buffer updated the same way):
 ```
---depth-model Any_V3_Metric_Large_Native --resolution 518 --method mlbw_l2_inpaint
+--depth-model Any_V3_Metric_Large_Native --resolution 384 --method mlbw_l2_inpaint
 --divergence 2.75 --convergence 0.5
 --midground-pop 0.25 --midground-threshold-low 0.0 --midground-threshold-high 1.0
 --depth-refine --depth-refine-strength 0.5
@@ -1963,3 +2034,68 @@ the provisional `90` to the now-confirmed `650`):
 --scene-detect --preserve-screen-border --stereo-mode-tag --half-sbs
 --video-codec hevc_nvenc --crf 15 --metadata filename
 ```
+
+**UPDATE (2026-09-17, see Section 13.10): resolution switched from 518 to
+the technical peak, 384** — same reasoning/verification as Section 12.8's
+update for the original model. `0.5` remains Depth Detail Refinement's real
+peak at 384 too (unlike the original, whose peak shifted slightly).
+
+### 13.9 Edge Dilation + Edge Repair (2026-09-17)
+
+Same test as Section 12.7, run in parallel for Native on the same frame/crop/
+recipe (Divergence 2.75, Pop 0.25, resolution 518).
+
+**Edge Dilation:**
+
+| Config | Laplacian | GradMag |
+|---|---|---|
+| 0/0 | 14.64 | 11.173 |
+| 1/1 | 14.60 | 11.092 |
+| 2/1 | 14.57 | 11.045 |
+| 3/2 | 14.58 | 11.050 |
+
+Small but real LOSS with more dilation (-1.1% GradMag total, 0/0 → 3/2) —
+**opposite direction from the original** (Section 12.7 gained +0.5%). Neither
+effect is large enough to be a strong lever, but they don't even agree on
+direction — don't assume Edge Dilation behaves the same across the two models.
+
+**Edge Repair:**
+
+| Strength | Laplacian | GradMag | Pixel diff vs Off (mean/max) |
+|---|---|---|---|
+| 0.0 (off) | 14.57 | 11.045 | — |
+| 0.5 | 12.59 (-14%) | 10.857 | 0.0521 / 6 |
+| 1.0 | 10.85 (-26%) | 10.652 | 0.1102 / 12 |
+
+Same real, measurable softening effect as the original (Section 12.7), slightly
+smaller in magnitude (-26% vs -36% Laplacian at strength 1.0, smaller pixel
+diffs too). Same recommendation: leave at 0 (off) by default, try 0.5 only if
+real footage shows visible edge ghosting/fringing.
+
+### 13.10 Resolution 384 vs 518 — full recipe re-test (2026-09-17)
+
+Same re-test as Section 12.8, run for Native in parallel. Full recipe (Depth
+Detail Refinement, Sharpen, Divergence+Pop, Edge Dilation, Edge Repair)
+re-measured at 384 to confirm the switch from 518 doesn't require changing
+anything else.
+
+**Result: every directional finding holds at 384, same as the original model.**
+
+- **Depth Detail Refinement**: still monotonically favors LOWER strength —
+  peak stays at `0.25` at 384 too (934.80, vs 1.50's lowest at 926.00), same
+  shape as 518. Recommended CLI (13's own) already used `0.5`, close enough to
+  the true peak that no change is needed there.
+- **Sharpen**: +4.9% at 384 vs +4.8% at 518 — no real difference.
+- **Divergence+Pop disparity (near point)**: EXACTLY identical to the 518
+  numbers at every config (A: 41, B: 56, C: 63, D: 88, E: 72 — same values
+  both resolutions) — even more resolution-independent than the original
+  model's own near-identical result. All of Section 13.4's disparity
+  conclusions carry over to 384 unchanged.
+- **Edge Dilation**: same small real loss direction as 518 (net -0.9%-ish,
+  0/0 → 3/2).
+- **Edge Repair**: same real softening effect confirmed (-21% Laplacian at
+  strength 1.0 vs 518's -26% — consistent magnitude, smaller pixel diffs at
+  384 too).
+
+**Conclusion: resolution switched to `384` in the recommended CLI (this
+section, above) — matches the original model's own Section 12.8 update.**

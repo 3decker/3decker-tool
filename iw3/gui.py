@@ -25,6 +25,7 @@ from .utils import (
     _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram,
     STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
     STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
+    STAGE_RESTORE_AV,
 )
 from . import update_check
 from . import subtitle_search_cli
@@ -3533,6 +3534,38 @@ class MainFrame(wx.Frame):
         self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
         self.update_rife_interpolate()
 
+        # ADR-172: automatic counterpart to the standalone "Restore All Audio
+        # Tracks" tool (ADR-169), combined with subtitle restoration -- see
+        # iw3.av_restore_cli's own module docstring. Deliberately a single plain
+        # checkbox with no sub-options (unlike RIFE's model/mode/fps/gpu row
+        # above) per direct user request, mirroring "Tag MKV as 3D"'s simplicity
+        # -- the whole point is zero extra typing/choices, since Input/Output are
+        # already known from the conversion job itself.
+        self.chk_restore_audio_subtitles = wx.CheckBox(
+            self.grp_postprocess,
+            label=T("Restore Audio & Subtitles from Source after conversion"),
+            name="chk_restore_audio_subtitles")
+        self.chk_restore_audio_subtitles.SetValue(False)
+        self.chk_restore_audio_subtitles.SetToolTip(
+            T("What it's for: the main conversion only ever keeps the source's FIRST audio track "
+              "and drops every subtitle track entirely -- a source with multiple languages loses "
+              "the rest silently. Once this job's output is fully written, this restores every "
+              "audio and subtitle track from the ORIGINAL SOURCE file automatically -- no need to "
+              "pick files again, this job already knows Input (the source) and its own finished "
+              "output. If Start Time/End Time above were used for this conversion, the same range "
+              "is applied to the source's audio/subtitles automatically so they line up with the "
+              "finished clip.\n"
+              "How it's safe: saved to a separate '_alldub' file -- the original conversion output "
+              "is always left untouched, even if this step itself fails. A source missing one "
+              "track type (e.g. no subtitles) is not a failure -- whatever it has gets restored.\n"
+              "Con: real extra processing time after the main conversion already finished (though "
+              "this step is a fast container remux, not a re-encode -- typically seconds, not "
+              "minutes, even on a full movie).\n"
+              "Recommended: on whenever your source has multiple audio languages or embedded "
+              "subtitles you want kept. The standalone 'Restore All Audio Tracks' tool (Tools tab) "
+              "still exists separately for audio-only restoration on a file you've already "
+              "converted."))
+
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
         j = -1
@@ -3551,6 +3584,11 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_rife_target_fps, (j, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_gpu, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_gpu, (j, 1), flag=wx.EXPAND)
+
+        layout.Add((0, 6), (j := j + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 4), (j := j + 1, 0))
+        layout.Add(self.chk_restore_audio_subtitles, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -7580,6 +7618,7 @@ class MainFrame(wx.Frame):
             rife_gpu=int(self.cbo_rife_gpu.GetClientData(self.cbo_rife_gpu.GetSelection())),
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
+            restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
 
@@ -7688,6 +7727,9 @@ class MainFrame(wx.Frame):
         so a run that turns on Preserve Dolby Vision against an SDR source, or Auto-
         Resume against a short clip, shows one more stage in "Step k/N" than actually
         fires (N is a maximum, matching how STAGE_HDR_REINJECT already behaved).
+        STAGE_RESTORE_AV (ADR-172) is listed last -- _run_audio_subtitle_restore() is
+        called after _run_rife_interpolation() in the same completion block in
+        utils.py, confirmed by reading that call site directly.
         Stage names here must stay byte-identical to iw3/utils.py's STAGE_* constants
         (imported, not re-typed) since _notify_stage() matches against this exact
         list to compute the current stage index."""
@@ -7707,6 +7749,8 @@ class MainFrame(wx.Frame):
             stages.append(STAGE_RIFE_INTERPOLATE)
         if getattr(args, "preserve_dowi", False):
             stages.append(STAGE_HDR_REINJECT)
+        if getattr(args, "restore_audio_subtitles", False):
+            stages.append(STAGE_RESTORE_AV)
         return stages
 
     @staticmethod
@@ -8755,6 +8799,8 @@ class MainFrame(wx.Frame):
             self.txt_rife_target_fps.SetValue(str(args.rife_target_fps))
         elif args.rife_multiplier in (2, 3, 4):
             _apply_combo_value(self.cbo_rife_mode, f"{args.rife_multiplier}x")
+
+        self.chk_restore_audio_subtitles.SetValue(bool(getattr(args, "restore_audio_subtitles", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
         self.chk_scene_detect_cache.SetValue(not args.disable_scene_cache)
@@ -15007,6 +15053,7 @@ def _self_test_import_command_round_trip():
         frame.txt_rife_target_fps.SetValue("60")
         frame.chk_waifu2x_upscale.SetValue(True)
         frame.update_waifu2x_upscale()
+        frame.chk_restore_audio_subtitles.SetValue(True)
         frame.chk_compile.SetValue(False)
 
         command1 = frame.get_cli_command()
@@ -15373,6 +15420,63 @@ def _self_test_da3_giant_variants_gated():
     print("_self_test_da3_giant_variants_gated: PASS")
 
 
+def _self_test_restore_audio_subtitles_checkbox():
+    """ADR-172: the new "Restore Audio & Subtitles from Source after conversion"
+    main-pipeline checkbox. Confirms: it exists, is parented to grp_postprocess
+    (not accidentally left floating or attached to the wrong container), defaults
+    to False/unchecked (an opt-in feature, matching every other post-processing
+    checkbox's own default), the tooltip actually mentions the real automatic
+    behavior (using Input as --source with zero extra file picking, and Start/End
+    Time forwarding) rather than just a placeholder, get_cli_command() round-trips
+    it through --restore-audio-subtitles correctly in both directions (checked ->
+    flag present, unchecked -> flag absent, matching the exact same
+    ClientData-omitted-when-default convention every other opt-in flag here
+    uses), and it is included in get_job_stages()'s stage list if and only if the
+    checkbox is checked."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.chk_restore_audio_subtitles.GetParent() is frame.grp_postprocess
+        assert frame.chk_restore_audio_subtitles.GetValue() is False
+
+        tip = frame.chk_restore_audio_subtitles.GetToolTip().GetTip()
+        assert "source" in tip.lower(), tip
+        assert "alldub" in tip.lower(), tip
+        assert "Start Time" in tip or "start_time" in tip.lower(), tip
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        frame.chk_restore_audio_subtitles.SetValue(False)
+        args_off = frame.parse_args(skip_set_state=True)
+        assert args_off.restore_audio_subtitles is False
+        stages_off = frame._compute_job_stages(args_off)
+        assert STAGE_RESTORE_AV not in stages_off, stages_off
+
+        frame.chk_restore_audio_subtitles.SetValue(True)
+        args_on = frame.parse_args(skip_set_state=True)
+        assert args_on.restore_audio_subtitles is True
+        stages_on = frame._compute_job_stages(args_on)
+        assert STAGE_RESTORE_AV in stages_on, stages_on
+
+        command_on = frame.get_cli_command()
+        assert "--restore-audio-subtitles" in command_on, command_on
+        frame.chk_restore_audio_subtitles.SetValue(False)
+        command_off = frame.get_cli_command()
+        assert "--restore-audio-subtitles" not in command_off, command_off
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_restore_audio_subtitles_checkbox: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -15446,6 +15550,7 @@ def _run_self_tests():
         _self_test_clear_all_button,
         _self_test_mlbw_l2_cycle_method,
         _self_test_da3_giant_variants_gated,
+        _self_test_restore_audio_subtitles_checkbox,
     ]
     failures = []
     for test in tests:

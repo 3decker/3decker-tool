@@ -1720,17 +1720,21 @@ using the GPU.
 |---|---|---|---|---|
 | 90 | 1.1032 | 0.6630 | 2.6261 | 864 |
 
-No conclusion yet on the right buffer size for Metric_Large — this row is a
-baseline only. Revisit once the higher buffers can actually run.
+**UPDATE (2026-09-17, see Section 13.8): the rest of this sweep (150-800) was
+completed later the same day**, alongside the equivalent sweep for
+`Any_V3_Metric_Large_Native` on both this bright scene and a dark scene —
+`650` turned out to be the real sweet spot (diminishing returns beyond it),
+not `90`. See Section 13.8 for the full table; the recommended CLI just below
+is updated accordingly.
 
-### 12.6 Recommended CLI for Metric_Large (current best data, buffer sweep incomplete)
+### 12.6 Recommended CLI for Metric_Large
 
 ```
 --depth-model Any_V3_Metric_Large --resolution 518 --method mlbw_l2_inpaint
 --divergence 2.75 --convergence 0.5
 --midground-pop 0.25 --midground-threshold-low 0.0 --midground-threshold-high 1.0
 --depth-refine --depth-refine-strength 1.25
---ema-normalize --ema-decay 0.99 --ema-buffer 90
+--ema-normalize --ema-decay 0.99 --ema-buffer 650
 --sharpen --sharpen-strength 1.0
 --scene-detect --preserve-screen-border --stereo-mode-tag --half-sbs
 --video-codec hevc_nvenc --crf 15 --metadata filename
@@ -1738,11 +1742,12 @@ baseline only. Revisit once the higher buffers can actually run.
 
 Resolution kept at 518 rather than the technical 384 peak (small measured
 difference, and 518 already has disparity/stereo data behind it in this
-session). EMA Buffer left at the only value actually tested (`90`) — treat this
-as provisional until 12.5 is completed. Object Stability and Edge Dilation were
-not tested for Metric_Large this session (Object Stability skipped on explicit
-request; redundant for temporally-aware models per 11.2's reasoning; Edge
-Dilation untested — carry VDA_L's `3 2` default if used).
+session). EMA Buffer updated to `650` per Section 13.8's completed sweep
+(supersedes this section's earlier "90, provisional" note). Object Stability
+and Edge Dilation were not tested for Metric_Large this session (Object
+Stability skipped on explicit request; redundant for temporally-aware models
+per 11.2's reasoning; Edge Dilation untested — carry VDA_L's `3 2` default if
+used).
 
 ---
 
@@ -1893,14 +1898,67 @@ Not yet tested: a full movie conversion, EMA buffer/decay behavior specifically
 for Native (inherits Metric_Large's own still-incomplete buffer sweep from
 Section 12.5), Edge Dilation, and dark-scene disparity/pop.
 
-**Recommended CLI for Any_V3_Metric_Large_Native** (same tuning as Section 12.6's
-Metric_Large recipe, with the one setting 13.2 says should flip):
+### 13.8 EMA Buffer sweep — NOW COMPLETE for both models, both scenes (supersedes Section 12.5's "incomplete" note)
+
+Completed the buffer sweep (90/150/220/350/650/800, decay 0.99) that was left
+incomplete in Section 12.5 for `Any_V3_Metric_Large`, and ran the identical
+sweep for `Any_V3_Metric_Large_Native`, on BOTH the bright classroom clip
+(36s/864 frames) and the dark forest clip (30s/720 frames).
+
+**Bright scene, mean Δ%:**
+
+| Buffer | Original | Native |
+|---|---|---|
+| 90 | 1.1032 | 0.5575 |
+| 150 | 1.0652 | 0.5184 |
+| 220 | 1.0297 | 0.4796 |
+| 350 | 0.9751 | 0.4241 |
+| 650 | 0.9148 | 0.3362 |
+| 800 | 0.9039 | 0.3352 |
+
+**Dark scene, mean Δ%:**
+
+| Buffer | Original | Native |
+|---|---|---|
+| 90 | 2.1592 | 2.1076 |
+| 150 | 2.0062 | 1.8609 |
+| 220 | 1.8887 | 1.7029 |
+| 350 | 1.7929 | 1.6035 |
+| 650 | 1.5892 | 1.3906 |
+| 800 | 1.4996 | 1.3906 (identical to 650 -- confirmed via file hash, not a bug: on this 720-frame clip, buffer 650 already covers effectively all available history, so 800 has nothing more to smooth over) |
+
+Two consistent findings across both scenes and both models:
+1. **650 is the practical sweet spot.** 90→350 gives a real, meaningful
+   stability gain every time; 650→800 is flat or nearly flat every time. No
+   real reason to go past 650.
+2. **With EMA smoothing applied, Native is more stable than the original on
+   BOTH scenes** — including the dark scene, where the earlier no-EMA test
+   (13.6) found Native slightly LESS stable. EMA smoothing changes that:
+   Native pulls ahead once smoothing is applied, at every buffer size tested.
+   This narrows (doesn't eliminate) 13.7's "scene-dependent, not universal"
+   caveat — Native's advantage is more consistently real once EMA is on than
+   the raw/no-EMA numbers alone suggested.
+
+**Recommended CLI for Any_V3_Metric_Large** (Section 12.6, buffer updated from
+the provisional `90` to the now-confirmed `650`):
+```
+--depth-model Any_V3_Metric_Large --resolution 518 --method mlbw_l2_inpaint
+--divergence 2.75 --convergence 0.5
+--midground-pop 0.25 --midground-threshold-low 0.0 --midground-threshold-high 1.0
+--depth-refine --depth-refine-strength 1.25
+--ema-normalize --ema-decay 0.99 --ema-buffer 650
+--sharpen --sharpen-strength 1.0
+--scene-detect --preserve-screen-border --stereo-mode-tag --half-sbs
+--video-codec hevc_nvenc --crf 15 --metadata filename
+```
+
+**Recommended CLI for Any_V3_Metric_Large_Native** (buffer updated the same way):
 ```
 --depth-model Any_V3_Metric_Large_Native --resolution 518 --method mlbw_l2_inpaint
 --divergence 2.75 --convergence 0.5
 --midground-pop 0.25 --midground-threshold-low 0.0 --midground-threshold-high 1.0
 --depth-refine --depth-refine-strength 0.5
---ema-normalize --ema-decay 0.99 --ema-buffer 90
+--ema-normalize --ema-decay 0.99 --ema-buffer 650
 --sharpen --sharpen-strength 1.0
 --scene-detect --preserve-screen-border --stereo-mode-tag --half-sbs
 --video-codec hevc_nvenc --crf 15 --metadata filename

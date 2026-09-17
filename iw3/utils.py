@@ -236,6 +236,67 @@ def _run_rife_interpolation(output_path, args):
     return interpolated_path
 
 
+def _run_audio_subtitle_restore(output_path, args):
+    """Optionally invokes iw3.av_restore_cli as a subprocess against a
+    just-finished iw3 output, when the user explicitly opted in (GUI: "Restore
+    Audio & Subtitles from Source after conversion" / --restore-audio-subtitles).
+    See docs/ai/AI_DECISIONS.md ADR-172 for the full reasoning -- this is the
+    automatic-checkbox counterpart to the standalone "Restore All Audio Tracks"
+    tool (ADR-169)/iw3.audio_restore_cli, combined with subtitle restoration
+    (iw3.av_restore_cli additionally restores subtitle tracks, which the main
+    conversion never carries over at all).
+
+    Follows the exact same pattern as _run_rife_interpolation()/
+    _run_waifu2x_upscale() above: a genuinely separate subprocess launched only
+    AFTER the conversion's own output file is fully written, and a separate
+    '<name>_alldub<ext>' output file so a failure here can never be mistaken for
+    the conversion itself having failed -- the original output is always left
+    untouched either way.
+
+    args.input is the ORIGINAL SOURCE the whole conversion ran against -- already
+    known, no separate file picker needed (the entire point of this being an
+    automatic checkbox rather than a manual standalone-tool run). If
+    args.start_time/args.end_time were set for this conversion (a clip of a
+    longer source, not the whole file), the exact same range is forwarded as
+    --source-start-time/--source-end-time so the restored audio/subtitles line
+    up with the finished clip automatically, with zero extra input from the
+    user -- this is the actual value-add over running the standalone tool by
+    hand, which would require re-typing that same range.
+
+    Returns the restored file's path on success, or None (having already logged
+    why) on failure -- verifies the output file actually exists rather than
+    trusting the subprocess's exit code alone, same convention
+    _run_rife_interpolation already uses."""
+    if not getattr(args, "restore_audio_subtitles", False):
+        return None
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+
+    base, ext = path.splitext(str(output_path))
+    restored_path = f"{base}_alldub{ext}"
+    cmd = [sys.executable, "-m", "iw3.av_restore_cli",
+           "-i", str(output_path), "-s", str(args.input), "-o", restored_path]
+    start_time = getattr(args, "start_time", None)
+    end_time = getattr(args, "end_time", None)
+    if start_time:
+        cmd += ["--source-start-time", str(start_time)]
+    if end_time:
+        cmd += ["--source-end-time", str(end_time)]
+
+    _notify_stage(args, STAGE_RESTORE_AV)
+    print("[iw3] Restoring audio/subtitle tracks from source...", file=sys.stderr)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace").strip()
+        print(f"[iw3] Audio/subtitle restore failed: {msg[:300]}", file=sys.stderr)
+        return None
+    if not path.exists(restored_path):
+        print("[iw3] Audio/subtitle restore exited 0 but produced no output file", file=sys.stderr)
+        return None
+    print(f"[iw3] Audio/subtitle restore done: {restored_path}", file=sys.stderr)
+    return restored_path
+
+
 def _extract_dovi_rpu(input_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_hevc):
     subprocess.run(
         [ffmpeg_bin, "-y", "-i", str(input_path), "-c:v", "copy", "-an", "-f", "hevc", str(tmp_hevc)],
@@ -1690,6 +1751,7 @@ STAGE_DEPTH_STEREO = "Depth & Stereo Conversion"
 STAGE_WAIFU2X_UPSCALE = "Upscaling with waifu2x"
 STAGE_RIFE_INTERPOLATE = "RIFE Frame Interpolation"
 STAGE_HDR_REINJECT = "HDR/Dolby Vision Reinjection"
+STAGE_RESTORE_AV = "Restoring Audio & Subtitles"
 
 
 def _notify_stage(args, name):
@@ -4142,6 +4204,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
         else:
             _run_waifu2x_upscale(output_path, args)
         _run_rife_interpolation(output_path, args)
+        _run_audio_subtitle_restore(output_path, args)
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -5230,6 +5293,18 @@ def create_parser(required_true=True):
                         help=("waifu2x model style for --waifu2x-upscale. \"photo\" (default) suits real "
                               "movie footage; \"art\" is tuned for illustration/anime source material. "
                               "This was previously GUI-only, with no command-line equivalent."))
+    parser.add_argument("--restore-audio-subtitles", action="store_true",
+                        help=("after conversion finishes, restore every audio AND subtitle track from "
+                              "--input (the original source) onto the finished output -- the main "
+                              "conversion only ever keeps the source's FIRST audio track and drops every "
+                              "subtitle track entirely (see iw3.av_restore_cli's own module docstring, "
+                              "ADR-172). Uses --input/the finished output automatically -- no extra file "
+                              "paths to provide. If --start-time/--end-time were used for this conversion, "
+                              "the same range is used to trim the source's audio/subtitles so they line up "
+                              "with the finished clip. Written to a separate '<name>_alldub<ext>' file -- "
+                              "the original conversion output is never modified. A source missing one "
+                              "track type (e.g. no subtitles) is not an error -- whatever it has gets "
+                              "restored."))
     parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
                         choices=["auto", "4k", "8k"],
                         help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "

@@ -15,6 +15,20 @@ it matters.
 
 ## Latest Update — September 17, 2026
 
+**New checkbox: "Restore Audio & Subtitles from Source after conversion,"
+right on the main conversion screen.** The main conversion has always kept
+only the FIRST audio track from your source (silently dropping other
+languages) and every subtitle track (dropped entirely, not just extras). Turn
+this checkbox on and it fixes both automatically once your conversion
+finishes — no separate tool, no re-picking files, no re-typing your Start/End
+Time trim range. It already knows your source and your finished output, since
+it's the same job. Saved as a new `_alldub` file next to your converted
+video — the original conversion output is never touched, even if this step
+runs into trouble. A source with audio but no subtitles (or vice versa) isn't
+treated as an error — whatever it has gets restored. The standalone "Restore
+All Audio Tracks" tool (Tools tab) is still there too, for audio-only
+restoration on a file you've already converted separately.
+
 **New depth model option: "Any_V3_Metric_Large_Native."** A real gap was found in
 how the existing `Any_V3_Metric_Large` model works: it's genuinely a "metric"
 depth model (predicts real-world distances), but internally it was being

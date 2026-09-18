@@ -769,6 +769,7 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_divergence", "sld_stereo_divergence", 1.0, 5.0, 10, False, "update_divergence_warning"),
     ("cbo_convergence", "sld_stereo_convergence", 0.0, 1.0, 100, False, None),
     ("cbo_convergence_smoothing", "sld_stereo_convergence_smoothing", 0.0, 0.95, 100, False, None),
+    ("cbo_max_negative_parallax", "sld_stereo_max_negative_parallax", 0.0, 1.0, 100, False, None),
     ("cbo_splat_blend_temperature", "sld_stereo_splat_blend_temperature", 10.0, 85.0, 1, False, None),
     ("cbo_depth_refine_strength", "sld_stereo_depth_refine_strength", 0.25, 1.5, 100, False, None),
     ("cbo_temporal_stabilize_strength", "sld_stereo_temporal_stabilize_strength", 0.3, 0.9, 100, False, None),
@@ -1220,6 +1221,27 @@ class MainFrame(wx.Frame):
               "more aggressive/dynamic, reacts faster but may jitter more. 0 = no smoothing at all."))
         self.sld_stereo_convergence_smoothing = _build_stereo_slider(
             self.grp_stereo, self.cbo_convergence_smoothing, 0.0, 0.95, 100)
+
+        self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Max Pop-Out Limit"))
+        self.cbo_max_negative_parallax = EditableComboBox(self.grp_stereo, choices=["1.0", "0.7", "0.4", "0.0"],
+                                                           name="cbo_max_negative_parallax")
+        self.cbo_max_negative_parallax.SetSelection(0)
+        self.cbo_max_negative_parallax.SetToolTip(
+            T("What it's for: a hard safety cap on negative parallax — how far anything is allowed to "
+              "pop out in front of the screen — kept separate from Convergence Plane. Convergence only "
+              "sets WHERE the zero-parallax reference plane sits; it doesn't limit how far past that "
+              "plane a close object can end up popping out. This setting caps that resulting pop-out "
+              "amount directly, no matter where Convergence or 3D Strength are set.\n"
+              "How it works: applied last, after every other depth adjustment (Convergence Mode, "
+              "Foreground/Midground/Background Pop), so it's a real final ceiling.\n"
+              "Values: 1.0 = off (no cap, default) down to 0.0 = no pop-out allowed at all — everything "
+              "is pushed back to sit at or behind the screen.\n"
+              "Con: lowering it flattens the nearest objects to a uniform pop-out amount rather than "
+              "gently compressing them, so very low values can look noticeably flat up close.\n"
+              "Recommended: 1.0 (off) unless a specific shot's close-up pop-out feels uncomfortable — "
+              "then try 0.7 or 0.4 rather than going straight to 0.0."))
+        self.sld_stereo_max_negative_parallax = _build_stereo_slider(
+            self.grp_stereo, self.cbo_max_negative_parallax, 0.0, 1.0, 100)
 
         self.lbl_ipd_offset = wx.StaticText(self.grp_stereo, label=T("Your Own Size"))
         # SpinCtrlDouble is better, but cannot save with PersistenceManager
@@ -2684,6 +2706,9 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_convergence_smoothing, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_smoothing, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_convergence_smoothing, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_max_negative_parallax, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.sld_stereo_max_negative_parallax, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
 
         layout.Add(self.lbl_ipd_offset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.sld_ipd_offset, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -5125,7 +5150,11 @@ class MainFrame(wx.Frame):
               "larger file than the H.264 default at the same quality setting.\n"
               "H.265/HEVC -- hevc_nvenc (GPU): hardware encode on the GPU selected above, much faster "
               "than libx265, requires an NVIDIA GPU with NVENC support (most GeForce/RTX cards from the "
-              "last several generations).\n"
+              "last several generations). On a long job you may see \"[WARN] NVENC zero-copy CUDA frame "
+              "handoff failed (Errno 129)... falling back to CPU-copy encode\" partway through -- that's "
+              "a known, already-handled internal fallback (it only changes how frames are technically "
+              "handed to the encoder), not a sign anything is wrong with the output or its Dolby Vision "
+              "metadata; the job keeps running and finishes normally.\n"
               "Con: HEVC output is somewhat less universally compatible with older/non-4K playback "
               "devices than H.264, and both HEVC options here produce a larger or slower-to-produce file "
               "than the H.264 default.\n"
@@ -5158,7 +5187,10 @@ class MainFrame(wx.Frame):
         self.txt_rife_standalone_log.SetToolTip(
             T("Shows this tool's own output verbatim, including the exact refusal message if Custom FPS "
               "isn't genuinely higher than the source's own frame rate, and the manifest file path it "
-              "wrote on success."))
+              "wrote on success. If you see \"[WARN] NVENC zero-copy CUDA frame handoff failed... "
+              "falling back to CPU-copy encode\" here on a GPU H.265 run, that's a known, harmless "
+              "fallback (see the Output Codec tooltip) -- it is unrelated to Dolby Vision metadata, "
+              "which this tool never writes anyway (see Run above)."))
         self.btn_rife_standalone_clear = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Clear"))
         self.btn_rife_standalone_clear.SetToolTip(
             T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
@@ -6898,6 +6930,7 @@ class MainFrame(wx.Frame):
             self.cbo_divergence,
             self.cbo_convergence,
             self.cbo_convergence_smoothing,
+            self.cbo_max_negative_parallax,
             self.cbo_resolution,
             self.cbo_stereo_width,
             self.cbo_edge_dilation,
@@ -7742,6 +7775,7 @@ class MainFrame(wx.Frame):
             convergence=float(self.cbo_convergence.GetValue()),
             convergence_mode=self.cbo_convergence_mode.GetValue(),
             convergence_smoothing=float(self.cbo_convergence_smoothing.GetValue()),
+            max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
             synthetic_view=self.cbo_synthetic_view.GetValue(),
             method=self.cbo_method.GetValue(),
@@ -8843,6 +8877,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence, args.convergence)
         _apply_combo_value(self.cbo_convergence_mode, args.convergence_mode)
         _apply_combo_value(self.cbo_convergence_smoothing, args.convergence_smoothing)
+        _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
         self.sld_ipd_offset.SetValue(int(round(args.ipd_offset)))
         _apply_combo_value(self.cbo_synthetic_view, args.synthetic_view)
         _apply_combo_value(self.cbo_method, args.method)
@@ -15780,6 +15815,105 @@ def _self_test_restore_audio_subtitles_checkbox():
     print("_self_test_restore_audio_subtitles_checkbox: PASS")
 
 
+def _self_test_max_negative_parallax_field():
+    """ADR-179: Max Negative Parallax (GUI label "Max Pop-Out Limit"), a safety cap
+    on pop-out that's independent from the Convergence Plane slider -- Convergence
+    only sets where the zero-parallax reference plane sits, this setting caps the
+    resulting pixel-offset (pop-out) measurement itself. Confirms: default is 1.0
+    (off, a no-op) both as the combo's own default and end-to-end through
+    parse_args(), setting a lower value round-trips through parse_args() and back
+    through _apply_combo_value/set_widgets_from_args, and get_cli_command() reflects
+    a non-default value but omits the flag at the 1.0 default (matching this file's
+    default-omitted CLI convention). Also directly verifies the underlying clamp
+    math in iw3.utils.apply_divergence: with convergence=0.5 and
+    max_negative_parallax=0.2, no output depth value used for warping exceeds 0.7,
+    and with max_negative_parallax=1.0 (off) the depth is passed through unchanged."""
+    import torch
+    import iw3.utils as iw3_utils
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.cbo_max_negative_parallax.GetValue() == "1.0"
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        args_default = frame.parse_args(skip_set_state=True)
+        assert args_default.max_negative_parallax == 1.0, args_default.max_negative_parallax
+
+        frame.cbo_max_negative_parallax.SetValue("0.4")
+        args_limited = frame.parse_args(skip_set_state=True)
+        assert args_limited.max_negative_parallax == 0.4, args_limited.max_negative_parallax
+
+        args_probe = frame.parse_args(skip_set_state=True)
+        args_probe.max_negative_parallax = 0.4
+        frame.apply_parsed_args_to_gui(args_probe)
+        assert frame.cbo_max_negative_parallax.GetValue() == "0.4"
+
+        # a loaded config from before this feature existed has no such attribute at all
+        del args_probe.max_negative_parallax
+        frame.cbo_max_negative_parallax.SetValue("0.4")
+        frame.apply_parsed_args_to_gui(args_probe)
+        assert frame.cbo_max_negative_parallax.GetValue() == "1.0"
+
+        frame.cbo_max_negative_parallax.SetValue("1.0")
+        command_off = frame.get_cli_command()
+        assert "--max-negative-parallax" not in command_off, command_off
+        frame.cbo_max_negative_parallax.SetValue("0.4")
+        command_on = frame.get_cli_command()
+        assert "--max-negative-parallax 0.4" in command_on, command_on
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    depth = torch.linspace(0.0, 1.0, steps=11, dtype=torch.float32).view(1, 1, 1, 11)
+    im = torch.zeros(1, 3, 1, 11, dtype=torch.float32)
+
+    class _WarpArgs:
+        pass
+    warp_args = _WarpArgs()
+    warp_args.state = {"convergence_model": None}
+    warp_args.mapper = "none"
+    warp_args.convergence = 0.5
+    warp_args.method = "grid_sample"
+    warp_args.synthetic_view = "both"
+
+    # Spy on the real warp call apply_divergence dispatches to, to see the actual
+    # post-clamp depth it used -- rather than re-deriving the clamp math separately
+    # and asserting against itself.
+    captured = {}
+    real_grid_sample_fn = iw3_utils.apply_divergence_grid_sample
+
+    def _spy_grid_sample(c, d, divergence, convergence, synthetic_view):
+        captured["depth"] = d.clone()
+        return real_grid_sample_fn(c, d, divergence, convergence, synthetic_view=synthetic_view)
+
+    iw3_utils.apply_divergence_grid_sample = _spy_grid_sample
+    try:
+        warp_args.divergence = 2.0
+        warp_args.max_negative_parallax = 0.2
+        iw3_utils.apply_divergence(depth.clone(), im.clone(), warp_args, None)
+        clamped_depth = captured["depth"]
+        assert float(clamped_depth.max()) <= 0.7 + 1e-6, float(clamped_depth.max())
+        assert float(clamped_depth.min()) == 0.0
+
+        warp_args.max_negative_parallax = 1.0
+        iw3_utils.apply_divergence(depth.clone(), im.clone(), warp_args, None)
+        unclamped_depth = captured["depth"]
+        assert torch.equal(unclamped_depth, depth), "1.0 (off) must not alter depth at all"
+    finally:
+        iw3_utils.apply_divergence_grid_sample = real_grid_sample_fn
+
+    print("_self_test_max_negative_parallax_field: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -15856,6 +15990,7 @@ def _run_self_tests():
         _self_test_mlbw_l2_cycle_method,
         _self_test_da3_giant_variants_gated,
         _self_test_restore_audio_subtitles_checkbox,
+        _self_test_max_negative_parallax_field,
     ]
     failures = []
     for test in tests:

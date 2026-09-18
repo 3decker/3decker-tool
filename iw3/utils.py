@@ -1980,6 +1980,23 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
                                         threshold_low=midground_threshold_low,
                                         threshold_high=midground_threshold_high)
 
+    # ADR-179: Max Negative Parallax -- a hard safety cap on how far anything can pop
+    # out in front of the Convergence plane, applied AFTER every other depth edit above
+    # (mapper, auto-convergence, Foreground/Midground/Background Pop) so it is a real
+    # final ceiling regardless of what produced the depth value. Every warp method below
+    # turns a positive (depth - convergence) into pop-out (negative parallax), so
+    # clamping depth's ceiling to convergence + max_negative_parallax caps that
+    # resulting pixel-offset measurement directly -- independent of the Convergence
+    # slider itself, which only sets where the zero-parallax reference plane sits.
+    # 1.0 (default) is a no-op: depth is already <= 1.0, so the cap never engages.
+    max_negative_parallax = getattr(args, "max_negative_parallax", 1.0)
+    if max_negative_parallax < 1.0:
+        parallax_cap = convergence + max_negative_parallax
+        if torch.is_tensor(parallax_cap):
+            depth = torch.minimum(depth, parallax_cap)
+        else:
+            depth = torch.clamp(depth, max=parallax_cap)
+
     if args.method == "NULL":
         left_eye, right_eye = im.clone(), im.clone()
         if not batch:
@@ -3664,6 +3681,51 @@ def _probe_video_duration(path_str):
         return None
 
 
+def _probe_video_frame_count(path_str):
+    """ADR-178: real, user-reported bug -- Auto Resume's audio ends up progressively
+    more out of sync with the video the more times a job is stopped and resumed.
+    Root cause: process_video_with_resume() used to track how much of the source had
+    been covered as an accumulated FLOAT DURATION (each segment's own
+    _probe_video_duration() result, summed). Every one of those per-segment duration
+    measurements carries its own small rounding (frame_dur is only an ESTIMATE of one
+    frame's length, added once as a fixed offset regardless of the real last frame's
+    exact length; float summation itself accumulates error) -- and because each
+    resume's start_time is derived from the PREVIOUS segment's own possibly-slightly-off
+    duration, that error doesn't stay local to one segment, it carries forward and
+    compounds into every segment after it. A real reproduction (3 interrupted
+    resumes on a 120s real clip) measured the accumulated error directly: the final
+    merged video had a real, counted 2831 frames -- ~46 frames (~1.9s at this
+    source's frame rate) short of what its own reported container duration implied.
+
+    Fix: count REAL, EXACT FRAMES per segment (an integer -- summing integers cannot
+    accumulate the fractional rounding error a summed float duration can) instead of
+    measuring each segment's own duration in isolation. The caller converts a frame
+    count back to a start_time ONCE, using the ORIGINAL SOURCE's own true frame rate
+    (a single conversion, not one compounding per-segment conversion), which is the
+    same rounding-error-reduction principle behind preferring frame-accurate editing
+    over timecode-accurate editing in video work generally.
+
+    Counts DEMUXED PACKETS (matching _probe_video_duration's own approach) rather
+    than calling a decoder, since these segment files are simple, already-encoded
+    single-video-stream outputs with no B-frame reordering surprises expected --
+    consistent with how _probe_video_duration already treats "one packet" as "one
+    frame" for this exact use case.
+    """
+    import av as _av
+    try:
+        with _av.open(str(path_str)) as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            count = 0
+            for packet in container.demux(stream):
+                if packet.pts is not None:
+                    count += 1
+            return count if count > 0 else None
+    except Exception:
+        return None
+
+
 def _find_other_resume_checkpoints(output_dir, input_filename, exclude_checkpoint_path):
     """ADR-154: real, hours-costly bug found live -- checkpoint identity
     (checkpoint_path = output_filename + ".iw3resume") is derived from the FULL
@@ -3728,11 +3790,18 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     if args.resume and path.exists(output_filename):
         return output_filename
 
+    source_fps = None
     try:
         with _av.open(str(input_filename)) as c:
             duration = float(c.duration) / 1000000.0 if c.duration else None
+            if c.streams.video:
+                source_fps = c.streams.video[0].average_rate
     except Exception:
         duration = None
+    # ADR-178: the SOURCE's own true frame rate, read once -- see
+    # _probe_video_frame_count()'s docstring for why this matters. Same fallback
+    # value _probe_video_duration() already uses when a stream reports none.
+    source_fps = float(source_fps) if source_fps else 24.0
 
     effective_start = parse_time(args.start_time) if getattr(args, "start_time", None) else 0.0
     effective_end = parse_time(args.end_time) if getattr(args, "end_time", None) else (duration or 0.0)
@@ -3789,6 +3858,22 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
         "keep_aspect_ratio": getattr(args, "keep_aspect_ratio", False),
     }
 
+    # ADR-178: real, user-reported bug -- Auto Resume's audio ended up progressively
+    # more out of sync with the video the more times a job was stopped and resumed.
+    # Root cause: this used to track completed coverage as an accumulated FLOAT
+    # DURATION (each segment's own _probe_video_duration() result, summed) -- every
+    # per-segment duration measurement carries its own small rounding, and because
+    # each resume's start_time was derived from the PREVIOUS segment's own
+    # possibly-slightly-off duration, that error didn't stay local, it compounded
+    # into every segment after it. Fixed by tracking real, exact FRAME COUNTS
+    # (integers -- summing integers cannot accumulate fractional rounding error the
+    # way summing floats can) as the ground truth instead, only converting back to a
+    # seconds value (covered_end, still needed to seek the source and to compare
+    # against effective_end) via the source's own true frame rate. See
+    # _probe_video_frame_count()'s docstring for the real, measured drift this
+    # fixes (confirmed empirically: ~46 frames/~1.9s lost across 3 resumes on a
+    # real 120s test clip before this fix).
+    #
     # Load any segments left over from a previous interrupted run, and re-verify each
     # one's *actual* coverage by scanning the file itself — never trust a stale recorded
     # position, since the file's real content is the only ground truth after a crash.
@@ -3800,15 +3885,16 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
                 data = json.load(f)
             saved = data.get("segments", [])
             saved_fingerprint = data.get("fingerprint")
+            running_frame = round(effective_start * source_fps)
             for seg in saved:
                 seg_file = seg.get("file")
-                seg_start = seg.get("start")
-                if seg_file is None or seg_start is None or not path.exists(seg_file):
+                if seg_file is None or not path.exists(seg_file):
                     continue
-                actual_dur = _probe_video_duration(seg_file)
-                if actual_dur is None or actual_dur <= 0.5:
+                frame_count = _probe_video_frame_count(seg_file)
+                if frame_count is None or frame_count <= 0:
                     continue
-                segments.append({"start": seg_start, "end": seg_start + actual_dur, "file": seg_file})
+                segments.append({"start_frame": running_frame, "frame_count": frame_count, "file": seg_file})
+                running_frame += frame_count
         except Exception:
             segments = []
             saved_fingerprint = None
@@ -3822,7 +3908,9 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
               f"to start a separate fresh job.", file=sys.stderr)
         return
 
-    covered_end = max([s["end"] for s in segments], default=effective_start)
+    covered_frames = (segments[-1]["start_frame"] + segments[-1]["frame_count"]) if segments \
+        else round(effective_start * source_fps)
+    covered_end = covered_frames / source_fps
 
     # Recover from a HARD crash/power-loss, not just a graceful stop: if the process died
     # mid-segment, that segment never got renamed from its "_tmp_..." working name to its
@@ -3835,8 +3923,8 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
         orphaned_tmp = path.join(path.dirname(seg_file), "_tmp_" + path.basename(seg_file))
         if not path.exists(orphaned_tmp):
             break
-        actual_dur = _probe_video_duration(orphaned_tmp)
-        if actual_dur is None or actual_dur <= 0.5:
+        frame_count = _probe_video_frame_count(orphaned_tmp)
+        if frame_count is None or frame_count <= 0:
             # Nothing usable was salvageable (e.g. killed before any frame was flushed).
             try:
                 os.remove(orphaned_tmp)
@@ -3847,17 +3935,19 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
             os.replace(orphaned_tmp, seg_file)
         except Exception:
             break
-        segments.append({"start": covered_end, "end": covered_end + actual_dur, "file": seg_file})
-        print(f"[auto-resume] recovered {actual_dur:.1f}s from a leftover in-progress file "
-              f"(likely from a crash or power loss) instead of re-encoding it.", file=sys.stderr)
-        covered_end += actual_dur
+        segments.append({"start_frame": covered_frames, "frame_count": frame_count, "file": seg_file})
+        covered_frames += frame_count
+        covered_end = covered_frames / source_fps
+        print(f"[auto-resume] recovered {frame_count} real frame(s) from a leftover in-progress "
+              f"file (likely from a crash or power loss) instead of re-encoding it.", file=sys.stderr)
 
     if segments:
         with open(checkpoint_path, "w") as f:
-            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments],
+            json.dump({"segments": [{"start_frame": s["start_frame"], "file": s["file"]} for s in segments],
                       "fingerprint": fingerprint}, f)
-        print(f"[auto-resume] resuming continuously from {covered_end:.1f}s "
-              f"({len(segments)} segment(s) already on disk).", file=sys.stderr)
+        print(f"[auto-resume] resuming continuously from {covered_end:.3f}s "
+              f"({covered_frames} real frame(s) completed, {len(segments)} segment(s) already on disk).",
+              file=sys.stderr)
 
     # Process the rest of the video in ONE continuous pass — no scheduled chunk
     # boundaries. A new segment is only ever created here because we're picking up after
@@ -3884,14 +3974,14 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
 
         process_video_full(input_filename, seg_file, seg_args, depth_model, side_model)
 
-        actual_dur = _probe_video_duration(seg_file)
-        new_covered_end = covered_end
-        if actual_dur is not None and actual_dur > 0.5:
-            segments.append({"start": covered_end, "end": covered_end + actual_dur, "file": seg_file})
-            new_covered_end = covered_end + actual_dur
+        frame_count = _probe_video_frame_count(seg_file)
+        new_covered_frames = covered_frames
+        if frame_count is not None and frame_count > 0:
+            segments.append({"start_frame": covered_frames, "frame_count": frame_count, "file": seg_file})
+            new_covered_frames = covered_frames + frame_count
 
         with open(checkpoint_path, "w") as f:
-            json.dump({"segments": [{"start": s["start"], "file": s["file"]} for s in segments],
+            json.dump({"segments": [{"start_frame": s["start_frame"], "file": s["file"]} for s in segments],
                       "fingerprint": fingerprint}, f)
 
         if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
@@ -3900,23 +3990,24 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
             interrupted = True
             break
 
-        if new_covered_end <= covered_end + 0.5:
-            # This attempt made no real progress. This usually means the source file's
-            # own container metadata overstates its real duration (common with some
-            # WEB-DL releases — the video/audio streams genuinely have no more frames
+        if new_covered_frames <= covered_frames:
+            # This attempt made no real progress (zero new frames). This usually means the
+            # source file's own container metadata overstates its real duration (common with
+            # some WEB-DL releases — the video/audio streams genuinely have no more frames
             # past this point even though the container header claims a longer runtime).
             # Treat this as having reached the real end of the file rather than retrying
             # forever or abandoning the job short of a target that can never be reached.
             stall_guard += 1
             if stall_guard >= 2:
                 print(f"[auto-resume] source file has no more decodable frames past "
-                      f"{covered_end:.1f}s (container metadata claims {effective_end:.1f}s) — "
-                      f"treating {covered_end:.1f}s as the real end and finishing up.",
-                      file=sys.stderr)
+                      f"{covered_end:.1f}s ({covered_frames} real frames completed; container "
+                      f"metadata claims {effective_end:.1f}s) — treating this as the real end "
+                      f"and finishing up.", file=sys.stderr)
                 break
         else:
             stall_guard = 0
-        covered_end = new_covered_end
+        covered_frames = new_covered_frames
+        covered_end = covered_frames / source_fps
 
     if interrupted or not segments:
         return
@@ -3948,16 +4039,39 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     if concat_ok:
         os.replace(segment_files[0], video_only_filename)
     elif mkvmerge_bin:
+        # ADR-180: --no-audio (and every other mkvmerge source option) applies only to
+        # the ONE input file immediately following it on the command line -- it does
+        # NOT carry over to files appended afterward with "+". Putting it before only
+        # segment_files[0] left every later segment's AAC audio track intact while
+        # stripping only the first segment's. Whenever segment 0 happened to be a
+        # crash-recovered/leftover segment WITHOUT its own audio track (see
+        # "recovered N real frame(s) from a leftover in-progress file" above) while
+        # later segments had one, mkvmerge's default append mapping (which pairs up
+        # track IDs 1:1 across files) then had no track 1 in file 0 to append file 1's
+        # audio track onto, and hard-failed with exit 2 and an "Error: ... does not
+        # contain a track with the ID 1" message -- previously invisible because the
+        # diagnostic below was reading the wrong stream (see that fix's own comment).
+        # Repeating --no-audio before every segment strips audio from all of them
+        # uniformly, matching this whole code path's actual intent (video-only
+        # splice; real audio is extracted once, separately, below).
         mkvmerge_args = [mkvmerge_bin, "-o", video_only_filename, "--no-audio", segment_files[0]]
         for cf in segment_files[1:]:
-            mkvmerge_args += ["+", cf]
+            mkvmerge_args += ["+", "--no-audio", cf]
         result = subprocess.run(mkvmerge_args, capture_output=True)
         # mkvmerge exit code: 0 = ok, 1 = warnings (output still produced), 2 = error
         if result.returncode in (0, 1) and path.exists(video_only_filename):
             concat_ok = True
         else:
-            print(f"[auto-resume] mkvmerge splice failed, falling back to ffmpeg concat: "
-                  f"{result.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+            # ADR-180: mkvmerge writes ALL of its own output -- including the actual
+            # error text -- to STDOUT, never stderr (confirmed directly: a genuine
+            # mkvmerge failure here always produced 0 bytes on stderr). Reading only
+            # result.stderr here meant this diagnostic message always printed empty,
+            # making every real failure here look "silent" -- masking the actual
+            # reason for years. Report both streams (and the exit code) so a real
+            # future failure is actually diagnosable instead of a dead end.
+            reason = result.stdout.decode(errors="replace").strip() or result.stderr.decode(errors="replace").strip()
+            print(f"[auto-resume] mkvmerge splice failed (exit {result.returncode}), "
+                  f"falling back to ffmpeg concat: {reason}", file=sys.stderr)
 
     if not concat_ok:
         with open(concat_list, "w", encoding="utf-8") as f:
@@ -3997,13 +4111,24 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
 
     # Extract audio once, directly from the original source, over the full effective
     # range — a single clean encode instead of N stitched chunk-local encodes.
+    #
+    # ADR-178: end_time=covered_end (the REAL position the video actually reached,
+    # counted in exact frames), NOT the raw requested effective_end. When the source's
+    # own container metadata overstates its real length (see the stall-guard case
+    # above), the video genuinely stops short of effective_end -- extracting audio for
+    # the full originally-requested range would hand a LONGER audio track to a SHORTER
+    # video, which is exactly the kind of mismatch -shortest below is there to paper
+    # over, but only by truncating (silently dropping trailing audio) rather than the
+    # two ever actually corresponding to the same real content range. Matching audio's
+    # request to the video's own true, measured end keeps both anchored to the same
+    # real span from the start.
     _notify_stage(args, STAGE_AUDIO_EXTRACT)
     audio_tmp = base + "_resume_audio.m4a"
     has_audio = False
     try:
         has_audio = VU.export_audio(
             input_filename, audio_tmp,
-            start_time=effective_start, end_time=effective_end,
+            start_time=effective_start, end_time=covered_end,
             title=f"{path.basename(input_filename)} Audio",
             stop_event=args.state["stop_event"], suspend_event=args.state["suspend_event"],
             tqdm_fn=args.state["tqdm_fn"],
@@ -5095,6 +5220,13 @@ def create_parser(required_true=True):
                         help=("EMA decay for auto convergence modes (sod_v1/face_detect). "
                               "Higher = smoother but slower to react. Lower = more aggressive/dynamic. "
                               "0 = no smoothing"))
+    parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 1.0)],
+                        help=("ADR-179: hard safety cap on negative parallax (how far anything is allowed "
+                              "to pop out in front of the Convergence plane), independent of the Convergence "
+                              "value itself. Normalized 0-1, same units as Convergence: 1.0 = no cap (off, "
+                              "default). 0.0 = no pop-out allowed at all (nothing sits in front of the "
+                              "screen). Applied as a final clamp on (depth - convergence) after every other "
+                              "depth edit (mapper, auto-convergence, Foreground/Midground/Background Pop)."))
     parser.add_argument("--update", action="store_true",
                         help="force update midas models from torch hub")
     parser.add_argument("--recursive", "-r", action="store_true",

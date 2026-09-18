@@ -29,6 +29,15 @@ treated as an error — whatever it has gets restored. The standalone "Restore
 All Audio Tracks" tool (Tools tab) is still there too, for audio-only
 restoration on a file you've already converted separately.
 
+**Fixed: Restore Audio & Subtitles (and RIFE Frame Interpolation, and the
+waifu2x upscale step) could silently do nothing when your Output was set to
+a folder instead of an exact filename** — the normal way most people use
+this app. All three of those post-conversion steps were looking at the
+wrong file path in that case, so they'd quietly fail instead of running.
+Fixed for all three. If you turned on "Restore Audio & Subtitles" and didn't
+get the extra tracks you expected, this was why — it should now work
+correctly.
+
 **New depth model option: "Any_V3_Metric_Large_Native."** A real gap was found in
 how the existing `Any_V3_Metric_Large` model works: it's genuinely a "metric"
 depth model (predicts real-world distances), but internally it was being

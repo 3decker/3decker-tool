@@ -3626,6 +3626,18 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             print(f"[auto-ema] could not write TXT report ({e.__class__.__name__}: {e})",
                   file=sys.stderr)
 
+    # ADR-172 amendment: real, live-found bug -- output_filename here is the REAL
+    # resolved final path (output_path joined with make_output_filename() when
+    # output_path was a directory, see the is_output_dir() branch above); the
+    # caller's own output_path parameter stays as whatever raw value was passed in
+    # (often a directory, never updated). Returning it lets process_video()'s
+    # completion block (waifu2x/RIFE/_run_audio_subtitle_restore) use the actual
+    # final file instead of silently falling back to a stale directory path --
+    # confirmed via a real reproduction: _run_audio_subtitle_restore failed with
+    # "--input must be an .mkv file" because it was handed the output directory,
+    # not the real generated filename, whenever -o was a folder (the common case).
+    return output_filename
+
 
 def _probe_video_duration(path_str):
     """
@@ -3702,8 +3714,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     import av as _av
 
     if not getattr(args, "auto_resume", False):
-        process_video_full(input_filename, output_path, args, depth_model, side_model)
-        return
+        return process_video_full(input_filename, output_path, args, depth_model, side_model)
 
     # Resolve final output filename (mirrors process_video_full logic)
     output_parent_dir = path.basename(output_path)
@@ -3715,7 +3726,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
         output_filename = output_path
 
     if args.resume and path.exists(output_filename):
-        return
+        return output_filename
 
     try:
         with _av.open(str(input_filename)) as c:
@@ -3731,8 +3742,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     # Short clips: just run a single normal pass, no point wrapping this in the
     # segment/checkpoint machinery below.
     if not duration or (effective_end - effective_start) <= 60.0:
-        process_video_full(input_filename, output_path, args, depth_model, side_model)
-        return
+        return process_video_full(input_filename, output_path, args, depth_model, side_model)
 
     ext = path.splitext(output_filename)[1]
     base = path.splitext(output_filename)[0]
@@ -4098,6 +4108,8 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
     if path.exists(output_filename):
         _apply_stereo_mode_tag(output_filename, args)
 
+    return output_filename
+
 
 def process_video_keyframes(input_filename, output_path, args, depth_model, side_model):
     assert depth_model.get_name() not in {"VideoDepthAnything", "VideoDepthAnythingStreaming"}
@@ -4170,6 +4182,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
 
     input_filename, hdr_tmp_file = _tonemap_hdr_to_sdr(input_filename, args)
     input_filename, denoise_tmp_file = _denoise_preprocess(input_filename, args)
+    resolved_output_path = None
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -4186,7 +4199,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
             if args.state["convergence_model"] is not None:
                 args.state["convergence_model"].reset(enable_ema=True)
 
-            process_video_with_resume(input_filename, output_path, args, depth_model, side_model)
+            resolved_output_path = process_video_with_resume(input_filename, output_path, args, depth_model, side_model)
     finally:
         for tmp_file in (hdr_tmp_file, denoise_tmp_file):
             if tmp_file and path.exists(tmp_file):
@@ -4195,16 +4208,26 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
                 except Exception:
                     pass
 
+    # ADR-173: real, live-found bug -- when -o is a directory (the common case), the
+    # actual final filename is only computed deep inside process_video_full()/
+    # process_video_with_resume() via make_output_filename(), never in this function's
+    # own output_path parameter. Every step below used to receive the raw, unresolved
+    # output_path (often literally a directory) instead, so each one failed silently
+    # against a real production file whenever -o was a folder. resolved_output_path is
+    # the real path when available (video path, not --keyframe's image-folder path);
+    # fall back to the original parameter only if it could not be resolved.
+    final_output_path = resolved_output_path or output_path
+
     # Only on a genuine, uncancelled completion -- the functions above return early on
     # cancellation without raising, so a cancelled job would otherwise still reach here.
     stop_event = args.state.get("stop_event") if getattr(args, "state", None) else None
     if not (stop_event is not None and stop_event.is_set()):
         if _should_use_stereo_upscale(args):
-            _run_waifu2x_upscale_stereo(output_path, args)
+            _run_waifu2x_upscale_stereo(final_output_path, args)
         else:
-            _run_waifu2x_upscale(output_path, args)
-        _run_rife_interpolation(output_path, args)
-        _run_audio_subtitle_restore(output_path, args)
+            _run_waifu2x_upscale(final_output_path, args)
+        _run_rife_interpolation(final_output_path, args)
+        _run_audio_subtitle_restore(final_output_path, args)
 
 
 def export_images(input_path, output_dir, args, title=None):

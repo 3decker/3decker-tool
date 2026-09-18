@@ -2244,4 +2244,45 @@ User watched a real Native-converted movie (Hocus Pocus, `Any_V3_Metric_Large_Na
 
 A real, substantial reduction in typical frame-to-frame noise (40-44%) and a real but more modest reduction in the single worst spike (17-26%, since a genuine ~3x whole-frame scale jump can't be fully undone by blending 70% of the previous, now-stale frame). Real short clips rendered both ways for direct visual comparison (not just numbers) — see `E:\3d Movies\HP_compare_clips\`.
 
-**Updated recommendation: add `--temporal-stabilize` to the Native CLI, especially for movies with VFX/lighting effects or busy multi-layer scenes** (this flag already auto-applies to the single-frame processing path `mlbw_l2_inpaint` already uses, so no other setting needs to change). Not yet tested whether a higher strength than the 0.7 default would close the gap further on the worst single spikes, or whether the same flag meaningfully helps the plain `Any_V3_Metric_Large` too — worth checking if this comes up again.
+**Updated recommendation: add `--temporal-stabilize` to the Native CLI, especially for movies with VFX/lighting effects or busy multi-layer scenes** (this flag already auto-applies to the single-frame processing path `mlbw_l2_inpaint` already uses, so no other setting needs to change).
+
+**UPDATE (same day): higher strength tested (0.85/0.95), and the original
+`Any_V3_Metric_Large` tested too** (both real windows, real per-frame code
+path). Higher strength keeps reducing typical/mean noise with diminishing
+returns (0.7→0.95 on the lightning window: mean 0.58%→0.45%) but only
+modestly reduces the single worst spike (20.7%→19.1%) — a genuine ~3x
+whole-frame scale jump can't be fully undone by blending against an
+increasingly-stale previous frame. **`--temporal-stabilize` also
+substantially helps the plain `Any_V3_Metric_Large`**, sometimes more than
+it helps Native at the same spot (forest window worst spike: 34.97%→13.18%,
+a 62% cut). Also tested a calm, non-problematic window (1:45-1:58, ordinary
+character motion, no dramatic spikes to begin with) as a sanity check:
+typical noise still drops by roughly half for both models, though for the
+original model specifically its single worst spike got slightly WORSE with
+stabilization on (6.55%→7.10%) — a reminder this isn't a universal win on
+every single metric, just a strong one overall.
+
+**Final practical recommendation, given the user explicitly does not want to
+use `--temporal-stabilize` (real, reasonable objection: it introduces a
+frame-blending lag they can perceive and dislike):** without that mitigation
+available, there is no other lever that fixes the whole-frame scale-drift
+weakness -- it is not a spatial-settings problem (resolution, divergence,
+edge dilation, etc. do not touch it), it is inherent behavior of Native's
+metric-scale estimation on monocular-ambiguous content (VFX light effects,
+busy multi-layer compositions). A direct crispness re-check (Laplacian/
+GradMag on the actual rendered stereo output, three ways: original,
+Native no-TS, Native+TS) found **no meaningful image-detail difference
+between any of them** (14.9-15.0 Laplacian, 14.36-14.41 GradMag, all within
+noise) -- so Native's usual "crisper" advantage isn't present on this kind
+of content either, removing the main reason to prefer it here.
+
+**For a movie with meaningful dark, VFX-heavy, or busy multi-layer content
+(this Hocus Pocus test case included) and `--temporal-stabilize` off the
+table: use the plain `Any_V3_Metric_Large`, not Native.** Reserve Native for
+movies that are mostly bright, simple, well-lit content, where its real
+crispness/pop advantages (Section 13.13) actually show up and its
+scale-drift weakness has little ambiguous content to trigger on. This
+supersedes 13.13's more conditional framing ("prefer Native at 518 for dark
+content") specifically for the temporal-stabilize-declined case -- 13.13's
+518-over-384 guidance still holds for anyone who IS willing to use
+`--temporal-stabilize`.

@@ -6016,7 +6016,25 @@ class MainFrame(wx.Frame):
         the frame will now visibly grow/shrink as you click between tabs, which is
         exactly what was asked for (no wasted space) but does mean the window is no
         longer a fixed size while you explore different tabs -- a user who preferred
-        the old fixed-size-regardless-of-tab behavior would need to say so."""
+        the old fixed-size-regardless-of-tab behavior would need to say so.
+
+        ADR-177 correction: the first version of this method left `self.nb_options`'s
+        temporary MinSize override in place after `self.Fit()`, and real, live user
+        testing found that broke manual drag-resizing -- "now it does not let me to
+        shrink the page after certain limit." Root cause: this is the EXACT same class
+        of bug `_update_frame_min_size()` above was already built to prevent (see its
+        own docstring) -- `self.Fit()` re-derives the frame's OS-level drag-resize
+        floor (WM_GETMINMAXINFO) from the CURRENT sizer chain, which at that moment
+        includes the inflated `nb_options` MinSize this method had just set to make
+        Fit() compute the right SIZE for this tab. That temporarily-correct-for-Fit()
+        value was then left behind as a permanent floor, silently overriding
+        `_update_frame_min_size()`'s deliberately small one -- even though
+        `tab_wrap_*`'s own scrolling (ADR-048) was already proven to handle being
+        shown smaller than its natural content size just fine. Fix: release the
+        override and re-assert the real (small, toolbar/process-row-derived) floor
+        immediately after Fit() has already applied the computed size -- Fit() setting
+        the floor is a one-time side effect of the size computation, not something
+        that should outlive this method call."""
         if self.layout_mode != LAYOUT_MODE_TABS:
             return
         selection = self.nb_options.GetSelection()
@@ -6036,6 +6054,10 @@ class MainFrame(wx.Frame):
         self.nb_options.SetMinSize((page_min.width + chrome_w, page_min.height + chrome_h))
         self.Layout()
         self.Fit()
+        # Release the temporary override and restore the real, small drag-resize
+        # floor -- see the ADR-177 correction above.
+        self.nb_options.SetMinSize(wx.DefaultSize)
+        self._update_frame_min_size()
 
     def on_notebook_page_changed(self, event):
         event.Skip()
@@ -11661,6 +11683,53 @@ def _self_test_theme_preference():
     print("_self_test_theme_preference: PASS")
 
 
+def _self_test_tab_switch_keeps_small_drag_resize_floor():
+    """ADR-177: real, live user regression from ADR-176's first version -- switching
+    Tabbed-mode tabs (via _fit_frame_to_active_tab(), wired to
+    on_notebook_page_changed) must resize the FRAME to fit the active tab's content
+    (ADR-176's actual point) WITHOUT leaving the frame's own drag-resize floor
+    (self.GetMinSize(), what Windows' WM_GETMINMAXINFO consults) pinned to that tab's
+    full content size afterward -- that would silently take away the user's ability
+    to manually shrink the window below whatever tab happened to be selected last,
+    exactly what "now it does not let me to shrink the page after certain limit"
+    reported. The correct floor is the small, toolbar/process-row-derived one
+    _update_frame_min_size() already establishes (proven small enough that
+    tab_wrap_*'s own scrolling, ADR-048, absorbs the rest) -- it must be the SAME
+    after switching tabs as it was before, regardless of which tab (or how much
+    content that tab has) is currently active."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS, \
+            "this test assumes the default Layout (Tabbed) -- if that default ever " \
+            "changes, switch_layout_mode(gui_mod.LAYOUT_MODE_TABS) first"
+
+        expected_min = frame.GetMinSize()
+
+        # Switch to the busiest tab (Stereo Generation, index 0) then the smallest
+        # (Video Encoding) -- the exact pair of tabs the real regression report was
+        # found on -- firing the real event handler each time, not calling the
+        # private method directly, so this exercises the actual live-click path.
+        for page_index in (0, 4, 0):
+            frame.nb_options.SetSelection(page_index)
+            frame.on_notebook_page_changed(wx.CommandEvent())
+            assert frame.GetMinSize() == expected_min, (
+                f"frame's drag-resize floor changed after switching to tab "
+                f"{page_index} ({frame.GetMinSize()} != original {expected_min}) -- "
+                f"this is the exact regression ADR-177 fixed"
+            )
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_tab_switch_keeps_small_drag_resize_floor: PASS")
+
+
 def _self_test_layout_mode_live_switch():
     """Regression test for ADR-045 (live Layout switching, no restart): starting from
     a real MainFrame in either mode, MainFrame.switch_layout_mode() must move all 7
@@ -15731,6 +15800,7 @@ def _run_self_tests():
         _self_test_compile_all_cuda_device_shows_message,
         _self_test_layout_modes,
         _self_test_theme_preference,
+        _self_test_tab_switch_keeps_small_drag_resize_floor,
         _self_test_layout_mode_live_switch,
         _self_test_tabbed_scrolling,
         _self_test_stereo_sliders_sync,

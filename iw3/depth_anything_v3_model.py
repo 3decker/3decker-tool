@@ -218,7 +218,29 @@ def _forward(model, x, enable_amp, sky_thresh=0.3, raw_output=False, metric_dept
                 # `not force_disparity`, i.e. when is_metric() is True there too)
                 # -- matching an already-working pattern in this codebase rather
                 # than inventing a new one.
-                depth = -depth * (1 - sky_weight)
+                #
+                # ADR-174: real, live-found bug in the line above (now removed) --
+                # `depth = -depth * (1 - sky_weight)` forces sky pixels toward 0
+                # as sky_weight -> 1, but 0 is the NEAR pole of this signed space
+                # (near real content is a small-magnitude negative value close to
+                # 0; far content is a large-magnitude negative value). That made
+                # sky pixels become the LARGEST (least negative) value in the
+                # whole frame -- after min-max normalization, sky mapped to ~1.0
+                # ("nearest thing in the scene") instead of ~0.0 ("farthest"),
+                # confirmed on a real frame (a bright blue sky ended up MORE
+                # "near" than the actual foreground characters). The raw_output
+                # branch below already solves this correctly in its own (positive,
+                # far=large) value space by blending sky toward the 99th-
+                # percentile-far real value instead of toward zero -- reusing that
+                # same blend here, in the same positive space, then negating once
+                # at the end, fixes it without inventing a new approach.
+                non_sky_depth = depth[~sky_mask]
+                if non_sky_depth.numel() > 0:
+                    max_rel_dist = torch.quantile(non_sky_depth, 0.99)
+                else:
+                    max_rel_dist = depth.max()
+                depth = (depth * (1 - sky_weight) + sky_weight * max_rel_dist).clamp(max=max_rel_dist)
+                depth = -depth
             else:
                 # TODO: This value should ideally be adjustable via the foreground scale option,
                 #       but currently it is not possible.
@@ -448,12 +470,18 @@ def _self_test_metric_native_registration():
 
 
 def _self_test_metric_forward_transform():
-    """ADR-171: synthetic (no GPU, no real checkpoint) proof that _forward()'s
-    metric_depth branch does what the code comment claims -- negates raw depth
-    (matching depth_pro_model.py's own proven `out = -out` metric convention)
-    instead of the 1.0/(depth+shift) reciprocal every non-metric Any_V3 variant
-    still gets -- and that passing metric_depth=False (every existing model's
-    real call shape, unchanged) reproduces the exact pre-ADR-171 math bit-for-bit.
+    """ADR-171/174: synthetic (no GPU, no real checkpoint) proof that
+    _forward()'s metric_depth branch negates raw depth (matching
+    depth_pro_model.py's own proven `out = -out` metric convention) instead of
+    the 1.0/(depth+shift) reciprocal every non-metric Any_V3 variant still
+    gets -- and that passing metric_depth=False (every existing model's real
+    call shape, unchanged) reproduces the exact pre-ADR-171 math bit-for-bit.
+    Uses all-zero sky data specifically to isolate the base depth transform
+    from the separate sky-blending behavior, which
+    _self_test_metric_forward_transform_sky_far below covers instead -- ADR-171's
+    original version of this test also used all-zero sky and that is exactly
+    why it did not catch ADR-174's real sky-handling bug; keeping this
+    isolation but pairing it with a dedicated sky test now.
     `model` is a plain callable stand-in returning a fixed depth/sky tensor pair
     -- _forward() only ever calls `model(x)` once and reads out["depth"]/out["sky"],
     so a real DA3 network is not needed to test this math in isolation."""
@@ -472,9 +500,14 @@ def _self_test_metric_forward_transform():
         "metric_depth=False must reproduce the original 1.0/(depth+shift) math unchanged"
 
     out_metric = _forward(fake_model, torch.zeros(1, 3, 8, 8), enable_amp=False, metric_depth=True)
-    expected_metric = -depth.squeeze(0).squeeze(0)
+    # ADR-174: with zero sky everywhere, sky_weight=0 identically, so the fix's
+    # blend term drops out -- but the clamp(max=quantile(depth, 0.99)) still
+    # applies (it no longer depends on sky_weight being nonzero), so the
+    # expected value must include it too, not a bare negation.
+    max_rel_dist = torch.quantile(depth.squeeze(0).squeeze(0), 0.99)
+    expected_metric = -(depth.squeeze(0).squeeze(0).clamp(max=max_rel_dist))
     assert torch.allclose(out_metric.squeeze(0), expected_metric, atol=1e-5), \
-        "metric_depth=True must negate raw depth directly, not apply the reciprocal"
+        "metric_depth=True must negate raw depth (after the 99th-percentile clamp), not apply the reciprocal"
 
     # The two branches must genuinely diverge on the same input -- not an
     # accidental match that would hide a real bug in either branch.
@@ -484,9 +517,50 @@ def _self_test_metric_forward_transform():
     print("_self_test_metric_forward_transform: PASS")
 
 
+def _self_test_metric_forward_transform_sky_far():
+    """ADR-174: real, live-found bug -- the original ADR-171 metric_depth branch
+    (`depth = -depth * (1 - sky_weight)`) forced sky pixels toward 0, which is
+    the NEAR pole of this signed value space (near real content is a small-
+    magnitude negative value close to 0; far content is large-magnitude
+    negative). That made sky the LARGEST (least negative, i.e. "nearest")
+    value in the whole frame -- confirmed visually on a real movie frame (a
+    clear blue sky normalized to ~0.93, nearly as "near" as the actual
+    foreground characters at ~0.97, when it should have been close to the
+    FAR end like the original Any_V3_Metric_Large's own ~0.30 for the same
+    sky region). This test proves the fix: a sky pixel's transformed value
+    must end up SMALLER (more negative, i.e. FARTHER) than every real,
+    non-sky pixel's transformed value -- not merely "close to 0"."""
+    torch.manual_seed(1)
+    depth = torch.rand(1, 1, 8, 8) * 5.0 + 0.5  # plausible real "meters", all near/mid content
+    sky = torch.zeros(1, 1, 8, 8)
+    # Mark the whole top row as confident sky (matches real DA3 sky-head output
+    # shape/range: a probability, thresholded at 0.3 by _forward() itself).
+    sky[0, 0, 0, :] = 1.0
+
+    def fake_model(x):
+        return {"depth": depth.clone(), "sky": sky.clone()}
+
+    fake_model.device = torch.device("cpu")
+
+    out_metric = _forward(fake_model, torch.zeros(1, 3, 8, 8), enable_amp=False, metric_depth=True)
+    out_metric = out_metric.squeeze(0).squeeze(0)  # (1, 1, 8, 8) -> (8, 8)
+
+    sky_values = out_metric[0, :]       # the row marked as sky
+    real_values = out_metric[1:, :]     # every other (real, non-sky) row
+
+    assert sky_values.max().item() <= real_values.min().item(), (
+        "every sky pixel must end up farther (more negative) than every real "
+        f"pixel -- got sky max={sky_values.max().item():.4f}, "
+        f"real min={real_values.min().item():.4f}"
+    )
+
+    print("_self_test_metric_forward_transform_sky_far: PASS")
+
+
 def _run_self_tests():
     _self_test_metric_native_registration()
     _self_test_metric_forward_transform()
+    _self_test_metric_forward_transform_sky_far()
     print("All iw3.depth_anything_v3_model self-tests PASSED")
 
 

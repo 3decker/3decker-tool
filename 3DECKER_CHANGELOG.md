@@ -38,6 +38,15 @@ Fixed for all three. If you turned on "Restore Audio & Subtitles" and didn't
 get the extra tracks you expected, this was why — it should now work
 correctly.
 
+**Fixed a real depth-mapping bug in "Any_V3_Metric_Large_Native"** (the new
+depth model added earlier this update): the sky was being treated as the
+*closest* thing in the picture instead of the farthest, which could make
+distant background elements pop toward the viewer and overlap strangely with
+closer objects — especially noticeable on sky-heavy or space-themed footage.
+Confirmed and fixed by directly comparing a real frame's depth map before and
+after. `Any_V3_Metric_Large` (the original, non-"Native" option) was never
+affected by this.
+
 **New depth model option: "Any_V3_Metric_Large_Native."** A real gap was found in
 how the existing `Any_V3_Metric_Large` model works: it's genuinely a "metric"
 depth model (predicts real-world distances), but internally it was being

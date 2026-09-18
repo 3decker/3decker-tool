@@ -2220,3 +2220,28 @@ correct for every film — the right choice now genuinely depends on how much
 of the runtime is hard content, which the user has to judge per-film (scene
 detection/EMA-by-duration tooling elsewhere in this doc can help estimate shot
 difficulty, but there's no automated "is this scene hard" classifier here).
+
+### 13.14 Root cause of Native's real-world overlap/instability complaints, and a real fix: `--temporal-stabilize` (2026-09-18)
+
+User watched a real Native-converted movie (Hocus Pocus, `Any_V3_Metric_Large_Native`, resolution 518, the dark-content-recommended settings from 13.13) end to end and reported real "overlapping or wrong separation" at 5 specific timestamps. Investigated all 5 with direct raw-depth frame-to-frame measurement (not guessing from stills) against the exact same clips run through the plain `Any_V3_Metric_Large` for comparison.
+
+**Confirmed real instability at 4 of 5 flagged timestamps**, with a clean split by content type:
+- Dark, narrow-depth-range close-ups (3:08, 3:32-3:37): Native MORE stable than the original (22.8% vs 51.4%, 48.3% vs 58.5% worst-frame deltas) — consistent with 13.13's own finding that Native at resolution 518 (not 384) handles dark content reasonably.
+- Moderately-lit, multi-layer scenes with an unusual visual element — a moving magical light-beam VFX (2:07-2:10) or a busy multi-character scene (2:15-2:19): Native LESS stable than the original (24.5% vs 8.3%, 56.5% vs 39.3%).
+
+**Root cause, confirmed by direct inspection of the raw (pre-normalize) depth values at the exact spike frames** — this is NOT a single-outlier-pixel problem (the first hypothesis, an extension of ADR-174's sky clamp to all anomalous pixels, was tested and does not describe what's actually happening): at the 2:07-2:10 spike, the model's *entire frame's* non-sky depth distribution shifted ~3x between two adjacent frames of an otherwise static shot (mean 1.24→5.41, median 0.96→3.04, not just the tail). This is inherent instability in the network's own absolute-scale judgment for a genuinely ambiguous monocular cue (a translucent, physically-fictional light effect gives the network nothing reliable to judge real-world distance from) — a spatial percentile clamp cannot fix a whole-frame scale disagreement between two frames.
+
+**Real fix: `--temporal-stabilize` (an existing flag, not new code)**, which blends each frame's depth with the previous frame's (optical-flow motion-warped, so it doesn't smear moving content) specifically to damp this class of frame-to-frame flicker. It was not enabled in the user's real file. Verified properly against the REAL per-frame conversion code path (`BaseDepthModel.minmax_normalize_chw`, which calls the temporal stabilizer) — **not** the `--export` CLI flag, which was directly confirmed via code reading to route through a separate batch method (`minmax_normalize`) that never calls the temporal stabilizer at all; an early test using `--export` showed byte-identical output with/without `--temporal-stabilize` for this exact reason, a real methodology trap worth remembering for any future investigation that reaches for `--export` to inspect raw depth.
+
+**Measured improvement, default strength (0.7), both real trouble spots:**
+
+| Window | Metric | Without | With | Change |
+|---|---|---|---|---|
+| 2:05-2:12 (lightning) | Mean frame delta | 1.03% | 0.58% | -44% |
+| | Worst spike | 27.98% | 20.71% | -26% |
+| 2:13-2:21 (forest) | Mean frame delta | 2.29% | 1.35% | -41% |
+| | Worst spike | 31.84% | 26.47% | -17% |
+
+A real, substantial reduction in typical frame-to-frame noise (40-44%) and a real but more modest reduction in the single worst spike (17-26%, since a genuine ~3x whole-frame scale jump can't be fully undone by blending 70% of the previous, now-stale frame). Real short clips rendered both ways for direct visual comparison (not just numbers) — see `E:\3d Movies\HP_compare_clips\`.
+
+**Updated recommendation: add `--temporal-stabilize` to the Native CLI, especially for movies with VFX/lighting effects or busy multi-layer scenes** (this flag already auto-applies to the single-frame processing path `mlbw_l2_inpaint` already uses, so no other setting needs to change). Not yet tested whether a higher strength than the 0.7 default would close the gap further on the worst single spikes, or whether the same flag meaningfully helps the plain `Any_V3_Metric_Large` too — worth checking if this comes up again.

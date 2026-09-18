@@ -31,7 +31,10 @@ of screen space being used." The window now resizes itself to fit whichever
 tab you're actually looking at, instead of staying sized for the busiest tab
 (Stereo Generation) no matter which one is open. Note this means the window
 will now visibly grow/shrink as you click between tabs — that's the point,
-not a bug, but it is a real behavior change from before.
+not a bug, but it is a real behavior change from before. (A first version of
+this accidentally stopped you from manually shrinking the window past a
+certain point afterward — caught and fixed the same day; you should be able
+to drag it as small as before again, regardless of which tab is open.)
 
 ## Update — September 17, 2026
 

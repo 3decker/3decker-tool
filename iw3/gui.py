@@ -124,6 +124,37 @@ def _save_layout_mode(config_path, mode):
         f.write(mode)
 
 
+# ADR-175: manual Theme preference. Real user feedback (relayed from an outside
+# reviewer): ADR-116 above made this fork always force its own light "Soft Sky"
+# palette in apply_accent_theme() regardless of Windows' own light/dark setting --
+# meaning nunif/gui/common.py's is_dark_mode()/apply_dark_mode() (still called
+# right before apply_accent_theme() in __init__) has had no visible effect since
+# ADR-116 landed: apply_accent_theme() always runs after it and always overwrites
+# every color it touches. So "does 3DECKER have dark mode" was previously "only in
+# dead code" -- this makes it a real, selectable option again. THEME_MODE_SYSTEM
+# restores the pre-ADR-175 behavior (follow Windows) as the default, so nobody's
+# current look changes unless they explicitly pick Dark.
+THEME_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-theme.cfg")
+THEME_MODE_SYSTEM = "system"
+THEME_MODE_LIGHT = "light"
+THEME_MODE_DARK = "dark"
+THEME_MODE_CHOICES = (THEME_MODE_SYSTEM, THEME_MODE_LIGHT, THEME_MODE_DARK)
+
+
+def _load_theme_mode(config_path):
+    if path.exists(config_path):
+        with open(config_path, encoding="utf-8") as f:
+            value = f.read().strip()
+        if value in THEME_MODE_CHOICES:
+            return value
+    return THEME_MODE_SYSTEM
+
+
+def _save_theme_mode(config_path, mode):
+    with open(config_path, mode="w", encoding="utf-8") as f:
+        f.write(mode)
+
+
 # UI Zoom preference: scales the whole app's text/control size up or down, on top of
 # (never instead of) init_win32_dpi()'s existing system-level DPI awareness -- that
 # handles Windows' own display scaling; this is a separate, user-controlled layer.
@@ -925,6 +956,7 @@ class MainFrame(wx.Frame):
         self.depth_model_limit_resolution = None
         self.layout_mode = _load_layout_mode(LAYOUT_CONFIG_PATH)
         self.zoom_level = _load_zoom_level(ZOOM_CONFIG_PATH)
+        self.theme_mode = _load_theme_mode(THEME_CONFIG_PATH)
         self.initialize_component()
         if is_dark_mode():
             apply_dark_mode(self)
@@ -5367,6 +5399,30 @@ class MainFrame(wx.Frame):
               "see every setting at once and don't mind scrolling.\n"
               "Note: switches instantly -- no restart needed."))
 
+        # ADR-175: Theme preference -- real outside feedback found that this fork's
+        # own accent palette (apply_accent_theme(), ADR-116) had silently made
+        # Windows' own dark-mode setting do nothing, so "does this app have dark
+        # mode" was true only in dead code. System restores that following-Windows
+        # behavior as the default (nobody's current look changes unless they pick
+        # something else); Light/Dark are explicit overrides. See
+        # _resolve_dark_theme()/apply_accent_theme() for the actual color values.
+        self.sep_theme = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
+        self.lbl_theme = wx.StaticText(self.pnl_preset, label=T("Theme"))
+        self.cbo_theme = wx.ComboBox(self.pnl_preset, name="cbo_theme")
+        self.cbo_theme.SetEditable(False)
+        self.cbo_theme.Append(T("System"), THEME_MODE_SYSTEM)
+        self.cbo_theme.Append(T("Light"), THEME_MODE_LIGHT)
+        self.cbo_theme.Append(T("Dark"), THEME_MODE_DARK)
+        self.cbo_theme.SetSelection(THEME_MODE_CHOICES.index(self.theme_mode))
+        self.cbo_theme.SetToolTip(
+            T("What it's for: which color theme this app uses.\n"
+              "Values: System (default) — follows Windows' own Light/Dark setting. "
+              "Light — always uses this app's light \"Soft Sky\" palette, even if Windows is set to "
+              "dark. Dark — always uses a dark palette, even if Windows is set to light.\n"
+              "Recommended: leave on System unless you specifically want this app's theme to differ "
+              "from the rest of Windows.\n"
+              "Note: switches instantly -- no restart needed."))
+
         # UI Zoom: scales the whole app's text/control size up or down, independent of
         # Windows' own system display scaling (init_win32_dpi(), untouched by this).
         # Persisted like Layout, in its own file, and -- like Layout (ADR-038) --
@@ -5603,6 +5659,8 @@ class MainFrame(wx.Frame):
         self.btn_import_command.Bind(wx.EVT_BUTTON, self.on_click_btn_import_command)
         self.cbo_language.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_language)
         self.cbo_layout.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_layout)
+        self.cbo_theme.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_theme)
+        self.nb_options.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.on_notebook_page_changed)
         self.cbo_zoom.Bind(wx.EVT_TEXT, self.on_text_changed_cbo_zoom)
         self.btn_check_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_updates)
         self.btn_check_nagadomi_updates.Bind(wx.EVT_BUTTON, self.on_click_btn_check_nagadomi_updates)
@@ -5917,6 +5975,71 @@ class MainFrame(wx.Frame):
         # already trusts to get that right, rather than a smaller ad hoc subset of it.
         self.apply_accent_theme()
         refresh_layouts(self)
+        if new_mode == LAYOUT_MODE_TABS:
+            # ADR-176: refresh_layouts() above does NOT shrink the frame down to the
+            # active tab's own content width -- see _fit_frame_to_active_tab()'s own
+            # docstring for why (a real, live-confirmed gap: switching from Single
+            # Page, where the frame is wide enough for all 7 category panels side by
+            # side, back to Tabbed left the frame at that same width with the single
+            # active tab's content occupying only a fraction of it).
+            self._fit_frame_to_active_tab()
+        self._clamp_frame_to_screen()
+
+    def _fit_frame_to_active_tab(self):
+        """ADR-176: real outside feedback ("other pages are extremely empty with only
+        1/3 of screen space being used") -- confirmed live via screenshot before
+        writing this: switching Tabbed mode's Notebook to a smaller tab (e.g. Video
+        Encoding, ~9 fields) left the frame at whatever width/height Stereo Generation
+        (the busiest tab, or Single Page mode's full-width layout) had last required,
+        with the smaller tab's actual content occupying only a fraction of that area.
+
+        Root cause: `_compose_options_layout_tabbed()` pins each tab_wrap_*'s own
+        MinSize to that tab's own content via `wrap.SetMinSize(wrap_sizer.CalcMin())`
+        -- but a wx.Notebook's own reported best/min size is the union across ALL of
+        its pages (so switching tabs never clips a page or visibly "jumps" by
+        default), not just the currently SELECTED one. refresh_layouts()'s generic
+        InvalidateBestSize()+Layout()+Fit() pass (used elsewhere for exactly this kind
+        of resync) does not change that -- it's not a stale-cache problem, it's the
+        Notebook's normal, intentional sizing behavior. So the frame ends up sized for
+        whichever tab has ever been the widest/tallest, not the one actually showing.
+
+        Fix: explicitly override self.nb_options's OWN MinSize to match only the
+        active page's already-pinned MinSize (self.nb_options.GetSelection()'s page --
+        e.g. self.tab_wrap_video_enc when Video Encoding is selected) plus a fixed
+        allowance for the tab strip/border chrome the page content doesn't include,
+        then run the same Layout()+Fit() pass switch_layout_mode() already uses.
+        Called on every real tab change (on_notebook_page_changed) and once after
+        switching INTO Tabbed mode (switch_layout_mode) -- both are real, confirmed
+        ways to land on a tab narrower than the frame's current size.
+
+        This is a deliberate UX trade-off, not a bug fix with no visible side effect:
+        the frame will now visibly grow/shrink as you click between tabs, which is
+        exactly what was asked for (no wasted space) but does mean the window is no
+        longer a fixed size while you explore different tabs -- a user who preferred
+        the old fixed-size-regardless-of-tab behavior would need to say so."""
+        if self.layout_mode != LAYOUT_MODE_TABS:
+            return
+        selection = self.nb_options.GetSelection()
+        if selection == wx.NOT_FOUND:
+            return
+        active_page = self.nb_options.GetPage(selection)
+        # Chrome allowance: the Notebook's tab-header strip plus its own border, which
+        # the page's own pinned MinSize (the page CONTENT only) does not account for.
+        # Derived from the Notebook's own current total size minus its current page's
+        # reported client size, rather than a hardcoded guess, so it stays correct
+        # across Zoom levels (the tab strip's own height grows with the zoom font).
+        notebook_size = self.nb_options.GetSize()
+        client_size = self.nb_options.GetClientSize()
+        chrome_w = max(0, notebook_size.width - client_size.width)
+        chrome_h = max(0, notebook_size.height - client_size.height)
+        page_min = active_page.GetMinSize()
+        self.nb_options.SetMinSize((page_min.width + chrome_w, page_min.height + chrome_h))
+        self.Layout()
+        self.Fit()
+
+    def on_notebook_page_changed(self, event):
+        event.Skip()
+        self._fit_frame_to_active_tab()
         self._clamp_frame_to_screen()
 
     def apply_zoom_level(self, zoom_level):
@@ -6011,6 +6134,11 @@ class MainFrame(wx.Frame):
             ("spacer", 4),
             ("widget", self.lbl_layout, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 2),
             ("widget", self.cbo_layout, wx.ALL, 2),
+            ("spacer", 2),
+            ("widget", self.sep_theme, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
+            ("spacer", 4),
+            ("widget", self.lbl_theme, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 2),
+            ("widget", self.cbo_theme, wx.ALL, 2),
             ("spacer", 2),
             ("widget", self.sep_zoom, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
             ("spacer", 4),
@@ -6338,6 +6466,19 @@ class MainFrame(wx.Frame):
         for child in window.GetChildren():
             self._set_fg_recursive(child, text_color, field_bg_color)
 
+    def _resolve_dark_theme(self):
+        """ADR-175: THEME_MODE_SYSTEM defers to Windows' own setting (is_dark_mode()),
+        the same signal nunif/gui/common.py's apply_dark_mode() already used before
+        ADR-116 made it a no-op -- so leaving Theme on its default (System) preserves
+        whatever a given install already looked like. LIGHT/DARK are explicit
+        overrides that ignore Windows entirely."""
+        if self.theme_mode == THEME_MODE_DARK:
+            return True
+        elif self.theme_mode == THEME_MODE_LIGHT:
+            return False
+        else:
+            return is_dark_mode()
+
     def apply_accent_theme(self):
         """3DECKER visual pass: a real, considered color palette using only what
         wxPython natively supports (SetForegroundColour/SetBackgroundColour/SetFont) --
@@ -6345,17 +6486,37 @@ class MainFrame(wx.Frame):
         apply_dark_mode() (nunif/gui/common.py) so it always applies last instead of
         being clobbered by that function's blanket recursive fg/bg reset.
 
-        ADR-116: always applies this fork's own deliberately high-contrast palette,
-        regardless of the Windows light/dark setting -- per direct user request for
-        a less bright background and stronger text contrast across the whole app.
-        Went through a few rounds live (dark charcoal, then light brown) before
-        landing on "Soft Sky" -- a light, muted blue -- picked from a set of
-        mockups covering brown/grey/blue options.
+        ADR-116: originally always applied this fork's own deliberately high-contrast
+        LIGHT palette, regardless of the Windows light/dark setting -- per direct user
+        request for a less bright background and stronger text contrast. Went through
+        a few rounds live (dark charcoal, then light brown) before landing on
+        "Soft Sky" -- a light, muted blue -- picked from a set of mockups covering
+        brown/grey/blue options.
+
+        ADR-175: real outside feedback ("a dark mode would be a good idea") found
+        that ADR-116 had made Windows' own dark-mode setting silently do nothing --
+        apply_dark_mode() ran, then this function immediately overwrote every color
+        it touched with the fixed light palette above, every single launch. Added a
+        real Theme preference (self.theme_mode, System/Light/Dark) that this function
+        now checks via _resolve_dark_theme() -- Light keeps the exact original "Soft
+        Sky" palette unchanged (so nobody's current look changes on this update
+        unless they explicitly pick something else), Dark is a same-structure "Deep
+        Sky" counterpart (same accent hue family, inverted for a dark background),
+        System restores genuinely following Windows again (the pre-ADR-116 behavior).
+        Called again live from on_text_changed_cbo_theme -- every color this sets
+        comes from local variables computed fresh each call, nothing accumulates
+        from a previous call, so re-running it with different colors is safe.
         """
-        accent = wx.Colour(0x3a, 0x6e, 0xa5)
-        panel_bg = wx.Colour(0xd8, 0xe3, 0xee)
-        text_fg = wx.Colour(0x1c, 0x2e, 0x3f)
-        field_bg = wx.Colour(0xf2, 0xf7, 0xfb)
+        if self._resolve_dark_theme():
+            accent = wx.Colour(0x6c, 0xaa, 0xe0)
+            panel_bg = wx.Colour(0x20, 0x28, 0x32)
+            text_fg = wx.Colour(0xe6, 0xec, 0xf2)
+            field_bg = wx.Colour(0x2b, 0x35, 0x41)
+        else:
+            accent = wx.Colour(0x3a, 0x6e, 0xa5)
+            panel_bg = wx.Colour(0xd8, 0xe3, 0xee)
+            text_fg = wx.Colour(0x1c, 0x2e, 0x3f)
+            field_bg = wx.Colour(0xf2, 0xf7, 0xfb)
 
         # Base text color for every control in the window, before the more specific
         # overrides below (group box titles, Start/Cancel) get applied on top.
@@ -8214,6 +8375,7 @@ class MainFrame(wx.Frame):
         exclude_names.add("cbo_language")  # ignore language
         exclude_names.add("cbo_layout")  # ignore GUI layout preference (own file, live-applied, ADR-037/038)
         exclude_names.add("cbo_zoom")  # ignore UI Zoom preference (own file, live-applied, see docs/ai/AI_DECISIONS.md)
+        exclude_names.add("cbo_theme")  # ignore Theme preference (own file, live-applied, ADR-175)
         if not name:
             restore_path = True
             name = ""
@@ -8355,6 +8517,15 @@ class MainFrame(wx.Frame):
         mode = self.cbo_layout.GetClientData(self.cbo_layout.GetSelection())
         _save_layout_mode(LAYOUT_CONFIG_PATH, mode)
         self.switch_layout_mode(mode)
+
+    def on_text_changed_cbo_theme(self, event):
+        # ADR-175: applies immediately, same live-reapply pattern as Layout/Zoom --
+        # apply_accent_theme() is safe to call again with different colors (see its
+        # own docstring), no restart-required dialog needed.
+        mode = self.cbo_theme.GetClientData(self.cbo_theme.GetSelection())
+        _save_theme_mode(THEME_CONFIG_PATH, mode)
+        self.theme_mode = mode
+        self.apply_accent_theme()
 
     def on_text_changed_cbo_zoom(self, event):
         # Applies immediately, like Layout (ADR-038) -- see apply_zoom_level().
@@ -11430,6 +11601,64 @@ def _self_test_layout_modes():
         app.Destroy()
 
     print("_self_test_layout_modes: PASS")
+
+
+def _self_test_theme_preference():
+    """ADR-175: real outside feedback found ADR-116's apply_accent_theme() had made
+    Windows' own dark-mode setting silently do nothing -- this is the regression test
+    for the fix. Verifies: default is System (nobody's current look changes on this
+    update); each explicit Theme choice actually changes a real applied color (not
+    just the stored preference); switching is live (no restart, mirrors Layout/Zoom);
+    and cbo_theme is excluded from preset restore, the same "own file, not part of a
+    conversion preset" treatment cbo_layout/cbo_zoom already get."""
+    import iw3.gui as gui_mod
+
+    # Isolate from whatever is actually persisted on disk (e.g. a real manual test
+    # session that picked Dark) -- same monkeypatch pattern _self_test_layout_modes
+    # already uses for _load_layout_mode, for the same reason.
+    orig_load = gui_mod._load_theme_mode
+    gui_mod._load_theme_mode = lambda config_path: gui_mod.THEME_MODE_SYSTEM
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.theme_mode == gui_mod.THEME_MODE_SYSTEM, \
+            "default Theme must be System -- must not change anyone's current look on upgrade"
+        assert frame.cbo_theme.GetClientData(frame.cbo_theme.GetSelection()) == gui_mod.THEME_MODE_SYSTEM
+
+        light_bg = frame.grp_stereo.GetParent().GetBackgroundColour()
+
+        frame.cbo_theme.SetStringSelection(T("Dark"))
+        frame.on_text_changed_cbo_theme(None)
+        assert frame.theme_mode == gui_mod.THEME_MODE_DARK
+        assert frame._resolve_dark_theme() is True
+        dark_bg = frame.grp_stereo.GetParent().GetBackgroundColour()
+        assert dark_bg != light_bg, "switching to Dark must actually change a real applied color, live"
+
+        frame.cbo_theme.SetStringSelection(T("Light"))
+        frame.on_text_changed_cbo_theme(None)
+        assert frame.theme_mode == gui_mod.THEME_MODE_LIGHT
+        assert frame._resolve_dark_theme() is False
+        light_bg_again = frame.grp_stereo.GetParent().GetBackgroundColour()
+        assert light_bg_again == light_bg, "switching back to Light must restore the exact original colors"
+
+        # cbo_theme must never be restored from a saved preset -- it's a display
+        # preference persisted to its own file (iw3-gui-theme.cfg), same treatment
+        # as cbo_layout/cbo_zoom. load_preset() needs a real saved preset file to
+        # exercise end-to-end; here we confirm the exclusion is registered the same
+        # way the other two already are.
+        import inspect
+        src = inspect.getsource(frame.load_preset)
+        assert 'exclude_names.add("cbo_theme")' in src
+    finally:
+        gui_mod._load_theme_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_theme_preference: PASS")
 
 
 def _self_test_layout_mode_live_switch():
@@ -15501,6 +15730,7 @@ def _run_self_tests():
         _self_test_compile_probe_crash_handled,
         _self_test_compile_all_cuda_device_shows_message,
         _self_test_layout_modes,
+        _self_test_theme_preference,
         _self_test_layout_mode_live_switch,
         _self_test_tabbed_scrolling,
         _self_test_stereo_sliders_sync,

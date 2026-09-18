@@ -13,7 +13,27 @@ it matters.
 
 ---
 
-## Latest Update — September 17, 2026
+## Latest Update — September 18, 2026
+
+**Dark mode is now a real, working option — a new "Theme" dropdown next to
+Layout in the toolbar (System / Light / Dark).** This app already had the
+code to follow Windows' own Light/Dark setting, but a later visual pass
+always forced its own light color scheme on top, regardless of what Windows
+was set to — so Windows' dark mode setting was silently having zero effect
+on this app for a while. Now you can explicitly force Light or Dark
+regardless of Windows, or leave it on System to follow Windows like before.
+Switches instantly, no restart needed.
+
+**Fixed: switching to a tab with fewer settings (like Video Encoding) left
+the window way oversized, wasting a lot of empty space.** Real feedback from
+someone trying this app out: "other pages are extremely empty with only 1/3
+of screen space being used." The window now resizes itself to fit whichever
+tab you're actually looking at, instead of staying sized for the busiest tab
+(Stereo Generation) no matter which one is open. Note this means the window
+will now visibly grow/shrink as you click between tabs — that's the point,
+not a bug, but it is a real behavior change from before.
+
+## Update — September 17, 2026
 
 **New checkbox: "Restore Audio & Subtitles from Source after conversion,"
 right on the main conversion screen.** The main conversion has always kept

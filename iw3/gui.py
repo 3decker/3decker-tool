@@ -5291,11 +5291,13 @@ class MainFrame(wx.Frame):
         self.lbl_bluray_output = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Output File"))
         self.txt_bluray_output = wx.TextCtrl(self.cpn_bluray.GetPane(), name="txt_bluray_output")
         self.txt_bluray_output.SetToolTip(
-            T("Where to write the finished 3D movie (.mkv). Auto-filled with '<disc name>_3D.mkv' "
-              "next to the ISO once you pick one.\n"
+            T("Where to write the finished 3D movie (.mkv), or the copied disc (.iso) when the Lossless "
+              "3D Blu-ray ISO layout is chosen. Auto-filled with '<disc name>_3D.mkv' (or .iso) next to "
+              "the source once you pick one.\n"
               "Con: the job also needs a temporary folder (created next to this file and deleted when "
               "done) holding about 75% of the movie's size on the disc -- roughly 25 GB for a full "
-              "feature. Choose a drive with that much free space; the tool refuses to start if there "
+              "feature (the Lossless ISO layout needs no temporary folder, just room for the ISO itself). "
+              "Choose a drive with that much free space; the tool refuses to start if there "
               "isn't enough."))
         self.btn_bluray_output = wx.Button(self.cpn_bluray.GetPane(), label=T("..."))
 
@@ -5308,6 +5310,8 @@ class MainFrame(wx.Frame):
         self.cbo_bluray_layout.Append(T("Full Top-Bottom (1920x2160)"), "full_tb")
         self.cbo_bluray_layout.Append(T("Half Top-Bottom (1920x1080)"), "half_tb")
         self.cbo_bluray_layout.Append(T("Frame Packed (auto-detected by TVs, H.264 only)"), "frame_packed")
+        self.cbo_bluray_layout.Append(
+            T("Lossless 3D Blu-ray ISO (no re-encode, for 3D Blu-ray players / PowerDVD)"), "bd3d_iso")
         self.cbo_bluray_layout.SetSelection(0)
         self.cbo_bluray_layout.SetToolTip(
             T("What it's for: how the left-eye and right-eye pictures are arranged in the output video.\n"
@@ -5322,9 +5326,18 @@ class MainFrame(wx.Frame):
               "H.264 auto-detect flag as Half Side-by-Side.\n"
               "Frame Packed: Full Top-Bottom plus the 3D auto-detect flag, so a compatible TV or player "
               "switches into 3D by itself. Needs the H.264 codec -- picking it switches the codec for you.\n"
+              "Lossless 3D Blu-ray ISO: NOT a video file -- an exact copy of the disc's own two-view 3D "
+              "video (no re-encode, zero quality loss) written as a new 3D Blu-ray .iso, with every audio "
+              "and subtitle track. Plays in real full-resolution 3D on a 3D Blu-ray player or PowerDVD, "
+              "and can be burned to a BD-R. Codec and Quality do not apply and are greyed out.\n"
+              "Con: VLC, MPC-HC and USB playback on TVs cannot play this format -- use one of the other "
+              "layouts for those. About 25-34 GB for a full movie (much bigger than the other options). "
+              "Subtitle depth: whether disc subtitles keep their 3D depth in a 3D player has not been "
+              "verified.\n"
               "Con: Full layouts make very wide/tall frames; that is fine for 1080p discs but a 4K source "
               "would produce 7680x2160, which many players cannot handle -- prefer Half for 4K.\n"
-              "Recommended: Full Side-by-Side."))
+              "Recommended: Full Side-by-Side for everyday watching; the Lossless ISO for archiving or a "
+              "3D Blu-ray player."))
 
         self.lbl_bluray_codec = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Video Codec"))
         self.cbo_bluray_codec = wx.ComboBox(self.cpn_bluray.GetPane(), name="cbo_bluray_codec")
@@ -5365,6 +5378,7 @@ class MainFrame(wx.Frame):
             T("What it's for: copies every audio track (all languages and formats, including lossless "
               "DTS-HD/TrueHD if the disc has them) and every subtitle track from the disc into the "
               "finished file, unchanged, with their language names.\n"
+              "In Lossless ISO mode, unticked means the ISO gets the 3D video only, no audio or subtitles.\n"
               "Con: the extra tracks make the file bigger (lossless audio is often 2-4 GB). Disc "
               "subtitles are picture-based (PGS): fine in VLC/MPC-HC, but some TVs cannot show them.\n"
               "Recommended: on."))
@@ -11431,6 +11445,12 @@ class MainFrame(wx.Frame):
 
     # --- 3D Blu-ray Import (standalone tool, see ADR-182) ---
 
+    def _bluray_is_iso_layout(self):
+        return self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection()) == "bd3d_iso"
+
+    def _bluray_output_ext(self):
+        return ".iso" if self._bluray_is_iso_layout() else ".mkv"
+
     def on_click_btn_bluray_disc_iso(self, event):
         with wx.FileDialog(self, message=T("Select 3D Blu-ray Disc Image (.iso)"),
                            wildcard="Disc images (*.iso)|*.iso|All files (*.*)|*.*",
@@ -11441,7 +11461,7 @@ class MainFrame(wx.Frame):
                 disc_path = dlg.GetPath()
                 self.txt_bluray_disc.SetValue(disc_path)
                 if not self.txt_bluray_output.GetValue():
-                    self.txt_bluray_output.SetValue(f"{path.splitext(disc_path)[0]}_3D.mkv")
+                    self.txt_bluray_output.SetValue(f"{path.splitext(disc_path)[0]}_3D{self._bluray_output_ext()}")
 
     def on_click_btn_bluray_disc_folder(self, event):
         with wx.DirDialog(self, message=T("Select the disc folder (the one containing BDMV)"),
@@ -11450,11 +11470,13 @@ class MainFrame(wx.Frame):
                 folder = dlg.GetPath()
                 self.txt_bluray_disc.SetValue(folder)
                 if not self.txt_bluray_output.GetValue():
-                    self.txt_bluray_output.SetValue(path.join(path.dirname(folder), f"{path.basename(folder)}_3D.mkv"))
+                    self.txt_bluray_output.SetValue(
+                        path.join(path.dirname(folder), f"{path.basename(folder)}_3D{self._bluray_output_ext()}"))
 
     def on_click_btn_bluray_output(self, event):
-        with wx.FileDialog(self, message=T("Save 3D Movie As"),
-                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+        wildcard = ("Disc images (*.iso)|*.iso|All files (*.*)|*.*" if self._bluray_is_iso_layout()
+                    else "Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*")
+        with wx.FileDialog(self, message=T("Save 3D Movie As"), wildcard=wildcard,
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
             if self.txt_bluray_output.GetValue():
                 dlg.SetPath(self.txt_bluray_output.GetValue())
@@ -11462,6 +11484,15 @@ class MainFrame(wx.Frame):
                 self.txt_bluray_output.SetValue(dlg.GetPath())
 
     def on_changed_bluray_layout(self, event):
+        # The lossless ISO has no re-encode: Codec/Quality don't apply, and the output
+        # is an .iso instead of an .mkv (swap the extension of an already-filled path).
+        is_iso = self._bluray_is_iso_layout()
+        self.cbo_bluray_codec.Enable(not is_iso)
+        self.txt_bluray_quality.Enable(not is_iso)
+        current = self.txt_bluray_output.GetValue().strip()
+        old_ext, new_ext = (".mkv", ".iso") if is_iso else (".iso", ".mkv")
+        if current.lower().endswith(old_ext):
+            self.txt_bluray_output.SetValue(current[:-len(old_ext)] + new_ext)
         # Frame Packed can only be written by libx264 -- switch the codec dropdown for
         # the user instead of letting the tool silently do it later.
         if self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection()) == "frame_packed":
@@ -11475,9 +11506,10 @@ class MainFrame(wx.Frame):
         # these widgets from that thread.
         names = {"mount": T("Opening the disc"), "demux": T("Reading the disc"),
                  "scan": T("Preparing frames"), "encode": T("Converting"),
+                 "mux": T("Copying to 3D Blu-ray ISO"),
                  "restore": T("Adding audio and subtitles")}
         name = names.get(stage, stage)
-        if total > 0 and stage in ("demux", "encode"):
+        if total > 0 and stage in ("demux", "encode", "mux"):
             self.gauge_bluray.SetRange(int(total))
             self.gauge_bluray.SetValue(int(min(done, total)))
             percent = min(100, int(done / total * 100))
@@ -11556,7 +11588,8 @@ class MainFrame(wx.Frame):
         stem = path.splitext(path.basename(output_path))[0]
         out_dir = path.dirname(path.abspath(output_path))
         shutil.rmtree(path.join(out_dir, f"_mvc_work_{stem}"), ignore_errors=True)
-        for leftover in (path.join(out_dir, f"{stem}.video_only.mkv"), output_path):
+        for leftover in (path.join(out_dir, f"{stem}.video_only.mkv"),
+                         path.join(out_dir, f"{stem}.mux.meta"), output_path):
             try:
                 if path.exists(leftover) and path.getmtime(leftover) >= self.bluray_start_time - 1:
                     os.remove(leftover)
@@ -11580,15 +11613,18 @@ class MainFrame(wx.Frame):
             return None, T("Select a valid 3D Blu-ray ISO or disc folder first.")
         if not output_path:
             return None, T("Set an Output File path first.")
-        if path.splitext(output_path)[1].lower() != ".mkv":
-            return None, T("Output File must end in .mkv.")
-        if not validate_number(self.txt_bluray_quality.GetValue(), 0, 51, allow_empty=False):
+        wanted_ext = self._bluray_output_ext()
+        if path.splitext(output_path)[1].lower() != wanted_ext:
+            return None, T("Output File must end in %s.") % wanted_ext
+        if not self._bluray_is_iso_layout() and not validate_number(
+                self.txt_bluray_quality.GetValue(), 0, 51, allow_empty=False):
             return None, T("Quality must be a number between 0 and 51 (18 recommended).")
         layout = self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection())
         codec = self.cbo_bluray_codec.GetClientData(self.cbo_bluray_codec.GetSelection())
         cmd = [sys.executable, "-m", "iw3.mvc_extract_cli", "--disc", disc, "--output", output_path,
                "--layout", layout, "--video-codec", codec,
-               "--quality", str(int(float(self.txt_bluray_quality.GetValue()))), "--gui-progress"]
+               "--quality", str(int(float(self.txt_bluray_quality.GetValue() or "18") if not self._bluray_is_iso_layout() else 18)),
+               "--gui-progress"]
         if not self.chk_bluray_restore_av.GetValue():
             cmd.append("--no-audio-subs")
         return cmd, None
@@ -16362,7 +16398,7 @@ def _self_test_bluray_import_panel():
         layout_of = lambda: frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection())  # noqa
         codec_of = lambda: frame.cbo_bluray_codec.GetClientData(frame.cbo_bluray_codec.GetSelection())  # noqa
         assert [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())] == \
-            ["full_sbs", "half_sbs", "full_tb", "half_tb", "frame_packed"]
+            ["full_sbs", "half_sbs", "full_tb", "half_tb", "frame_packed", "bd3d_iso"]
         assert layout_of() == "full_sbs" and codec_of() == "hevc_nvenc"
         assert frame.txt_bluray_quality.GetValue() == "18"
         assert frame.chk_bluray_restore_av.GetValue() is True
@@ -16409,6 +16445,25 @@ def _self_test_bluray_import_panel():
             frame.cbo_bluray_layout.SetSelection(4)
             frame.on_changed_bluray_layout(None)
             assert codec_of() == "libx264", "Frame Packed must switch the codec to libx264"
+
+            # Lossless ISO: codec/quality disabled, output extension swaps both ways,
+            # a .mkv output is refused, the command carries --layout bd3d_iso
+            frame.cbo_bluray_layout.SetSelection(5)
+            frame.txt_bluray_output.SetValue(out)
+            frame.on_changed_bluray_layout(None)
+            assert not frame.cbo_bluray_codec.IsEnabled() and not frame.txt_bluray_quality.IsEnabled()
+            assert frame.txt_bluray_output.GetValue().endswith(".iso"), frame.txt_bluray_output.GetValue()
+            iso_out = frame.txt_bluray_output.GetValue()
+            frame.txt_bluray_output.SetValue(out)
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err, "an .mkv output must be refused in Lossless ISO mode"
+            frame.txt_bluray_output.SetValue(iso_out)
+            cmd, err = frame.build_bluray_command()
+            assert err is None and cmd[cmd.index("--layout") + 1] == "bd3d_iso", (cmd, err)
+            frame.cbo_bluray_layout.SetSelection(0)
+            frame.on_changed_bluray_layout(None)
+            assert frame.cbo_bluray_codec.IsEnabled() and frame.txt_bluray_quality.IsEnabled()
+            assert frame.txt_bluray_output.GetValue().endswith(".mkv")
 
             # Run/Cancel/Clear lockstep, driven through the real handlers
             frame.cbo_bluray_layout.SetSelection(0)

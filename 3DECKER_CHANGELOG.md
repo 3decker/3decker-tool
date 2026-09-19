@@ -28,6 +28,12 @@ works (deleted afterward). It cannot open copy-protected discs; rip those to an
 ISO or folder first with a separate tool. New installs and updates fetch the two
 small helper programs it needs automatically.
 
+**Also new: a "Lossless 3D Blu-ray ISO" choice in that same tool.** Instead of making
+a video file, it copies the disc's own 3D video into a new 3D Blu-ray ISO with no
+re-encoding — zero quality loss, all audio and subtitle tracks included. Play it
+on a 3D Blu-ray player or in PowerDVD, or keep it as a perfect backup. (VLC and
+MPC-HC can't play this kind, so use the other layouts for those.)
+
 ---
 
 ## Update — September 18, 2026

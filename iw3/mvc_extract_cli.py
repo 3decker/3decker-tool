@@ -429,6 +429,85 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
                     pass
 
 
+ISO_LAYOUT = "bd3d_iso"
+
+
+def list_tracks(ssif_path, tsmuxer_bin):
+    """Every track tsMuxeR sees in the .ssif, as dicts: id, codec (e.g. V_MPEG4/ISO/MVC,
+    A_AC3, S_HDMV/PGS) and lang (3-letter code or "")."""
+    out = subprocess.run([tsmuxer_bin, str(ssif_path)], capture_output=True, text=True).stdout
+    tracks, cur = [], None
+    for line in out.splitlines():
+        if line.startswith("Track ID:"):
+            cur = {"id": int(line.split(":", 1)[1].strip()), "codec": "", "lang": ""}
+            tracks.append(cur)
+        elif cur is not None and line.startswith("Stream ID:"):
+            cur["codec"] = line.split(":", 1)[1].strip()
+        elif cur is not None and line.startswith("Stream lang:"):
+            cur["lang"] = line.split(":", 1)[1].strip()
+    return tracks
+
+
+def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_cb=None, cut_end=None):
+    """Lossless copy: writes the disc's own base+dependent 3D video (untouched, no
+    re-encode) plus, if include_av, every audio and subtitle track, into a new 3D
+    Blu-ray .iso that a 3D Blu-ray player or PowerDVD can play (tsMuxeR builds the
+    BDMV structure incl. the SSIF file -- only when the output is an .iso, per its
+    docs). Chapters are added every 10 minutes. Returns the number of tracks written."""
+    tsmuxer_bin = _find_tsmuxer()
+    if tsmuxer_bin is None:
+        raise RuntimeError("tsMuxeR not found -- run `python -m iw3.install_mvc_tools`")
+    if path.splitext(out_iso)[1].lower() != ".iso":
+        raise ValueError("a 3D Blu-ray copy must be saved as an .iso file")
+    tracks = list_tracks(ssif_path, tsmuxer_bin)
+    if not any(t["codec"] == "V_MPEG4/ISO/MVC" for t in tracks):
+        raise RuntimeError("no 3D (MVC) video track found in this disc's main movie")
+    wanted = [t for t in tracks if t["codec"].startswith("V_") or (include_av and t["codec"][:2] in ("A_", "S_"))]
+    ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
+    cut = f" --cut-start=0s --cut-end={cut_end}" if cut_end else ""
+    lines = [f"MUXOPT --blu-ray --auto-chapters=10{cut}"]
+    for t in wanted:
+        extra = f", lang={t['lang']}" if t["lang"] else ""
+        lines.append(f"{t['codec']}, {ssif_meta}, track={t['id']}{extra}")
+    os.makedirs(path.dirname(path.abspath(out_iso)), exist_ok=True)
+    meta_path = path.splitext(path.abspath(out_iso))[0] + ".mux.meta"
+    # no BOM: tsMuxeR rejects a UTF-8 byte-order mark on the first line
+    with open(meta_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    proc = None
+    ok = False
+    try:
+        proc = subprocess.Popen([tsmuxer_bin, meta_path, out_iso], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)
+        tail = []
+        for line in proc.stdout:
+            tail.append(line.rstrip())
+            del tail[:-15]
+            m = re.search(r"(\d+(?:\.\d+)?)%", line)
+            if m and progress_cb:
+                progress_cb("mux", float(m.group(1)), 100)
+            if stop_event is not None and stop_event.is_set():
+                proc.kill()
+                raise Cancelled()
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError("tsMuxeR failed:\n" + "\n".join(tail))
+        ok = True
+        return len(wanted)
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+        try:
+            os.remove(meta_path)
+        except OSError:
+            pass
+        if not ok:
+            try:
+                os.remove(out_iso)
+            except OSError:
+                pass
+
+
 def _powershell(script):
     result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                             capture_output=True, text=True, timeout=120)
@@ -509,6 +588,16 @@ def import_disc(source, output_path, work_dir=None, progress_cb=None, cut_end=No
         print(f"[mvc-extract] tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
 
         os.makedirs(path.dirname(path.abspath(output_path)), exist_ok=True)
+        if kwargs.get("layout") == ISO_LAYOUT:
+            # lossless copy: no temp streams, the .iso itself is the only big file
+            free = shutil.disk_usage(path.dirname(path.abspath(output_path))).free
+            need = path.getsize(ssif)
+            if free < need * 1.05:
+                raise RuntimeError(f"not enough free disk space for the ISO: need about "
+                                   f"{need / 1e9:.0f} GB, only {free / 1e9:.0f} GB free")
+            return mux_bd3d_iso(ssif, output_path, include_av=kwargs.get("restore_av", True),
+                                stop_event=kwargs.get("stop_event"), progress_cb=progress_cb,
+                                cut_end=cut_end)
         work_created = not path.isdir(work_dir)
         os.makedirs(work_dir, exist_ok=True)
         # the two demuxed streams together are roughly 3/4 of the .ssif
@@ -552,8 +641,10 @@ def main():
     parser.add_argument("--video-codec", type=str, default="hevc_nvenc", choices=CODECS)
     parser.add_argument("--quality", "--crf", type=int, default=18, dest="quality",
                          help="CRF (x264/x265) or constant-quality level (NVENC); lower = better/larger")
-    parser.add_argument("--layout", type=str, default="full_sbs", choices=LAYOUTS,
-                         help="full_sbs 3840x1080 | half_sbs 1920x1080 | full_tb 1920x2160 | half_tb 1920x1080 | "
+    parser.add_argument("--layout", type=str, default="full_sbs", choices=LAYOUTS + (ISO_LAYOUT,),
+                         help="bd3d_iso = lossless copy into a 3D Blu-ray .iso (no re-encode; --output must end in "
+                              ".iso; codec/quality ignored) | "
+                              "full_sbs 3840x1080 | half_sbs 1920x1080 | full_tb 1920x2160 | half_tb 1920x1080 | "
                               "frame_packed = full_tb plus the Frame Packing SEI flag (libx264 only)")
     parser.add_argument("--no-audio-subs", action="store_true",
                          help="skip restoring the disc's audio and subtitle tracks (video only)")
@@ -587,6 +678,8 @@ def main():
                     parser.error(f"no MVC track found via {detect_from} -- not real 3D content, "
                                  f"or the wrong file")
                 print(f"[mvc-extract] auto-detected tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
+            if args.layout == ISO_LAYOUT:
+                parser.error("--layout bd3d_iso works with --disc, not manual --ssif mode")
             frames = extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end,
                                         args.work_dir, args.output, **common)
     except Cancelled:
@@ -595,7 +688,8 @@ def main():
     except (RuntimeError, ValueError, OSError) as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
-    print(f"\n[mvc-extract] done: {args.output} ({frames} frames)", file=sys.stderr)
+    unit = "tracks" if args.layout == ISO_LAYOUT else "frames"
+    print(f"\n[mvc-extract] done: {args.output} ({frames} {unit})", file=sys.stderr)
     return 0
 
 

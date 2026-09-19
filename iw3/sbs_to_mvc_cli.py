@@ -56,14 +56,26 @@ def find_frim():
     return candidate if path.exists(candidate) else None
 
 
-def install_frim(root=None):
-    """Downloads FRIM 1.31 from its author's page (verified against a pinned SHA-256)
-    and keeps only the two files the software MVC encoder needs. Not redistributed
-    from this repo -- fetched on the user's machine, like a manual download."""
+_FRIM_FILES = ("FRIMEncode64.exe", "libmfxsw64.dll")
+
+
+def install_frim(root=None, package_dir=None):
+    """Installs the two files the software MVC encoder needs into <root>\\frim.
+
+    Preferred: copy them from nunif\\windows_package\\frim\\ in this repo (hosted with the FRIM
+    author's permission, so an install never depends on their download link surviving).
+    Fallback if that folder is missing: download FRIM 1.31 from the author's page (or a mirror)
+    and accept it only if its SHA-256 matches FRIM_SHA256."""
     root = root or _root()
     dest = path.join(root, "frim")
-    if path.exists(path.join(dest, "FRIMEncode64.exe")) and path.exists(path.join(dest, "libmfxsw64.dll")):
+    if all(path.exists(path.join(dest, n)) for n in _FRIM_FILES):
         return "already installed"
+    package_dir = package_dir or path.join(root, "nunif", "windows_package", "frim")
+    if all(path.exists(path.join(package_dir, n)) for n in _FRIM_FILES):
+        os.makedirs(dest, exist_ok=True)
+        for name in _FRIM_FILES:
+            shutil.copy2(path.join(package_dir, name), path.join(dest, name))
+        return "installed"
     urls = [FRIM_URL] + list(FRIM_MIRRORS)
     if os.environ.get("FRIM_MIRROR_URL"):
         urls.append(os.environ["FRIM_MIRROR_URL"])

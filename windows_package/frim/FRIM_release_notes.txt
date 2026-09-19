@@ -1,0 +1,437 @@
+FRIM release notes.
+
+Intel Media SDK provides framework for MPEG2, H.264 AVC/MVC-3D and H.265 HEVC encoding and decoding.
+Intel Media SDK can be freely distributed and used - see "Intel Media SDK EULA.rtf" - section Licensed Binaries.
+Supported OS: Windows 7, Windows 8.x, Windows 10
+
+FRIM package are free command line tools based on examples in this SDK.
+
+---------------------------------------------------------------------------------------------------
+2020-03-08
+
+All - build with Intel Media SDK 2019 R1 and MS Visual Studio 2017
+
+FRIMTranscode:
+- h265 (HEVC) codec added
+- plugin support added with optional parameters:
+    -iguid    decode-GUID-code
+    -iplugin  full-decode-plugin-path-name
+    -oguid    encode-GUID-code
+    -oplugin  full-encode-plugin-path-name
+
+FRIMSource:
+- HEVC decoding uses 10-bit processing with AviSynth+
+
+FRIMImport:
+FRIMExport:
+- HEVC decoding/encoding uses 10-bit processing with Adobe Premiere
+
+---------------------------------------------------------------------------------------------------
+2019-04-16
+
+All - build with Intel Media SDK 2018 R2.1 and MS Visual Studio 2017
+
+FRIMDecode, FRIMSource, FRIMImport:
+- fix in decoding VC1 (ignored extraction of SEI messages - these are not supported at all in VC1)
+
+FRIMSource, FRIMImport:
+- fix for ALT mode (for ordering right-left eye)
+
+---------------------------------------------------------------------------------------------------
+2018-07-08
+
+All - build with Intel Media SDK 2018 R1 and MS Visual Studio 2017
+
+FRIM all:
+
+- added option -config file.cfg
+    configuration file can contain list of options/parameters
+    these are then applied as regular command line options
+
+- experimental HEVC support + all associated rework
+
+- 32-bit versions renamed to FRIMxxx32.exe
+- FOURCC: I420 is used for 8-bit,
+          P210 (10-bit 4:2:0 in 16-bit planar arrays) for 10-bit HEVC decode/encode
+- plugin support added with optional parameters:
+    -guid    GUID-code
+    -plugin  full-plugin-path-name
+
+- plugins are by default referred by registry
+    [HKEY_LOCAL_MACHINE\SOFTWARE\Intel\MediaSDK\Plugin]
+
+FRIMDecode:
+- VPP unit added (resize, simple video-processing)
+
+FRIMTranscode:
+- not incorporated in experimental version 1.29, will be updated later
+
+Please note that NOT all features (related to AVC/HEVC, VPP) are supported by every Intel processor and all platforms!
+Some platforms (specifically sw) and CPU's may have certain limitations.
+
+---------------------------------------------------------------------------------------------------
+
+2017-12-31
+
+FRIMDecode
+FRIMTranscode
+- added option -RecoveryPointSEI on|off   (with default on (!))
+
+FRIMDecode
+- added option -ofmd filename.ofmd  for retrieval of offset_metadata  (MVC-3D only)
+
+---------------------------------------------------------------------------------------------------
+
+2017-07-08
+
+All - build with Intel Media SDK 2017 R1
+
+FRIMFranscode
+- added parameter -dar for forcing Display Aspect Ratio
+- otherwise display aspect ratio is taken from source (note: MPEG2 supports only 4:3, 16:9 and 2.21:1 display aspect ratios)
+
+FRIMTranscode
+- add parameters   -size    width height
+                   -dstsize width height
+  just to simplify their counterparts -w, -h -dstw, -dsth
+
+FRIMTranscode
+FRIMEncode
+- cropping added(!)
+
+  Practical examples:
+
+	# Crop Full HD to "21:9"
+	  -area 0 136 1920 808 -dstsize 1920 808 -dar 1920:808
+
+	# Crop Full HD to 4:3 and resize to 960x720
+	  -area 240 0 1440 1080 -dstsize 960 720 -dar 4:3
+
+	# General crop and resize, e.g.
+    -size 1920 1080  -dstsize 1280 720  -area 60 136 1800 808  -dstarea 40 91 1200 538 -dar 1280:720
+
+    This says:  "resize whole FullHD frame to SmallHD frame,
+            and copy mid area (1800x808) with source left-upper corner (60,136)
+            to new mid area (1200x538) with destination left-upper corner (40,91)"
+
+---------------------------------------------------------------------------------------------------
+
+2016-01-16
+
+64-bit: renamed to FRIMDecode64.exe, FRIMEncode64.exe, FRIMTranscode64.exe
+        This allows to keep all on the same place and avoid confusion when calling them
+
+FRIMEncode:
+- new option for frame-alternation input  added: -alt numViews  (similar to -sbs and -tab)
+
+FRIMDecode:
+- new option for frame-alternation output added: -alt           (similar to -sbs and -tab)
+
+FRIMSource:
+- new layout for frame-alternation output added:  layout="alt"  (similar to "sbs" and "tab")
+
+---------------------------------------------------------------------------------------------------
+
+2015-05-08
+
+FRIMSource64.dll
+- 64-bit version for AviSynth+ (64-bit) released
+
+---------------------------------------------------------------------------------------------------
+
+2015-03-27
+
+FRIMEncode:
+- fixed reading from stdin
+
+FRIMEncode + FRIMTranscode:
+- new options added
+    -f 24000/1001                  - frame rate as rational number
+    -f 23.976                      - frame rate as real number
+    -Trellis  IPB|off
+    -Bpyramid on|off
+    -RDO on|off
+
+    -VPPbrightness factor          - in range [-100.0,100.0], increment 0.1,  default 0.0
+    -VPPcontrast   factor          - in range [0.00,10.00],   increment 0.01, default 1.00
+    -VPPhue        factor          - in range [-180.0,180.0], increment 0.1,  default 0.0
+    -VPPsaturation factor          - in range [0.00,10.00],   increment 0.01, default 1.00
+    -VPPdenoise    factor          - denoising, in range [0,100]
+    -VPPdetail     factor          - detail/edge enhancement, in range [0,100]
+    -VPPstabilize  U|B             - image stabilization, U=upscale, B=boxing
+    -VPPdeinterlace                - activate deinterlacing
+
+- setting parameters of output bitstream
+    -videoformat code              - undef, ntsc, component, pal, secam, mac
+    -videofullrange                - define stream as fullrange (0-255) YUV
+    -colormatrix code              - undef, auto, bt709, smpte170m, bt470bg, smpte240m, YCgCo, fcc, GBR
+    -colorprim   code              - undef, auto, bt709, smpte170m, bt470m, bt470bg, smpte240m, film
+    -colortransfer code            - undef, auto, bt709, smpte170m, bt470m, bt470bg, smpte240m, linear, log100, log316
+
+No changes in documentation
+
+---------------------------------------------------------------------------------------------------
+
+2015-02-28
+
+FRIM all
+- compiled with Intel Media SDK 2015 Update 1
+- new parameters added
+      -async depth          - depth of asynchronous pipeline (between 1 and 20), default is 4
+
+FRIM Encode, FRIM Transcode, FRIM Export (for Adobe Premiere)
+- new parameters added:
+
+      -lahrd   bitRate  depth   ... new encoding mode LA HRD-compliant
+
+      -dar     w:h              ... set output display aspect ratio, e.g. 4:3, 16:9 (FRIM Encode only)
+
+      -gopfile filename         ... GOP-structure file (=requested I-frames), e.g.: (FRIM Encode only)
+                                      9     I
+                                     40     I
+                                     55     I
+                                     etc.
+       (due to bug in libmfxhw32.dll (Product version 6.0.1536.317) this feature has requested effect only in -sw mode)
+
+- additonal encoding options (optional):
+      -BitrateLimit on|off  - enable/disable bitrate limitations imposed by encoder
+                              default value on (for H.264 only)
+      -MBBRC on|off         - enable/disable macroblock level bitrate control
+      -ExtBRC on|off        - enable/disable extended bitrate control algorithms
+                              default value off (for H.264 only)
+      -RepeatPPS on|off     - controls picture parameter set repetition
+                              default value on (for H.264 only)
+      -AdaptiveI on|off     - adaptive change B&P to I frames (for H.264 only)
+      -AdaptiveB on|off     - adaptive change B to P frames (for H.264 only)
+
+---------------------------------------------------------------------------------------------------
+
+2014-03-22
+
+FRIM all - code refactoring (removal of dependency on legacy stdout/stderr)
+
+FRIM Encode, FRIM Transcode
+- new encoding modes
+  -lavbr   bitRate  depth   .... renamed from -labrc
+  -avbr    bitRate  accuracy  convergence
+  -icq     quality
+  -laicq   quality  depth
+
+FRIMSource.dll
+- fixed identification of interlaced sources
+- parameter container=<empty>|TS (default empty) ... identical to TS=true, for potentical future types of container,
+                                                     RECOMMENDED to use over TS=true (which will be obsolete and removed in the future)!
+- parameter reload=false|true    (default true)  ... when true, then system will load input file again when jumped "before" cached content
+                                                     Warning: can be slower
+- parameter num_frames=0   ...   zero as num_frames will imply automatic length calculation
+                                 Warning: can be slower - before actual decoding starts
+                                 Limitation: works only for TS-container !
+
+FRIMExport.prm
+- Manual setting of MVC-3D TAB vs. SBS layout added
+- viewoutput creates only two files .avc and .mvc
+  (combined files is not necessary, since tsMuxer accept both, and anyway, combined can be created by external MVCCombiners)
+
+FRIMImport.prm
+- new module, read FRIMPremiere_readme.pdf for description
+
+---------------------------------------------------------------------------------------------------
+
+2014-02-02:
+FRIM package 1.22
+Support reading transport stream .ts/mts/m2ts directly !
+
+FRIM Decoder / FRIM Transcoder
+- optional parameter -ts added
+
+  example:    FRIMDecode -ts -i::h264 input.m2ts -o output.yuv
+
+FRIM Source for Avisynth
+- optional parameter ts=false/true (default is false) added
+
+	example:  FRIMSource(codec="h264", filename="input.m2ts", ts=true, cache=24, num_frames=300)
+
+  example for Panasonic 3D-Z10000 (with audio):
+
+  FILE3D="Z10000.m2ts"
+  V=FRIMSource(codec="mvc", filename=FILE3D, filename_dep=FILE3D, ts=true, \
+               layout="sbs", cache=24, num_frames=300)
+  A=DirectShowSource(FILE3D).KillVideo()
+  AudioDub(V,A)
+
+---------------------------------------------------------------------------------------------------
+
+2014-01-25:
+FRIM package 1.21 moved to platform Intel Media SDK 2014, build x86 and x64!
+(distribution contains both libmfxsw32.dll and libmfxsw64.dll)
+
+FRIM Decoder 1.21
+FRIM Encoder 1.21
+- parameter -swaplr added ... swap L- and R-eye in -tab or -sbs mode
+
+FRIM Transcoder 1.21
+- no functional changes
+
+FRIM Source for Avisynth (only 32-bits for Avisynth 2.58)
+- see FRIMSource_readme.pdf for description
+- uses the same kernel as FRIM Decoder
+
+FRIM Exporter for Adobe Premiere CS6 (only 64-bits)
+- plugin FRIMExport.prm to be placed with other CS6 plugins in
+   "c:\Program Files\Adobe\Common\Plug-ins\CS6\MediaCore\FRIMExport.prm"
+
+- uses the same kernel and the same parameters as FRIM Encoder
+- tested on CS6, possibly will work also with other 64-bit versions of Adobe Premiere (like CS5, CC)
+- example/pattern how to use it in 3D in Adobe Premiere is in project file Pattern_3D-TAB.prproj
+
+---------------------------------------------------------------------------------------------------
+
+2014-01-12:
+FRIM Decoder 1.20
+- output to standard output (stdout) added - see examples in documentation
+
+FRIM Encoder 1.20
+- input from standard input (stdin)  added - see examples in documentation
+
+FRIM Transcoder 1.20
+- no functional changes
+
+---------------------------------------------------------------------------------------------------
+
+2014-01-03:
+FRIM Encoder 1.19
+- fixed bug in counting -start, -length in SMPTE format
+   ... now it uses "non-drop" frames, i.e. HH:MM:SS:FF is based on 24 or 25 or 30 fps, (i.e. not on 23.976 and 29.97!)
+- -rf numRefFrame        parameter number of ref. frames added
+- -ResetRefList on|off   parameter for reset ref. frames
+- added report for actually created GOP structure
+		-goplog  filename
+
+		in format: frame_number    I/i/P/B/b
+      frame_number is counting from 0
+      I ... IDR-frame
+      i ... I-frame
+      P ... P-frame
+      B ... reference B-frame
+      b ... non-reference B-farme
+
+FRIM "all" 1.19
+- minor code changes
+
+Utilities bincopy.exe and pipecopy.exe added to distribution pack
+
+---------------------------------------------------------------------------------------------------
+
+2013-11-26:
+FRIM "all" 1.18
+- compiled on Win 8 --> D3D11 allowed
+- processing info message now reports correct number of processed frames (for "mvc" NOT(!) multiplied by 2 anymore)
+- added parameter "-start firstFrame" (for processing), together with "-length" allows decode/encode portions of the videostream
+  optionally, SMPTE format is allowed:  -start 00:01:25:14 -length 00:00:05:07
+- unified option naming: "-sw" or "-hw", "-d3d", "-d3d11"
+- running platform is now detected automatically, i.e. "software mode" (using libmfxsw32.dll) is not default anymore!
+  To force "software" you MUST specify "-sw" option
+- fixed information message about running platform (SOFTWARE, HARDWARE - D3D9 or D3D11 now displayed correctly)
+- default GOP structure was set to "24-4-0-Open" for h264 and mvc (and 24-3-0-Open for MPEG2) for better compatibility with -hw option
+
+FRIM Encoder 1.18
+FRIM Decoder 1.18
+- option "-b" removed, use "-cbr" instead
+- change of syntax of "-i" and "-o" to be unified with FRIM Transcoder
+  (see related FRIM*coder_readme.pdf !)
+
+FRIM Transcoder 1.18
+- KNOWN BUG:  when parameter "-length" is used then it adds from unknown reasons few frames (~3) more then requested
+
+- FEATURE:  Joined and linked sessions with "-hw" MUST use the same type of d3d memory (either -d3d or -d3d11)!
+            System memory cannot be used in such case!
+            Reason: HARDWARE library (libmfxhw32.dll) is loaded and shared among sessions.
+
+- parameter "-f" overwrites encoding part of the session only
+  (remark: options -start, -length are related to decoding part of the session)
+
+---------------------------------------------------------------------------------------------------
+
+2013-11-21:
+FRIM Decoder 1.16
+- no functional changes
+
+FRIM Encoder 1.16
+- workaround for Avisynth error (occasionally Avisynt 2.5.8 doesn't feed R-eye in -sbs mode)
+- allowed bitrate higher than 65000 Kbps
+
+FRIM Transcoder 1.16
+- allowed bitrate higher than 65000 Kbps
+- option -n renamed to -length (more self-explanatory)
+- extended information about processed streams is provided (like in FRIM Decoder and Encoder)
+- comment line starting character '#' added to PAR file
+
+---------------------------------------------------------------------------------------------------
+
+2013-11-12:
+FRIM Encoder 1.15
+- avi/avs encoding - reports now a bit more detailed error information.
+- new feature: CQP bitrate control mode added: [ -cqp QPI QPP QPB ]
+
+FRIM Decoder 1.15
+- fixed bug with wrong YUV-file length of decoded MVC
+
+- new feature: MVC - both output filenames can be defined
+
+  FRIMDecode mvc -i input_base_avc.h264 -i input_dependent_mvc.h264 -o output_L.yuv –o output_R.yuv
+
+     - this allows to send one of the to null device:  \\.\nul
+     - if only one filename output.yuv is defined then naming convention  output_L.yuv and output_R.yuv is applied.
+
+FRIM Transcoder 1.15
+- added detailed parameters/options like in FRIM Encode
+- added base+dependent input for mvc
+
+  FRIMTranscode -i::mvc input_base.avc input_dependent.mvc -o::mvc output_combined.h264
+
+
+FRIM all modules 1.15
+- shared code refactoring for identical (or at least similar) compression with FRIM Encoder and FRIM Transcoder
+
+---------------------------------------------------------------------------------------------------
+
+2013-11-07:
+FRIM Encoder 1.11
+- fixed bug in handling named pipes (.yuv)
+
+FRIM Decoder 1.11
+- separate main and dependent views on input are supported
+  FRIMDecode mvc -i input_L.h264 -i input_R.h264 -o output.yuv
+
+FRIM Transcoder 1.01
+- no changes
+
+---------------------------------------------------------------------------------------------------
+
+2013-11-05:
+FRIM Encoder 1.10
+- added options for GOP control (length, IP-distance, IDR-interval, opened/closed/strict)
+- added options for bitrate control -cbr, -vbr  (for Blu-ray/DVD compatibility setting)
+- added option -cpbsize for cpb/vbv buffer size (for Blu-ray/DVD compatibility setting)
+- added option -l numSlices  (for Blu-ray compatibility setting)
+- added option -maxdpb for size of Decoded Picture Buffer
+- added options -profile, -level for proper marking of elementary stream
+- added options for CAVLC and CABAC encoding
+- added options for H.264 elementary stream structure control
+		  -VuiNalHrd, -VuiVclHrd, -PicTimingSEI, -EndOfSequence, -EndOfStream
+		  Proper combination of these options can influence compatibility of output
+		  elementary H.264 streams with Bluray/DVB/IP/etc.
+
+- removed rotation options - useless, anyway not working in previous version
+- few cosmetic changes
+
+FRIM Encoder 1.01
+- only cosmetic changes
+
+FRIM Transcoder 1.01
+- only cosmetic changes
+
+---------------------------------------------------------------------------------------------------
+
+2013-10-29:
+Initial release 1.00

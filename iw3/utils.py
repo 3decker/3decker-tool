@@ -383,6 +383,32 @@ def _find_edge264_mvc():
     return None
 
 
+def _find_tsmuxer():
+    """ADR-182: locates the bundled tsMuxeR CLI (github.com/justdan96/tsMuxer,
+    Apache-2.0, a real, prebuilt-for-Windows release -- no local build needed, unlike
+    edge264-mvc above). Real 3D Blu-ray disc structure (an .mpls playlist referencing
+    one or more .m2ts clips, each carrying a COMBINED AVC+MVC video track) needs this
+    -- confirmed directly that plain ffmpeg cannot even read a raw MVC elementary
+    stream (errors immediately on the dependent-view SPS extension structure), so
+    something Blu-ray/MVC-aware has to pull the real video out first. tsMuxeR
+    explicitly lists V_MPEG4/ISO/MVC as a supported codec and reads .mpls directly.
+    NOT YET CONFIRMED (needs a real disc/ISO to test against): whether
+    edge264_test's decoder can be pointed at tsMuxeR's separated MVC-only output
+    directly, since tsMuxeR's own docs say it "always demultiplexes" a combined
+    AVC/MVC track into separate AVC and MVC elementary streams -- edge264-mvc may
+    need the original combined/interleaved stream instead. Verify before assuming
+    either direction works."""
+    import shutil
+    found = shutil.which("tsMuxeR") or shutil.which("tsMuxeR.exe")
+    if found:
+        return found
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    candidate = path.join(here, "tsmuxer", "tsMuxeR.exe")
+    if path.exists(candidate):
+        return candidate
+    return None
+
+
 def _find_mkvpropedit():
     """Same resolution strategy as _find_mkvmerge() -- mkvpropedit ships alongside
     mkvmerge in the same bundled MKVToolNix folder (verified present at

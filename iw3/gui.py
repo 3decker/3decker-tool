@@ -6043,7 +6043,7 @@ class MainFrame(wx.Frame):
         self.btn_clear_all.Bind(wx.EVT_BUTTON, self.on_click_btn_clear_all)
         self.btn_quick_preset_movie.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("movie"))
         self.btn_quick_preset_action.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("action"))
-        self.btn_quick_preset_3decker.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("3decker"))
+        self.btn_quick_preset_3decker.Bind(wx.EVT_BUTTON, self.on_click_btn_quick_preset_3decker)
         self.btn_compare_presets.Bind(wx.EVT_BUTTON, self.on_click_btn_compare_presets)
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
         self.btn_import_command.Bind(wx.EVT_BUTTON, self.on_click_btn_import_command)
@@ -8509,12 +8509,29 @@ class MainFrame(wx.Frame):
         # free vram
         gc_collect()
 
+    def on_click_btn_quick_preset_3decker(self, event):
+        if self.confirm_action(
+                T("Apply the 3DECKER Preferred preset? It replaces many of your current settings.")):
+            self.apply_quick_preset("3decker")
+
+    def confirm_action(self, message):
+        """Safety prompt for buttons that are easy to press by mistake. Yes/No, with
+        No as the default button so an accidental Enter/Space does nothing."""
+        with wx.MessageDialog(self, message=message, caption=T("Confirm"),
+                              style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION) as dlg:
+            return dlg.ShowModal() == wx.ID_YES
+
     def on_click_btn_cancel(self, event):
+        if not self.confirm_action(T("Cancel the running conversion? The current run will be stopped.")):
+            return
         self.suspend_event.set()
         self.stop_event.set()
 
     def on_click_btn_suspend(self, event):
         if self.suspend_event.is_set():
+            # pausing a running job asks first; resuming a paused one does not
+            if not self.confirm_action(T("Suspend the running conversion? You can resume it afterward.")):
+                return
             self.suspend_event.clear()
             self.btn_suspend.SetLabel(T("Resume"))
             if self.chk_pause_frees_vram.GetValue():
@@ -8906,7 +8923,7 @@ class MainFrame(wx.Frame):
         with wx.MessageDialog(
                 None,
                 message=T("Reset every setting to defaults and clear Input/Output?"),
-                caption=T("Confirm"), style=wx.YES_NO) as dlg:
+                caption=T("Confirm"), style=wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION) as dlg:
             if dlg.ShowModal() != wx.ID_YES:
                 return
         args = create_parser(required_true=False).parse_args([])
@@ -10074,6 +10091,9 @@ class MainFrame(wx.Frame):
             self.update_start_button_state()
 
     def on_click_btn_quick_preview(self, event):
+        if not self.confirm_action(
+                T("Start a Quick Preview? It converts a short sample with your current settings.")):
+            return
         try:
             self.test_quick_preview()
         except: # noqa
@@ -16902,6 +16922,83 @@ def _self_test_sbs2mvc_panel():
     print("_self_test_sbs2mvc_panel: PASS")
 
 
+def _self_test_confirm_dangerous_buttons():
+    """Cancel, Suspend, Quick Preview, 3DECKER Preferred and Clear All each ask Yes/No
+    first, with No as the default button, so an accidental click does nothing. Answering
+    No changes nothing; answering Yes runs the action; Resume (un-pausing) never asks.
+    wx.MessageDialog is faked so no real dialog appears."""
+    import iw3.gui as gui_mod
+
+    class _FakeDialog:
+        answer = wx.ID_NO
+        shown = []
+        styles = []
+
+        def __init__(self, *a, **kw):
+            _FakeDialog.shown.append(kw.get("message", a[1] if len(a) > 1 else ""))
+            _FakeDialog.styles.append(kw.get("style", 0))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ShowModal(self):
+            return _FakeDialog.answer
+
+    app = wx.App()
+    frame = None
+    orig_dialog = gui_mod.wx.MessageDialog
+    try:
+        frame = gui_mod.MainFrame()
+        gui_mod.wx.MessageDialog = _FakeDialog
+        calls = {"preview": 0, "preset": []}
+        frame.test_quick_preview = lambda: calls.__setitem__("preview", calls["preview"] + 1)
+        frame.apply_quick_preset = lambda name: calls["preset"].append(name)
+
+        # ---- answer No: nothing happens
+        _FakeDialog.answer = wx.ID_NO
+        frame.suspend_event.set()
+        frame.stop_event.clear()
+        frame.on_click_btn_cancel(None)
+        assert not frame.stop_event.is_set(), "Cancel must do nothing when answered No"
+        frame.on_click_btn_suspend(None)
+        assert frame.suspend_event.is_set() and frame.btn_suspend.GetLabel() == T("Suspend"), \
+            "Suspend must do nothing when answered No"
+        frame.on_click_btn_quick_preview(None)
+        assert calls["preview"] == 0, "Quick Preview must not run when answered No"
+        frame.on_click_btn_quick_preset_3decker(None)
+        assert calls["preset"] == [], "3DECKER Preferred must not apply when answered No"
+        method_before = frame.cbo_method.GetValue()
+        frame.on_click_btn_clear_all(None)
+        assert frame.cbo_method.GetValue() == method_before, "Clear All must do nothing when answered No"
+        assert len(_FakeDialog.shown) == 5, _FakeDialog.shown
+        assert all(s & wx.NO_DEFAULT for s in _FakeDialog.styles), "No must be the default button"
+
+        # ---- answer Yes: the action runs
+        _FakeDialog.answer = wx.ID_YES
+        frame.on_click_btn_suspend(None)
+        assert not frame.suspend_event.is_set() and frame.btn_suspend.GetLabel() == T("Resume")
+        asked = len(_FakeDialog.shown)
+        frame.on_click_btn_suspend(None)   # Resume: must NOT ask
+        assert len(_FakeDialog.shown) == asked, "Resume must not ask for confirmation"
+        assert frame.suspend_event.is_set() and frame.btn_suspend.GetLabel() == T("Suspend")
+        frame.on_click_btn_quick_preview(None)
+        assert calls["preview"] == 1
+        frame.on_click_btn_quick_preset_3decker(None)
+        assert calls["preset"] == ["3decker"]
+        frame.on_click_btn_cancel(None)
+        assert frame.stop_event.is_set()
+    finally:
+        gui_mod.wx.MessageDialog = orig_dialog
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_confirm_dangerous_buttons: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -16982,6 +17079,7 @@ def _run_self_tests():
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
+        _self_test_confirm_dangerous_buttons,
     ]
     failures = []
     for test in tests:

@@ -678,8 +678,12 @@ class SceneBatchAutoEMADialog(wx.Dialog):
         if (new_width, new_height) != (width, height):
             self.SetSize((new_width, new_height))
         x, y = self.GetPosition()
-        new_x = min(max(x, work_area.GetX()), work_area.GetRight() - new_width)
-        new_y = min(max(y, work_area.GetY()), work_area.GetBottom() - new_height)
+        # wx.Rect.GetRight()/GetBottom() are INCLUSIVE (x+width-1), so "bottom - height" is one pixel too
+        # small and asks for y=-1 when the frame is as tall as the work area -- a position the frame
+        # never took, leaving a 104px-from-the-top window (the default first-launch spot) hanging off the
+        # bottom of the screen. Use the exclusive edge (origin + size) instead.
+        new_x = min(max(x, work_area.GetX()), work_area.GetX() + work_area.GetWidth() - new_width)
+        new_y = min(max(y, work_area.GetY()), work_area.GetY() + work_area.GetHeight() - new_height)
         if (new_x, new_y) != (x, y):
             self.SetPosition((new_x, new_y))
 
@@ -7117,8 +7121,12 @@ class MainFrame(wx.Frame):
         if (new_width, new_height) != (width, height):
             self.SetSize((new_width, new_height))
         x, y = self.GetPosition()
-        new_x = min(max(x, work_area.GetX()), work_area.GetRight() - new_width)
-        new_y = min(max(y, work_area.GetY()), work_area.GetBottom() - new_height)
+        # wx.Rect.GetRight()/GetBottom() are INCLUSIVE (x+width-1), so "bottom - height" is one pixel too
+        # small and asks for y=-1 when the frame is as tall as the work area -- a position the frame
+        # never took, leaving a 104px-from-the-top window (the default first-launch spot) hanging off the
+        # bottom of the screen. Use the exclusive edge (origin + size) instead.
+        new_x = min(max(x, work_area.GetX()), work_area.GetX() + work_area.GetWidth() - new_width)
+        new_y = min(max(y, work_area.GetY()), work_area.GetY() + work_area.GetHeight() - new_height)
         if (new_x, new_y) != (x, y):
             self.SetPosition((new_x, new_y))
 
@@ -13940,6 +13948,12 @@ def _self_test_progress_bar_visible_on_screen():
         if display_index == wx.NOT_FOUND:
             display_index = 0
         work_area = wx.Display(display_index).GetClientArea()
+
+        # Start from the default first-launch spot, well below the top of the screen. A saved window
+        # position at the very top hid this bug on the dev machine (the clamp shrank the frame but left
+        # it hanging off the bottom because the position maths was off by one), so the clamp must
+        # also MOVE the frame up, not just shrink it.
+        frame.SetPosition((work_area.GetX() + 104, work_area.GetY() + 104))
 
         # Deliberately force the frame taller than the real screen -- reproduces the
         # pre-fix symptom regardless of what resolution this test machine actually has.

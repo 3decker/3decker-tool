@@ -81,6 +81,11 @@ if %ERRORLEVEL% neq 0 goto :on_error
 pushd "%NUNIF_DIR%" && python -m iw3.register_optional_inpaint_models && popd
 if %ERRORLEVEL% neq 0 goto :on_error
 
+@rem ADR-182: installs the 3D Blu-ray import tools (patched edge264-mvc decoder +
+@rem tsMuxeR) if missing. Deliberately NOT fatal -- only the optional 3D Blu-ray
+@rem import needs them, so a failed download must not fail the whole update.
+pushd "%NUNIF_DIR%" && python -m iw3.install_mvc_tools & popd
+
 
 @rem warmup, create pyc
 pushd "%NUNIF_DIR%" && python -m iw3.gui --help > nul && popd

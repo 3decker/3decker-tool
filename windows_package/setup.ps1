@@ -400,6 +400,20 @@ try {
 }
 
 # ---------------------------------------------------------------------------
+Write-Step "3D Blu-ray import tools (edge264-mvc decoder + tsMuxeR)"
+
+# ADR-182: patched edge264-mvc comes from nunif\windows_package\edge264-mvc\ (upstream
+# has no Windows release and a 4GB file-size bug); tsMuxeR is downloaded from its
+# official release. Not fatal -- only the optional 3D Blu-ray import needs them.
+Push-Location $nunifDir
+try {
+    & $pythonExe -m iw3.install_mvc_tools
+    if ($LASTEXITCODE -ne 0) { Write-Host "  WARNING: 3D Blu-ray tools were not fully installed; re-run setup or an update to retry." -ForegroundColor Yellow }
+} finally {
+    Pop-Location
+}
+
+# ---------------------------------------------------------------------------
 Write-Step "Done"
 Write-Host "Setup complete. Launch 3decker-gui.bat or waifu2x-gui.bat to get started." -ForegroundColor Green
 Write-Host "If you plan to use torch.compile, see nunif\windows_package\docs\torch_compile.md for the additional one-time setup it needs." -ForegroundColor Green

@@ -37,6 +37,11 @@ _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
 _BD_AUDIO = {"A_AC3", "A_EAC3", "A_DTS", "A_TRUEHD", "A_LPCM", "A_MLP"}
 FRIM_URL = "https://drive.google.com/uc?export=download&id=1lumXLd74U-E2k195bzfETbHgFcHcT4sH"
 FRIM_SHA256 = "76689784495D53B34889F0EA67C9DB6B9750925DB9D1147F8FD9159E111C0778"
+# Extra places to fetch the same file from if the author's link stops working. Empty on purpose:
+# FRIM has no explicit redistribution permission, so none is hosted by this project. Anything added
+# here (or set in the FRIM_MIRROR_URL environment variable) is still only accepted if its SHA-256
+# matches FRIM_SHA256, so a mirror can never substitute a different file.
+FRIM_MIRRORS = ()
 
 
 def _root():
@@ -59,10 +64,24 @@ def install_frim(root=None):
     dest = path.join(root, "frim")
     if path.exists(path.join(dest, "FRIMEncode64.exe")) and path.exists(path.join(dest, "libmfxsw64.dll")):
         return "already installed"
-    with urllib.request.urlopen(FRIM_URL, timeout=180) as resp:
-        data = resp.read()
-    if hashlib.sha256(data).hexdigest().upper() != FRIM_SHA256:
-        raise RuntimeError("the FRIM download did not match its expected checksum; not installing it")
+    urls = [FRIM_URL] + list(FRIM_MIRRORS)
+    if os.environ.get("FRIM_MIRROR_URL"):
+        urls.append(os.environ["FRIM_MIRROR_URL"])
+    data, errors = None, []
+    for url in urls:
+        try:
+            with urllib.request.urlopen(url, timeout=180) as resp:
+                candidate = resp.read()
+        except Exception as e:
+            errors.append(f"{url}: {e}")
+            continue
+        if hashlib.sha256(candidate).hexdigest().upper() != FRIM_SHA256:
+            errors.append(f"{url}: downloaded file did not match the expected checksum")
+            continue
+        data = candidate
+        break
+    if data is None:
+        raise RuntimeError("could not download FRIM from any address:\n  " + "\n  ".join(errors))
     tmp = path.join(root, "tmp", "frim_download")
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp, exist_ok=True)

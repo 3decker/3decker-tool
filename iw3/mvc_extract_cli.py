@@ -244,9 +244,42 @@ def _read_ffmpeg_progress(stream, tail, total_frames, progress_cb):
                 progress_cb("encode", int(fm.group(1)), total_frames)
 
 
+def _restore_disc_av(ssif_path, video_only, output_path, cut_start, cut_end, progress_cb):
+    """Adds every audio and subtitle track of the disc's normal .m2ts clip (which sits
+    one folder above SSIF/ and, unlike the video-only demux, carries them) to the
+    encoded video, using the same engine as the main pipeline's Restore Audio &
+    Subtitles option. If that clip is missing or the mux fails, the video-only file
+    is kept as the result and a warning is printed -- never lose the encode."""
+    from types import SimpleNamespace
+    from . import av_restore_cli
+
+    stem = path.splitext(path.basename(ssif_path))[0]
+    m2ts = path.join(path.dirname(path.dirname(path.abspath(ssif_path))), stem + ".m2ts")
+    if not path.exists(m2ts):
+        print(f"[mvc-extract] WARNING: {m2ts} not found; output has no audio/subtitles", file=sys.stderr)
+        os.replace(video_only, output_path)
+        return
+    if progress_cb:
+        progress_cb("restore", 0, 1)
+
+    def secs(t):
+        return None if t is None else str(t).rstrip("s")
+
+    start = secs(cut_start)
+    args = SimpleNamespace(input=video_only, source=m2ts, output=output_path,
+                           source_start_time=None if start in (None, "0") else start,
+                           source_end_time=secs(cut_end))
+    if av_restore_cli.run(args) != 0:
+        print("[mvc-extract] WARNING: audio/subtitle restore failed; keeping the video-only result",
+              file=sys.stderr)
+        os.replace(video_only, output_path)
+    if progress_cb:
+        progress_cb("restore", 1, 1)
+
+
 def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work_dir, output_path,
                         video_codec="hevc_nvenc", quality=18, layout="full_sbs",
-                        keep_temp=False, stop_event=None, progress_cb=None):
+                        restore_av=True, keep_temp=False, stop_event=None, progress_cb=None):
     """Full pipeline: tsMuxeR demux -> interleave (streamed) -> edge264-mvc decode -> ffmpeg encode.
 
     Two things never touch disk: the combined MVC stream (interleaved on the fly
@@ -280,6 +313,9 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
     if ffmpeg_bin is None:
         raise RuntimeError("ffmpeg not found")
 
+    if restore_av and path.splitext(output_path)[1].lower() != ".mkv":
+        raise ValueError("restoring the disc's audio/subtitles needs an .mkv output path")
+    video_only = (path.splitext(output_path)[0] + ".video_only.mkv") if restore_av else output_path
     os.makedirs(work_dir, exist_ok=True)
     meta_path = path.join(work_dir, "_mvc_extract.meta")
     base_es = path.join(work_dir, f"{path.splitext(path.basename(ssif_path))[0]}.track_{avc_track}.264")
@@ -327,7 +363,7 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
         ffmpeg_args = [ffmpeg_bin, "-y", "-hide_banner", "-i", "-"]
         if vf:
             ffmpeg_args += ["-vf", vf]
-        ffmpeg_args += encoder_args(video_codec, quality, layout) + [output_path]
+        ffmpeg_args += encoder_args(video_codec, quality, layout) + [video_only]
 
         # edge264 reads "-" (stdin) and writes Y4M to stdout; ffmpeg reads that pipe.
         # The parent closes its copy of edge264's stdout so a dead ffmpeg is noticed.
@@ -378,13 +414,15 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
                 edge_msg = f.read()[-2000:].decode(errors="replace")
             raise RuntimeError(f"decode incomplete: {frames} of {n} frames encoded "
                                f"(edge264 exit {edge264_proc.returncode}, feeder errors {feed_errors}):\n{edge_msg}")
+        if restore_av:
+            _restore_disc_av(ssif_path, video_only, output_path, cut_start, cut_end, progress_cb)
         return frames
     finally:
         for p in procs:
             if p.poll() is None:
                 p.kill()
         if not keep_temp:
-            for tmp in (base_es, dep_es, meta_path, edge_log):
+            for tmp in (base_es, dep_es, meta_path, edge_log) + ((video_only,) if restore_av else ()):
                 try:
                     os.remove(tmp)
                 except OSError:
@@ -411,6 +449,8 @@ def main():
     parser.add_argument("--layout", type=str, default="full_sbs", choices=LAYOUTS,
                          help="full_sbs 3840x1080 | half_sbs 1920x1080 | full_tb 1920x2160 | half_tb 1920x1080 | "
                               "frame_packed = full_tb plus the Frame Packing SEI flag (libx264 only)")
+    parser.add_argument("--no-audio-subs", action="store_true",
+                         help="skip restoring the disc's audio and subtitle tracks (video only)")
     parser.add_argument("--keep-temp", action="store_true", help="keep the demuxed elementary streams")
     args = parser.parse_args()
 
@@ -430,7 +470,8 @@ def main():
 
     frames = extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end, args.work_dir,
                                  args.output, video_codec=args.video_codec, quality=args.quality,
-                                 layout=args.layout, keep_temp=args.keep_temp, progress_cb=show)
+                                 layout=args.layout, restore_av=not args.no_audio_subs,
+                                 keep_temp=args.keep_temp, progress_cb=show)
     print(f"\n[mvc-extract] done: {args.output} ({frames} frames)", file=sys.stderr)
 
 

@@ -5,6 +5,8 @@ into the 3DECKER root folder (ADR-182):
                  patched build kept in this repo (upstream has no Windows release and
                  its own copy has a 4GB file-size bug -- see that folder's README.txt).
   tsmuxer\\      tsMuxeR (Apache-2.0), downloaded from its official GitHub release.
+  frim\\         FRIMEncode (freeware, videofan3d), downloaded from its author's page and
+                 checked against a pinned SHA-256 -- only needed by SBS-to-MVC.
 
 Safe to run repeatedly: anything already installed is left alone, except that an
 edge264-mvc without the patch marker is replaced with the patched build.
@@ -65,7 +67,9 @@ def main():
         print("[mvc-tools] Windows-only bundles; nothing to do on this platform.")
         return 0
     failed = False
-    for label, fn in (("edge264-mvc", install_edge264), ("tsMuxeR", install_tsmuxer)):
+    from .sbs_to_mvc_cli import install_frim
+    for label, fn in (("edge264-mvc", install_edge264), ("tsMuxeR", install_tsmuxer),
+                      ("FRIMEncode", install_frim)):
         try:
             print(f"[mvc-tools] {label}: {fn()}")
         except Exception as e:

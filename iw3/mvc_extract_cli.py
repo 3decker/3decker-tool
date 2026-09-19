@@ -158,6 +158,8 @@ CODECS = ("hevc_nvenc", "libx265", "libx264")
 # to set it; NVENC has no equivalent at all.
 _SEI_TYPE = {"half_sbs": 3, "half_tb": 4, "frame_packed": 4}
 
+_COLOR_TAG = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+
 _SPLIT_EYES = "split[a][b];[a]crop=iw/2:ih:0:0[l];[b]crop=iw/2:ih:iw/2:0[r];[l][r]vstack"
 
 
@@ -189,10 +191,11 @@ def encoder_args(codec, quality, layout):
         args = ["-c:v", "libx264", "-crf", str(quality)]
         if layout in _SEI_TYPE:
             args += ["-x264-params", f"frame-packing={_SEI_TYPE[layout]}"]
-    # A 3D Blu-ray is Rec.709 limited range; Y4M carries no colour tags, so without
-    # these a player has to guess.
-    args += ["-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709",
-             "-color_trc", "bt709", "-color_range", "tv"]
+    # The Rec.709 tags are applied by _COLOR_TAG in the filter chain, NOT with ffmpeg's
+    # -colorspace/-color_* output flags: those make ffmpeg CONVERT the picture from an
+    # assumed BT.601 to BT.709 (measured: luma only 37.9 dB against a bit-exact decode),
+    # while setparams only labels it (bit-exact, verified).
+    args += ["-pix_fmt", "yuv420p"]
     return args
 
 
@@ -360,9 +363,8 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
               file=sys.stderr)
 
         vf = layout_filter(layout)
-        ffmpeg_args = [ffmpeg_bin, "-y", "-hide_banner", "-i", "-"]
-        if vf:
-            ffmpeg_args += ["-vf", vf]
+        ffmpeg_args = [ffmpeg_bin, "-y", "-hide_banner", "-i", "-",
+                       "-vf", f"{vf},{_COLOR_TAG}" if vf else _COLOR_TAG]
         ffmpeg_args += encoder_args(video_codec, quality, layout) + [video_only]
 
         # edge264 reads "-" (stdin) and writes Y4M to stdout; ffmpeg reads that pipe.

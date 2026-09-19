@@ -34,6 +34,20 @@ re-encoding — zero quality loss, all audio and subtitle tracks included. Play 
 on a 3D Blu-ray player or in PowerDVD, or keep it as a perfect backup. (VLC and
 MPC-HC can't play this kind, so use the other layouts for those.)
 
+**New: "SBS to 3D Blu-ray MVC" (Tools tab).** Turns one of your own 3D videos
+(side-by-side or top-bottom, full or half) into a real 3D Blu-ray disc image
+you can play in true full-resolution 3D on a 3D Blu-ray player or PowerDVD, or
+burn to a BD-R. It splits the two eyes, encodes them as a proper 3D Blu-ray
+pair, and keeps your audio and picture subtitles. 3D Blu-ray only allows
+1920x1080 at 23.976 or 24 frames per second, so other frame rates are refused
+instead of quietly changing your movie's speed. The encoding runs on the CPU
+(no GPU option exists for this format on current hardware) at roughly
+real-time speed or faster.
+
+**Fixed: 3D Blu-ray Import changed the colors slightly.** The video's color
+label was being applied in a way that also shifted the colors a little. Now
+it only labels them — the picture is a bit-for-bit match with the disc.
+
 ---
 
 ## Update — September 18, 2026

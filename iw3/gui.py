@@ -5462,6 +5462,153 @@ class MainFrame(wx.Frame):
         sizer_bluray = wx.StaticBoxSizer(self.grp_bluray, wx.VERTICAL)
         sizer_bluray.Add(pane_header_row_bluray, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone tool: SBS to 3D Blu-ray (MVC) (ADR-182 UPDATE 6) ---
+        # python -m iw3.sbs_to_mvc_cli as its own subprocess; stdout is a dedicated
+        # progress channel (IW3_MVC_PROGRESS <stage> <done> <total>), stderr feeds the log.
+        self.grp_sbs2mvc = wx.StaticBox(self.tab_tools, label=T("SBS to 3D Blu-ray MVC (Standalone Tool)"))
+
+        self.cpn_sbs2mvc = wx.CollapsiblePane(self.grp_sbs2mvc, label=T("Settings"), name="cpn_sbs2mvc")
+        self.cpn_sbs2mvc.Collapse(True)
+        self.cpn_sbs2mvc.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED, self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_sbs2mvc.GetPane().SetName("cpn_sbs2mvc_pane")
+
+        self.lbl_sbs2mvc_input = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("3D Video (SBS or Top-Bottom)"))
+        self.txt_sbs2mvc_input = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), name="txt_sbs2mvc_input")
+        self.txt_sbs2mvc_input.SetToolTip(
+            T("What it's for: a 3D video with both eyes in one picture -- side-by-side or top-bottom, such "
+              "as one of your own 3DECKER conversions -- to turn into a real 3D Blu-ray (MVC) disc image.\n"
+              "Why: a real 3D Blu-ray plays in true full-resolution 3D (each eye 1080p) on a 3D Blu-ray "
+              "player or PowerDVD, and can be burned to a BD-R.\n"
+              "Con: 3D Blu-ray only allows 1920x1080 at 23.976 or 24 frames per second -- other frame "
+              "rates are refused rather than silently changing your movie's speed. HDR video is refused "
+              "too (make it SDR first). Read-only: your file is never modified.\n"
+              "Recommended: the direct iw3 output (Full or Half Side-by-Side)."))
+        self.btn_sbs2mvc_input = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("..."))
+
+        self.lbl_sbs2mvc_output = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Output ISO"))
+        self.txt_sbs2mvc_output = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), name="txt_sbs2mvc_output")
+        self.txt_sbs2mvc_output.SetToolTip(
+            T("Where to write the 3D Blu-ray disc image (.iso). Auto-filled with '<video name>_MVC.iso' "
+              "next to the input once you pick one.\n"
+              "Con: the job also needs a temporary folder (created next to this file, deleted when done) "
+              "and then the ISO itself -- together roughly 3x the finished ISO's size. The tool refuses "
+              "to start if there isn't enough free space."))
+        self.btn_sbs2mvc_output = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("..."))
+
+        self.lbl_sbs2mvc_layout = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Input Layout"))
+        self.cbo_sbs2mvc_layout = wx.ComboBox(self.cpn_sbs2mvc.GetPane(), name="cbo_sbs2mvc_layout")
+        self.cbo_sbs2mvc_layout.SetEditable(False)
+        self.cbo_sbs2mvc_layout.Append(T("Full Side-by-Side (3840x1080)"), "full_sbs")
+        self.cbo_sbs2mvc_layout.Append(T("Half Side-by-Side (1920x1080)"), "half_sbs")
+        self.cbo_sbs2mvc_layout.Append(T("Full Top-Bottom (1920x2160)"), "full_tb")
+        self.cbo_sbs2mvc_layout.Append(T("Half Top-Bottom (1920x1080)"), "half_tb")
+        self.cbo_sbs2mvc_layout.SetSelection(0)
+        self.cbo_sbs2mvc_layout.SetToolTip(
+            T("What it's for: how the two eyes are stored in YOUR input video, so they can be cut apart "
+              "correctly. Picked automatically from the video's size when you choose a file -- change it "
+              "if that guess is wrong.\n"
+              "Full: each eye at full size (Side-by-Side is twice as wide as one eye, Top-Bottom twice as "
+              "tall). Half: each eye squeezed to half width (or height) so the whole frame is a normal "
+              "1920x1080 -- the squeeze is undone when the eyes are stretched back to 1920x1080 each.\n"
+              "Con: Half inputs only have half the detail in one direction, and that can't be recovered.\n"
+              "Recommended: Full Side-by-Side if your input is 3840x1080."))
+
+        self.chk_sbs2mvc_swap = wx.CheckBox(self.cpn_sbs2mvc.GetPane(), label=T("Swap eyes"), name="chk_sbs2mvc_swap")
+        self.chk_sbs2mvc_swap.SetToolTip(
+            T("What it's for: use only if your input has the RIGHT eye first (a 'cross-eyed' layout). "
+              "Wrong setting = the depth looks inside-out (things that should pop out sink in).\n"
+              "Recommended: off -- normal side-by-side and top-bottom put the left eye first."))
+
+        self.lbl_sbs2mvc_bitrate = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Bitrate (Mbps)"))
+        self.txt_sbs2mvc_bitrate = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), value="20", name="txt_sbs2mvc_bitrate")
+        self.txt_sbs2mvc_bitrate.SetToolTip(
+            T("What it's for: target video bitrate per eye-view, in Mbps. Higher = better picture, bigger file.\n"
+              "Values: 2-40 (3D Blu-ray allows about 40 combined). Measured on a real clip against the input: "
+              "12 -> 45.9 dB, 20 -> 47.4 dB, 30 -> 48.5 dB (above ~45 dB is visually indistinguishable). "
+              "The encoder only uses what the picture needs, so an easy movie is smaller than the target.\n"
+              "Con: the encode is software-only (no GPU); expect roughly real-time speed or a bit faster.\n"
+              "Recommended: 20."))
+
+        self.chk_sbs2mvc_restore_av = wx.CheckBox(
+            self.cpn_sbs2mvc.GetPane(), label=T("Include audio && subtitles"), name="chk_sbs2mvc_restore_av")
+        self.chk_sbs2mvc_restore_av.SetValue(True)
+        self.chk_sbs2mvc_restore_av.SetToolTip(
+            T("What it's for: carries the input's audio and subtitle tracks into the disc.\n"
+              "How: Blu-ray-legal audio (AC-3, DTS, TrueHD, PCM) is copied unchanged; anything else "
+              "(AAC, Opus, FLAC...) is converted to AC-3 first. Picture-based (PGS) subtitles are copied; "
+              "text subtitles (SRT/ASS) can't be used on a Blu-ray and are skipped -- the log says so.\n"
+              "Recommended: on."))
+
+        self.btn_sbs2mvc_run = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Run"))
+        self.btn_sbs2mvc_run.SetToolTip(
+            T("What it's for: starts the conversion as a separate background process (python -m "
+              "iw3.sbs_to_mvc_cli) -- your input file is never modified.\n"
+              "Not verified on real hardware: the disc image reads back correctly through this app and its "
+              "structure is a normal 3D Blu-ray, but playback on a real 3D Blu-ray player or PowerDVD is "
+              "still to be confirmed -- try a short clip first.\n"
+              "Recommended: watch the progress bar; check the log afterward."))
+        self.btn_sbs2mvc_cancel = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Cancel"))
+        self.btn_sbs2mvc_cancel.Disable()
+        self.btn_sbs2mvc_cancel.SetToolTip(
+            T("Stops the running conversion and all the programs it started, and removes the temporary "
+              "files and any partial ISO."))
+
+        self.gauge_sbs2mvc = wx.Gauge(self.cpn_sbs2mvc.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_sbs2mvc.SetToolTip(
+            T("Real progress of the current stage (encoding frames, then building the disc), read live "
+              "from the background process."))
+        self.lbl_sbs2mvc_progress = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label="")
+
+        self.txt_sbs2mvc_log = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                            size=self.FromDIP((-1, 60)), name="txt_sbs2mvc_log")
+        self.txt_sbs2mvc_log.SetToolTip(
+            T("Shows this tool's own messages when the job ends: notes (such as audio converted to AC-3 or "
+              "subtitles skipped) and the exact reason if it refused or failed."))
+        self.btn_sbs2mvc_clear = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Clear"))
+        self.btn_sbs2mvc_clear.SetToolTip(
+            T("Empties the log box above. Disabled while a job is running; re-enabled when it finishes."))
+
+        self.btn_sbs2mvc_input.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_input)
+        self.btn_sbs2mvc_output.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_output)
+        self.btn_sbs2mvc_run.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_run)
+        self.btn_sbs2mvc_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_cancel)
+        self.btn_sbs2mvc_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_sbs2mvc_log.Clear())
+        self.sbs2mvc_proc = None
+        self.sbs2mvc_cancelled = False
+        self.sbs2mvc_start_time = 0.0
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_sbs2mvc_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_sbs2mvc_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_sbs2mvc_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_sbs2mvc_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_sbs2mvc_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_sbs2mvc_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_sbs2mvc_layout, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sbs2mvc_layout, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_sbs2mvc_swap, (h, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_sbs2mvc_bitrate, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_sbs2mvc_bitrate, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_sbs2mvc_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.btn_sbs2mvc_run, (h := h + 1, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_sbs2mvc_cancel, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_sbs2mvc, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_sbs2mvc_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_sbs2mvc_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_sbs2mvc_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_sbs2mvc.GetPane().SetSizer(layout)
+
+        self.pnl_sbs2mvc_dot = wx.Panel(self.grp_sbs2mvc, size=self.FromDIP((10, 10)))
+        self.pnl_sbs2mvc_dot.SetBackgroundColour(wx.Colour(167, 139, 250))
+        pane_header_row_sbs2mvc = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_sbs2mvc.Add(self.pnl_sbs2mvc_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_sbs2mvc.Add(self.cpn_sbs2mvc, 1, wx.EXPAND)
+
+        sizer_sbs2mvc = wx.StaticBoxSizer(self.grp_sbs2mvc, wx.VERTICAL)
+        sizer_sbs2mvc.Add(pane_header_row_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
+
         # Each category below is its own panel (a Notebook tab, or a Single Page
         # section -- see ADR-037) instead of one big 4-column grid -- every sizer_*
         # here was already fully built above (unchanged), this only changes how
@@ -5504,6 +5651,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_sharpen, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_bluray, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
         # ADR-037: the 7 category panels built above are already fully self-contained
@@ -7049,7 +7197,7 @@ class MainFrame(wx.Frame):
         only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
                       "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
-                      "cpn_bluray")
+                      "cpn_bluray", "cpn_sbs2mvc")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -8735,6 +8883,7 @@ class MainFrame(wx.Frame):
         "txt_rife_standalone_input", "txt_rife_standalone_output",
         "txt_rife_standalone_target_fps", "txt_rife_standalone_log",
         "txt_bluray_disc", "txt_bluray_output", "txt_bluray_log",
+        "txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log",
     )
     # The one field in that list whose real default isn't blank -- confirmed
     # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
@@ -11646,6 +11795,172 @@ class MainFrame(wx.Frame):
         self.SetStatusText(T("Importing 3D Blu-ray..."))
         startWorker(self.on_exit_bluray_worker, self.run_bluray, wargs=(cmd,))
 
+    # --- SBS to 3D Blu-ray MVC (standalone tool, see ADR-182 UPDATE 6) ---
+
+    def on_click_btn_sbs2mvc_input(self, event):
+        with wx.FileDialog(self, message=T("Select 3D Video (SBS or Top-Bottom)"), wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_sbs2mvc_input.GetValue():
+                dlg.SetPath(self.txt_sbs2mvc_input.GetValue())
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            input_path = dlg.GetPath()
+        self.txt_sbs2mvc_input.SetValue(input_path)
+        if not self.txt_sbs2mvc_output.GetValue():
+            self.txt_sbs2mvc_output.SetValue(f"{path.splitext(input_path)[0]}_MVC.iso")
+        try:
+            from .sbs_to_mvc_cli import probe_video, guess_layout
+            width, height = probe_video(input_path)[:2]
+            guessed = guess_layout(width, height)
+            for i in range(self.cbo_sbs2mvc_layout.GetCount()):
+                if self.cbo_sbs2mvc_layout.GetClientData(i) == guessed:
+                    self.cbo_sbs2mvc_layout.SetSelection(i)
+                    break
+        except Exception:  # the guess is only a convenience
+            pass
+
+    def on_click_btn_sbs2mvc_output(self, event):
+        with wx.FileDialog(self, message=T("Save 3D Blu-ray Disc Image As"),
+                           wildcard="Disc images (*.iso)|*.iso|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_sbs2mvc_output.GetValue():
+                dlg.SetPath(self.txt_sbs2mvc_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_sbs2mvc_output.SetValue(dlg.GetPath())
+
+    def _update_sbs2mvc_progress(self, stage, done, total):
+        # Called via wx.CallAfter from run_sbs2mvc's background thread.
+        names = {"encode": T("Encoding 3D"), "mux": T("Building the disc")}
+        name = names.get(stage, stage)
+        if total > 0:
+            self.gauge_sbs2mvc.SetRange(int(total))
+            self.gauge_sbs2mvc.SetValue(int(min(done, total)))
+            percent = min(100, int(done / total * 100))
+            if stage == "encode":
+                elapsed = time() - self.sbs2mvc_start_time
+                fps = done / (elapsed + 1e-6)
+                eta = self._format_duration((total - done) / fps) if fps > 0 and done > 0 else "?"
+                self.lbl_sbs2mvc_progress.SetLabel(
+                    f"{name}: {int(done)}/{int(total)} {T('frames')} ({percent}%) "
+                    f"[{fps:.1f} FPS, {T('elapsed')} {self._format_duration(elapsed)}, ETA {eta}]")
+            else:
+                self.lbl_sbs2mvc_progress.SetLabel(f"{name}: {percent}%")
+        else:
+            self.gauge_sbs2mvc.Pulse()
+            self.lbl_sbs2mvc_progress.SetLabel(f"{name}...")
+
+    def run_sbs2mvc(self, cmd):
+        self.sbs2mvc_proc = proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+        for line in proc.stdout:
+            parts = line.strip().split(" ")
+            if len(parts) == 4 and parts[0] == "IW3_MVC_PROGRESS":
+                try:
+                    wx.CallAfter(self._update_sbs2mvc_progress, parts[1], float(parts[2]), float(parts[3]))
+                except ValueError:
+                    continue
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
+
+    def _cleanup_after_sbs2mvc_cancel(self):
+        output_path = self.txt_sbs2mvc_output.GetValue().strip()
+        stem = path.splitext(path.basename(output_path))[0]
+        out_dir = path.dirname(path.abspath(output_path))
+        shutil.rmtree(path.join(out_dir, f"_sbs2mvc_work_{stem}"), ignore_errors=True)
+        try:
+            if path.exists(output_path) and path.getmtime(output_path) >= self.sbs2mvc_start_time - 1:
+                os.remove(output_path)
+        except OSError:
+            pass
+
+    def on_exit_sbs2mvc_worker(self, result):
+        self.btn_sbs2mvc_run.Enable()
+        self.btn_sbs2mvc_clear.Enable()
+        self.btn_sbs2mvc_cancel.Disable()
+        self.sbs2mvc_proc = None
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_sbs2mvc_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        self.txt_sbs2mvc_log.SetValue(output.replace("\r", "\n"))
+        self.txt_sbs2mvc_log.ShowPosition(self.txt_sbs2mvc_log.GetLastPosition())
+        if self.sbs2mvc_cancelled:
+            self._cleanup_after_sbs2mvc_cancel()
+            self.lbl_sbs2mvc_progress.SetLabel(T("Cancelled"))
+            self.SetStatusText(T("SBS to 3D Blu-ray cancelled"))
+        elif returncode == 0:
+            self.gauge_sbs2mvc.SetValue(self.gauge_sbs2mvc.GetRange())
+            self.lbl_sbs2mvc_progress.SetLabel(
+                f"{T('Done')} [{T('elapsed')} {self._format_duration(time() - self.sbs2mvc_start_time)}]")
+            self.SetStatusText(T("3D Blu-ray disc image created successfully"))
+        else:
+            self.SetStatusText(T("SBS to 3D Blu-ray failed -- see the log below"))
+            wx.MessageBox(T("The conversion failed or refused -- see the log box for the exact reason."),
+                          T("SBS to 3D Blu-ray MVC"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_sbs2mvc_cancel(self, event):
+        proc = self.sbs2mvc_proc
+        if proc is not None and proc.poll() is None:
+            self.sbs2mvc_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_sbs2mvc_cancel.Disable()
+
+    def build_sbs2mvc_command(self):
+        """Returns (cmd, None) or (None, error_message); no process is started."""
+        input_path = self.txt_sbs2mvc_input.GetValue().strip()
+        output_path = self.txt_sbs2mvc_output.GetValue().strip()
+        if not input_path or not path.exists(input_path):
+            return None, T("Select a valid 3D video file first.")
+        if not output_path:
+            return None, T("Set an Output ISO path first.")
+        if path.splitext(output_path)[1].lower() != ".iso":
+            return None, T("Output ISO must end in .iso.")
+        if path.abspath(output_path) == path.abspath(input_path):
+            return None, T("Output must be different from the input video.")
+        if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, 40, allow_empty=False):
+            return None, T("Bitrate must be a number between 2 and 40 (20 recommended).")
+        layout = self.cbo_sbs2mvc_layout.GetClientData(self.cbo_sbs2mvc_layout.GetSelection())
+        cmd = [sys.executable, "-m", "iw3.sbs_to_mvc_cli", "--input", input_path, "--output", output_path,
+               "--layout", layout, "--bitrate", str(float(self.txt_sbs2mvc_bitrate.GetValue())), "--gui-progress"]
+        if self.chk_sbs2mvc_swap.GetValue():
+            cmd.append("--swap-eyes")
+        if not self.chk_sbs2mvc_restore_av.GetValue():
+            cmd.append("--no-audio-subs")
+        return cmd, None
+
+    def on_click_btn_sbs2mvc_run(self, event):
+        cmd, error = self.build_sbs2mvc_command()
+        if error:
+            wx.MessageBox(error, T("SBS to 3D Blu-ray MVC"), wx.OK | wx.ICON_WARNING)
+            return
+        self.txt_sbs2mvc_log.SetValue(T("Running...\n"))
+        self.gauge_sbs2mvc.SetRange(1)
+        self.gauge_sbs2mvc.SetValue(0)
+        self.lbl_sbs2mvc_progress.SetLabel("")
+        self.sbs2mvc_cancelled = False
+        self.sbs2mvc_start_time = time()
+        self.btn_sbs2mvc_run.Disable()
+        self.btn_sbs2mvc_clear.Disable()
+        self.btn_sbs2mvc_cancel.Enable()
+        self.SetStatusText(T("Converting to 3D Blu-ray..."))
+        startWorker(self.on_exit_sbs2mvc_worker, self.run_sbs2mvc, wargs=(cmd,))
+
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))
 LOCALE_DICT = LOCALES.get(get_default_locale(), {})
@@ -12608,9 +12923,9 @@ def _self_test_video_filter_collapsible_section():
 
 
 def _self_test_standalone_tools_collapsible_sections():
-    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 9
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 10
     Guided Light panes added to Standalone Tools (ADR-101, one per tool; ADR-169
-    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th) --
+    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th; ADR-182 UPDATE 6 adds SBS to 3D Blu-ray MVC as the 10th) --
     tab_tools/tab_wrap_tools/on_toggled_standalone_tools_collapsible_pane in place of
     the Stereo Generation equivalents. Also checks each pane has a real, unique
     name (the exact bug class this pattern already broke once with 2+ panes sharing
@@ -12628,9 +12943,9 @@ def _self_test_standalone_tools_collapsible_sections():
         frame = gui_mod.MainFrame()
         panes = frame.get_standalone_tools_sliders_and_panes()
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
-        assert len(panes) == 9, f"expected 9 Standalone Tools panes, found {len(panes)}"
+        assert len(panes) == 10, f"expected 10 Standalone Tools panes, found {len(panes)}"
         names = [p.GetName() for p in panes]
-        assert len(set(names)) == 9, f"pane names are not all unique: {names}"
+        assert len(set(names)) == 10, f"pane names are not all unique: {names}"
         for p in panes:
             assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
 
@@ -16499,6 +16814,94 @@ def _self_test_bluray_import_panel():
     print("_self_test_bluray_import_panel: PASS")
 
 
+def _self_test_sbs2mvc_panel():
+    """SBS to 3D Blu-ray MVC standalone tool (ADR-182 UPDATE 6): widgets and defaults,
+    command building and validation, Run/Cancel/Clear lockstep, cancel cleanup. No
+    encoder or disc is used: startWorker is monkeypatched."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.cpn_sbs2mvc.GetPane().GetName() == "cpn_sbs2mvc_pane"
+        assert frame.cpn_sbs2mvc in frame.get_standalone_tools_sliders_and_panes()
+        for name in ("txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log"):
+            assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        assert [frame.cbo_sbs2mvc_layout.GetClientData(i) for i in range(frame.cbo_sbs2mvc_layout.GetCount())] == \
+            ["full_sbs", "half_sbs", "full_tb", "half_tb"]
+        assert frame.txt_sbs2mvc_bitrate.GetValue() == "20"
+        assert frame.chk_sbs2mvc_restore_av.GetValue() and not frame.chk_sbs2mvc_swap.GetValue()
+        assert frame.btn_sbs2mvc_run.IsEnabled() and not frame.btn_sbs2mvc_cancel.IsEnabled()
+
+        cmd, err = frame.build_sbs2mvc_command()
+        assert cmd is None and err, "empty input must be refused"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = path.join(tmpdir, "movie_sbs.mkv")
+            open(video, "wb").close()
+            frame.txt_sbs2mvc_input.SetValue(video)
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd is None and err, "empty output must be refused"
+            frame.txt_sbs2mvc_output.SetValue(path.join(tmpdir, "movie.mkv"))
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd is None and err, "non-.iso output must be refused"
+            out = path.join(tmpdir, "movie_MVC.iso")
+            frame.txt_sbs2mvc_output.SetValue(out)
+            frame.txt_sbs2mvc_bitrate.SetValue("99")
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd is None and err, "out-of-range bitrate must be refused"
+            frame.txt_sbs2mvc_bitrate.SetValue("20")
+
+            cmd, err = frame.build_sbs2mvc_command()
+            assert err is None
+            assert cmd[1:3] == ["-m", "iw3.sbs_to_mvc_cli"], cmd
+            assert cmd[cmd.index("--input") + 1] == video and cmd[cmd.index("--output") + 1] == out
+            assert cmd[cmd.index("--layout") + 1] == "full_sbs"
+            assert cmd[cmd.index("--bitrate") + 1] == "20.0"
+            assert "--gui-progress" in cmd and "--swap-eyes" not in cmd and "--no-audio-subs" not in cmd
+
+            frame.cbo_sbs2mvc_layout.SetSelection(3)
+            frame.chk_sbs2mvc_swap.SetValue(True)
+            frame.chk_sbs2mvc_restore_av.SetValue(False)
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd[cmd.index("--layout") + 1] == "half_tb"
+            assert "--swap-eyes" in cmd and "--no-audio-subs" in cmd
+
+            gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
+            frame.on_click_btn_sbs2mvc_run(None)
+            assert not frame.btn_sbs2mvc_run.IsEnabled() and not frame.btn_sbs2mvc_clear.IsEnabled()
+            assert frame.btn_sbs2mvc_cancel.IsEnabled()
+            frame.on_exit_sbs2mvc_worker(_FakeResult((0, "[sbs2mvc] done")))
+            assert frame.btn_sbs2mvc_run.IsEnabled() and frame.btn_sbs2mvc_clear.IsEnabled()
+            assert not frame.btn_sbs2mvc_cancel.IsEnabled()
+            assert "done" in frame.txt_sbs2mvc_log.GetValue()
+
+            work = path.join(tmpdir, "_sbs2mvc_work_movie_MVC")
+            os.makedirs(work)
+            open(path.join(work, "base.264"), "wb").close()
+            open(out, "wb").close()
+            frame.sbs2mvc_start_time = time() - 5
+            frame.sbs2mvc_cancelled = True
+            frame.on_exit_sbs2mvc_worker(_FakeResult((1, "")))
+            assert not path.exists(work) and not path.exists(out), "cancel must remove temp folder and partial ISO"
+            assert path.exists(video), "the input video must never be touched"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_sbs2mvc_panel: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -16578,6 +16981,7 @@ def _run_self_tests():
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,
+        _self_test_sbs2mvc_panel,
     ]
     failures = []
     for test in tests:

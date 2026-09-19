@@ -2385,3 +2385,84 @@ temporal-stabilize-declined dark/VFX-heavy content per 13.14):**
 --preserve-screen-border --stereo-mode-tag --half-sbs
 --video-codec hevc_nvenc --crf 15 --metadata filename
 ```
+
+### 14.1 Pop/spatial separation/immersion -- real disparity measurement at identical settings
+
+Same two rendered clips as above (bright campus scene, dark cabin scene),
+same fixed Divergence 2.5/Convergence 0.25/Pop -0.50 for both models. Real
+near/mid/far disparity measured via template matching (left-eye patch
+searched against the right eye, same technique as 11.9) -- NOT crispness or
+stability, a direct measurement of actual pixel-shift/pop-out strength.
+
+One methodology note: the first NEAR point tried in the bright scene (a
+foreground fence post) gave an unreliable reading (match confidence 0.36) --
+that fence is deliberately out-of-focus bokeh in the original cinematography,
+which defeats template matching (no texture to lock onto). Re-picked a sharp
+in-focus foreground object (a bicycle) instead -- confidence rose to
+0.97/0.97 and the reading became sane. Recorded here so a future session
+doesn't waste time on the same trap: **a template-matching disparity probe
+needs a sharp, non-repetitive real feature at the depth it's meant to
+represent, not just "the physically closest thing in frame."** (A first
+attempt at the bike's wheel also failed -- 0.74 confidence, wildly
+inconsistent reading -- because the spokes are a repetitive pattern that
+causes the same aperture-problem ambiguity; used the seat/frame instead.)
+
+| Point | Metric_Large (bright) | VDA_L (bright) | Metric_Large (dark) | VDA_L (dark) |
+|---|---|---|---|---|
+| Near | +24px | **+36px** | -1px | **+5px** |
+| Mid | +22px | **+31px** | +18px | **+26px** |
+| Far | +35px | **+41px** | +16px | **+23px** |
+| Spread (max-min) | 13px | 10px | 19px | 21px |
+
+**VDA_L produces more disparity at every single point measured, in both
+scenes** -- roughly 6-13px more pixel-shift at every depth layer, despite
+both models running the exact same Divergence/Convergence/Pop numbers. Real
+pixel disparity is Divergence x (depth value - Convergence), so this is a
+direct measurement of VDA_L assigning more extreme (further from the
+Convergence point) depth values to the same real content than Metric_Large
+does -- more perceived pop/separation/immersion, not an artifact of the
+settings. The near-to-far SPREAD (how differentiated the layers feel from
+each other, as opposed to how far they all sit from the screen) is close
+between the two and flips by scene (Metric_Large slightly wider in bright,
+VDA_L slightly wider in dark) -- not a consistent advantage either way.
+
+**Combined verdict (crispness + stability + pop, all at these exact settings):
+VDA_L wins on every axis tested.**
+
+### 14.2 Consolidated settings table
+
+| Setting | VDA_L | Any_V3_Metric_Large | Shared? |
+|---|---|---|---|
+| Depth Model | VDA_L | Any_V3_Metric_Large | -- |
+| Depth Resolution | 648 | 384 | Model-specific |
+| Divergence | 2.5 | 2.5 | Shared |
+| Convergence (constant) | 0.25 | 0.25 | Shared |
+| Midground Pop | -0.50, threshold 0-100% | -0.50, threshold 0-100% | Shared |
+| Depth Detail Refinement | On, strength 0.5 | On, strength 1.25 | Model-specific |
+| Sharpen | On, strength 1.0 | On, strength 1.0 | Shared |
+| Edge Dilation | 3/2 | 3/2 | Shared (see note below) |
+| Edge Repair | Off | Off | Shared |
+| EMA Decay/Buffer | 0.99 / 650 | 0.99 / 650 | Shared* |
+| Object Stability | Off | Off | Shared |
+| Depth Anti-Aliasing | Off | Off | Shared |
+| Method | mlbw_l2_inpaint | mlbw_l2_inpaint | Shared |
+| Format | Half SBS | Half SBS | Shared |
+
+*EMA Buffer/Decay: proven-best for Metric_Large via a real sweep (13.8);
+reused as a reasonable default for VDA_L, which has no independent EMA
+sweep of its own -- flagged, not silently assumed.
+
+**Edge Dilation 3/2 specifically -- why, given divergence here is 2.5, not
+the values it was actually tested at:** not fresh-tested at 2.5 for either
+model this session (methodology note in 14 above). Reused because: VDA_L's
+own sweep (11.8, tested exactly at Divergence 2.5) found genuinely no
+measurable difference across 0/0 through 3/2, so any value is equally
+defensible for VDA_L and 3/2 was picked to match Metric_Large's own real
+finding, for a uniform shared setting. Metric_Large's sweep (12.7, tested at
+Divergence 2.75, not 2.5) found a small but real +0.5% GradMag gain from 3/2
+over 0/0 -- the one value with a proven (if modest) benefit for either
+model. Also matches the GUI tooltip's own documented Divergence-to-dilation
+pairing guide (2.0-2.25 -> 2/1, 3.0-3.5 -> 3/2; 2.5 sits between, closer to
+the 3/2 end). Not re-verified at exactly 2.5 for Metric_Large -- worth a
+fresh check if this setting is ever suspected of mattering more than the
+existing data suggests.

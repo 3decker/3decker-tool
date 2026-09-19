@@ -150,15 +150,25 @@ def interleave_mvc(base_path, dependent_path, out_path):
     return len(base_bounds), len(dep_bounds), n
 
 
-LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb", "frame_packed")
+LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb",
+           "full_sbs_4k", "half_sbs_4k", "full_tb_4k", "half_tb_4k", "frame_packed")
 CODECS = ("hevc_nvenc", "libx265", "libx264")
 
 # Only libx264 can write the H.264 Frame Packing SEI that lets a 3D TV/player
 # auto-detect the layout (ADR-181). x265 defines the SEI type but exposes no way
 # to set it; NVENC has no equivalent at all.
-_SEI_TYPE = {"half_sbs": 3, "half_tb": 4, "frame_packed": 4}
+_SEI_TYPE = {"half_sbs": 3, "half_tb": 4, "half_sbs_4k": 3, "half_tb_4k": 4, "frame_packed": 4}
 
 _COLOR_TAG = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+
+# 4K layouts: each 1080p eye is ENLARGED (Lanczos -- no new detail; use the Upscale tool for AI
+# upscaling) to the per-eye size below, then the eyes are stacked. name -> (eye_w, eye_h, stack filter)
+_LAYOUTS_4K = {
+    "full_sbs_4k": (3840, 2160, "hstack"),   # 7680x2160
+    "half_sbs_4k": (1920, 2160, "hstack"),   # 3840x2160, each eye squeezed to half width
+    "full_tb_4k": (3840, 2160, "vstack"),    # 3840x4320
+    "half_tb_4k": (3840, 1080, "vstack"),    # 3840x2160, each eye squeezed to half height
+}
 
 _SPLIT_EYES = "split[a][b];[a]crop=iw/2:ih:0:0[l];[b]crop=iw/2:ih:iw/2:0[r];[l][r]vstack"
 
@@ -174,6 +184,10 @@ def layout_filter(layout):
         return _SPLIT_EYES
     if layout == "half_tb":
         return _SPLIT_EYES + ",scale=iw:ih/2:flags=lanczos"
+    if layout in _LAYOUTS_4K:
+        w, h, stack = _LAYOUTS_4K[layout]
+        return (f"split[a][b];[a]crop=iw/2:ih:0:0,scale={w}:{h}:flags=lanczos[l];"
+                f"[b]crop=iw/2:ih:iw/2:0,scale={w}:{h}:flags=lanczos[r];[l][r]{stack}")
     raise ValueError(f"unknown layout {layout!r}; choose from {LAYOUTS}")
 
 
@@ -647,6 +661,8 @@ def main():
                          help="bd3d_iso = lossless copy into a 3D Blu-ray .iso (no re-encode; --output must end in "
                               ".iso; codec/quality ignored) | "
                               "full_sbs 3840x1080 | half_sbs 1920x1080 | full_tb 1920x2160 | half_tb 1920x1080 | "
+                              "*_4k = the same four with each eye enlarged to 4K (full_sbs_4k 7680x2160, "
+                              "half_sbs_4k 3840x2160, full_tb_4k 3840x4320, half_tb_4k 3840x2160) | "
                               "frame_packed = full_tb plus the Frame Packing SEI flag (libx264 only)")
     parser.add_argument("--no-audio-subs", action="store_true",
                          help="skip restoring the disc's audio and subtitle tracks (video only)")

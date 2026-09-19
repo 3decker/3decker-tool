@@ -5309,6 +5309,10 @@ class MainFrame(wx.Frame):
         self.cbo_bluray_layout.Append(T("Half Side-by-Side (1920x1080)"), "half_sbs")
         self.cbo_bluray_layout.Append(T("Full Top-Bottom (1920x2160)"), "full_tb")
         self.cbo_bluray_layout.Append(T("Half Top-Bottom (1920x1080)"), "half_tb")
+        self.cbo_bluray_layout.Append(T("Full Side-by-Side 4K (7680x2160)"), "full_sbs_4k")
+        self.cbo_bluray_layout.Append(T("Half Side-by-Side 4K (3840x2160)"), "half_sbs_4k")
+        self.cbo_bluray_layout.Append(T("Full Top-Bottom 4K (3840x4320)"), "full_tb_4k")
+        self.cbo_bluray_layout.Append(T("Half Top-Bottom 4K (3840x2160)"), "half_tb_4k")
         self.cbo_bluray_layout.Append(T("Frame Packed (auto-detected by TVs, H.264 only)"), "frame_packed")
         self.cbo_bluray_layout.Append(
             T("Lossless 3D Blu-ray ISO (no re-encode, for 3D Blu-ray players / PowerDVD)"), "bd3d_iso")
@@ -5324,6 +5328,12 @@ class MainFrame(wx.Frame):
               "prefer this over side-by-side.\n"
               "Half Top-Bottom: eyes stacked and squeezed to half height -- a normal 1920x1080 frame. Same "
               "H.264 auto-detect flag as Half Side-by-Side.\n"
+              "The four 4K entries: the same four arrangements with each eye ENLARGED to 4K -- Full "
+              "Side-by-Side 4K is 7680x2160, Half Side-by-Side 4K and Half Top-Bottom 4K are 3840x2160, Full "
+              "Top-Bottom 4K is 3840x4320. Pick one when your TV, projector or headset wants a 4K-sized "
+              "frame. A 3D Blu-ray only holds 1080p per eye, so this is a plain enlargement (Lanczos) and "
+              "adds no new detail -- for a real AI upscale, run the result through the Upscale with waifu2x "
+              "tool.\n"
               "Frame Packed: Full Top-Bottom plus the 3D auto-detect flag, so a compatible TV or player "
               "switches into 3D by itself. Needs the H.264 codec -- picking it switches the codec for you.\n"
               "Lossless 3D Blu-ray ISO: NOT a video file -- an exact copy of the disc's own two-view 3D "
@@ -5334,8 +5344,9 @@ class MainFrame(wx.Frame):
               "layouts for those. About 25-34 GB for a full movie (much bigger than the other options). "
               "Subtitle depth: whether disc subtitles keep their 3D depth in a 3D player has not been "
               "verified.\n"
-              "Con: Full layouts make very wide/tall frames; that is fine for 1080p discs but a 4K source "
-              "would produce 7680x2160, which many players cannot handle -- prefer Half for 4K.\n"
+              "Con: Full 4K layouts make very wide/tall frames (Full Side-by-Side 4K is 7680x2160), which "
+              "many players, TVs and hardware decoders cannot handle -- prefer a Half 4K layout if it "
+              "doesn't play. 4K files are also much bigger and slower to encode.\n"
               "Recommended: Full Side-by-Side for everyday watching; the Lossless ISO for archiving or a "
               "3D Blu-ray player."))
 
@@ -5502,6 +5513,12 @@ class MainFrame(wx.Frame):
         self.cbo_sbs2mvc_layout.Append(T("Half Side-by-Side (1920x1080)"), "half_sbs")
         self.cbo_sbs2mvc_layout.Append(T("Full Top-Bottom (1920x2160)"), "full_tb")
         self.cbo_sbs2mvc_layout.Append(T("Half Top-Bottom (1920x1080)"), "half_tb")
+        # 4K inputs: same geometry as the entries above (only the size differs), so they map to the
+        # same converter layout -- the "_4k" suffix here is just so the list says what you have.
+        self.cbo_sbs2mvc_layout.Append(T("Full Side-by-Side 4K (7680x2160)"), "full_sbs_4k")
+        self.cbo_sbs2mvc_layout.Append(T("Half Side-by-Side 4K (3840x2160)"), "half_sbs_4k")
+        self.cbo_sbs2mvc_layout.Append(T("Full Top-Bottom 4K (3840x4320)"), "full_tb_4k")
+        self.cbo_sbs2mvc_layout.Append(T("Half Top-Bottom 4K (3840x2160)"), "half_tb_4k")
         self.cbo_sbs2mvc_layout.SetSelection(0)
         self.cbo_sbs2mvc_layout.SetToolTip(
             T("What it's for: how the two eyes are stored in YOUR input video, so they can be cut apart "
@@ -5510,6 +5527,9 @@ class MainFrame(wx.Frame):
               "Full: each eye at full size (Side-by-Side is twice as wide as one eye, Top-Bottom twice as "
               "tall). Half: each eye squeezed to half width (or height) so the whole frame is a normal "
               "1920x1080 -- the squeeze is undone when the eyes are stretched back to 1920x1080 each.\n"
+              "The 4K entries are for 4K inputs, for example a 3840x2160 Half Side-by-Side from a 4K "
+              "conversion. A 3D Blu-ray only holds 1080p per eye, so 4K eyes are scaled down to 1920x1080 "
+              "on the disc.\n"
               "Con: Half inputs only have half the detail in one direction, and that can't be recovered.\n"
               "Recommended: Full Side-by-Side if your input is 3840x1080."))
 
@@ -7163,6 +7183,7 @@ class MainFrame(wx.Frame):
             self.grp_stereo, self.grp_depth_blend, self.grp_video_filter,
             self.grp_processor, self.grp_postprocess,
             self.grp_hdr_reinject, self.grp_subsearch, self.grp_submux, self.grp_stereotag,
+            *[getattr(self, name) for name in self._STANDALONE_TOOL_GROUP_NAMES if hasattr(self, name)],
             self.grp_video_dec.grp_video_dec, self.grp_video.grp_video,
         ):
             box.SetForegroundColour(accent)
@@ -9109,6 +9130,13 @@ class MainFrame(wx.Frame):
     # hide before a screenshot. *_log fields are included too (not just the
     # path fields) since they're plain read-only text displays of past
     # command output, which can just as easily echo a real path back.
+    # Every Standalone Tools group box (title) that the theme code paints in the accent colour.
+    # A tool missing from this list keeps the default black title, unreadable on the dark theme.
+    _STANDALONE_TOOL_GROUP_NAMES = (
+        "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone",
+        "grp_bluray", "grp_sbs2mvc", "grp_upscale",
+    )
+
     _CLEAR_ALL_STANDALONE_TEXT_FIELDS = (
         "txt_reinject_source", "txt_reinject_converted", "txt_reinject_output",
         "txt_reinject_rife_manifest", "txt_reinject_log",
@@ -12057,6 +12085,14 @@ class MainFrame(wx.Frame):
             from .sbs_to_mvc_cli import probe_video, guess_layout
             width, height = probe_video(input_path)[:2]
             guessed = guess_layout(width, height)
+            # a 4K-sized input (eyes taller than 1080 rows, or a top-bottom frame wider than 1920)
+            is_4k = height >= 2000 if guessed.endswith("sbs") else width >= 3000
+            if guessed.endswith("sbs") and width >= 6000:
+                guessed, is_4k = "full_sbs", True
+            if guessed.endswith("sbs") and width == 3840 and height == 2160:
+                guessed, is_4k = "half_sbs", True
+            if is_4k:
+                guessed += "_4k"
             for i in range(self.cbo_sbs2mvc_layout.GetCount()):
                 if self.cbo_sbs2mvc_layout.GetClientData(i) == guessed:
                     self.cbo_sbs2mvc_layout.SetSelection(i)
@@ -12180,7 +12216,7 @@ class MainFrame(wx.Frame):
             return None, T("Output must be different from the input video.")
         if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, 40, allow_empty=False):
             return None, T("Bitrate must be a number between 2 and 40 (20 recommended).")
-        layout = self.cbo_sbs2mvc_layout.GetClientData(self.cbo_sbs2mvc_layout.GetSelection())
+        layout = self.cbo_sbs2mvc_layout.GetClientData(self.cbo_sbs2mvc_layout.GetSelection()).replace("_4k", "")
         cmd = [sys.executable, "-m", "iw3.sbs_to_mvc_cli", "--input", input_path, "--output", output_path,
                "--layout", layout, "--bitrate", str(float(self.txt_sbs2mvc_bitrate.GetValue())), "--gui-progress"]
         if self.chk_sbs2mvc_swap.GetValue():
@@ -17142,8 +17178,13 @@ def _self_test_bluray_import_panel():
 
         layout_of = lambda: frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection())  # noqa
         codec_of = lambda: frame.cbo_bluray_codec.GetClientData(frame.cbo_bluray_codec.GetSelection())  # noqa
+
+        def pick(value):
+            frame.cbo_bluray_layout.SetSelection(
+                [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())].index(value))
         assert [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())] == \
-            ["full_sbs", "half_sbs", "full_tb", "half_tb", "frame_packed", "bd3d_iso"]
+            ["full_sbs", "half_sbs", "full_tb", "half_tb", "full_sbs_4k", "half_sbs_4k", "full_tb_4k",
+             "half_tb_4k", "frame_packed", "bd3d_iso"]
         assert layout_of() == "full_sbs" and codec_of() == "hevc_nvenc"
         assert frame.txt_bluray_quality.GetValue() == "18"
         assert frame.chk_bluray_restore_av.GetValue() is True
@@ -17178,7 +17219,7 @@ def _self_test_bluray_import_panel():
             assert cmd[cmd.index("--quality") + 1] == "18"
             assert "--gui-progress" in cmd and "--no-audio-subs" not in cmd
 
-            frame.cbo_bluray_layout.SetSelection(3)
+            pick("half_tb")
             frame.chk_bluray_restore_av.SetValue(False)
             frame.txt_bluray_quality.SetValue("22")
             cmd, err = frame.build_bluray_command()
@@ -17186,14 +17227,20 @@ def _self_test_bluray_import_panel():
             assert cmd[cmd.index("--quality") + 1] == "22"
             assert "--no-audio-subs" in cmd
 
+            # the four 4K layouts reach the command unchanged
+            for value in ("full_sbs_4k", "half_sbs_4k", "full_tb_4k", "half_tb_4k"):
+                pick(value)
+                cmd, err = frame.build_bluray_command()
+                assert err is None and cmd[cmd.index("--layout") + 1] == value, (value, cmd)
+
             # Frame Packed forces the only codec that can write its flag
-            frame.cbo_bluray_layout.SetSelection(4)
+            pick("frame_packed")
             frame.on_changed_bluray_layout(None)
             assert codec_of() == "libx264", "Frame Packed must switch the codec to libx264"
 
             # Lossless ISO: codec/quality disabled, output extension swaps both ways,
             # a .mkv output is refused, the command carries --layout bd3d_iso
-            frame.cbo_bluray_layout.SetSelection(5)
+            pick("bd3d_iso")
             frame.txt_bluray_output.SetValue(out)
             frame.on_changed_bluray_layout(None)
             assert not frame.cbo_bluray_codec.IsEnabled() and not frame.txt_bluray_quality.IsEnabled()
@@ -17205,13 +17252,13 @@ def _self_test_bluray_import_panel():
             frame.txt_bluray_output.SetValue(iso_out)
             cmd, err = frame.build_bluray_command()
             assert err is None and cmd[cmd.index("--layout") + 1] == "bd3d_iso", (cmd, err)
-            frame.cbo_bluray_layout.SetSelection(0)
+            pick("full_sbs")
             frame.on_changed_bluray_layout(None)
             assert frame.cbo_bluray_codec.IsEnabled() and frame.txt_bluray_quality.IsEnabled()
             assert frame.txt_bluray_output.GetValue().endswith(".mkv")
 
             # Run/Cancel/Clear lockstep, driven through the real handlers
-            frame.cbo_bluray_layout.SetSelection(0)
+            pick("full_sbs")
             gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
             frame.on_click_btn_bluray_run(None)
             assert not frame.btn_bluray_run.IsEnabled()
@@ -17267,7 +17314,8 @@ def _self_test_sbs2mvc_panel():
         for name in ("txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log"):
             assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
         assert [frame.cbo_sbs2mvc_layout.GetClientData(i) for i in range(frame.cbo_sbs2mvc_layout.GetCount())] == \
-            ["full_sbs", "half_sbs", "full_tb", "half_tb"]
+            ["full_sbs", "half_sbs", "full_tb", "half_tb", "full_sbs_4k", "half_sbs_4k", "full_tb_4k",
+             "half_tb_4k"]
         assert frame.txt_sbs2mvc_bitrate.GetValue() == "20"
         assert frame.chk_sbs2mvc_restore_av.GetValue() and not frame.chk_sbs2mvc_swap.GetValue()
         assert frame.btn_sbs2mvc_run.IsEnabled() and not frame.btn_sbs2mvc_cancel.IsEnabled()
@@ -17304,6 +17352,15 @@ def _self_test_sbs2mvc_panel():
             cmd, err = frame.build_sbs2mvc_command()
             assert cmd[cmd.index("--layout") + 1] == "half_tb"
             assert "--swap-eyes" in cmd and "--no-audio-subs" in cmd
+
+            # a 4K input entry is passed to the converter as the plain layout
+            items = [frame.cbo_sbs2mvc_layout.GetClientData(i) for i in range(frame.cbo_sbs2mvc_layout.GetCount())]
+            frame.cbo_sbs2mvc_layout.SetSelection(items.index("full_tb_4k"))
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd[cmd.index("--layout") + 1] == "full_tb", cmd
+            frame.cbo_sbs2mvc_layout.SetSelection(items.index("half_sbs_4k"))
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd[cmd.index("--layout") + 1] == "half_sbs", cmd
 
             gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
             frame.on_click_btn_sbs2mvc_run(None)
@@ -17506,6 +17563,36 @@ def _self_test_upscale_panel():
     print("_self_test_upscale_panel: PASS")
 
 
+def _self_test_standalone_tool_titles_share_accent_colour():
+    """Every Standalone Tools group title uses the same accent (blue) colour as the first tools,
+    in both themes -- a title left at the default black is unreadable on the dark theme. The tools
+    keep being added, so this checks the whole _STANDALONE_TOOL_GROUP_NAMES list is really painted
+    AND that every grp_* StaticBox on the Tools tab is in that list (a new tool that isn't fails)."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        reference = ("grp_hdr_reinject", "grp_subsearch", "grp_submux", "grp_stereotag")
+        accent_before = frame.grp_hdr_reinject.GetForegroundColour()
+        names = list(reference) + list(frame._STANDALONE_TOOL_GROUP_NAMES)
+        for name in names:
+            box = getattr(frame, name)
+            assert box.GetForegroundColour() == accent_before, \
+                f"{name} title is {box.GetForegroundColour()}, expected the accent {accent_before}"
+        on_tab = {n for n in dir(frame) if n.startswith("grp_") and isinstance(getattr(frame, n, None), wx.StaticBox)
+                  and getattr(frame, n).GetParent() is frame.tab_tools}
+        missing = on_tab - set(names)
+        assert not missing, f"Standalone Tools group boxes not in the accent-colour list: {sorted(missing)}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_standalone_tool_titles_share_accent_colour: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -17588,6 +17675,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_panel,
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,
+        _self_test_standalone_tool_titles_share_accent_colour,
     ]
     failures = []
     for test in tests:

@@ -13,7 +13,24 @@ it matters.
 
 ---
 
-## Latest Update — September 18, 2026
+## Latest Update — September 19, 2026
+
+**New: 3D Blu-ray Import (Tools tab).** Got a real 3D Blu-ray disc (a disc image
+or a ripped disc folder)? Pick it, pick where to save, and 3DECKER turns it into a
+normal 3D video file you can play in VLC, MPC-HC or on a 3D TV. It finds the main
+movie by itself, reads both eyes' pictures from the disc, and keeps the disc's
+audio tracks and subtitles. You choose the 3D arrangement — Full or Half
+Side-by-Side, Full or Half Top-Bottom, or Frame Packed (which many TVs detect
+automatically) — and the video format (GPU-accelerated H.265 by default, or
+CPU H.265 / H.264). A progress bar shows how far along it is and a Cancel button
+stops it cleanly. Needs about 25 GB of free space for temporary files while it
+works (deleted afterward). It cannot open copy-protected discs; rip those to an
+ISO or folder first with a separate tool. New installs and updates fetch the two
+small helper programs it needs automatically.
+
+---
+
+## Update — September 18, 2026
 
 **Dark mode is now a real, working option — a new "Theme" dropdown next to
 Layout in the toolbar (System / Light / Dark).** This app already had the
@@ -35,6 +52,41 @@ not a bug, but it is a real behavior change from before. (A first version of
 this accidentally stopped you from manually shrinking the window past a
 certain point afterward — caught and fixed the same day; you should be able
 to drag it as small as before again, regardless of which tab is open.)
+
+**New setting: "Max Pop-Out Limit," a safety cap on how far anything can pop
+out toward you.** This is different from Convergence Plane — Convergence
+only sets *where* the screen depth sits, it doesn't limit how far a close
+object can end up popping out past it. Max Pop-Out Limit is a hard ceiling on
+the actual pop-out amount, independent of Convergence and 3D Strength, in the
+Stereo Generation tab right below Convergence Smoothing. Defaults to 1.0
+(off — nothing changes unless you lower it). If a specific shot's close-up
+pop-out feels uncomfortable, try 0.7 or 0.4 before going all the way to 0.0
+(which removes all pop-out).
+
+**Fixed: Auto Resume caused audio to drift further out of sync with the video
+every time a job was stopped and resumed.** Real user report — noticed the
+delay growing worse each time a conversion was paused/resumed. Two separate
+bugs were causing this, both now fixed:
+1. Progress was tracked using small time measurements that each carried a
+   tiny rounding error, which added up across every resume. Now tracked by
+   exact frame count instead, so nothing can drift.
+2. The step that stitches your resumed segments back into one file was
+   silently failing in some cases (specifically, when a job was resumed from
+   a segment recovered after a crash or force-stop) and falling back to a
+   less reliable method that could drop frames. Fixed directly.
+Verified on a real test clip across 3 stop/resume cycles: the final video's
+frame count now matches exactly what was recorded during conversion, with
+audio and video staying within milliseconds of each other throughout.
+
+**Half SBS and Half TB videos now signal "this is 3D" directly to real 3D
+TVs and players**, when using the H.264 video codec option. Real 3D
+Blu-rays and TVs look for a specific marker in the file to automatically
+switch into 3D display mode — previously this app only added a marker
+software players could read (the file still played fine everywhere, it
+just meant some TVs needed you to manually select the 3D mode yourself).
+Half SBS already had the real marker; Half TB is now fixed to match. Only
+works with the H.264 codec option — HEVC and NVENC don't support this
+marker at all, so this doesn't apply if you're using those.
 
 ## Update — September 17, 2026
 

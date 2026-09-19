@@ -359,6 +359,30 @@ def _find_mkvmerge():
     return None
 
 
+def _find_edge264_mvc():
+    """ADR-182: locates the bundled edge264-mvc decoder (edge264_test.exe), built
+    from https://github.com/jens-duttke/edge264-mvc (BSD-3-Clause) specifically for
+    real 3D Blu-ray MVC (Multiview Video Coding) support -- decoding a Blu-ray's dual
+    -view H.264 elementary stream into a standard side-by-side video iw3 can treat as
+    ordinary input. Verified for real against the project's own bundled ITU
+    conformance MVC test streams (tests/conformance/mvc/*.264): genuine, correct dual
+    -view decode confirmed by inspecting the decoded side-by-side frame directly (real
+    parallax visible between the two halves, not one eye duplicated).
+    Same "<nunif-windows root>/<tool>/<tool>.exe" bundling convention as mkvtoolnix
+    (see _find_mkvmerge() above) -- kept in its own subfolder since it ships with its
+    own runtime DLLs (edge264.1.dll + the MinGW runtime it was built with), not just a
+    single exe."""
+    import shutil
+    found = shutil.which("edge264_test") or shutil.which("edge264_test.exe")
+    if found:
+        return found
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    candidate = path.join(here, "edge264-mvc", "edge264_test.exe")
+    if path.exists(candidate):
+        return candidate
+    return None
+
+
 def _find_mkvpropedit():
     """Same resolution strategy as _find_mkvmerge() -- mkvpropedit ships alongside
     mkvmerge in the same bundled MKVToolNix folder (verified present at

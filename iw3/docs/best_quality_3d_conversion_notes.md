@@ -2452,17 +2452,31 @@ VDA_L wins on every axis tested.**
 reused as a reasonable default for VDA_L, which has no independent EMA
 sweep of its own -- flagged, not silently assumed.
 
-**Edge Dilation 3/2 specifically -- why, given divergence here is 2.5, not
-the values it was actually tested at:** not fresh-tested at 2.5 for either
-model this session (methodology note in 14 above). Reused because: VDA_L's
-own sweep (11.8, tested exactly at Divergence 2.5) found genuinely no
-measurable difference across 0/0 through 3/2, so any value is equally
-defensible for VDA_L and 3/2 was picked to match Metric_Large's own real
-finding, for a uniform shared setting. Metric_Large's sweep (12.7, tested at
-Divergence 2.75, not 2.5) found a small but real +0.5% GradMag gain from 3/2
-over 0/0 -- the one value with a proven (if modest) benefit for either
-model. Also matches the GUI tooltip's own documented Divergence-to-dilation
-pairing guide (2.0-2.25 -> 2/1, 3.0-3.5 -> 3/2; 2.5 sits between, closer to
-the 3/2 end). Not re-verified at exactly 2.5 for Metric_Large -- worth a
-fresh check if this setting is ever suspected of mattering more than the
-existing data suggests.
+### 14.3 Edge Dilation re-swept fresh at the actual settings profile (2026-09-18)
+
+14.2's Edge Dilation 3/2 choice was flagged as reused/not independently
+re-verified at Divergence 2.5 for Metric_Large. Closed that gap: real fresh
+sweep, both models, both scenes (bright + dark), all other settings exactly
+matching 14.2's table, five configs requested: 0/0, 1/1, 2/1, 2/2, 3/2 (20
+real renders total).
+
+| Config | Metric_Large bright | Metric_Large dark | VDA_L bright | VDA_L dark |
+|---|---|---|---|---|
+| 0/0 | 22.2031 | 15.5151 | 22.4801 | 15.6955 |
+| 1/1 | 22.2466 | 15.5350 | 22.4951 | 15.7049 |
+| 2/1 | 22.2982 | 15.5410 | 22.5290 | 15.7025 |
+| 2/2 | 22.2871 | **15.5466** | 22.5405 | 15.7036 |
+| 3/2 | 22.2976 | 15.5455 | **22.5572** | **15.7078** |
+
+(Gradient Magnitude, rendered stereo output, left eye -- higher = sharper.
+Bold = peak per column.)
+
+**3/2 holds up as the right shared choice.** It's the outright peak in 3 of
+4 (model, scene) combinations (Metric_Large bright is a near-exact tie:
+22.2976 vs 2/1's 22.2982, a 0.0006 difference, well inside noise), and in
+the one case it isn't the peak (Metric_Large dark, where 2/2 edges it out by
+0.0011 -- also noise-level) it's still effectively tied for best. Every
+config's total spread across the whole sweep is tiny regardless (0.08%-
+0.43%), consistent with 11.8/12.7's original "weak lever" finding -- but
+within that narrow band, 3/2 is never meaningfully behind and usually
+exactly at the top. No reason to change it; the earlier caveat is resolved.

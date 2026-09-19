@@ -34,8 +34,11 @@ streams -- see docs/ai/AI_DECISIONS.md ADR-182):
      the final compressed output.
 """
 import argparse
+import os
+import re
 import subprocess
 import sys
+import threading
 from os import path
 
 from .utils import _find_tsmuxer, _find_edge264_mvc, _get_ffmpeg_bin
@@ -147,15 +150,126 @@ def interleave_mvc(base_path, dependent_path, out_path):
     return len(base_bounds), len(dep_bounds), n
 
 
-def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work_dir, output_path,
-                        video_codec="libx264", crf=16):
-    """Full pipeline: tsMuxeR demux -> interleave -> edge264-mvc decode -> ffmpeg encode.
+LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb", "frame_packed")
+CODECS = ("hevc_nvenc", "libx265", "libx264")
 
-    The decoder's raw Y4M output is piped DIRECTLY into ffmpeg's stdin -- never
-    written to disk. A real 15-second test produced a 2.2GB raw Y4M file; a full
-    ~90-minute movie at that rate would be roughly 800GB, not practical. Piping
-    keeps disk usage down to just the (much smaller) demuxed elementary streams
-    and the final compressed output."""
+# Only libx264 can write the H.264 Frame Packing SEI that lets a 3D TV/player
+# auto-detect the layout (ADR-181). x265 defines the SEI type but exposes no way
+# to set it; NVENC has no equivalent at all.
+_SEI_TYPE = {"half_sbs": 3, "half_tb": 4, "frame_packed": 4}
+
+_SPLIT_EYES = "split[a][b];[a]crop=iw/2:ih:0:0[l];[b]crop=iw/2:ih:iw/2:0[r];[l][r]vstack"
+
+
+def layout_filter(layout):
+    """ffmpeg -vf chain turning edge264's full-width side-by-side frame (left eye |
+    right eye, each at full 1920x1080) into the requested layout. None = no change."""
+    if layout == "full_sbs":
+        return None
+    if layout == "half_sbs":
+        return "scale=iw/2:ih:flags=lanczos"
+    if layout in ("full_tb", "frame_packed"):
+        return _SPLIT_EYES
+    if layout == "half_tb":
+        return _SPLIT_EYES + ",scale=iw:ih/2:flags=lanczos"
+    raise ValueError(f"unknown layout {layout!r}; choose from {LAYOUTS}")
+
+
+def encoder_args(codec, quality, layout):
+    """ffmpeg output-side video arguments for the chosen codec/quality/layout.
+    `quality` is CRF for the software encoders and the equivalent constant-quality
+    (-cq) level for NVENC -- lower is better quality and a bigger file."""
+    if codec not in CODECS:
+        raise ValueError(f"unknown codec {codec!r}; choose from {CODECS}")
+    if codec == "hevc_nvenc":
+        args = ["-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
+    elif codec == "libx265":
+        args = ["-c:v", "libx265", "-crf", str(quality)]
+    else:
+        args = ["-c:v", "libx264", "-crf", str(quality)]
+        if layout in _SEI_TYPE:
+            args += ["-x264-params", f"frame-packing={_SEI_TYPE[layout]}"]
+    # A 3D Blu-ray is Rec.709 limited range; Y4M carries no colour tags, so without
+    # these a player has to guess.
+    args += ["-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709",
+             "-color_trc", "bt709", "-color_range", "tv"]
+    return args
+
+
+class Cancelled(Exception):
+    pass
+
+
+def _stream_interleaved(stdin, base_path, base_bounds, dep_path, dep_bounds, n, stop_event, errors):
+    """Writes base AU i then dependent AU i, for every i, straight into the decoder's
+    stdin -- the combined ~24GB stream never exists on disk or in memory."""
+    try:
+        with open(base_path, "rb") as bf, open(dep_path, "rb") as df:
+            for i in range(n):
+                if stop_event is not None and stop_event.is_set():
+                    return
+                bs, be = base_bounds[i]
+                ds, de = dep_bounds[i]
+                bf.seek(bs)
+                stdin.write(bf.read(be - bs))
+                df.seek(ds)
+                stdin.write(df.read(de - ds))
+    except (BrokenPipeError, OSError) as e:
+        errors.append(e)
+    finally:
+        try:
+            stdin.close()
+        except OSError:
+            pass
+
+
+def _read_ffmpeg_progress(stream, tail, total_frames, progress_cb):
+    """Reads ffmpeg's stderr (progress lines end in \\r, not \\n), keeps the last
+    few KB for error reporting, and reports the running frame number."""
+    buf = b""
+    while True:
+        chunk = stream.read(512)
+        if not chunk:
+            break
+        buf += chunk
+        while True:
+            m = re.search(rb"[\r\n]", buf)
+            if not m:
+                break
+            line, buf = buf[:m.start()], buf[m.end():]
+            tail.append(line)
+            del tail[:-40]
+            fm = re.search(rb"frame=\s*(\d+)", line)
+            if fm and progress_cb is not None:
+                progress_cb("encode", int(fm.group(1)), total_frames)
+
+
+def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work_dir, output_path,
+                        video_codec="hevc_nvenc", quality=18, layout="full_sbs",
+                        keep_temp=False, stop_event=None, progress_cb=None):
+    """Full pipeline: tsMuxeR demux -> interleave (streamed) -> edge264-mvc decode -> ffmpeg encode.
+
+    Two things never touch disk: the combined MVC stream (interleaved on the fly
+    straight into the decoder's stdin) and the raw decoded video (edge264's stdout
+    is piped directly into ffmpeg; a full movie would be ~800GB raw). Only the two
+    demuxed elementary streams (~24GB for a full film) are temporary files, and
+    they are deleted afterwards unless keep_temp is set.
+
+    Feeding the decoder through stdin (not letting it memory-map a file) matters
+    twice: edge264's own Windows file-size call wrapped at 4GB (see ADR-182 UPDATE
+    3), and a 25GB mapped view drove the machine low on memory.
+
+    progress_cb(stage, done, total) is called with stage in
+    {"demux", "scan", "encode"}; stop_event (threading.Event) cancels cleanly."""
+    if layout not in LAYOUTS:
+        raise ValueError(f"unknown layout {layout!r}; choose from {LAYOUTS}")
+    if layout in _SEI_TYPE and video_codec != "libx264":
+        if layout == "frame_packed":
+            print(f"[mvc-extract] frame_packed needs libx264 (only it can write the Frame Packing SEI); "
+                  f"switching from {video_codec}", file=sys.stderr)
+            video_codec = "libx264"
+        # half_sbs/half_tb are still valid with other codecs -- just no auto-detect flag
+
     tsmuxer_bin = _find_tsmuxer()
     edge264_bin = _find_edge264_mvc()
     ffmpeg_bin = _get_ffmpeg_bin()
@@ -166,46 +280,115 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
     if ffmpeg_bin is None:
         raise RuntimeError("ffmpeg not found")
 
+    os.makedirs(work_dir, exist_ok=True)
     meta_path = path.join(work_dir, "_mvc_extract.meta")
-    cut_opts = f" --cut-start={cut_start} --cut-end={cut_end}" if cut_end else f" --cut-start={cut_start}"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        f.write(f"MUXOPT --demux{cut_opts}\n")
-        f.write(f"V_MPEG4/ISO/AVC, {path.abspath(ssif_path).replace(chr(92), '/')}, track={avc_track}\n")
-        f.write(f"V_MPEG4/ISO/MVC, {path.abspath(ssif_path).replace(chr(92), '/')}, track={mvc_track}\n")
+    base_es = path.join(work_dir, f"{path.splitext(path.basename(ssif_path))[0]}.track_{avc_track}.264")
+    dep_es = path.join(work_dir, f"{path.splitext(path.basename(ssif_path))[0]}.track_{mvc_track}.mvc")
+    edge_log = path.join(work_dir, "_edge264_stderr.log")
+    procs = []
+    try:
+        cut_opts = f" --cut-start={cut_start} --cut-end={cut_end}" if cut_end else f" --cut-start={cut_start}"
+        ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            f.write(f"MUXOPT --demux{cut_opts}\n")
+            f.write(f"V_MPEG4/ISO/AVC, {ssif_meta}, track={avc_track}\n")
+            f.write(f"V_MPEG4/ISO/MVC, {ssif_meta}, track={mvc_track}\n")
 
-    result = subprocess.run([tsmuxer_bin, meta_path, work_dir], capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"tsMuxeR demux failed: {result.stdout}\n{result.stderr}")
+        if progress_cb:
+            progress_cb("demux", 0, 1)
+        demux = subprocess.Popen([tsmuxer_bin, meta_path, work_dir],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        procs.append(demux)
+        out_lines = []
+        for line in demux.stdout:
+            out_lines.append(line)
+            m = re.search(r"(\d+(?:\.\d+)?)%", line)
+            if m and progress_cb:
+                progress_cb("demux", float(m.group(1)), 100)
+            if stop_event is not None and stop_event.is_set():
+                demux.kill()
+                raise Cancelled()
+        demux.wait()
+        if demux.returncode != 0:
+            raise RuntimeError(f"tsMuxeR demux failed: {''.join(out_lines)[-2000:]}")
 
-    base_es = path.join(work_dir, f"00000.track_{avc_track}.264")
-    dep_es = path.join(work_dir, f"00000.track_{mvc_track}.mvc")
-    combined = path.join(work_dir, "_combined_mvc.264")
-    base_n, dep_n, written_n = interleave_mvc(base_es, dep_es, combined)
-    print(f"[mvc-extract] base AUs={base_n} dependent AUs={dep_n} written={written_n}", file=sys.stderr)
+        if progress_cb:
+            progress_cb("scan", 0, 1)
+        base_bounds = _find_au_boundaries(base_es, delimiter_types={9})
+        dep_bounds = _find_au_boundaries(dep_es, delimiter_types={24, 9})
+        n = min(len(base_bounds), len(dep_bounds))
+        if len(base_bounds) != len(dep_bounds):
+            print(f"[mvc-extract] WARNING: base AUs={len(base_bounds)} != dependent AUs={len(dep_bounds)}; "
+                  f"using the first {n}", file=sys.stderr)
+        print(f"[mvc-extract] base AUs={len(base_bounds)} dependent AUs={len(dep_bounds)} using={n}",
+              file=sys.stderr)
 
-    # Pipe edge264-mvc's stdout directly into ffmpeg's stdin -- no raw Y4M ever
-    # touches disk. Standard Python subprocess pipe-chaining: pass the first
-    # process's stdout pipe object directly as the second process's stdin, then
-    # close the parent's duplicate handle so the first process receives a
-    # real SIGPIPE/broken-pipe signal if ffmpeg exits early instead of hanging.
-    edge264_proc = subprocess.Popen(
-        [edge264_bin, combined, "-O", "-k", "-y"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    ffmpeg_args = [ffmpeg_bin, "-y", "-i", "-",
-                   "-c:v", video_codec, "-crf", str(crf), "-pix_fmt", "yuv420p", output_path]
-    ffmpeg_proc = subprocess.Popen(
-        ffmpeg_args, stdin=edge264_proc.stdout,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    edge264_proc.stdout.close()
+        vf = layout_filter(layout)
+        ffmpeg_args = [ffmpeg_bin, "-y", "-hide_banner", "-i", "-"]
+        if vf:
+            ffmpeg_args += ["-vf", vf]
+        ffmpeg_args += encoder_args(video_codec, quality, layout) + [output_path]
 
-    ffmpeg_out, ffmpeg_err = ffmpeg_proc.communicate()
-    edge264_proc.wait()
-    edge264_err = edge264_proc.stderr.read()
+        # edge264 reads "-" (stdin) and writes Y4M to stdout; ffmpeg reads that pipe.
+        # The parent closes its copy of edge264's stdout so a dead ffmpeg is noticed.
+        with open(edge_log, "wb") as edge_err:
+            edge264_proc = subprocess.Popen([edge264_bin, "-", "-O", "-k", "-y"],
+                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=edge_err)
+            procs.append(edge264_proc)
+            ffmpeg_proc = subprocess.Popen(ffmpeg_args, stdin=edge264_proc.stdout,
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            procs.append(ffmpeg_proc)
+            edge264_proc.stdout.close()
 
-    if ffmpeg_proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg encode failed: {ffmpeg_err.decode(errors='replace')}")
-    if edge264_proc.returncode != 0:
-        raise RuntimeError(f"edge264-mvc decode failed: {edge264_err.decode(errors='replace')}")
+            feed_errors = []
+            feeder = threading.Thread(target=_stream_interleaved, daemon=True,
+                                       args=(edge264_proc.stdin, base_es, base_bounds, dep_es, dep_bounds,
+                                             n, stop_event, feed_errors))
+            tail = []
+            reader = threading.Thread(target=_read_ffmpeg_progress, daemon=True,
+                                       args=(ffmpeg_proc.stderr, tail, n, progress_cb))
+            feeder.start()
+            reader.start()
+            while ffmpeg_proc.poll() is None:
+                if stop_event is not None and stop_event.is_set():
+                    for p in (ffmpeg_proc, edge264_proc):
+                        p.kill()
+                    raise Cancelled()
+                try:
+                    ffmpeg_proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    pass
+            feeder.join()
+            reader.join()
+            edge264_proc.wait()
+
+        ffmpeg_tail = b"\n".join(tail).decode(errors="replace")
+        if ffmpeg_proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg encode failed:\n{ffmpeg_tail[-3000:]}")
+        frames = 0
+        for line in reversed(tail):
+            fm = re.search(rb"frame=\s*(\d+)", line)
+            if fm:
+                frames = int(fm.group(1))
+                break
+        # edge264 exits 1 after decoding every frame of a demuxed stream (no formal
+        # end-of-stream NAL). Judge success by frames delivered, not its exit code.
+        if edge264_proc.returncode not in (0, 1) or frames < n - 2:
+            with open(edge_log, "rb") as f:
+                edge_msg = f.read()[-2000:].decode(errors="replace")
+            raise RuntimeError(f"decode incomplete: {frames} of {n} frames encoded "
+                               f"(edge264 exit {edge264_proc.returncode}, feeder errors {feed_errors}):\n{edge_msg}")
+        return frames
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        if not keep_temp:
+            for tmp in (base_es, dep_es, meta_path, edge_log):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 def main():
@@ -222,8 +405,13 @@ def main():
     parser.add_argument("--output", "-o", type=str, required=True,
                          help="final encoded output path (e.g. .mkv) -- a real compressed video, "
                               "never a raw intermediate")
-    parser.add_argument("--video-codec", type=str, default="libx264")
-    parser.add_argument("--crf", type=int, default=16)
+    parser.add_argument("--video-codec", type=str, default="hevc_nvenc", choices=CODECS)
+    parser.add_argument("--quality", "--crf", type=int, default=18, dest="quality",
+                         help="CRF (x264/x265) or constant-quality level (NVENC); lower = better/larger")
+    parser.add_argument("--layout", type=str, default="full_sbs", choices=LAYOUTS,
+                         help="full_sbs 3840x1080 | half_sbs 1920x1080 | full_tb 1920x2160 | half_tb 1920x1080 | "
+                              "frame_packed = full_tb plus the Frame Packing SEI flag (libx264 only)")
+    parser.add_argument("--keep-temp", action="store_true", help="keep the demuxed elementary streams")
     args = parser.parse_args()
 
     avc_track, mvc_track = args.avc_track, args.mvc_track
@@ -237,9 +425,13 @@ def main():
                           f"or --mpls points at the wrong playlist")
         print(f"[mvc-extract] auto-detected tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
 
-    extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end, args.work_dir, args.output,
-                        video_codec=args.video_codec, crf=args.crf)
-    print(f"[mvc-extract] done: {args.output}", file=sys.stderr)
+    def show(stage, done, total):
+        print(f"\r[mvc-extract] {stage}: {done}/{total}      ", end="", file=sys.stderr, flush=True)
+
+    frames = extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end, args.work_dir,
+                                 args.output, video_codec=args.video_codec, quality=args.quality,
+                                 layout=args.layout, keep_temp=args.keep_temp, progress_cb=show)
+    print(f"\n[mvc-extract] done: {args.output} ({frames} frames)", file=sys.stderr)
 
 
 if __name__ == "__main__":

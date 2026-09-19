@@ -2286,3 +2286,102 @@ supersedes 13.13's more conditional framing ("prefer Native at 518 for dark
 content") specifically for the temporal-stabilize-declined case -- 13.13's
 518-over-384 guidance still holds for anyone who IS willing to use
 `--temporal-stabilize`.
+
+---
+
+## 14. VDA_L vs Any_V3_Metric_Large rematch at Divergence 2.5 / Convergence 0.25 / Midground Pop -0.50 (2026-09-18)
+
+User asked for a direct head-to-head between exactly these two models (not
+Native, not Distill_Any_L), each given its own fully-tuned settings, under a
+shared Divergence 2.5 / Convergence 0.25 (constant) / Midground Pop -0.50
+(threshold 0-100%, i.e. the whole frame) -- matching the exact settings
+profile decoded from the user's own real Mario Galaxy conversion filename.
+Object Stability (`--temporal-stabilize`) explicitly excluded per the user's
+standing preference (see 13.14's ending).
+
+**Methodology note -- what was fresh-tested vs reused:** Depth Resolution,
+Depth Detail Refinement strength, Sharpen strength, EMA Buffer/Decay, and
+Edge Dilation/Edge Repair all act on the depth map itself or the final
+rendered image -- none of them are downstream of Divergence/Convergence/Pop
+(which only redistribute already-computed depth values into left/right pixel
+shifts during the stereo warp). So each model's own best values for those
+settings, already real-measured in Sections 11/12/13 at a different
+Divergence/Pop, do not need to be re-tested here -- reused as-is:
+
+| Setting | VDA_L | Any_V3_Metric_Large |
+|---|---|---|
+| Resolution | 648 (11.3) | 384 (12.8/13.10) |
+| Depth Detail Refinement | 0.5 (11.7) | 1.25 (12.6/13.13) |
+| Sharpen | 1.0 (11.4) | 1.0 (12.6) |
+| Edge Repair | 0/off (11.5, zero effect) | 0/off (12.7, real but not worth the softening) |
+| Edge Dilation | 3/2 (11.8, no proven effect, doc's own pairing default) | 3/2 (12.7, small real +0.5% GradMag gain) |
+| EMA Buffer/Decay | 650/0.99 -- no VDA_L-specific sweep exists; reused Metric_Large's own proven value (13.8) as a reasonable shared default for both, not independently re-derived for VDA_L. Flagged here rather than silently assumed. |
+
+**What's genuinely new this session:** the actual head-to-head render +
+measurement at Divergence 2.5/Convergence 0.25/Pop -0.50, on two real scenes
+from Hocus Pocus -- a bright/complex outdoor campus scene (00:14:20, dense
+foliage/fence/crowd detail) and a dark/hard low-light interior scene with
+motion blur (00:35:00) -- chosen fresh this session by sampling and visually
+inspecting real candidate frames rather than reusing an unverifiable old
+timestamp reference.
+
+**Crispness** (Gradient Magnitude, rendered stereo output, left eye):
+
+| Scene | Any_V3_Metric_Large | VDA_L | VDA_L advantage |
+|---|---|---|---|
+| Bright (00:14:20) | 22.2976 | 22.5572 | +1.2% |
+| Dark (00:35:00) | 15.5455 | 15.7078 | +1.0% |
+
+A real but small VDA_L edge on both scenes -- much smaller than Section
+11.1's original ~31% gap, because THIS comparison gives each model its own
+fully-tuned settings rather than a shared one-size-fits-all config close to
+only one model's sweet spot.
+
+**Stability** (EMA-normalized depth, frame-to-frame delta, 650/0.99 buffer):
+
+| Scene | Model | Mean | Median | P95 | Max |
+|---|---|---|---|---|---|
+| Bright | Any_V3_Metric_Large | 7.3253% | 7.5304% | 9.1643% | 10.0849% |
+| Bright | **VDA_L** | **5.9631%** | **6.7041%** | **7.8297%** | **8.5729%** |
+| Dark | Any_V3_Metric_Large | 4.4745% | 2.4692% | 18.2783% | **41.6632%** |
+| Dark | **VDA_L** | **1.7514%** | **1.0685%** | **4.9669%** | **11.9055%** |
+
+VDA_L is substantially more stable on both scenes -- ~19% lower mean delta
+on the bright scene, and a much larger margin on the dark/hard scene (~61%
+lower mean, and critically a worst-case spike **3.5x smaller** than
+Metric_Large's, 11.9% vs 41.7%). This is the same direction as Section
+11.1's original finding, holding up even with both models at their own
+best-tuned settings.
+
+**Verdict: VDA_L wins on both axes tested here** -- a small but real
+crispness edge, and a substantial stability edge, especially on hard/dark
+content. Matches 11.1's original cost caveat: ~10% slower, ~40% more VRAM
+than Metric_Large -- not a practical concern given the stated 32GB VRAM
+headroom and no hard speed constraint.
+
+**Recommended CLI, VDA_L (winner):**
+```
+--depth-model VDA_L --resolution 648 --method mlbw_l2_inpaint
+--divergence 2.5 --convergence 0.25
+--midground-pop -0.50 --midground-threshold-low 0.0 --midground-threshold-high 1.0
+--depth-refine --depth-refine-strength 0.5
+--ema-normalize --ema-decay 0.99 --ema-buffer 650
+--sharpen --sharpen-strength 1.0
+--edge-dilation 3 2
+--preserve-screen-border --stereo-mode-tag --half-sbs
+--video-codec hevc_nvenc --crf 15 --metadata filename
+```
+
+**Recommended CLI, Any_V3_Metric_Large (runner-up, still the pick for
+temporal-stabilize-declined dark/VFX-heavy content per 13.14):**
+```
+--depth-model Any_V3_Metric_Large --resolution 384 --method mlbw_l2_inpaint
+--divergence 2.5 --convergence 0.25
+--midground-pop -0.50 --midground-threshold-low 0.0 --midground-threshold-high 1.0
+--depth-refine --depth-refine-strength 1.25
+--ema-normalize --ema-decay 0.99 --ema-buffer 650
+--sharpen --sharpen-strength 1.0
+--edge-dilation 3 2
+--preserve-screen-border --stereo-mode-tag --half-sbs
+--video-codec hevc_nvenc --crf 15 --metadata filename
+```

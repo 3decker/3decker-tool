@@ -176,6 +176,13 @@ def _find_bin(*names):
     return names[0]
 
 
+# ffmpeg's hevc_nvenc with `-cq N -b:v 0` and NO maximum silently caps the bitrate near ~19 Mbps, so cq 14 and
+# cq 16 produced the SAME file (measured on a real 4K clip: cq14 and cq16 both 18.3 Mbps; with this ceiling cq14 =
+# 67 Mbps, cq16 = 51 Mbps). Every hevc_nvenc -cq call in this module must add these arguments, or the cq value is
+# ignored below ~18. The ceiling is only a safety limit -- the cq number decides the real bitrate.
+_NVENC_CQ_CEILING = ["-maxrate", "200M", "-bufsize", "400M"]
+
+
 def _ffmpeg_bin():
     return _find_bin("ffmpeg.exe", "ffmpeg")
 
@@ -428,7 +435,7 @@ def _prepare_and_key(input_path, times, work_dir, args, log_fp):
     ff_args = [_ffmpeg_bin(), "-y", "-i", raw_hevc]
     if crop:
         ff_args += ["-vf", f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]}"]
-    ff_args += ["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "14", "-b:v", "0"]
+    ff_args += ["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "14", "-b:v", "0", *_NVENC_CQ_CEILING]
     if seg_times:
         ff_args += ["-forced-idr", "1", "-force_key_frames", seg_times]
     ff_args += [
@@ -1196,7 +1203,7 @@ def _join_and_finalize(converted_dir, original_source, output_path, args, log_fp
                     f.write(f"file '{p}'\n")
             concat_cmd = [_ffmpeg_bin(), "-y", "-f", "concat", "-safe", "0", "-i", list_file,
                           "-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "16", "-b:v", "0",
-                          "-pix_fmt", "yuv420p"]
+                          *_NVENC_CQ_CEILING, "-pix_fmt", "yuv420p"]
             if vr_merge_fps:
                 concat_cmd += ["-r", str(vr_merge_fps), "-vsync", "cfr"]
             if path.splitext(video_only)[1].lower() in (".mp4", ".mov", ".m4v"):
@@ -1222,7 +1229,7 @@ def _join_and_finalize(converted_dir, original_source, output_path, args, log_fp
             with open(script_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("\n".join(script_lines))
             mismatch_cmd = [_ffmpeg_bin(), *args_list, "-filter_complex_script", script_path, "-map", "[outv]",
-                            "-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "16", "-b:v", "0"]
+                            "-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "16", "-b:v", "0", *_NVENC_CQ_CEILING]
             if vr_optimized_merge and vr_merge_fps:
                 mismatch_cmd += ["-r", str(vr_merge_fps), "-vsync", "cfr"]
             if vr_optimized_merge and path.splitext(video_only)[1].lower() in (".mp4", ".mov", ".m4v"):

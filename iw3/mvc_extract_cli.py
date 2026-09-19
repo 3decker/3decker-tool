@@ -62,53 +62,89 @@ def _find_video_track(mpls_or_m2ts_path, tsmuxer_bin):
     return avc_track, mvc_track
 
 
-def _split_access_units(data, delimiter_types):
-    """Splits a raw NAL-unit elementary stream into access units, each
-    starting at one of the given delimiter NAL types. Confirmed directly
-    against real extracted streams (not assumed from spec alone): base-view
-    access units start with a type-9 (AUD) NAL; dependent-view access units
-    start with a type-24 NAL."""
-    starts = []
-    idx = 0
-    while True:
-        idx = data.find(b"\x00\x00\x01", idx)
-        if idx == -1:
-            break
-        starts.append(idx)
-        idx += 3
+_CHUNK_SIZE = 64 * 1024 * 1024  # 64MB
+_OVERLAP = 8  # a start code (3 bytes) + NAL header (1 byte) never needs more lookback than this
 
-    aus = []
-    current_au_start = None
-    for pos in starts:
-        nal_type = data[pos + 3] & 0x1F
-        if nal_type in delimiter_types:
-            if current_au_start is not None:
-                aus.append(data[current_au_start:pos])
-            current_au_start = pos
-    if current_au_start is not None:
-        aus.append(data[current_au_start:len(data)])
-    return aus
+
+def _find_au_boundaries(path, delimiter_types):
+    """Scans an elementary stream FILE (not an in-memory buffer) in bounded
+    64MB chunks for access-unit start offsets, each at one of the given
+    delimiter NAL types -- confirmed directly against real extracted streams
+    (not assumed from spec alone): base-view access units start with a
+    type-9 (AUD) NAL; dependent-view access units start with a type-24 NAL.
+    Returns a list of (start, end) byte-offset pairs -- integers only, no
+    file data is retained here.
+
+    ADR-182: two earlier versions of this function both used too much memory
+    on a real ~90-minute movie (14GB base + 9.5GB dependent view): reading
+    each whole file into a plain bytes object pushed a real 63GB-RAM machine
+    down to ~2GB available; switching to mmap.mmap() was better in theory
+    (file-backed pages the OS can discard without a pagefile write) but its
+    reported working set still climbed to 12GB+ with available memory
+    dropping to ~300MB before being killed as too risky to trust unattended
+    -- confirmed via live Get-Counter monitoring both times, not assumed.
+    This version reads fixed 64MB chunks via plain seek+read, keeping only
+    the current chunk (plus an 8-byte overlap to catch a start code split
+    across a chunk boundary) in memory at any time -- a small, predictable,
+    genuinely bounded footprint regardless of file size."""
+    starts = []
+    with open(path, "rb") as f:
+        file_offset = 0
+        carry = b""
+        while True:
+            chunk = f.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            buf = carry + chunk
+            buf_base_offset = file_offset - len(carry)
+
+            idx = 0
+            while True:
+                idx = buf.find(b"\x00\x00\x01", idx)
+                if idx == -1 or idx + 3 >= len(buf):
+                    break
+                nal_type = buf[idx + 3] & 0x1F
+                if nal_type in delimiter_types:
+                    starts.append(buf_base_offset + idx)
+                idx += 3
+
+            file_offset += len(chunk)
+            carry = buf[-_OVERLAP:] if len(buf) >= _OVERLAP else buf
+
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+
+    bounds = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else file_size
+        bounds.append((s, e))
+    return bounds
 
 
 def interleave_mvc(base_path, dependent_path, out_path):
     """Recombines a separately-demuxed base (AVC) and dependent (MVC) view
     elementary stream into one combined bitstream a real MVC decoder can
-    read. Returns (base_au_count, dependent_au_count, written_au_count)."""
-    with open(base_path, "rb") as f:
-        base_data = f.read()
-    with open(dependent_path, "rb") as f:
-        dep_data = f.read()
+    read. Returns (base_au_count, dependent_au_count, written_au_count).
 
-    base_aus = _split_access_units(base_data, delimiter_types={9})
-    dep_aus = _split_access_units(dep_data, delimiter_types={24, 9})
+    Bounded memory (see _find_au_boundaries' own docstring for why): reads
+    and writes exactly one access unit's worth of data (typically well under
+    1MB, confirmed against real extracted streams) at a time via seek+read,
+    never the whole file."""
+    base_bounds = _find_au_boundaries(base_path, delimiter_types={9})
+    dep_bounds = _find_au_boundaries(dependent_path, delimiter_types={24, 9})
 
-    n = min(len(base_aus), len(dep_aus))
-    with open(out_path, "wb") as out:
+    n = min(len(base_bounds), len(dep_bounds))
+    with open(base_path, "rb") as bf, open(dependent_path, "rb") as df, open(out_path, "wb") as out:
         for i in range(n):
-            out.write(base_aus[i])
-            out.write(dep_aus[i])
+            bs, be = base_bounds[i]
+            ds, de = dep_bounds[i]
+            bf.seek(bs)
+            out.write(bf.read(be - bs))
+            df.seek(ds)
+            out.write(df.read(de - ds))
 
-    return len(base_aus), len(dep_aus), n
+    return len(base_bounds), len(dep_bounds), n
 
 
 def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work_dir, output_path,

@@ -5369,13 +5369,16 @@ class MainFrame(wx.Frame):
               "instead of 3840x1080. Uses the same detector as the main conversion's Auto Crop.\n"
               "How it works: about 40 spots of the disc's picture are checked, and a bar is only removed if "
               "it is black in nearly all of them, so a dark scene can't fool it. Both eyes always get the "
-              "identical crop, so the 3D depth is not affected. Disc subtitles are separate tracks and are "
-              "not cut. With the 4K layouts the picture keeps its true shape (a 2.39:1 film becomes "
+              "identical crop, so the 3D depth is not affected. With the 4K layouts the picture keeps its true shape (a 2.39:1 film becomes "
               "3840x1608 per eye, not a stretched 3840x2160).\n"
               "Con: adds a short analysis step before the conversion starts. A frame that isn't 16:9 "
               "(for example 3840x804) is fine for VLC/MPC-HC but some TVs and headsets expect a standard "
               "size -- leave this off if your player needs 1920x1080 or 3840x2160 frames. Greyed out for "
               "the Lossless 3D Blu-ray ISO, which copies the disc untouched.\n"
+              "Subtitles: the disc's subtitles are drawn for the full 1080-row frame and on widescreen films "
+              "often sit in the bottom black bar. After cropping that bar is gone, so in some players they may "
+              "appear in the wrong place or be cut off -- check them in the finished file, or turn Auto-crop "
+              "off if you need the subtitles.\n"
               "Recommended: Off for 16:9 discs (nothing to remove); \"Remove black bars (all sides)\" for "
               "widescreen films if your player copes with the odd frame size."))
 

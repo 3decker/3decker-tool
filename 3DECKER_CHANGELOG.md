@@ -44,6 +44,19 @@ instead of quietly changing your movie's speed. The encoding runs on the CPU
 (no GPU option exists for this format on current hardware) at roughly
 real-time speed or faster.
 
+**New: "Upscale with waifu2x" (Tools tab).** The upscaler that could only run
+automatically after a conversion is now also a tool you can run on any video,
+any time. Pick "Whole frame" for a normal enlargement, or "Stereo-aware 4K / 8K"
+for side-by-side or top-bottom 3D videos — that one splits the two eyes,
+upscales each separately (so the AI never blends the seam between them), smooths
+flicker, and puts them back together at exactly 4K or 8K width. Includes a
+progress bar and a Cancel button. Upscaling is slow — try a short clip first.
+
+**Safety pop-ups on the buttons that are easy to hit by mistake.** Cancel,
+Suspend, Quick Preview and 3DECKER Preferred now ask "are you sure?" first (and
+Clear All already did). "No" is the pre-selected answer, so an accidental Enter
+key does nothing. Resume (un-pausing) doesn't ask.
+
 **Fixed: 3D Blu-ray Import changed the colors slightly.** The video's color
 label was being applied in a way that also shifted the colors a little. Now
 it only labels them — the picture is a bit-for-bit match with the disc.

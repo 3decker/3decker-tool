@@ -5609,6 +5609,229 @@ class MainFrame(wx.Frame):
         sizer_sbs2mvc = wx.StaticBoxSizer(self.grp_sbs2mvc, wx.VERTICAL)
         sizer_sbs2mvc.Add(pane_header_row_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone tool: Upscale with waifu2x ---
+        # Runs the SAME two commands the "Upscale with waifu2x after conversion" option runs
+        # (iw3.utils._run_waifu2x_upscale / _run_waifu2x_upscale_stereo), but on any
+        # already-converted video, whenever you want: python -m waifu2x.cli (whole frame) or
+        # python -m iw3.waifu2x_upscale_stereo_cli (each eye separately, 4K/8K target), as
+        # their own subprocess. Progress is read from their tqdm output on stderr.
+        self.grp_upscale = wx.StaticBox(self.tab_tools, label=T("Upscale with waifu2x (Standalone Tool)"))
+
+        self.cpn_upscale = wx.CollapsiblePane(self.grp_upscale, label=T("Settings"), name="cpn_upscale")
+        self.cpn_upscale.Collapse(True)
+        self.cpn_upscale.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED, self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_upscale.GetPane().SetName("cpn_upscale_pane")
+
+        self.lbl_upscale_input = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Video to Upscale"))
+        self.txt_upscale_input = wx.TextCtrl(self.cpn_upscale.GetPane(), name="txt_upscale_input")
+        self.txt_upscale_input.SetToolTip(
+            T("What it's for: any video to upscale with waifu2x -- typically one of your finished 3D "
+              "conversions (side-by-side or top-bottom), but a normal 2D video works too.\n"
+              "How it's safe: read-only, never modified; a new file is always written to Output File.\n"
+              "Con: upscaling is slow and the output is much bigger than the input -- a full movie can "
+              "take many hours. Try a short clip first."))
+        self.btn_upscale_input = wx.Button(self.cpn_upscale.GetPane(), label=T("..."))
+
+        self.lbl_upscale_output = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Output File"))
+        self.txt_upscale_output = wx.TextCtrl(self.cpn_upscale.GetPane(), name="txt_upscale_output")
+        self.txt_upscale_output.SetToolTip(
+            T("Where to write the upscaled video. Auto-filled with '<name>_w2x.mkv' (or _w2x4k/_w2x8k for "
+              "the stereo-aware modes) next to the input once you pick one -- the same naming the "
+              "after-conversion upscale option uses."))
+        self.btn_upscale_output = wx.Button(self.cpn_upscale.GetPane(), label=T("..."))
+
+        self.lbl_upscale_mode = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Mode"))
+        self.cbo_upscale_mode = wx.ComboBox(self.cpn_upscale.GetPane(), name="cbo_upscale_mode")
+        self.cbo_upscale_mode.SetEditable(False)
+        self.cbo_upscale_mode.Append(T("Whole frame (2x / 4x)"), "whole")
+        self.cbo_upscale_mode.Append(T("Stereo-aware 4K (each eye separately, 3840 wide)"), "4k")
+        self.cbo_upscale_mode.Append(T("Stereo-aware 8K (each eye separately, 7680 wide)"), "8k")
+        self.cbo_upscale_mode.SetSelection(0)
+        self.cbo_upscale_mode.SetToolTip(
+            T("What it's for: how the picture is upscaled.\n"
+              "Whole frame: the entire video frame is enlarged by the Method's factor (2x or 4x). Simple "
+              "and the right choice for a normal 2D video.\n"
+              "Stereo-aware 4K / 8K: for a side-by-side or top-bottom 3D video only. The two eyes are "
+              "split apart, each is upscaled on its own (so the AI never blends pixels across the seam "
+              "between the eyes), smoothed frame-to-frame to reduce flicker, then put back together at "
+              "exactly 3840 (4K) or 7680 (8K) wide. The exact enlargement is worked out from your video's "
+              "real size.\n"
+              "Con: the stereo-aware modes make several full passes over the video, so they take clearly "
+              "longer, and they always write H.264.\n"
+              "Recommended: Whole frame for 2D; Stereo-aware 4K for 3D if you want the cleaner per-eye "
+              "result."))
+
+        self.lbl_upscale_method = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Method"))
+        self.cbo_upscale_method = wx.ComboBox(self.cpn_upscale.GetPane(),
+                                               choices=["noise_scale2x", "noise_scale4x", "scale2x", "scale4x"],
+                                               name="cbo_upscale_method")
+        self.cbo_upscale_method.SetEditable(False)
+        self.cbo_upscale_method.SetSelection(0)
+        self.cbo_upscale_method.SetToolTip(
+            T("What it's for: which waifu2x mode to run. \"noise_scale\" enlarges AND reduces compression "
+              "noise at the same time; plain \"scale\" only enlarges. 2x/4x is the size multiplier (width "
+              "and height each multiplied). In the stereo-aware modes the final size comes from the 4K/8K "
+              "target instead; the factor is chosen to be the smaller one that reaches it.\n"
+              "Recommended: noise_scale2x for most video."))
+
+        self.lbl_upscale_noise = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Noise Reduction"))
+        self.cbo_upscale_noise = wx.ComboBox(self.cpn_upscale.GetPane(), choices=["0", "1", "2", "3"],
+                                              name="cbo_upscale_noise")
+        self.cbo_upscale_noise.SetEditable(False)
+        self.cbo_upscale_noise.SetSelection(1)
+        self.cbo_upscale_noise.SetToolTip(
+            T("waifu2x noise reduction strength (0=off, 3=strongest); ignored by the plain \"scale\" "
+              "methods.\n"
+              "Con: too high on a clean source starts softening real fine detail.\n"
+              "Recommended: 1; raise to 2-3 only for a visibly noisy or heavily compressed source."))
+
+        self.lbl_upscale_style = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Style"))
+        self.cbo_upscale_style = wx.ComboBox(self.cpn_upscale.GetPane(), choices=["photo", "art"],
+                                              name="cbo_upscale_style")
+        self.cbo_upscale_style.SetEditable(False)
+        self.cbo_upscale_style.SetSelection(0)
+        self.cbo_upscale_style.SetToolTip(
+            T("waifu2x model style. \"photo\" is the better default for real movie footage; \"art\" is "
+              "tuned for illustration and anime."))
+
+        self.lbl_upscale_layout = wx.StaticText(self.cpn_upscale.GetPane(), label=T("3D Layout"))
+        self.cbo_upscale_layout = wx.ComboBox(self.cpn_upscale.GetPane(), name="cbo_upscale_layout")
+        self.cbo_upscale_layout.SetEditable(False)
+        self.cbo_upscale_layout.Append(T("Side-by-Side"), "sbs")
+        self.cbo_upscale_layout.Append(T("Top-Bottom"), "tb")
+        self.cbo_upscale_layout.SetSelection(0)
+        self.cbo_upscale_layout.SetToolTip(
+            T("What it's for: where the two eyes sit in your video, so the stereo-aware modes can split "
+              "them exactly. Only used by the Stereo-aware 4K/8K modes (greyed out for Whole frame). "
+              "Picked automatically from the video's shape when you choose a file -- change it if that "
+              "guess is wrong.\n"
+              "Con: a wrong choice cuts the picture in the wrong place and gives a broken result."))
+
+        self.lbl_upscale_gpu = wx.StaticText(self.cpn_upscale.GetPane(), label=T("GPU"))
+        self.cbo_upscale_gpu = wx.ComboBox(self.cpn_upscale.GetPane(), name="cbo_upscale_gpu")
+        self.cbo_upscale_gpu.SetEditable(False)
+        upscale_gpu_names = _query_nvidia_smi_gpu_names()
+        if upscale_gpu_names is not None:
+            for i, device_name in enumerate(upscale_gpu_names):
+                self.cbo_upscale_gpu.Append(f"{i}:{device_name}", i)
+        elif torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                self.cbo_upscale_gpu.Append(f"{i}:{torch.cuda.get_device_properties(i).name}", i)
+        elif mps_is_available():
+            self.cbo_upscale_gpu.Append("MPS", 0)
+        elif xpu_is_available():
+            for i in range(torch.xpu.device_count()):
+                self.cbo_upscale_gpu.Append(f"{i}:{torch.xpu.get_device_name(i)}", i)
+        self.cbo_upscale_gpu.Append("CPU", -1)
+        self.cbo_upscale_gpu.SetSelection(0)
+        self.cbo_upscale_gpu.SetToolTip(
+            T("Which GPU (or CPU) runs waifu2x. Con: CPU works without a graphics card but is dramatically "
+              "slower. Recommended: your main GPU (the first entry)."))
+
+        self.lbl_upscale_codec = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Output Codec"))
+        self.cbo_upscale_codec = wx.ComboBox(self.cpn_upscale.GetPane(), name="cbo_upscale_codec")
+        self.cbo_upscale_codec.SetEditable(False)
+        self.cbo_upscale_codec.Append(T("H.264 (default)"), None)
+        self.cbo_upscale_codec.Append(T("H.265/HEVC -- libx265 (CPU)"), "libx265")
+        self.cbo_upscale_codec.Append(T("H.265/HEVC -- hevc_nvenc (GPU)"), "hevc_nvenc")
+        self.cbo_upscale_codec.SetSelection(0)
+        self.cbo_upscale_codec.SetToolTip(
+            T("What it's for: the video format of the upscaled file (Whole frame mode only -- the "
+              "stereo-aware modes always write H.264).\n"
+              "Why change it: an upscaled picture is large; HEVC keeps it much smaller at the same "
+              "quality, and hevc_nvenc encodes on the GPU, far faster than libx265.\n"
+              "Con: HEVC is less universally compatible with older players than H.264.\n"
+              "Recommended: hevc_nvenc if you have an NVIDIA card, otherwise leave the default."))
+
+        self.lbl_upscale_quality = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Quality (CRF)"))
+        self.txt_upscale_quality = wx.TextCtrl(self.cpn_upscale.GetPane(), value="20", name="txt_upscale_quality")
+        self.txt_upscale_quality.SetToolTip(
+            T("What it's for: picture quality of the upscaled file as a constant-quality number. LOWER means "
+              "better quality and a BIGGER file.\n"
+              "Values: 0-51. About 16-18 is near-lossless, 20 is visually excellent, 24+ starts to soften.\n"
+              "Recommended: 20."))
+
+        self.btn_upscale_run = wx.Button(self.cpn_upscale.GetPane(), label=T("Run"))
+        self.btn_upscale_run.SetToolTip(
+            T("What it's for: starts the upscale as a separate background process -- this app's own GPU "
+              "state is never touched and the input video is never modified.\n"
+              "Con: slow. Speed depends on the picture size and the mode; on a large 3D video expect far "
+              "less than real-time. Running it while another conversion uses the same GPU makes both "
+              "slower.\n"
+              "Recommended: try a short clip first; watch the progress bar."))
+        self.btn_upscale_cancel = wx.Button(self.cpn_upscale.GetPane(), label=T("Cancel"))
+        self.btn_upscale_cancel.Disable()
+        self.btn_upscale_cancel.SetToolTip(
+            T("Stops the running upscale and all the programs it started, and removes any partial output "
+              "file."))
+
+        self.gauge_upscale = wx.Gauge(self.cpn_upscale.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_upscale.SetToolTip(
+            T("Real progress of the current pass (frames done so far), read live from the background "
+              "process. The stereo-aware modes make several passes, so the bar restarts for each one."))
+        self.lbl_upscale_progress = wx.StaticText(self.cpn_upscale.GetPane(), label="")
+
+        self.txt_upscale_log = wx.TextCtrl(self.cpn_upscale.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                            size=self.FromDIP((-1, 60)), name="txt_upscale_log")
+        self.txt_upscale_log.SetToolTip(
+            T("Shows the tool's own output when the job ends, including the exact reason if it failed."))
+        self.btn_upscale_clear = wx.Button(self.cpn_upscale.GetPane(), label=T("Clear"))
+        self.btn_upscale_clear.SetToolTip(
+            T("Empties the log box above. Disabled while a job is running; re-enabled when it finishes."))
+
+        self.btn_upscale_input.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_input)
+        self.btn_upscale_output.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_output)
+        self.cbo_upscale_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_upscale_mode)
+        self.btn_upscale_run.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_run)
+        self.btn_upscale_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_cancel)
+        self.btn_upscale_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_upscale_log.Clear())
+        self.upscale_proc = None
+        self.upscale_cancelled = False
+        self.upscale_start_time = 0.0
+        self.on_changed_upscale_mode(None)
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_upscale_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_upscale_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_upscale_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_upscale_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_upscale_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_mode, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_mode, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_method, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_method, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_noise, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_noise, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_style, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_style, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_layout, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_layout, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_gpu, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_gpu, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_codec, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_quality, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_upscale_quality, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_upscale_run, (h := h + 1, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_upscale_cancel, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_upscale, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_upscale_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_upscale_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_upscale_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_upscale.GetPane().SetSizer(layout)
+
+        self.pnl_upscale_dot = wx.Panel(self.grp_upscale, size=self.FromDIP((10, 10)))
+        self.pnl_upscale_dot.SetBackgroundColour(wx.Colour(244, 114, 182))
+        pane_header_row_upscale = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_upscale.Add(self.pnl_upscale_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_upscale.Add(self.cpn_upscale, 1, wx.EXPAND)
+
+        sizer_upscale = wx.StaticBoxSizer(self.grp_upscale, wx.VERTICAL)
+        sizer_upscale.Add(pane_header_row_upscale, 0, wx.ALL | wx.EXPAND, 4)
+
         # Each category below is its own panel (a Notebook tab, or a Single Page
         # section -- see ADR-037) instead of one big 4-column grid -- every sizer_*
         # here was already fully built above (unchanged), this only changes how
@@ -5652,6 +5875,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_bluray, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_upscale, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
         # ADR-037: the 7 category panels built above are already fully self-contained
@@ -7197,7 +7421,7 @@ class MainFrame(wx.Frame):
         only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
                       "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
-                      "cpn_bluray", "cpn_sbs2mvc")
+                      "cpn_bluray", "cpn_sbs2mvc", "cpn_upscale")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -8901,6 +9125,7 @@ class MainFrame(wx.Frame):
         "txt_rife_standalone_target_fps", "txt_rife_standalone_log",
         "txt_bluray_disc", "txt_bluray_output", "txt_bluray_log",
         "txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log",
+        "txt_upscale_input", "txt_upscale_output", "txt_upscale_log",
     )
     # The one field in that list whose real default isn't blank -- confirmed
     # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
@@ -11981,6 +12206,191 @@ class MainFrame(wx.Frame):
         self.SetStatusText(T("Converting to 3D Blu-ray..."))
         startWorker(self.on_exit_sbs2mvc_worker, self.run_sbs2mvc, wargs=(cmd,))
 
+    # --- Upscale with waifu2x (standalone tool) ---
+
+    def _upscale_suffix(self):
+        mode = self.cbo_upscale_mode.GetClientData(self.cbo_upscale_mode.GetSelection())
+        return "_w2x" if mode == "whole" else f"_w2x{mode}"
+
+    def on_click_btn_upscale_input(self, event):
+        with wx.FileDialog(self, message=T("Select Video to Upscale"), wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_upscale_input.GetValue():
+                dlg.SetPath(self.txt_upscale_input.GetValue())
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            input_path = dlg.GetPath()
+        self.txt_upscale_input.SetValue(input_path)
+        if not self.txt_upscale_output.GetValue():
+            self.txt_upscale_output.SetValue(f"{path.splitext(input_path)[0]}{self._upscale_suffix()}.mkv")
+        try:
+            from .sbs_to_mvc_cli import probe_video, guess_layout
+            width, height = probe_video(input_path)[:2]
+            axis = "tb" if guess_layout(width, height).endswith("tb") else "sbs"
+            for i in range(self.cbo_upscale_layout.GetCount()):
+                if self.cbo_upscale_layout.GetClientData(i) == axis:
+                    self.cbo_upscale_layout.SetSelection(i)
+                    break
+        except Exception:  # the guess is only a convenience
+            pass
+
+    def on_click_btn_upscale_output(self, event):
+        with wx.FileDialog(self, message=T("Save Upscaled Video As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|MP4 files (*.mp4)|*.mp4|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_upscale_output.GetValue():
+                dlg.SetPath(self.txt_upscale_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_upscale_output.SetValue(dlg.GetPath())
+
+    def on_changed_upscale_mode(self, event):
+        whole = self.cbo_upscale_mode.GetClientData(self.cbo_upscale_mode.GetSelection()) == "whole"
+        self.cbo_upscale_layout.Enable(not whole)
+        self.cbo_upscale_codec.Enable(whole)
+        # keep an auto-filled output name in step with the mode ("_w2x" vs "_w2x4k")
+        current = self.txt_upscale_output.GetValue().strip()
+        if current:
+            stem, ext = path.splitext(current)
+            for old in ("_w2x8k", "_w2x4k", "_w2x"):
+                if stem.endswith(old):
+                    self.txt_upscale_output.SetValue(stem[:-len(old)] + self._upscale_suffix() + ext)
+                    break
+
+    def _update_upscale_progress(self, done, total):
+        # Called via wx.CallAfter from run_upscale's reader thread.
+        if total > 0:
+            self.gauge_upscale.SetRange(int(total))
+            self.gauge_upscale.SetValue(int(min(done, total)))
+            elapsed = time() - self.upscale_start_time
+            self.lbl_upscale_progress.SetLabel(
+                f"{int(done)}/{int(total)} {T('frames')} ({min(100, int(done / total * 100))}%) "
+                f"[{T('elapsed')} {self._format_duration(elapsed)}]")
+
+    def run_upscale(self, cmd):
+        # Runs on a background thread via startWorker. waifu2x prints its progress as tqdm
+        # bars on stderr (carriage-return separated); everything is kept for the log.
+        self.upscale_proc = proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=path.dirname(path.dirname(path.abspath(__file__))),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        tail = []
+        buf = b""
+        while True:
+            chunk = proc.stdout.read(256)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                m = re.search(rb"[\r\n]", buf)
+                if not m:
+                    break
+                line, buf = buf[:m.start()], buf[m.end():]
+                text = line.decode(errors="replace").strip()
+                if not text:
+                    continue
+                pm = re.search(r"\b(\d+)/(\d+) \[", text)
+                if pm:
+                    wx.CallAfter(self._update_upscale_progress, int(pm.group(1)), int(pm.group(2)))
+                else:
+                    tail.append(text)
+                    del tail[:-40]
+        proc.wait()
+        return proc.returncode, "\n".join(tail)
+
+    def _cleanup_after_upscale_cancel(self):
+        output_path = self.txt_upscale_output.GetValue().strip()
+        try:
+            if output_path and path.exists(output_path) and path.getmtime(output_path) >= self.upscale_start_time - 1:
+                os.remove(output_path)
+        except OSError:
+            pass
+
+    def on_exit_upscale_worker(self, result):
+        self.btn_upscale_run.Enable()
+        self.btn_upscale_clear.Enable()
+        self.btn_upscale_cancel.Disable()
+        self.upscale_proc = None
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_upscale_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        self.txt_upscale_log.SetValue(output)
+        self.txt_upscale_log.ShowPosition(self.txt_upscale_log.GetLastPosition())
+        if self.upscale_cancelled:
+            self._cleanup_after_upscale_cancel()
+            self.lbl_upscale_progress.SetLabel(T("Cancelled"))
+            self.SetStatusText(T("Upscale cancelled"))
+        elif returncode == 0:
+            self.gauge_upscale.SetValue(self.gauge_upscale.GetRange())
+            self.lbl_upscale_progress.SetLabel(
+                f"{T('Done')} [{T('elapsed')} {self._format_duration(time() - self.upscale_start_time)}]")
+            self.SetStatusText(T("Upscale finished successfully"))
+        else:
+            self.SetStatusText(T("Upscale failed -- see the log below"))
+            wx.MessageBox(T("The upscale failed -- see the log box for the exact reason."),
+                          T("Upscale with waifu2x"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_upscale_cancel(self, event):
+        proc = self.upscale_proc
+        if proc is not None and proc.poll() is None:
+            self.upscale_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_upscale_cancel.Disable()
+
+    def build_upscale_command(self):
+        """Returns (cmd, None) or (None, error_message); no process is started."""
+        input_path = self.txt_upscale_input.GetValue().strip()
+        output_path = self.txt_upscale_output.GetValue().strip()
+        if not input_path or not path.exists(input_path):
+            return None, T("Select a valid video to upscale first.")
+        if not output_path:
+            return None, T("Set an Output File path first.")
+        if path.abspath(output_path) == path.abspath(input_path):
+            return None, T("Output File must be different from the input video.")
+        if not validate_number(self.txt_upscale_quality.GetValue(), 0, 51, allow_empty=False):
+            return None, T("Quality (CRF) must be a number between 0 and 51 (20 recommended).")
+        mode = self.cbo_upscale_mode.GetClientData(self.cbo_upscale_mode.GetSelection())
+        method = self.cbo_upscale_method.GetValue()
+        noise = self.cbo_upscale_noise.GetValue()
+        style = self.cbo_upscale_style.GetValue()
+        gpu = int(self.cbo_upscale_gpu.GetClientData(self.cbo_upscale_gpu.GetSelection()))
+        crf = str(int(float(self.txt_upscale_quality.GetValue())))
+        if mode == "whole":
+            cmd = [sys.executable, "-m", "waifu2x.cli", "-i", input_path, "-o", output_path,
+                   "-m", method, "-n", noise, "--style", style, "--gpu", str(gpu), "--crf", crf, "-y"]
+            codec = self.cbo_upscale_codec.GetClientData(self.cbo_upscale_codec.GetSelection())
+            if codec:
+                cmd += ["--video-codec", codec]
+        else:
+            axis = self.cbo_upscale_layout.GetClientData(self.cbo_upscale_layout.GetSelection())
+            cmd = [sys.executable, "-m", "iw3.waifu2x_upscale_stereo_cli", "-i", input_path, "-o", output_path,
+                   "--split-axis", axis, "--target-packed-width", "3840" if mode == "4k" else "7680",
+                   "--waifu2x-method", method, "--waifu2x-noise-level", noise, "--waifu2x-style", style,
+                   "--crf", crf, "--gpu", str(max(gpu, 0))]
+        return cmd, None
+
+    def on_click_btn_upscale_run(self, event):
+        cmd, error = self.build_upscale_command()
+        if error:
+            wx.MessageBox(error, T("Upscale with waifu2x"), wx.OK | wx.ICON_WARNING)
+            return
+        self.txt_upscale_log.SetValue(T("Running...\n"))
+        self.gauge_upscale.SetRange(1)
+        self.gauge_upscale.SetValue(0)
+        self.lbl_upscale_progress.SetLabel("")
+        self.upscale_cancelled = False
+        self.upscale_start_time = time()
+        self.btn_upscale_run.Disable()
+        self.btn_upscale_clear.Disable()
+        self.btn_upscale_cancel.Enable()
+        self.SetStatusText(T("Upscaling..."))
+        startWorker(self.on_exit_upscale_worker, self.run_upscale, wargs=(cmd,))
+
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))
 LOCALE_DICT = LOCALES.get(get_default_locale(), {})
@@ -12943,9 +13353,9 @@ def _self_test_video_filter_collapsible_section():
 
 
 def _self_test_standalone_tools_collapsible_sections():
-    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 10
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 11
     Guided Light panes added to Standalone Tools (ADR-101, one per tool; ADR-169
-    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th; ADR-182 UPDATE 6 adds SBS to 3D Blu-ray MVC as the 10th) --
+    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th; ADR-182 UPDATE 6 adds SBS to 3D Blu-ray MVC as the 10th; the Upscale with waifu2x tool is the 11th) --
     tab_tools/tab_wrap_tools/on_toggled_standalone_tools_collapsible_pane in place of
     the Stereo Generation equivalents. Also checks each pane has a real, unique
     name (the exact bug class this pattern already broke once with 2+ panes sharing
@@ -12963,9 +13373,9 @@ def _self_test_standalone_tools_collapsible_sections():
         frame = gui_mod.MainFrame()
         panes = frame.get_standalone_tools_sliders_and_panes()
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
-        assert len(panes) == 10, f"expected 10 Standalone Tools panes, found {len(panes)}"
+        assert len(panes) == 11, f"expected 11 Standalone Tools panes, found {len(panes)}"
         names = [p.GetName() for p in panes]
-        assert len(set(names)) == 10, f"pane names are not all unique: {names}"
+        assert len(set(names)) == 11, f"pane names are not all unique: {names}"
         for p in panes:
             assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
 
@@ -16999,6 +17409,103 @@ def _self_test_confirm_dangerous_buttons():
     print("_self_test_confirm_dangerous_buttons: PASS")
 
 
+def _self_test_upscale_panel():
+    """Upscale with waifu2x standalone tool: widgets/defaults, command building for the whole-
+    frame and stereo-aware modes, validation, mode-dependent enabling, output-name tracking,
+    Run/Cancel/Clear lockstep and cancel cleanup. startWorker is monkeypatched: nothing runs."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.cpn_upscale.GetPane().GetName() == "cpn_upscale_pane"
+        assert frame.cpn_upscale in frame.get_standalone_tools_sliders_and_panes()
+        for name in ("txt_upscale_input", "txt_upscale_output", "txt_upscale_log"):
+            assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        mode_of = lambda: frame.cbo_upscale_mode.GetClientData(frame.cbo_upscale_mode.GetSelection())  # noqa
+        assert [frame.cbo_upscale_mode.GetClientData(i) for i in range(3)] == ["whole", "4k", "8k"]
+        assert mode_of() == "whole"
+        assert not frame.cbo_upscale_layout.IsEnabled() and frame.cbo_upscale_codec.IsEnabled()
+        assert frame.btn_upscale_run.IsEnabled() and not frame.btn_upscale_cancel.IsEnabled()
+
+        cmd, err = frame.build_upscale_command()
+        assert cmd is None and err, "empty input must be refused"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = path.join(tmpdir, "movie_sbs.mkv")
+            open(video, "wb").close()
+            out = path.join(tmpdir, "movie_sbs_w2x.mkv")
+            frame.txt_upscale_input.SetValue(video)
+            frame.txt_upscale_output.SetValue(video)
+            cmd, err = frame.build_upscale_command()
+            assert cmd is None and err, "output equal to input must be refused"
+            frame.txt_upscale_output.SetValue(out)
+            frame.txt_upscale_quality.SetValue("abc")
+            cmd, err = frame.build_upscale_command()
+            assert cmd is None and err, "non-numeric quality must be refused"
+            frame.txt_upscale_quality.SetValue("20")
+
+            cmd, err = frame.build_upscale_command()
+            assert err is None and cmd[1:3] == ["-m", "waifu2x.cli"], cmd
+            assert cmd[cmd.index("-i") + 1] == video and cmd[cmd.index("-o") + 1] == out
+            assert cmd[cmd.index("-m", 3) + 1] == "noise_scale2x"
+            assert cmd[cmd.index("-n") + 1] == "1" and cmd[cmd.index("--style") + 1] == "photo"
+            assert cmd[cmd.index("--crf") + 1] == "20" and "-y" in cmd and "--video-codec" not in cmd
+
+            frame.cbo_upscale_codec.SetSelection(2)
+            cmd, err = frame.build_upscale_command()
+            assert cmd[cmd.index("--video-codec") + 1] == "hevc_nvenc"
+
+            # stereo-aware 4K: layout enabled, codec disabled, output name follows the mode
+            frame.cbo_upscale_mode.SetSelection(1)
+            frame.on_changed_upscale_mode(None)
+            assert frame.cbo_upscale_layout.IsEnabled() and not frame.cbo_upscale_codec.IsEnabled()
+            assert frame.txt_upscale_output.GetValue().endswith("_w2x4k.mkv"), frame.txt_upscale_output.GetValue()
+            frame.cbo_upscale_layout.SetSelection(1)
+            cmd, err = frame.build_upscale_command()
+            assert err is None and cmd[1:3] == ["-m", "iw3.waifu2x_upscale_stereo_cli"], cmd
+            assert cmd[cmd.index("--split-axis") + 1] == "tb"
+            assert cmd[cmd.index("--target-packed-width") + 1] == "3840"
+            frame.cbo_upscale_mode.SetSelection(2)
+            frame.on_changed_upscale_mode(None)
+            cmd, err = frame.build_upscale_command()
+            assert cmd[cmd.index("--target-packed-width") + 1] == "7680"
+            assert frame.txt_upscale_output.GetValue().endswith("_w2x8k.mkv")
+            frame.cbo_upscale_mode.SetSelection(0)
+            frame.on_changed_upscale_mode(None)
+            assert frame.txt_upscale_output.GetValue().endswith("_w2x.mkv")
+
+            gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
+            frame.on_click_btn_upscale_run(None)
+            assert not frame.btn_upscale_run.IsEnabled() and not frame.btn_upscale_clear.IsEnabled()
+            assert frame.btn_upscale_cancel.IsEnabled()
+            frame.on_exit_upscale_worker(_FakeResult((0, "all good")))
+            assert frame.btn_upscale_run.IsEnabled() and frame.btn_upscale_clear.IsEnabled()
+            assert not frame.btn_upscale_cancel.IsEnabled() and "all good" in frame.txt_upscale_log.GetValue()
+
+            open(frame.txt_upscale_output.GetValue(), "wb").close()
+            frame.upscale_start_time = time() - 5
+            frame.upscale_cancelled = True
+            frame.on_exit_upscale_worker(_FakeResult((1, "")))
+            assert not path.exists(frame.txt_upscale_output.GetValue()), "cancel must remove the partial output"
+            assert path.exists(video), "the input video must never be touched"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_upscale_panel: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -17080,6 +17587,7 @@ def _run_self_tests():
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
         _self_test_confirm_dangerous_buttons,
+        _self_test_upscale_panel,
     ]
     failures = []
     for test in tests:

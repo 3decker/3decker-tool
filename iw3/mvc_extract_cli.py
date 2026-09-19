@@ -276,7 +276,12 @@ def encoder_args(codec, quality, layout):
     if codec not in CODECS:
         raise ValueError(f"unknown codec {codec!r}; choose from {CODECS}")
     if codec == "hevc_nvenc":
-        args = ["-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(quality), "-b:v", "0"]
+        # -maxrate/-bufsize are REQUIRED for -cq to work below ~20: without them NVENC silently caps the
+        # bitrate near 19 Mbps, so Quality 8, 14 and 18 all produced the same file (measured on a lossless
+        # 15 s sample: cq14 34.6 MB capped vs 66.9 MB with the ceiling raised). 100 Mbps is only a safety
+        # ceiling; the Quality number decides the real bitrate.
+        args = ["-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(quality), "-b:v", "0",
+                "-maxrate", "100M", "-bufsize", "200M"]
     elif codec == "libx265":
         args = ["-c:v", "libx265", "-crf", str(quality)]
     else:

@@ -5350,6 +5350,31 @@ class MainFrame(wx.Frame):
               "Recommended: Full Side-by-Side for everyday watching; the Lossless ISO for archiving or a "
               "3D Blu-ray player."))
 
+        self.lbl_bluray_autocrop = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Auto-crop"))
+        self.cbo_bluray_autocrop = wx.ComboBox(self.cpn_bluray.GetPane(), name="cbo_bluray_autocrop")
+        self.cbo_bluray_autocrop.SetEditable(False)
+        # ClientData is the real --autocrop value ("" = off)
+        self.cbo_bluray_autocrop.Append(T("Off"), "")
+        self.cbo_bluray_autocrop.Append(T("Remove black bars (all sides)"), "BLACK")
+        self.cbo_bluray_autocrop.Append(T("Remove black bars (top and bottom only)"), "BLACK_TB")
+        self.cbo_bluray_autocrop.SetSelection(0)
+        self.cbo_bluray_autocrop.SetToolTip(
+            T("What it's for: widescreen films (2.39:1) are stored on the disc as a 16:9 picture with black "
+              "bars above and below. This finds those bars and cuts them off both eyes by the same amount, "
+              "so the video contains only the picture -- for example Full Side-by-Side becomes 3840x804 "
+              "instead of 3840x1080. Uses the same detector as the main conversion's Auto Crop.\n"
+              "How it works: about 40 spots of the disc's picture are checked, and a bar is only removed if "
+              "it is black in nearly all of them, so a dark scene can't fool it. Both eyes always get the "
+              "identical crop, so the 3D depth is not affected. Disc subtitles are separate tracks and are "
+              "not cut. With the 4K layouts the picture keeps its true shape (a 2.39:1 film becomes "
+              "3840x1608 per eye, not a stretched 3840x2160).\n"
+              "Con: adds a short analysis step before the conversion starts. A frame that isn't 16:9 "
+              "(for example 3840x804) is fine for VLC/MPC-HC but some TVs and headsets expect a standard "
+              "size -- leave this off if your player needs 1920x1080 or 3840x2160 frames. Greyed out for "
+              "the Lossless 3D Blu-ray ISO, which copies the disc untouched.\n"
+              "Recommended: Off for 16:9 discs (nothing to remove); \"Remove black bars (all sides)\" for "
+              "widescreen films if your player copes with the odd frame size."))
+
         self.lbl_bluray_codec = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Video Codec"))
         self.cbo_bluray_codec = wx.ComboBox(self.cpn_bluray.GetPane(), name="cbo_bluray_codec")
         self.cbo_bluray_codec.SetEditable(False)
@@ -5451,6 +5476,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_bluray_output, (h, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_bluray_layout, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_bluray_layout, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_bluray_autocrop, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_bluray_autocrop, (h, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_bluray_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_bluray_codec, (h, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_bluray_quality, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -5533,6 +5560,26 @@ class MainFrame(wx.Frame):
               "Con: Half inputs only have half the detail in one direction, and that can't be recovered.\n"
               "Recommended: Full Side-by-Side if your input is 3840x1080."))
 
+        self.lbl_sbs2mvc_autocrop = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Auto-crop"))
+        self.cbo_sbs2mvc_autocrop = wx.ComboBox(self.cpn_sbs2mvc.GetPane(), name="cbo_sbs2mvc_autocrop")
+        self.cbo_sbs2mvc_autocrop.SetEditable(False)
+        self.cbo_sbs2mvc_autocrop.Append(T("Off"), "")
+        self.cbo_sbs2mvc_autocrop.Append(T("Remove black bars (all sides)"), "BLACK")
+        self.cbo_sbs2mvc_autocrop.Append(T("Remove black bars (top and bottom only)"), "BLACK_TB")
+        self.cbo_sbs2mvc_autocrop.SetSelection(0)
+        self.cbo_sbs2mvc_autocrop.SetToolTip(
+            T("What it's for: finds black bars around the picture in your video's left eye and cuts them "
+              "off both eyes by the same amount BEFORE the picture is fitted into the disc frame. Uses the "
+              "same detector as the main conversion's Auto Crop (about 40 spots are checked, and a bar is "
+              "only removed if it is black in nearly all of them).\n"
+              "Important: a 3D Blu-ray frame is always 1920x1080, so the bars are put back around the "
+              "fitted picture -- this will NOT make the frame smaller. It helps when your bars are uneven "
+              "or noisy, or the picture sits off-centre, because the picture is then centred and scaled "
+              "to fit properly.\n"
+              "Con: adds a short analysis step; on a video with clean, centred bars the result is identical "
+              "to leaving it off.\n"
+              "Recommended: Off, unless the picture looks off-centre or its edges show a dark fringe."))
+
         self.chk_sbs2mvc_swap = wx.CheckBox(self.cpn_sbs2mvc.GetPane(), label=T("Swap eyes"), name="chk_sbs2mvc_swap")
         self.chk_sbs2mvc_swap.SetToolTip(
             T("What it's for: use only if your input has the RIGHT eye first (a 'cross-eyed' layout). "
@@ -5609,6 +5656,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_sbs2mvc_layout, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_sbs2mvc_layout, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_sbs2mvc_swap, (h, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_sbs2mvc_autocrop, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sbs2mvc_autocrop, (h, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_sbs2mvc_bitrate, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_sbs2mvc_bitrate, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_sbs2mvc_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -11911,6 +11960,7 @@ class MainFrame(wx.Frame):
         is_iso = self._bluray_is_iso_layout()
         self.cbo_bluray_codec.Enable(not is_iso)
         self.txt_bluray_quality.Enable(not is_iso)
+        self.cbo_bluray_autocrop.Enable(not is_iso)
         current = self.txt_bluray_output.GetValue().strip()
         old_ext, new_ext = (".mkv", ".iso") if is_iso else (".iso", ".mkv")
         if current.lower().endswith(old_ext):
@@ -11928,6 +11978,7 @@ class MainFrame(wx.Frame):
         # these widgets from that thread.
         names = {"mount": T("Opening the disc"), "demux": T("Reading the disc"),
                  "scan": T("Preparing frames"), "encode": T("Converting"),
+                 "autocrop": T("Looking for black bars"),
                  "mux": T("Copying to 3D Blu-ray ISO"),
                  "restore": T("Adding audio and subtitles")}
         name = names.get(stage, stage)
@@ -12047,6 +12098,9 @@ class MainFrame(wx.Frame):
                "--layout", layout, "--video-codec", codec,
                "--quality", str(int(float(self.txt_bluray_quality.GetValue() or "18") if not self._bluray_is_iso_layout() else 18)),
                "--gui-progress"]
+        autocrop = self.cbo_bluray_autocrop.GetClientData(self.cbo_bluray_autocrop.GetSelection())
+        if autocrop and layout != "bd3d_iso":
+            cmd += ["--autocrop", autocrop]
         if not self.chk_bluray_restore_av.GetValue():
             cmd.append("--no-audio-subs")
         return cmd, None
@@ -12111,7 +12165,8 @@ class MainFrame(wx.Frame):
 
     def _update_sbs2mvc_progress(self, stage, done, total):
         # Called via wx.CallAfter from run_sbs2mvc's background thread.
-        names = {"encode": T("Encoding 3D"), "mux": T("Building the disc")}
+        names = {"encode": T("Encoding 3D"), "mux": T("Building the disc"),
+                 "autocrop": T("Looking for black bars")}
         name = names.get(stage, stage)
         if total > 0:
             self.gauge_sbs2mvc.SetRange(int(total))
@@ -12219,6 +12274,9 @@ class MainFrame(wx.Frame):
         layout = self.cbo_sbs2mvc_layout.GetClientData(self.cbo_sbs2mvc_layout.GetSelection()).replace("_4k", "")
         cmd = [sys.executable, "-m", "iw3.sbs_to_mvc_cli", "--input", input_path, "--output", output_path,
                "--layout", layout, "--bitrate", str(float(self.txt_sbs2mvc_bitrate.GetValue())), "--gui-progress"]
+        autocrop = self.cbo_sbs2mvc_autocrop.GetClientData(self.cbo_sbs2mvc_autocrop.GetSelection())
+        if autocrop:
+            cmd += ["--autocrop", autocrop]
         if self.chk_sbs2mvc_swap.GetValue():
             cmd.append("--swap-eyes")
         if not self.chk_sbs2mvc_restore_av.GetValue():
@@ -17227,6 +17285,24 @@ def _self_test_bluray_import_panel():
             assert cmd[cmd.index("--quality") + 1] == "22"
             assert "--no-audio-subs" in cmd
 
+            # auto-crop: off by default, a chosen mode reaches the command, greyed out for the lossless ISO
+            assert frame.cbo_bluray_autocrop.GetClientData(frame.cbo_bluray_autocrop.GetSelection()) == ""
+            cmd, err = frame.build_bluray_command()
+            assert "--autocrop" not in cmd, cmd
+            frame.cbo_bluray_autocrop.SetSelection(1)
+            cmd, err = frame.build_bluray_command()
+            assert cmd[cmd.index("--autocrop") + 1] == "BLACK", cmd
+            frame.cbo_bluray_autocrop.SetSelection(2)
+            cmd, err = frame.build_bluray_command()
+            assert cmd[cmd.index("--autocrop") + 1] == "BLACK_TB", cmd
+            pick("bd3d_iso")
+            frame.on_changed_bluray_layout(None)
+            assert not frame.cbo_bluray_autocrop.IsEnabled(), "auto-crop must be greyed out for the lossless ISO"
+            pick("full_sbs")
+            frame.on_changed_bluray_layout(None)
+            assert frame.cbo_bluray_autocrop.IsEnabled()
+            frame.cbo_bluray_autocrop.SetSelection(0)
+
             # the four 4K layouts reach the command unchanged
             for value in ("full_sbs_4k", "half_sbs_4k", "full_tb_4k", "half_tb_4k"):
                 pick(value)
@@ -17361,6 +17437,16 @@ def _self_test_sbs2mvc_panel():
             frame.cbo_sbs2mvc_layout.SetSelection(items.index("half_sbs_4k"))
             cmd, err = frame.build_sbs2mvc_command()
             assert cmd[cmd.index("--layout") + 1] == "half_sbs", cmd
+
+            # auto-crop: off by default, a chosen mode reaches the command
+            assert "--autocrop" not in cmd
+            frame.cbo_sbs2mvc_autocrop.SetSelection(1)
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd[cmd.index("--autocrop") + 1] == "BLACK", cmd
+            frame.cbo_sbs2mvc_autocrop.SetSelection(2)
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd[cmd.index("--autocrop") + 1] == "BLACK_TB", cmd
+            frame.cbo_sbs2mvc_autocrop.SetSelection(0)
 
             gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
             frame.on_click_btn_sbs2mvc_run(None)

@@ -29,7 +29,7 @@ import threading
 import urllib.request
 from os import path
 
-from .mvc_extract_cli import Cancelled, list_tracks
+from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop, list_tracks
 from .utils import _find_tsmuxer, _get_ffmpeg_bin
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
@@ -162,20 +162,37 @@ def guess_layout(width, height):
     return "half_sbs"
 
 
-def eye_filter(layout, width, height):
+def eye_only_filter(layout):
+    """ffmpeg -vf that keeps just the LEFT eye of a packed frame (used to look for black bars)."""
+    return "crop=iw/2:ih:0:0" if layout in ("full_sbs", "half_sbs") else "crop=iw:ih/2:0:0"
+
+
+def eye_filter(layout, width, height, crop=None):
     """ffmpeg -vf chain: cut both eyes out of the input frame, scale each to fit
     1920x1080 keeping its true picture shape (half layouts store a squeezed picture),
-    pad with black, and put them side by side (3840x1080 raw for FRIM's -sbs 2)."""
+    pad with black, and put them side by side (3840x1080 raw for FRIM's -sbs 2).
+    With `crop` = (x, y, w, h) (in one eye's own pixels) the black bars are cut off each eye
+    first. The disc frame is still 1920x1080, so the bars are put back around the fitted
+    picture -- auto-crop mainly tidies uneven or noisy edges, it cannot shrink a Blu-ray frame."""
     if layout not in LAYOUTS:
         raise ValueError(f"unknown layout {layout!r}; choose from {LAYOUTS}")
     if layout in ("full_sbs", "half_sbs"):
         eye_w, eye_h = width // 2, height
-        disp_w, disp_h = (width, height) if layout == "half_sbs" else (eye_w, eye_h)
         crop_l, crop_r = f"crop={eye_w}:{eye_h}:0:0", f"crop={eye_w}:{eye_h}:{eye_w}:0"
     else:
         eye_w, eye_h = width, height // 2
-        disp_w, disp_h = (width, height) if layout == "half_tb" else (eye_w, eye_h)
         crop_l, crop_r = f"crop={eye_w}:{eye_h}:0:0", f"crop={eye_w}:{eye_h}:0:{eye_h}"
+    if crop is not None:
+        cx, cy, cw, ch = crop
+        extra = f",crop={cw}:{ch}:{cx}:{cy}"
+        crop_l, crop_r = crop_l + extra, crop_r + extra
+        eye_w, eye_h = cw, ch
+    if layout == "half_sbs":
+        disp_w, disp_h = eye_w * 2, eye_h
+    elif layout == "half_tb":
+        disp_w, disp_h = eye_w, eye_h * 2
+    else:
+        disp_w, disp_h = eye_w, eye_h
     scale = min(1920 / disp_w, 1080 / disp_h)
     w = min(1920, max(2, round(disp_w * scale / 2) * 2))
     h = min(1080, max(2, round(disp_h * scale / 2) * 2))
@@ -224,7 +241,7 @@ def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av):
 
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
-            stop_event=None, progress_cb=None):
+            stop_event=None, progress_cb=None, autocrop=None):
     """Full job. Returns the number of frames encoded. progress_cb(stage, done, total),
     stage in {"encode", "mux"}."""
     frim = find_frim()
@@ -254,6 +271,17 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     seconds = min(duration, cut_seconds) if cut_seconds else duration
     total_frames = int(seconds * float(fps_text))
 
+    crop = None
+    if autocrop:
+        if progress_cb:
+            progress_cb("autocrop", 0, 1)
+        crop = detect_eye_crop(input_path, autocrop, vf=eye_only_filter(layout))
+        if crop is None:
+            print("[sbs2mvc] auto-crop: no black bars found; nothing cropped", file=sys.stderr)
+        else:
+            print(f"[sbs2mvc] auto-crop: each eye cut to x={crop[0]} y={crop[1]} {crop[2]}x{crop[3]}",
+                  file=sys.stderr)
+
     out_dir = path.dirname(path.abspath(output_iso))
     os.makedirs(out_dir, exist_ok=True)
     stem = path.splitext(path.basename(output_iso))[0]
@@ -276,7 +304,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     ffmpeg_log = path.join(work_dir, "ffmpeg.log")
     procs, ok = [], False
     try:
-        vf = eye_filter(layout, width, height)
+        vf = eye_filter(layout, width, height, crop)
         ff_cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
         if cut_seconds:
             ff_cmd += ["-t", str(cut_seconds)]
@@ -397,6 +425,9 @@ def main():
     parser.add_argument("--bitrate", type=float, default=20.0,
                         help="target Mbps per view (default 20; 3D Blu-ray allows about 40 combined)")
     parser.add_argument("--swap-eyes", action="store_true", help="the input is right-eye-first (cross-eyed)")
+    parser.add_argument("--autocrop", type=str.upper, default=None, choices=AUTOCROP_MODES,
+                        help="remove black bars from each eye before fitting: BLACK = all sides, BLACK_TB = "
+                             "top/bottom only (FLAT / FLAT_TB for flat-colour borders)")
     parser.add_argument("--no-audio-subs", action="store_true", help="video only")
     parser.add_argument("--cut-seconds", type=float, default=None, help="only convert the first N seconds")
     parser.add_argument("--work-dir", default=None)
@@ -420,7 +451,7 @@ def main():
         frames = convert(args.input, args.output, layout=layout, bitrate_mbps=args.bitrate,
                          swap_eyes=args.swap_eyes, include_av=not args.no_audio_subs,
                          work_dir=args.work_dir, cut_seconds=args.cut_seconds, keep_temp=args.keep_temp,
-                         progress_cb=show)
+                         progress_cb=show, autocrop=args.autocrop)
     except Cancelled:
         print("\n[sbs2mvc] cancelled", file=sys.stderr)
         return 1

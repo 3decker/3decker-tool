@@ -52,6 +52,8 @@ upscales each separately (so the AI never blends the seam between them), smooths
 flicker, and puts them back together at exactly 4K or 8K width. Includes a
 progress bar and a Cancel button. Upscaling is slow — try a short clip first.
 
+**Auto-crop for 3D Blu-ray Import and SBS to 3D Blu-ray MVC.** Both tools have a new Auto-crop choice (off by default) that finds black bars around the picture and removes them from both eyes by the same amount, using the same detector as the main conversion. In 3D Blu-ray Import it makes a widescreen film's video contain only the picture (for example Full Side-by-Side becomes 3840x804 instead of 3840x1080), and the 4K layouts keep the picture's true shape. A 3D Blu-ray frame is always 1920x1080, so in SBS to 3D Blu-ray MVC it can't make the frame smaller - it only tidies uneven edges and off-centre pictures. It isn't used for the Lossless 3D Blu-ray ISO, which copies the disc untouched.
+
 **4K layouts in 3D Blu-ray Import and SBS to 3D Blu-ray MVC.** The 3D Layout list in 3D Blu-ray Import now also offers Full Side-by-Side 4K, Half Side-by-Side 4K, Full Top-Bottom 4K and Half Top-Bottom 4K (each eye enlarged to 4K - a plain enlargement, so for real AI upscaling run the result through the Upscale tool afterward). SBS to 3D Blu-ray MVC has the matching 4K choices in its Input Layout list, picked automatically from your video's size; a 3D Blu-ray itself still holds 1080p per eye. Full Side-by-Side 4K is 7680x2160, which many players can't handle.
 
 **Tool titles on the Standalone Tools tab are now all blue.** Some (Add Audio Track, Restore All Audio Tracks, Sharpen, RIFE and the newest tools) were still black, which was hard to read on the dark theme.

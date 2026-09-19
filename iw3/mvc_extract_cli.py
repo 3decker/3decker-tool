@@ -173,9 +173,87 @@ _LAYOUTS_4K = {
 _SPLIT_EYES = "split[a][b];[a]crop=iw/2:ih:0:0[l];[b]crop=iw/2:ih:iw/2:0[r];[l][r]vstack"
 
 
-def layout_filter(layout):
+AUTOCROP_MODES = ("BLACK", "BLACK_TB", "FLAT", "FLAT_TB")
+
+
+def detect_eye_crop(video_path, mode, vf=""):
+    """Runs iw3's own AutoCrop analysis (the same detector as the main conversion's Auto Crop) on
+    `video_path` and returns (x, y, w, h) of the picture inside ONE eye, or None when there
+    is nothing to remove. `vf` can isolate one eye when the video is a packed 3D frame.
+
+    iw3's helper samples KEYFRAMES only; a short or sparse-keyframe video can deliver none and
+    then silently report "no bars". So if the keyframe pass sees nothing, sample ordinary frames."""
+    import torch
+    import nunif.utils.video as VU
+    from nunif.utils.autocrop import AutoCrop, AutoCropDetector
+
+    from tqdm import tqdm
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    def quiet_tqdm(**kwargs):  # keep progress-bar noise out of the tool's log
+        return tqdm(**{**kwargs, "disable": True})
+
+    def analyze(keyframe_only):
+        model = AutoCropDetector(mode=mode.upper(), mod=2)
+        size = [0, 0]
+
+        def on_batch(x):
+            size[0] = max(size[0], x.shape[-2])
+            size[1] = max(size[1], x.shape[-1])
+            model.update(x)
+
+        pool = VU.FrameCallbackPool(on_batch, batch_size=2, device=device, max_workers=0)
+        VU.sample_frames(video_path, pool, num_samples=40, keyframe_only=keyframe_only, vf=vf,
+                         device=device, title="AutoCrop Analysis", tqdm_fn=quiet_tqdm)
+        return model, size
+
+    model, (height, width) = analyze(True)
+    if model.frame_count == 0:
+        model, (height, width) = analyze(False)
+    if model.frame_count == 0:
+        return None
+    slice_h, slice_w = model.get_crop()
+    return AutoCrop.calc_crop(slice_h, slice_w, height, width)
+
+
+def _even(v):
+    return max(2, int(round(v / 2)) * 2)
+
+
+def _cropped_layout_filter(layout, crop):
+    """Same layouts as layout_filter(), but each eye is first cut down to the picture
+    rectangle `crop` = (x, y, w, h) (black bars removed, same rectangle for both eyes).
+    The 4K layouts keep the picture's true shape: the width is fixed by the layout and the
+    height follows from the cropped picture's aspect ratio (a bar-free 2.39:1 eye becomes
+    3840x1608, not a stretched 3840x2160)."""
+    x, y, w, h = crop
+    is_4k = layout.endswith("_4k")
+    geometry = layout[:-3] if is_4k else layout
+    if geometry == "frame_packed":
+        geometry = "full_tb"
+    if is_4k:
+        nat_h = _even(3840 * h / w)
+        sizes = {"full_sbs": (3840, nat_h), "half_sbs": (1920, nat_h),
+                 "full_tb": (3840, nat_h), "half_tb": (3840, _even(nat_h / 2))}
+    else:
+        sizes = {"full_sbs": (w, h), "half_sbs": (_even(w / 2), h),
+                 "full_tb": (w, h), "half_tb": (w, _even(h / 2))}
+    eye_w, eye_h = sizes[geometry]
+    stack = "hstack" if geometry.endswith("sbs") else "vstack"
+    scale = "" if (eye_w, eye_h) == (w, h) else f",scale={eye_w}:{eye_h}:flags=lanczos"
+    return (f"split[a][b];[a]crop=iw/2:ih:0:0,crop={w}:{h}:{x}:{y}{scale}[l];"
+            f"[b]crop=iw/2:ih:iw/2:0,crop={w}:{h}:{x}:{y}{scale}[r];[l][r]{stack}")
+
+
+def layout_filter(layout, crop=None):
     """ffmpeg -vf chain turning edge264's full-width side-by-side frame (left eye |
-    right eye, each at full 1920x1080) into the requested layout. None = no change."""
+    right eye, each at full 1920x1080) into the requested layout. None = no change.
+    With `crop` (x, y, w, h) each eye is cut to that picture rectangle first."""
+    if crop is not None:
+        if layout not in LAYOUTS:
+            raise ValueError(f"unknown layout {layout!r}; choose from {LAYOUTS}")
+        return _cropped_layout_filter(layout, crop)
     if layout == "full_sbs":
         return None
     if layout == "half_sbs":
@@ -296,7 +374,8 @@ def _restore_disc_av(ssif_path, video_only, output_path, cut_start, cut_end, pro
 
 def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work_dir, output_path,
                         video_codec="hevc_nvenc", quality=18, layout="full_sbs",
-                        restore_av=True, keep_temp=False, stop_event=None, progress_cb=None):
+                        restore_av=True, keep_temp=False, stop_event=None, progress_cb=None,
+                        autocrop=None):
     """Full pipeline: tsMuxeR demux -> interleave (streamed) -> edge264-mvc decode -> ffmpeg encode.
 
     Two things never touch disk: the combined MVC stream (interleaved on the fly
@@ -333,6 +412,24 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
     if restore_av and path.splitext(output_path)[1].lower() != ".mkv":
         raise ValueError("restoring the disc's audio/subtitles needs an .mkv output path")
     video_only = (path.splitext(output_path)[0] + ".video_only.mkv") if restore_av else output_path
+    crop = None
+    if autocrop:
+        # analyse the disc's own 2D-compatible clip (BDMV/STREAM/<N>.m2ts = the left-eye picture);
+        # the packed 3D stream is only decoded later
+        stem_name = path.splitext(path.basename(ssif_path))[0]
+        m2ts = path.join(path.dirname(path.dirname(path.abspath(ssif_path))), stem_name + ".m2ts")
+        if path.exists(m2ts):
+            if progress_cb:
+                progress_cb("autocrop", 0, 1)
+            crop = detect_eye_crop(m2ts, autocrop)
+            if crop is None:
+                print("[mvc-extract] auto-crop: no black bars found; nothing cropped", file=sys.stderr)
+            else:
+                print(f"[mvc-extract] auto-crop: each eye cut to x={crop[0]} y={crop[1]} {crop[2]}x{crop[3]}",
+                      file=sys.stderr)
+        else:
+            print(f"[mvc-extract] WARNING: {m2ts} not found; auto-crop skipped", file=sys.stderr)
+
     os.makedirs(work_dir, exist_ok=True)
     meta_path = path.join(work_dir, "_mvc_extract.meta")
     base_es = path.join(work_dir, f"{path.splitext(path.basename(ssif_path))[0]}.track_{avc_track}.264")
@@ -376,7 +473,7 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
         print(f"[mvc-extract] base AUs={len(base_bounds)} dependent AUs={len(dep_bounds)} using={n}",
               file=sys.stderr)
 
-        vf = layout_filter(layout)
+        vf = layout_filter(layout, crop)
         ffmpeg_args = [ffmpeg_bin, "-y", "-hide_banner", "-i", "-",
                        "-vf", f"{vf},{_COLOR_TAG}" if vf else _COLOR_TAG]
         ffmpeg_args += encoder_args(video_codec, quality, layout) + [video_only]
@@ -664,6 +761,10 @@ def main():
                               "*_4k = the same four with each eye enlarged to 4K (full_sbs_4k 7680x2160, "
                               "half_sbs_4k 3840x2160, full_tb_4k 3840x4320, half_tb_4k 3840x2160) | "
                               "frame_packed = full_tb plus the Frame Packing SEI flag (libx264 only)")
+    parser.add_argument("--autocrop", type=str.upper, default=None, choices=AUTOCROP_MODES,
+                         help="remove black bars: BLACK = all sides, BLACK_TB = top/bottom only (FLAT / FLAT_TB do "
+                              "the same for flat-colour borders). Both eyes get the same crop. Not used by "
+                              "--layout bd3d_iso (that copies the disc untouched).")
     parser.add_argument("--no-audio-subs", action="store_true",
                          help="skip restoring the disc's audio and subtitle tracks (video only)")
     parser.add_argument("--keep-temp", action="store_true", help="keep the demuxed elementary streams")
@@ -682,6 +783,11 @@ def main():
 
     common = dict(video_codec=args.video_codec, quality=args.quality, layout=args.layout,
                   restore_av=not args.no_audio_subs, keep_temp=args.keep_temp, progress_cb=show)
+    if args.autocrop and args.layout == ISO_LAYOUT:
+        print("[mvc-extract] note: --autocrop is ignored for the lossless ISO (nothing is re-encoded)",
+              file=sys.stderr)
+    elif args.autocrop:
+        common["autocrop"] = args.autocrop
     try:
         if args.disc is not None:
             frames = import_disc(args.disc, args.output, work_dir=args.work_dir, cut_end=args.cut_end, **common)

@@ -1815,11 +1815,21 @@ def make_video_codec_option(args, input_path=None):
             options["x265-params"] = ":".join(x265_params)
             # print(options)
         elif args.video_codec == "libx264":
-            # TODO:
-            # if args.tb or args.half_tb:
-            #    options["x264-params"] = "frame-packing=4"
+            # H.264 Frame Packing Arrangement SEI (Annex D): types 3 (side-by-side) and
+            # 4 (top-bottom) are the real-world "half-resolution-per-eye, squeezed into
+            # one frame" convention -- the same layout Half SBS/Half TB already produce,
+            # confirmed via a real encode + ffprobe round-trip (side_data_type=Stereo 3D
+            # correctly recognized). This is what lets a real 3D TV/player auto-detect
+            # and correctly un-squeeze the video without the viewer manually selecting a
+            # 3D mode -- unlike the MKV-level StereoMode tag (--stereo-mode-tag), which
+            # only software players that read Matroska metadata understand. Only applies
+            # to Half SBS/Half TB: Full SBS/Full TB (full resolution per eye, double-size
+            # frame) has no standard frame-packing-arrangement type and is deliberately
+            # left untagged here.
             if args.half_sbs:
                 options["x264-params"] = "frame-packing=3"
+            elif args.half_tb:
+                options["x264-params"] = "frame-packing=4"
         elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
             options["rc"] = "constqp"
             options["qp"] = str(args.crf)

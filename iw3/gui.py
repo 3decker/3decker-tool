@@ -2623,7 +2623,12 @@ class MainFrame(wx.Frame):
               "common for streaming/playback compatibility). VR90 is for VR headsets. Cross Eyed is for "
               "viewing without any equipment. Anaglyph is the red/cyan glasses look. RGB-D / Export save "
               "the depth data itself instead of a finished 3D image. Recommended: Half SBS for most TVs "
-              "and 3D players, unless you know you need a different format."))
+              "and 3D players, unless you know you need a different format.\n"
+              "Bonus for Half SBS/Half TB specifically: when Video Codec is H.264 (libx264), the file "
+              "also gets a real \"Frame Packing\" 3D signal embedded in it — the same standard real "
+              "3D Blu-rays and TVs use to auto-detect 3D and switch modes on their own, without you "
+              "manually telling the TV/player it's a 3D side-by-side or top-bottom file. Only works with "
+              "the H.264 (libx264) codec option — HEVC and NVENC don't support embedding this signal."))
 
         self.lbl_anaglyph_method = wx.StaticText(self.grp_stereo, label=T("Anaglyph Method"))
         self.cbo_anaglyph_method = wx.ComboBox(
@@ -15914,6 +15919,45 @@ def _self_test_max_negative_parallax_field():
     print("_self_test_max_negative_parallax_field: PASS")
 
 
+def _self_test_frame_packing_sei():
+    """Completes a TODO that was sitting commented-out in make_video_codec_option()
+    (iw3/utils.py) -- Half SBS + libx264 already applied the real H.264 Frame Packing
+    Arrangement SEI (frame-packing=3, Annex D), which is what lets an actual 3D TV/
+    player auto-detect and correctly un-squeeze the video without the viewer manually
+    selecting a 3D mode -- but the matching Half TB case (frame-packing=4) was never
+    finished. Verified for real: encoding a tiny clip with each x264-params value and
+    round-tripping through ffprobe showed `side_data_type=Stereo 3D` correctly
+    recognized for both. This test covers the logic directly (which combinations set
+    which x264-params value), not the ffprobe round-trip itself -- that real encode
+    verification isn't repeated here since it needs the real ffmpeg binary and takes
+    real encode time; this asserts the same thing the manual verification confirmed.
+    Also confirms Full SBS/Full TB (full resolution per eye, no standard
+    frame-packing-arrangement type for that layout) are deliberately left untagged,
+    and that hevc_nvenc/libx265 (no equivalent SEI passthrough available via ffmpeg
+    for either, confirmed by reading their option lists) never get an x264-params key
+    at all."""
+    import types
+    import iw3.utils as iw3_utils
+
+    def _args(**kw):
+        base = dict(video_codec="libx264", preset="medium", crf=15, tune=[], profile_level=None,
+                    half_sbs=False, half_tb=False, tb=False, gpu=[0])
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    assert iw3_utils.make_video_codec_option(_args(half_sbs=True))["x264-params"] == "frame-packing=3"
+    assert iw3_utils.make_video_codec_option(_args(half_tb=True))["x264-params"] == "frame-packing=4"
+    assert "x264-params" not in iw3_utils.make_video_codec_option(_args())
+    assert "x264-params" not in iw3_utils.make_video_codec_option(_args(tb=True))
+
+    hevc_args = _args(video_codec="hevc_nvenc", half_sbs=True)
+    assert "x264-params" not in iw3_utils.make_video_codec_option(hevc_args)
+    x265_args = _args(video_codec="libx265", half_sbs=True)
+    assert "x264-params" not in iw3_utils.make_video_codec_option(x265_args)
+
+    print("_self_test_frame_packing_sei: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -15991,6 +16035,7 @@ def _run_self_tests():
         _self_test_da3_giant_variants_gated,
         _self_test_restore_audio_subtitles_checkbox,
         _self_test_max_negative_parallax_field,
+        _self_test_frame_packing_sei,
     ]
     failures = []
     for test in tests:

@@ -5258,6 +5258,196 @@ class MainFrame(wx.Frame):
         sizer_rife_standalone = wx.StaticBoxSizer(self.grp_rife_standalone, wx.VERTICAL)
         sizer_rife_standalone.Add(pane_header_row_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone tool: 3D Blu-ray Import (ADR-182) ---
+        # Turns a real 3D Blu-ray (ISO or ripped disc folder) into an ordinary 3D video
+        # file (SBS/TB) with the disc's own audio and subtitles, via
+        # python -m iw3.mvc_extract_cli --disc ... as its own subprocess, same
+        # out-of-process convention as the other standalone tools. stdout is a
+        # DEDICATED progress channel ("IW3_MVC_PROGRESS <stage> <done> <total>",
+        # same idea as RIFE's IW3_RIFE_PROGRESS); everything human-readable goes to
+        # stderr and is shown in the log box when the job ends.
+        self.grp_bluray = wx.StaticBox(self.tab_tools, label=T("3D Blu-ray Import (Standalone Tool)"))
+
+        self.cpn_bluray = wx.CollapsiblePane(self.grp_bluray, label=T("Settings"), name="cpn_bluray")
+        self.cpn_bluray.Collapse(True)
+        self.cpn_bluray.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED, self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_bluray.GetPane().SetName("cpn_bluray_pane")
+
+        self.lbl_bluray_disc = wx.StaticText(self.cpn_bluray.GetPane(), label=T("3D Blu-ray (ISO or Folder)"))
+        self.txt_bluray_disc = wx.TextCtrl(self.cpn_bluray.GetPane(), name="txt_bluray_disc")
+        self.txt_bluray_disc.SetToolTip(
+            T("What it's for: the real 3D Blu-ray to convert -- either a disc image (.iso) or a folder "
+              "that holds the disc's BDMV folder (a ripped disc, or a mounted drive such as D:\\).\n"
+              "How it works: the ISO is mounted and unmounted automatically, the main movie is picked "
+              "automatically (the biggest 3D stream on the disc), and its two camera views are decoded and "
+              "combined into one 3D video.\n"
+              "Con: only discs that really contain 3D (a BDMV\\STREAM\\SSIF folder) work -- a normal 2D "
+              "Blu-ray is refused with a clear message. Copy-protected discs must be ripped to an ISO/folder "
+              "first by a separate tool; this tool cannot break disc protection.\n"
+              "Recommended: an .iso file on a fast drive."))
+        self.btn_bluray_disc_iso = wx.Button(self.cpn_bluray.GetPane(), label=T("ISO..."))
+        self.btn_bluray_disc_folder = wx.Button(self.cpn_bluray.GetPane(), label=T("Folder..."))
+
+        self.lbl_bluray_output = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Output File"))
+        self.txt_bluray_output = wx.TextCtrl(self.cpn_bluray.GetPane(), name="txt_bluray_output")
+        self.txt_bluray_output.SetToolTip(
+            T("Where to write the finished 3D movie (.mkv). Auto-filled with '<disc name>_3D.mkv' "
+              "next to the ISO once you pick one.\n"
+              "Con: the job also needs a temporary folder (created next to this file and deleted when "
+              "done) holding about 75% of the movie's size on the disc -- roughly 25 GB for a full "
+              "feature. Choose a drive with that much free space; the tool refuses to start if there "
+              "isn't enough."))
+        self.btn_bluray_output = wx.Button(self.cpn_bluray.GetPane(), label=T("..."))
+
+        self.lbl_bluray_layout = wx.StaticText(self.cpn_bluray.GetPane(), label=T("3D Layout"))
+        self.cbo_bluray_layout = wx.ComboBox(self.cpn_bluray.GetPane(), name="cbo_bluray_layout")
+        self.cbo_bluray_layout.SetEditable(False)
+        # ClientData carries the real --layout value each choice maps to.
+        self.cbo_bluray_layout.Append(T("Full Side-by-Side (3840x1080)"), "full_sbs")
+        self.cbo_bluray_layout.Append(T("Half Side-by-Side (1920x1080)"), "half_sbs")
+        self.cbo_bluray_layout.Append(T("Full Top-Bottom (1920x2160)"), "full_tb")
+        self.cbo_bluray_layout.Append(T("Half Top-Bottom (1920x1080)"), "half_tb")
+        self.cbo_bluray_layout.Append(T("Frame Packed (auto-detected by TVs, H.264 only)"), "frame_packed")
+        self.cbo_bluray_layout.SetSelection(0)
+        self.cbo_bluray_layout.SetToolTip(
+            T("What it's for: how the left-eye and right-eye pictures are arranged in the output video.\n"
+              "Full Side-by-Side: each eye at full 1920x1080, placed next to each other (3840x1080 total). "
+              "Best picture quality; plays correctly in VLC/MPC-HC and on most 3D TVs.\n"
+              "Half Side-by-Side: each eye squeezed to half width so the whole frame is a normal 1920x1080. "
+              "Most compatible with older TVs/players, at half the horizontal detail per eye. With the H.264 "
+              "codec a flag is added so many TVs switch to 3D automatically.\n"
+              "Full Top-Bottom: eyes stacked, each at full 1920x1080 (1920x2160 total). Some players and TVs "
+              "prefer this over side-by-side.\n"
+              "Half Top-Bottom: eyes stacked and squeezed to half height -- a normal 1920x1080 frame. Same "
+              "H.264 auto-detect flag as Half Side-by-Side.\n"
+              "Frame Packed: Full Top-Bottom plus the 3D auto-detect flag, so a compatible TV or player "
+              "switches into 3D by itself. Needs the H.264 codec -- picking it switches the codec for you.\n"
+              "Con: Full layouts make very wide/tall frames; that is fine for 1080p discs but a 4K source "
+              "would produce 7680x2160, which many players cannot handle -- prefer Half for 4K.\n"
+              "Recommended: Full Side-by-Side."))
+
+        self.lbl_bluray_codec = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Video Codec"))
+        self.cbo_bluray_codec = wx.ComboBox(self.cpn_bluray.GetPane(), name="cbo_bluray_codec")
+        self.cbo_bluray_codec.SetEditable(False)
+        self.cbo_bluray_codec.Append(T("H.265/HEVC -- hevc_nvenc (GPU)"), "hevc_nvenc")
+        self.cbo_bluray_codec.Append(T("H.265/HEVC -- libx265 (CPU)"), "libx265")
+        self.cbo_bluray_codec.Append(T("H.264 -- libx264 (CPU)"), "libx264")
+        self.cbo_bluray_codec.SetSelection(0)
+        self.cbo_bluray_codec.SetToolTip(
+            T("What it's for: which video format the finished file is encoded with.\n"
+              "H.265/HEVC -- hevc_nvenc (GPU): encodes on your NVIDIA graphics card. Fast (the encode "
+              "keeps up with the decoder) and gives small files at high quality. Needs an NVIDIA GPU with "
+              "NVENC.\n"
+              "H.265/HEVC -- libx265 (CPU): software HEVC. Works on any machine, slower, and can reach the "
+              "smallest files, but its Quality number is on a different scale than NVENC's (the same "
+              "number gives a smaller file).\n"
+              "H.264 -- libx264 (CPU): the most compatible format for old TVs and players, and the only "
+              "one that can carry the 3D auto-detect flag (Half layouts, Frame Packed). Bigger files at "
+              "the same quality, and a 3840x1080 H.264 picture is beyond what some TVs can decode.\n"
+              "Recommended: hevc_nvenc, unless you need the 3D auto-detect flag or a very old player."))
+
+        self.lbl_bluray_quality = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Quality"))
+        self.txt_bluray_quality = wx.TextCtrl(self.cpn_bluray.GetPane(), value="18", name="txt_bluray_quality")
+        self.txt_bluray_quality.SetToolTip(
+            T("What it's for: the picture quality of the finished file, as a constant-quality number "
+              "(CRF for the CPU encoders, the equivalent for NVENC). LOWER means better quality and a "
+              "BIGGER file.\n"
+              "Values: 10-40. About 14-16 is near-lossless, 18 is visually excellent (a full movie "
+              "roughly 10-18 GB), 22+ starts to show softening in dark or grainy scenes.\n"
+              "Con: the disc's own video is already compressed, so this is a second compression step -- "
+              "some fine film grain is always lost even at low numbers.\n"
+              "Recommended: 18."))
+
+        self.chk_bluray_restore_av = wx.CheckBox(
+            self.cpn_bluray.GetPane(), label=T("Restore audio && subtitles"), name="chk_bluray_restore_av")
+        self.chk_bluray_restore_av.SetValue(True)
+        self.chk_bluray_restore_av.SetToolTip(
+            T("What it's for: copies every audio track (all languages and formats, including lossless "
+              "DTS-HD/TrueHD if the disc has them) and every subtitle track from the disc into the "
+              "finished file, unchanged, with their language names.\n"
+              "Con: the extra tracks make the file bigger (lossless audio is often 2-4 GB). Disc "
+              "subtitles are picture-based (PGS): fine in VLC/MPC-HC, but some TVs cannot show them.\n"
+              "Recommended: on."))
+
+        self.btn_bluray_run = wx.Button(self.cpn_bluray.GetPane(), label=T("Run"))
+        self.btn_bluray_run.SetToolTip(
+            T("What it's for: starts the conversion as a separate background process (python -m "
+              "iw3.mvc_extract_cli) -- this app's own GPU/model state is never touched and the disc/ISO "
+              "is never modified.\n"
+              "How long: a full 90-minute movie takes roughly 30-40 minutes with the GPU codec (mostly "
+              "reading/extracting the disc), longer with a CPU codec.\n"
+              "Con: the ISO is mounted as a virtual drive while it runs; if you cancel or the app closes "
+              "mid-run it may stay mounted (right-click it in File Explorer and choose Eject).\n"
+              "Recommended: watch the progress bar; check the log afterward to confirm success."))
+        self.btn_bluray_cancel = wx.Button(self.cpn_bluray.GetPane(), label=T("Cancel"))
+        self.btn_bluray_cancel.Disable()
+        self.btn_bluray_cancel.SetToolTip(
+            T("Stops the running import and all the programs it started. Temporary files are removed; "
+              "no partial output file is kept."))
+
+        self.gauge_bluray = wx.Gauge(self.cpn_bluray.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_bluray.SetToolTip(
+            T("Real progress of the current stage (reading the disc, then converting frames), read live "
+              "from the background process -- not just a spinner."))
+        self.lbl_bluray_progress = wx.StaticText(self.cpn_bluray.GetPane(), label="")
+
+        self.txt_bluray_log = wx.TextCtrl(self.cpn_bluray.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                           size=self.FromDIP((-1, 60)), name="txt_bluray_log")
+        self.txt_bluray_log.SetToolTip(
+            T("Shows this tool's own messages when the job ends: which movie stream and video tracks it "
+              "found, any warning, or the exact reason it refused or failed."))
+        self.btn_bluray_clear = wx.Button(self.cpn_bluray.GetPane(), label=T("Clear"))
+        self.btn_bluray_clear.SetToolTip(
+            T("Empties the log box above. Disabled while a job is running so it can't wipe output you "
+              "may still be reading mid-run; re-enabled once the job finishes."))
+
+        self.btn_bluray_disc_iso.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_disc_iso)
+        self.btn_bluray_disc_folder.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_disc_folder)
+        self.btn_bluray_output.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_output)
+        self.cbo_bluray_layout.Bind(wx.EVT_COMBOBOX, self.on_changed_bluray_layout)
+        self.btn_bluray_run.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_run)
+        self.btn_bluray_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_cancel)
+        self.btn_bluray_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_bluray_log.Clear())
+        self.bluray_proc = None
+        self.bluray_cancelled = False
+        self.bluray_start_time = 0.0
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_bluray_disc, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_bluray_disc, (h, 1), (0, 2), flag=wx.EXPAND)
+        disc_buttons = wx.BoxSizer(wx.HORIZONTAL)
+        disc_buttons.Add(self.btn_bluray_disc_iso, 1, wx.EXPAND)
+        disc_buttons.Add(self.btn_bluray_disc_folder, 1, wx.EXPAND | wx.LEFT, 4)
+        layout.Add(disc_buttons, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_bluray_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_bluray_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_bluray_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_bluray_layout, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_bluray_layout, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_bluray_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_bluray_codec, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_bluray_quality, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_bluray_quality, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_bluray_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.btn_bluray_run, (h := h + 1, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_bluray_cancel, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_bluray, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_bluray_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_bluray_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_bluray_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_bluray.GetPane().SetSizer(layout)
+
+        self.pnl_bluray_dot = wx.Panel(self.grp_bluray, size=self.FromDIP((10, 10)))
+        self.pnl_bluray_dot.SetBackgroundColour(wx.Colour(52, 211, 153))
+        pane_header_row_bluray = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_bluray.Add(self.pnl_bluray_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_bluray.Add(self.cpn_bluray, 1, wx.EXPAND)
+
+        sizer_bluray = wx.StaticBoxSizer(self.grp_bluray, wx.VERTICAL)
+        sizer_bluray.Add(pane_header_row_bluray, 0, wx.ALL | wx.EXPAND, 4)
+
         # Each category below is its own panel (a Notebook tab, or a Single Page
         # section -- see ADR-037) instead of one big 4-column grid -- every sizer_*
         # here was already fully built above (unchanged), this only changes how
@@ -5299,6 +5489,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_sharpen, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_bluray, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
         # ADR-037: the 7 category panels built above are already fully self-contained
@@ -6843,7 +7034,8 @@ class MainFrame(wx.Frame):
         Tracks, Retroactively Tag MKV as 3D, Sharpen, RIFE Frame Interpolation) so
         only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
-                      "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone")
+                      "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
+                      "cpn_bluray")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -8528,6 +8720,7 @@ class MainFrame(wx.Frame):
         "txt_sharpen_input", "txt_sharpen_output", "txt_sharpen_log",
         "txt_rife_standalone_input", "txt_rife_standalone_output",
         "txt_rife_standalone_target_fps", "txt_rife_standalone_log",
+        "txt_bluray_disc", "txt_bluray_output", "txt_bluray_log",
     )
     # The one field in that list whose real default isn't blank -- confirmed
     # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
@@ -11236,6 +11429,187 @@ class MainFrame(wx.Frame):
         self.SetStatusText(T("Applying RIFE interpolation..."))
         startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd,))
 
+    # --- 3D Blu-ray Import (standalone tool, see ADR-182) ---
+
+    def on_click_btn_bluray_disc_iso(self, event):
+        with wx.FileDialog(self, message=T("Select 3D Blu-ray Disc Image (.iso)"),
+                           wildcard="Disc images (*.iso)|*.iso|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_bluray_disc.GetValue():
+                dlg.SetPath(self.txt_bluray_disc.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                disc_path = dlg.GetPath()
+                self.txt_bluray_disc.SetValue(disc_path)
+                if not self.txt_bluray_output.GetValue():
+                    self.txt_bluray_output.SetValue(f"{path.splitext(disc_path)[0]}_3D.mkv")
+
+    def on_click_btn_bluray_disc_folder(self, event):
+        with wx.DirDialog(self, message=T("Select the disc folder (the one containing BDMV)"),
+                          style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST) as dlg:
+            if dlg.ShowModal() == wx.ID_OK:
+                folder = dlg.GetPath()
+                self.txt_bluray_disc.SetValue(folder)
+                if not self.txt_bluray_output.GetValue():
+                    self.txt_bluray_output.SetValue(path.join(path.dirname(folder), f"{path.basename(folder)}_3D.mkv"))
+
+    def on_click_btn_bluray_output(self, event):
+        with wx.FileDialog(self, message=T("Save 3D Movie As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_bluray_output.GetValue():
+                dlg.SetPath(self.txt_bluray_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_bluray_output.SetValue(dlg.GetPath())
+
+    def on_changed_bluray_layout(self, event):
+        # Frame Packed can only be written by libx264 -- switch the codec dropdown for
+        # the user instead of letting the tool silently do it later.
+        if self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection()) == "frame_packed":
+            for i in range(self.cbo_bluray_codec.GetCount()):
+                if self.cbo_bluray_codec.GetClientData(i) == "libx264":
+                    self.cbo_bluray_codec.SetSelection(i)
+                    break
+
+    def _update_bluray_progress(self, stage, done, total):
+        # Called via wx.CallAfter from run_bluray's background thread -- never touch
+        # these widgets from that thread.
+        names = {"mount": T("Opening the disc"), "demux": T("Reading the disc"),
+                 "scan": T("Preparing frames"), "encode": T("Converting"),
+                 "restore": T("Adding audio and subtitles")}
+        name = names.get(stage, stage)
+        if total > 0 and stage in ("demux", "encode"):
+            self.gauge_bluray.SetRange(int(total))
+            self.gauge_bluray.SetValue(int(min(done, total)))
+            percent = min(100, int(done / total * 100))
+            if stage == "encode":
+                elapsed = time() - self.bluray_start_time
+                text = f"{name}: {int(done)}/{int(total)} {T('frames')} ({percent}%) [{T('elapsed')} {self._format_duration(elapsed)}]"
+            else:
+                text = f"{name}: {percent}%"
+            self.lbl_bluray_progress.SetLabel(text)
+        else:
+            self.gauge_bluray.Pulse()
+            self.lbl_bluray_progress.SetLabel(f"{name}...")
+
+    def run_bluray(self, cmd):
+        # Runs on a background thread via startWorker. stdout is the dedicated
+        # progress channel; stderr (human-readable messages/errors) is collected and
+        # returned for the log box.
+        self.bluray_proc = proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+        for line in proc.stdout:
+            parts = line.strip().split(" ")
+            if len(parts) == 4 and parts[0] == "IW3_MVC_PROGRESS":
+                try:
+                    wx.CallAfter(self._update_bluray_progress, parts[1], float(parts[2]), float(parts[3]))
+                except ValueError:
+                    continue
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
+
+    def on_exit_bluray_worker(self, result):
+        self.btn_bluray_run.Enable()
+        self.btn_bluray_clear.Enable()
+        self.btn_bluray_cancel.Disable()
+        self.bluray_proc = None
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_bluray_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        self.txt_bluray_log.SetValue(output.replace("\r", "\n"))
+        self.txt_bluray_log.ShowPosition(self.txt_bluray_log.GetLastPosition())
+        if self.bluray_cancelled:
+            self._cleanup_after_bluray_cancel()
+            self.lbl_bluray_progress.SetLabel(T("Cancelled"))
+            self.SetStatusText(T("3D Blu-ray import cancelled"))
+        elif returncode == 0:
+            total = self.gauge_bluray.GetRange()
+            self.gauge_bluray.SetValue(total)
+            self.lbl_bluray_progress.SetLabel(
+                f"{T('Done')} [{T('elapsed')} {self._format_duration(time() - self.bluray_start_time)}]")
+            self.SetStatusText(T("3D Blu-ray imported successfully"))
+        else:
+            self.SetStatusText(T("3D Blu-ray import failed -- see the log below"))
+            wx.MessageBox(T("The 3D Blu-ray import failed or refused -- see the log box for the exact reason."),
+                          T("3D Blu-ray Import"), wx.OK | wx.ICON_ERROR)
+
+    def _cleanup_after_bluray_cancel(self):
+        # The job was force-killed, so its own cleanup never ran: remove the temp
+        # folder and any partial output it left next to the chosen Output File.
+        output_path = self.txt_bluray_output.GetValue().strip()
+        stem = path.splitext(path.basename(output_path))[0]
+        out_dir = path.dirname(path.abspath(output_path))
+        shutil.rmtree(path.join(out_dir, f"_mvc_work_{stem}"), ignore_errors=True)
+        for leftover in (path.join(out_dir, f"{stem}.video_only.mkv"), output_path):
+            try:
+                if path.exists(leftover) and path.getmtime(leftover) >= self.bluray_start_time - 1:
+                    os.remove(leftover)
+            except OSError:
+                pass
+
+    def on_click_btn_bluray_cancel(self, event):
+        proc = self.bluray_proc
+        if proc is not None and proc.poll() is None:
+            self.bluray_cancelled = True
+            # /T also stops the programs it started (tsMuxeR, decoder, ffmpeg)
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_bluray_cancel.Disable()
+
+    def build_bluray_command(self):
+        """Returns (cmd, None) or (None, error_message). Kept separate from the click
+        handler so it can be tested without launching anything."""
+        disc = self.txt_bluray_disc.GetValue().strip()
+        output_path = self.txt_bluray_output.GetValue().strip()
+        if not disc or not path.exists(disc):
+            return None, T("Select a valid 3D Blu-ray ISO or disc folder first.")
+        if not output_path:
+            return None, T("Set an Output File path first.")
+        if path.splitext(output_path)[1].lower() != ".mkv":
+            return None, T("Output File must end in .mkv.")
+        if not validate_number(self.txt_bluray_quality.GetValue(), 0, 51, allow_empty=False):
+            return None, T("Quality must be a number between 0 and 51 (18 recommended).")
+        layout = self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection())
+        codec = self.cbo_bluray_codec.GetClientData(self.cbo_bluray_codec.GetSelection())
+        cmd = [sys.executable, "-m", "iw3.mvc_extract_cli", "--disc", disc, "--output", output_path,
+               "--layout", layout, "--video-codec", codec,
+               "--quality", str(int(float(self.txt_bluray_quality.GetValue()))), "--gui-progress"]
+        if not self.chk_bluray_restore_av.GetValue():
+            cmd.append("--no-audio-subs")
+        return cmd, None
+
+    def on_click_btn_bluray_run(self, event):
+        cmd, error = self.build_bluray_command()
+        if error:
+            wx.MessageBox(error, T("3D Blu-ray Import"), wx.OK | wx.ICON_WARNING)
+            return
+        self.txt_bluray_log.SetValue(T("Running...\n"))
+        self.gauge_bluray.SetRange(1)
+        self.gauge_bluray.SetValue(0)
+        self.lbl_bluray_progress.SetLabel("")
+        self.bluray_cancelled = False
+        self.bluray_start_time = time()
+        self.btn_bluray_run.Disable()
+        self.btn_bluray_clear.Disable()
+        self.btn_bluray_cancel.Enable()
+        self.SetStatusText(T("Importing 3D Blu-ray..."))
+        startWorker(self.on_exit_bluray_worker, self.run_bluray, wargs=(cmd,))
+
 
 LOCAL_LIST = sorted(list(LOCALES.keys()))
 LOCALE_DICT = LOCALES.get(get_default_locale(), {})
@@ -12198,9 +12572,9 @@ def _self_test_video_filter_collapsible_section():
 
 
 def _self_test_standalone_tools_collapsible_sections():
-    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 8
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 9
     Guided Light panes added to Standalone Tools (ADR-101, one per tool; ADR-169
-    adds Restore All Audio Tracks as the 8th) --
+    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th) --
     tab_tools/tab_wrap_tools/on_toggled_standalone_tools_collapsible_pane in place of
     the Stereo Generation equivalents. Also checks each pane has a real, unique
     name (the exact bug class this pattern already broke once with 2+ panes sharing
@@ -12218,9 +12592,9 @@ def _self_test_standalone_tools_collapsible_sections():
         frame = gui_mod.MainFrame()
         panes = frame.get_standalone_tools_sliders_and_panes()
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
-        assert len(panes) == 8, f"expected 8 Standalone Tools panes, found {len(panes)}"
+        assert len(panes) == 9, f"expected 9 Standalone Tools panes, found {len(panes)}"
         names = [p.GetName() for p in panes]
-        assert len(set(names)) == 8, f"pane names are not all unique: {names}"
+        assert len(set(names)) == 9, f"pane names are not all unique: {names}"
         for p in panes:
             assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
 
@@ -15958,6 +16332,118 @@ def _self_test_frame_packing_sei():
     print("_self_test_frame_packing_sei: PASS")
 
 
+def _self_test_bluray_import_panel():
+    """3D Blu-ray Import standalone tool (ADR-182): the widgets exist with the right
+    defaults, the command it builds carries exactly what was chosen (and refuses bad
+    input), picking Frame Packed switches the codec to libx264, Run/Cancel/Clear
+    enable in lockstep with a running job, and a cancelled job's leftover temp folder
+    and partial output are removed. No disc, GPU or subprocess is used: startWorker is
+    monkeypatched."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.cpn_bluray.GetPane().GetName() == "cpn_bluray_pane"
+        assert frame.cpn_bluray in frame.get_standalone_tools_sliders_and_panes()
+        for name in ("txt_bluray_disc", "txt_bluray_output", "txt_bluray_log"):
+            assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+            assert hasattr(frame, name), name
+
+        layout_of = lambda: frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection())  # noqa
+        codec_of = lambda: frame.cbo_bluray_codec.GetClientData(frame.cbo_bluray_codec.GetSelection())  # noqa
+        assert [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())] == \
+            ["full_sbs", "half_sbs", "full_tb", "half_tb", "frame_packed"]
+        assert layout_of() == "full_sbs" and codec_of() == "hevc_nvenc"
+        assert frame.txt_bluray_quality.GetValue() == "18"
+        assert frame.chk_bluray_restore_av.GetValue() is True
+        assert frame.btn_bluray_run.IsEnabled() and not frame.btn_bluray_cancel.IsEnabled()
+
+        # validation
+        cmd, err = frame.build_bluray_command()
+        assert cmd is None and err, "empty disc field must be refused"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            disc = path.join(tmpdir, "movie.iso")
+            open(disc, "wb").close()
+            out = path.join(tmpdir, "movie_3D.mkv")
+            frame.txt_bluray_disc.SetValue(disc)
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err, "empty output field must be refused"
+            frame.txt_bluray_output.SetValue(path.join(tmpdir, "movie_3D.mp4"))
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err, "non-.mkv output must be refused"
+            frame.txt_bluray_output.SetValue(out)
+            frame.txt_bluray_quality.SetValue("abc")
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err, "non-numeric quality must be refused"
+            frame.txt_bluray_quality.SetValue("18")
+
+            cmd, err = frame.build_bluray_command()
+            assert err is None
+            assert cmd[1:4] == ["-m", "iw3.mvc_extract_cli", "--disc"], cmd
+            assert cmd[cmd.index("--disc") + 1] == disc
+            assert cmd[cmd.index("--output") + 1] == out
+            assert cmd[cmd.index("--layout") + 1] == "full_sbs"
+            assert cmd[cmd.index("--video-codec") + 1] == "hevc_nvenc"
+            assert cmd[cmd.index("--quality") + 1] == "18"
+            assert "--gui-progress" in cmd and "--no-audio-subs" not in cmd
+
+            frame.cbo_bluray_layout.SetSelection(3)
+            frame.chk_bluray_restore_av.SetValue(False)
+            frame.txt_bluray_quality.SetValue("22")
+            cmd, err = frame.build_bluray_command()
+            assert cmd[cmd.index("--layout") + 1] == "half_tb"
+            assert cmd[cmd.index("--quality") + 1] == "22"
+            assert "--no-audio-subs" in cmd
+
+            # Frame Packed forces the only codec that can write its flag
+            frame.cbo_bluray_layout.SetSelection(4)
+            frame.on_changed_bluray_layout(None)
+            assert codec_of() == "libx264", "Frame Packed must switch the codec to libx264"
+
+            # Run/Cancel/Clear lockstep, driven through the real handlers
+            frame.cbo_bluray_layout.SetSelection(0)
+            gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
+            frame.on_click_btn_bluray_run(None)
+            assert not frame.btn_bluray_run.IsEnabled()
+            assert not frame.btn_bluray_clear.IsEnabled()
+            assert frame.btn_bluray_cancel.IsEnabled()
+            frame.on_exit_bluray_worker(_FakeResult((0, "[mvc-extract] done")))
+            assert frame.btn_bluray_run.IsEnabled() and frame.btn_bluray_clear.IsEnabled()
+            assert not frame.btn_bluray_cancel.IsEnabled()
+            assert "done" in frame.txt_bluray_log.GetValue()
+
+            # Cancelled job: leftovers next to the output are removed
+            work = path.join(tmpdir, "_mvc_work_movie_3D")
+            os.makedirs(work)
+            open(path.join(work, "x.264"), "wb").close()
+            leftover = path.join(tmpdir, "movie_3D.video_only.mkv")
+            open(leftover, "wb").close()
+            open(out, "wb").close()
+            frame.bluray_start_time = time() - 5
+            frame.bluray_cancelled = True
+            frame.on_exit_bluray_worker(_FakeResult((1, "")))
+            assert not path.exists(work) and not path.exists(leftover) and not path.exists(out), \
+                "a cancelled import must remove its temp folder and partial output"
+            assert path.exists(disc), "the source disc image must never be touched"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_bluray_import_panel: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -16036,6 +16522,7 @@ def _run_self_tests():
         _self_test_restore_audio_subtitles_checkbox,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
+        _self_test_bluray_import_panel,
     ]
     failures = []
     for test in tests:

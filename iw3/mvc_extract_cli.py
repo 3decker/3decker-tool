@@ -429,19 +429,125 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
                     pass
 
 
+def _powershell(script):
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                            capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip()[-500:])
+    return result.stdout.strip()
+
+
+def mount_iso(iso_path):
+    """Mounts an ISO with Windows' built-in support (7-Zip's UDF reader failed on the
+    25GB+ file inside a real disc). Returns (drive_root, mounted_by_us) -- an ISO the
+    user already had mounted is used as-is and never dismounted afterwards."""
+    p = iso_path.replace("'", "''")
+    out = _powershell(
+        f"$p='{p}'; $was=(Get-DiskImage -ImagePath $p).Attached; "
+        f"if(-not $was){{ Mount-DiskImage -ImagePath $p | Out-Null }}; "
+        f"$v=Get-DiskImage -ImagePath $p | Get-Volume; Write-Output ([string]$was + '|' + $v.DriveLetter)")
+    was, letter = out.splitlines()[-1].split("|")
+    if not letter:
+        raise RuntimeError("the ISO mounted but Windows gave it no drive letter")
+    return letter + ":\\", was.strip().lower() != "true"
+
+
+def dismount_iso(iso_path):
+    p = iso_path.replace("'", "''")
+    try:
+        _powershell(f"Dismount-DiskImage -ImagePath '{p}' | Out-Null")
+    except Exception as e:
+        print(f"[mvc-extract] WARNING: could not dismount {iso_path}: {e}", file=sys.stderr)
+
+
+def find_disc_ssif(root):
+    """The main movie's 3D stream: the largest file in BDMV/STREAM/SSIF (extras and
+    menus are tiny next to the feature). `root` may be the disc/drive root, its BDMV
+    folder, or a folder containing BDMV."""
+    root = path.abspath(root)
+    candidates = [path.join(root, "BDMV"), root, path.dirname(root)]
+    for bdmv in candidates:
+        ssif_dir = path.join(bdmv, "STREAM", "SSIF")
+        if path.basename(bdmv).upper() == "BDMV" and path.isdir(ssif_dir):
+            files = [path.join(ssif_dir, f) for f in os.listdir(ssif_dir) if f.lower().endswith(".ssif")]
+            if files:
+                return max(files, key=path.getsize)
+            raise RuntimeError("this disc has no 3D video (its BDMV/STREAM/SSIF folder is empty)")
+    raise RuntimeError("no Blu-ray 3D content found -- expected a BDMV/STREAM/SSIF folder "
+                       "(is this a 2D-only disc?)")
+
+
+def import_disc(source, output_path, work_dir=None, progress_cb=None, cut_end=None, **kwargs):
+    """One call for the whole job: `source` is an .iso, a disc/BDMV folder, or a .ssif.
+    Mounts the ISO if needed, picks the main movie, finds the AVC/MVC tracks itself,
+    checks there is enough free disk space for the temporary streams, runs
+    extract_and_decode(), and dismounts what it mounted. Returns the frame count."""
+    import shutil
+    source = path.abspath(source)
+    mounted_here = False
+    work_created = False
+    stem = path.splitext(path.basename(output_path))[0]
+    work_dir = work_dir or path.join(path.dirname(path.abspath(output_path)), f"_mvc_work_{stem}")
+    try:
+        if source.lower().endswith(".iso"):
+            if progress_cb:
+                progress_cb("mount", 0, 1)
+            root, mounted_here = mount_iso(source)
+            ssif = find_disc_ssif(root)
+        elif source.lower().endswith(".ssif"):
+            ssif = source
+        else:
+            ssif = find_disc_ssif(source)
+        print(f"[mvc-extract] main movie stream: {ssif}", file=sys.stderr)
+
+        tsmuxer_bin = _find_tsmuxer()
+        if tsmuxer_bin is None:
+            raise RuntimeError("tsMuxeR not found -- run `python -m iw3.install_mvc_tools`")
+        avc_track, mvc_track = _find_video_track(ssif, tsmuxer_bin)
+        if mvc_track is None or avc_track is None:
+            raise RuntimeError("no 3D (MVC) video track found in this disc's main movie")
+        print(f"[mvc-extract] tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
+
+        os.makedirs(path.dirname(path.abspath(output_path)), exist_ok=True)
+        work_created = not path.isdir(work_dir)
+        os.makedirs(work_dir, exist_ok=True)
+        # the two demuxed streams together are roughly 3/4 of the .ssif
+        need = int(path.getsize(ssif) * 0.75)
+        free = shutil.disk_usage(work_dir).free
+        if free < need * 1.05:
+            raise RuntimeError(f"not enough free disk space in {work_dir}: need about "
+                               f"{need / 1e9:.0f} GB for temporary files, only {free / 1e9:.0f} GB free")
+        return extract_and_decode(ssif, avc_track, mvc_track, "0s", cut_end, work_dir, output_path,
+                                  progress_cb=progress_cb, **kwargs)
+    finally:
+        if mounted_here:
+            dismount_iso(source)
+        if work_created:
+            try:
+                os.rmdir(work_dir)
+            except OSError:
+                pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--ssif", "-i", type=str, required=True, help="path to the .ssif file (BDMV/STREAM/SSIF/*.ssif)")
+    parser.add_argument("--disc", type=str, default=None,
+                         help="a 3D Blu-ray .iso, a disc/BDMV folder, or a .ssif file -- the main movie, its tracks "
+                              "and temp folder are all found automatically")
+    parser.add_argument("--ssif", "-i", type=str, default=None,
+                         help="(manual mode) path to the .ssif file (BDMV/STREAM/SSIF/*.ssif)")
     parser.add_argument("--mpls", type=str, default=None,
-                         help="the disc's playlist (BDMV/PLAYLIST/*.mpls) -- used to auto-detect the AVC/MVC track "
+                         help="(manual mode) a playlist or the .ssif itself, used to auto-detect the AVC/MVC track "
                               "IDs. If omitted, --avc-track/--mvc-track must be given directly.")
     parser.add_argument("--avc-track", type=int, default=None)
     parser.add_argument("--mvc-track", type=int, default=None)
     parser.add_argument("--cut-start", type=str, default="0s")
     parser.add_argument("--cut-end", type=str, default=None)
-    parser.add_argument("--work-dir", type=str, required=True)
+    parser.add_argument("--work-dir", type=str, default=None,
+                         help="folder for the temporary demuxed streams (~75%% of the movie's size); "
+                              "default: a _mvc_work_* folder next to --output")
     parser.add_argument("--output", "-o", type=str, required=True,
-                         help="final encoded output path (e.g. .mkv) -- a real compressed video, "
+                         help="final encoded output path (.mkv) -- a real compressed video, "
                               "never a raw intermediate")
     parser.add_argument("--video-codec", type=str, default="hevc_nvenc", choices=CODECS)
     parser.add_argument("--quality", "--crf", type=int, default=18, dest="quality",
@@ -452,28 +558,46 @@ def main():
     parser.add_argument("--no-audio-subs", action="store_true",
                          help="skip restoring the disc's audio and subtitle tracks (video only)")
     parser.add_argument("--keep-temp", action="store_true", help="keep the demuxed elementary streams")
+    parser.add_argument("--gui-progress", action="store_true",
+                         help="print machine-readable 'IW3_MVC_PROGRESS <stage> <done> <total>' lines to stdout")
     args = parser.parse_args()
+    if (args.disc is None) == (args.ssif is None):
+        parser.error("give exactly one of --disc (automatic) or --ssif (manual)")
 
-    avc_track, mvc_track = args.avc_track, args.mvc_track
-    if avc_track is None or mvc_track is None:
-        if args.mpls is None:
-            parser.error("either --mpls (to auto-detect tracks) or both --avc-track and --mvc-track are required")
-        tsmuxer_bin = _find_tsmuxer()
-        avc_track, mvc_track = _find_video_track(args.mpls, tsmuxer_bin)
-        if mvc_track is None:
-            parser.error(f"no MVC track found via {args.mpls} -- this title may not be real 3D content, "
-                          f"or --mpls points at the wrong playlist")
-        print(f"[mvc-extract] auto-detected tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
+    if args.gui_progress:
+        def show(stage, done, total):
+            print(f"IW3_MVC_PROGRESS {stage} {done} {total}", flush=True)
+    else:
+        def show(stage, done, total):
+            print(f"\r[mvc-extract] {stage}: {done}/{total}      ", end="", file=sys.stderr, flush=True)
 
-    def show(stage, done, total):
-        print(f"\r[mvc-extract] {stage}: {done}/{total}      ", end="", file=sys.stderr, flush=True)
-
-    frames = extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end, args.work_dir,
-                                 args.output, video_codec=args.video_codec, quality=args.quality,
-                                 layout=args.layout, restore_av=not args.no_audio_subs,
-                                 keep_temp=args.keep_temp, progress_cb=show)
+    common = dict(video_codec=args.video_codec, quality=args.quality, layout=args.layout,
+                  restore_av=not args.no_audio_subs, keep_temp=args.keep_temp, progress_cb=show)
+    try:
+        if args.disc is not None:
+            frames = import_disc(args.disc, args.output, work_dir=args.work_dir, cut_end=args.cut_end, **common)
+        else:
+            if args.work_dir is None:
+                parser.error("--work-dir is required with --ssif")
+            avc_track, mvc_track = args.avc_track, args.mvc_track
+            if avc_track is None or mvc_track is None:
+                detect_from = args.mpls or args.ssif
+                avc_track, mvc_track = _find_video_track(detect_from, _find_tsmuxer())
+                if mvc_track is None:
+                    parser.error(f"no MVC track found via {detect_from} -- not real 3D content, "
+                                 f"or the wrong file")
+                print(f"[mvc-extract] auto-detected tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
+            frames = extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end,
+                                        args.work_dir, args.output, **common)
+    except Cancelled:
+        print("\n[mvc-extract] cancelled", file=sys.stderr)
+        return 1
+    except (RuntimeError, ValueError, OSError) as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        return 1
     print(f"\n[mvc-extract] done: {args.output} ({frames} frames)", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

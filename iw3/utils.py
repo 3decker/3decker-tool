@@ -170,7 +170,70 @@ def _run_waifu2x_upscale(output_path, args):
     return upscaled_path
 
 
-def _run_rife_interpolation(output_path, args):
+_HEVC_ENCODERS = ("libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf")
+
+
+def _dv_after_rife_wanted(args):
+    """True when Preserve Dolby Vision and RIFE are both on (ADR-192). The DV/HDR10+ data can't be attached
+    during conversion (RIFE adds frames that have none), so it is put back AFTER RIFE, once."""
+    return (getattr(args, "rife_interpolate", False) and getattr(args, "preserve_dowi", False)
+            and not getattr(args, "hdr_to_sdr", False) and not getattr(args, "keyframe", False))
+
+
+def _reinject_dv_after_rife(source_path, rife_path, args):
+    """ADR-192: after RIFE, re-attach the ORIGINAL source's Dolby Vision RPU to RIFE's output through
+    iw3.reinject_hdr_cli --rife-manifest (each in-between frame gets a copy of its nearest real frame's entry).
+    The RIFE file is only replaced when the injection fully succeeded; otherwise it is left as it was
+    (plays fine, just without DV) and the reason is printed. Never raises."""
+    if not rife_path or not path.exists(rife_path):
+        return
+    manifest = rife_path + ".rife_manifest.json"
+    try:
+        hdr_types = _detect_hdr_types(source_path, _find_ffprobe())
+    except Exception as e:
+        print(f"[iw3] Dolby Vision after RIFE: could not inspect the source ({e}); skipped.", file=sys.stderr)
+        return
+    if not hdr_types["dv"] and not hdr_types["hdr10plus"]:
+        print("[iw3] Preserve Dolby Vision: no DV or HDR10+ found in the source, nothing to re-attach.",
+              file=sys.stderr)
+        return
+    if not path.exists(manifest):
+        print(f"[iw3] Dolby Vision after RIFE skipped: RIFE's frame list is missing ({manifest}).", file=sys.stderr)
+        return
+    base, ext = path.splitext(str(rife_path))
+    tmp_out = f"{base}_dvtmp{ext}"
+    cmd = [sys.executable, "-m", "iw3.reinject_hdr_cli",
+           "--source", str(source_path), "--converted", str(rife_path),
+           "--output", tmp_out, "--rife-manifest", manifest]
+    if getattr(args, "start_time", None):
+        cmd += ["--start-time", str(args.start_time)]
+    if getattr(args, "end_time", None):
+        cmd += ["--end-time", str(args.end_time)]
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+    _notify_stage(args, STAGE_HDR_REINJECT)
+    print("[iw3] Re-attaching Dolby Vision/HDR metadata to the RIFE output...", file=sys.stderr)
+    try:
+        result = subprocess.run(cmd, capture_output=True, cwd=nunif_dir)
+        ok = result.returncode == 0 and path.exists(tmp_out)
+        if ok:
+            os.replace(tmp_out, rife_path)
+            print(f"[iw3] Dolby Vision re-attached to: {rife_path}", file=sys.stderr)
+        else:
+            msg = (result.stderr or b"").decode(errors="replace").strip() or (result.stdout or b"").decode(errors="replace").strip()
+            print(f"[iw3] Dolby Vision after RIFE FAILED (the RIFE file was left unchanged, without DV): "
+                  f"{msg[-1500:]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[iw3] Dolby Vision after RIFE FAILED ({e.__class__.__name__}: {e}); "
+              "the RIFE file was left unchanged, without DV.", file=sys.stderr)
+    finally:
+        if path.exists(tmp_out):
+            try:
+                os.remove(tmp_out)
+            except Exception:
+                pass
+
+
+def _run_rife_interpolation(output_path, args, force_hevc=False):
     """Optionally invokes RIFE (iw3.rife_cli, a thin wrapper around the
     Practical-RIFE model -- see docs/ai/AI_DECISIONS.md ADR-029) as a subprocess
     against a just-finished iw3 output, when the user explicitly opted in (GUI:
@@ -187,10 +250,9 @@ def _run_rife_interpolation(output_path, args):
     not each eye separately -- see rife_cli.py's module docstring for why, and
     the accepted packed-eye-seam tradeoff this implies.
 
-    Mutually exclusive with --preserve-dowi (enforced earlier, in
-    set_state_args() -- there is no way to assign correct DV/HDR10+ metadata to
-    RIFE's synthetic in-between frames), so this function does not need to
-    re-check that here.
+    RIFE cannot carry DV/HDR10+ itself (its synthetic in-between frames have none);
+    with --preserve-dowi the caller passes force_hevc=True and then puts the metadata
+    back afterwards with _reinject_dv_after_rife() (ADR-192).
 
     args.rife_target_fps (if set) takes priority over args.rife_multiplier --
     both are forwarded to rife_cli.py as-is, which re-validates the mutual
@@ -220,6 +282,10 @@ def _run_rife_interpolation(output_path, args):
         cmd += ["--rife-target-fps", str(rife_target_fps)]
     elif rife_multiplier is not None:
         cmd += ["--rife-multiplier", str(rife_multiplier)]
+    if force_hevc:
+        # DV/HDR10+ can only exist in HEVC; rife_cli's own default is H.264
+        codec = getattr(args, "video_codec", None)
+        cmd += ["--video-codec", codec if codec in _HEVC_ENCODERS else "libx265"]
 
     _notify_stage(args, STAGE_RIFE_INTERPOLATE)
     print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
@@ -4365,6 +4431,13 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     # waifu2x" from the previous file.
     _notify_stage(args, STAGE_DEPTH_STEREO)
 
+    original_input_filename = input_filename
+    dv_after_rife = _dv_after_rife_wanted(args)
+    saved_preserve_dowi = getattr(args, "preserve_dowi", False)
+    if dv_after_rife:
+        # ADR-192: no DV injection into the conversion itself -- RIFE would drop it anyway. It is
+        # re-attached once, after RIFE, below.
+        args.preserve_dowi = False
     input_filename, hdr_tmp_file = _tonemap_hdr_to_sdr(input_filename, args)
     input_filename, denoise_tmp_file = _denoise_preprocess(input_filename, args)
     resolved_output_path = None
@@ -4386,6 +4459,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
 
             resolved_output_path = process_video_with_resume(input_filename, output_path, args, depth_model, side_model)
     finally:
+        args.preserve_dowi = saved_preserve_dowi
         for tmp_file in (hdr_tmp_file, denoise_tmp_file):
             if tmp_file and path.exists(tmp_file):
                 try:
@@ -4411,7 +4485,9 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
             _run_waifu2x_upscale_stereo(final_output_path, args)
         else:
             _run_waifu2x_upscale(final_output_path, args)
-        _run_rife_interpolation(final_output_path, args)
+        rife_output_path = _run_rife_interpolation(final_output_path, args, force_hevc=dv_after_rife)
+        if dv_after_rife:
+            _reinject_dv_after_rife(original_input_filename, rife_output_path, args)
         _run_audio_subtitle_restore(final_output_path, args)
 
 
@@ -6034,13 +6110,6 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         raise ValueError("--export-depth-only must be specified together with --export or --export-disparity")
     if args.export_depth_fit and not args.export:
         raise ValueError("--export-depth-fit must be specified together with --export or --export-disparity")
-
-    if getattr(args, "rife_interpolate", False) and getattr(args, "preserve_dowi", False):
-        raise ValueError(
-            "--rife-interpolate and --preserve-dowi cannot be used together: RIFE inserts "
-            "synthetic in-between frames that have no correct Dolby Vision/HDR10+ per-frame "
-            "metadata to assign, so there is currently no way to preserve DV/HDR10+ through "
-            "frame interpolation. Disable one of the two options and try again.")
 
     if getattr(args, "rife_multiplier", None) is not None and getattr(args, "rife_target_fps", None) is not None:
         raise ValueError(

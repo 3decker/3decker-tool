@@ -3038,6 +3038,11 @@ class MainFrame(wx.Frame):
               "Requires: HEVC output (Video Codec set to hevc_nvenc, hevc_qsv, hevc_amf, or libx265 — this "
               "metadata format doesn't exist for other codecs) and MKVToolNix installed for MKV output.\n"
               "Con: a small amount of extra time at the end of each job for the injection/remux step.\n"
+              "With RIFE: can be combined with 'Interpolate frames with RIFE'. RIFE's output is then forced "
+              "to HEVC and the Dolby Vision data is re-attached AFTER RIFE (each in-between frame reuses its "
+              "nearest real frame's data). Only Dolby Vision is carried over that way -- HDR10+ is skipped "
+              "with RIFE. If re-attaching fails, the RIFE file still plays but has no Dolby Vision, and the "
+              "log says why.\n"
               "Recommended: on for any Dolby Vision or HDR10+ source you want to keep looking correct on "
               "an HDR display after conversion."))
 
@@ -8671,17 +8676,6 @@ class MainFrame(wx.Frame):
             self.cuda_context_initialized = True
 
     def on_click_btn_start(self, event):
-        if self.chk_rife_interpolate.GetValue() and self.chk_preserve_dowi.GetValue():
-            # Same check as set_state_args()'s CLI-side ValueError (see
-            # docs/ai/AI_DECISIONS.md ADR-029) -- checked here too, before even
-            # building args, so the user gets a clear message immediately instead
-            # of an uncaught exception from deep inside parse_args()/set_state_args().
-            wx.MessageBox(
-                T("RIFE Frame Interpolation and Preserve Dolby Vision cannot be used together: "
-                  "there is no way to assign correct DV/HDR10+ metadata to RIFE's synthetic "
-                  "in-between frames. Disable one of the two before starting."),
-                f"{T('Error')}: ValueError", wx.OK | wx.ICON_ERROR)
-            return
         try:
             args = self.parse_args()
         except ValueError as e:
@@ -17666,6 +17660,80 @@ def _self_test_upscale_panel():
     print("_self_test_upscale_panel: PASS")
 
 
+def _self_test_rife_with_preserve_dolby_vision():
+    """ADR-192: RIFE + Preserve Dolby Vision are allowed together (no start-time refusal); the conversion
+    itself is run without DV injection and DV is re-attached after RIFE. The whole helper flow is exercised
+    with a fake subprocess -- nothing real runs."""
+    import types
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+
+    on = types.SimpleNamespace(rife_interpolate=True, preserve_dowi=True, hdr_to_sdr=False, keyframe=False)
+    assert U._dv_after_rife_wanted(on)
+    assert not U._dv_after_rife_wanted(types.SimpleNamespace(rife_interpolate=False, preserve_dowi=True))
+    assert not U._dv_after_rife_wanted(types.SimpleNamespace(rife_interpolate=True, preserve_dowi=False))
+    assert not U._dv_after_rife_wanted(types.SimpleNamespace(
+        rife_interpolate=True, preserve_dowi=True, hdr_to_sdr=True)), "tone-mapped SDR has no DV to keep"
+
+    # The old hard refusal in the GUI's Start handler is gone
+    import inspect
+    assert "cannot be used together" not in inspect.getsource(MainFrame.on_click_btn_start)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rife = path.join(tmp, "movie_LR_rife.mkv")
+        with open(rife, "wb") as f:
+            f.write(b"old")
+        args = types.SimpleNamespace(start_time="00:25:00", end_time="00:25:08", state={})
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            with open(cmd[cmd.index("--output") + 1], "wb") as f:
+                f.write(b"new-with-dv")
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        with mock.patch.object(U, "_detect_hdr_types", return_value={"dv": True, "hdr10plus": False}), \
+                mock.patch.object(U, "_find_ffprobe", return_value="ffprobe"), \
+                mock.patch.object(U.subprocess, "run", fake_run):
+            # manifest missing -> skipped, file untouched
+            U._reinject_dv_after_rife("src.mkv", rife, args)
+            assert not calls and open(rife, "rb").read() == b"old"
+            with open(rife + ".rife_manifest.json", "w") as f:
+                f.write("{}")
+            U._reinject_dv_after_rife("src.mkv", rife, args)
+            cmd = calls[0]
+            assert cmd[cmd.index("--source") + 1] == "src.mkv" and cmd[cmd.index("--converted") + 1] == rife
+            assert "--rife-manifest" in cmd and cmd[cmd.index("--start-time") + 1] == "00:25:00"
+            assert cmd[cmd.index("--end-time") + 1] == "00:25:08"
+            assert open(rife, "rb").read() == b"new-with-dv", "success replaces the RIFE file"
+            assert not any("_dvtmp" in n for n in os.listdir(tmp)), "temp file cleaned up"
+
+        # failure -> RIFE file left exactly as it was, temp cleaned, no exception
+        with open(rife, "wb") as f:
+            f.write(b"old")
+
+        def failing_run(cmd, **kw):
+            return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"ERROR: frame counts don't match")
+
+        with mock.patch.object(U, "_detect_hdr_types", return_value={"dv": True, "hdr10plus": False}), \
+                mock.patch.object(U, "_find_ffprobe", return_value="ffprobe"), \
+                mock.patch.object(U.subprocess, "run", failing_run):
+            U._reinject_dv_after_rife("src.mkv", rife, args)
+        assert open(rife, "rb").read() == b"old"
+        assert not any("_dvtmp" in n for n in os.listdir(tmp))
+
+        # source without DV/HDR10+ -> nothing to do
+        calls.clear()
+        with mock.patch.object(U, "_detect_hdr_types", return_value={"dv": False, "hdr10plus": False}), \
+                mock.patch.object(U, "_find_ffprobe", return_value="ffprobe"), \
+                mock.patch.object(U.subprocess, "run", fake_run):
+            U._reinject_dv_after_rife("src.mkv", rife, args)
+        assert not calls
+
+    print("_self_test_rife_with_preserve_dolby_vision: PASS")
+
+
 def _self_test_standalone_tool_titles_share_accent_colour():
     """Every Standalone Tools group title uses the same accent (blue) colour as the first tools,
     in both themes -- a title left at the default black is unreadable on the dark theme. The tools
@@ -17778,6 +17846,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_panel,
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,
+        _self_test_rife_with_preserve_dolby_vision,
         _self_test_standalone_tool_titles_share_accent_colour,
     ]
     failures = []

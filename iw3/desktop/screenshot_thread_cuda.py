@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from collections import deque
 import time
+from .frame_fit import fit_frame_chw, is_window_effect_size
 
 
 def resize_frame(frame, size):
@@ -38,6 +39,10 @@ class ScreenshotThreadWCCUDA(threading.Thread):
         self.stop_event = threading.Event()
         self.fps_counter = deque(maxlen=120)
         self.tick = 0
+        self.source_shape = None
+        # bumped whenever the captured picture really changes size (window resized / resolution changed);
+        # the main loop watches it to reset depth smoothing
+        self.size_change_count = 0
 
     def run(self):
         from wc_cuda import WindowsCapture
@@ -70,14 +75,25 @@ class ScreenshotThreadWCCUDA(threading.Thread):
                     right = w - self.crop_right if self.crop_right > 0 else w
                     source_frame = source_frame[:, top:bottom, left:right]
 
+                src_h, src_w = source_frame.shape[-2:]
+                if self.source_shape is None:
+                    self.source_shape = (src_h, src_w)
+                elif (src_h, src_w) != self.source_shape and not is_window_effect_size(src_h, src_w, *self.source_shape):
+                    self.source_shape = (src_h, src_w)
+                    self.size_change_count += 1
+
                 if source_frame.shape != (3, self.frame_height, self.frame_width):
-                    if self.window_name is not None:
+                    if self.window_name is not None and is_window_effect_size(
+                            src_h, src_w, self.frame_height, self.frame_width):
+                        # only window borders/shadows differ: keep the exact top-left copy
                         min_h = min(self.frame_height, source_frame.shape[1])
                         min_w = min(self.frame_width, source_frame.shape[2])
                         dest_frame = torch.zeros((3, self.frame_height, self.frame_width), dtype=torch.float32, device=self.device)
                         dest_frame[:, 0:min_h, 0:min_w].copy_(source_frame[:, 0:min_h, 0:min_w]).div_(255.0)
                     else:
-                        dest_frame = resize_frame(source_frame, size=(self.frame_height, self.frame_width))
+                        # a real size change (or the normal downscale to the stream size): fit inside the fixed
+                        # output frame keeping the aspect ratio -- no crop, no stretch, no crash
+                        dest_frame = fit_frame_chw(source_frame.float().div_(255.0), self.frame_height, self.frame_width)
                 else:
                     dest_frame = source_frame / 255.0
 

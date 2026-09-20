@@ -5,9 +5,7 @@ import torch
 from collections import deque
 import time
 import wx
-from torchvision.transforms import (
-    functional as TF,
-    InterpolationMode)
+from .frame_fit import fit_frame_chw
 
 
 def take_screenshot(mouse_position=None, draw_cursor_enabled=True):
@@ -45,6 +43,7 @@ class ScreenshotThreadPIL(threading.Thread):
         self.frame_set_event = threading.Event()
         self.stop_event = threading.Event()
         self.fps_counter = deque(maxlen=120)
+        self.size_change_count = 0  # bumped when the screen resolution changes while running
         if device.type == "cuda":
             self.cuda_stream = torch.cuda.Stream(device=device)
         else:
@@ -55,24 +54,23 @@ class ScreenshotThreadPIL(threading.Thread):
         while True:
             tick = time.perf_counter()
             frame = take_screenshot(wx.GetMousePosition(), draw_cursor_enabled=self.draw_cursor_enabled)
-            if frame_buffer is None:
+            if frame_buffer is None or tuple(frame_buffer.shape[1:]) != (frame.height, frame.width):
+                if frame_buffer is not None:
+                    # resolution changed: the old buffer would mismatch and kill this thread
+                    self.size_change_count += 1
                 frame_buffer = torch.ones((3, frame.height, frame.width), dtype=torch.uint8)
                 if torch.cuda.is_available():
                     frame_buffer = frame_buffer.pin_memory()
             if self.cuda_stream is not None:
                 with torch.cuda.stream(self.cuda_stream):
                     frame = to_tensor(frame, self.device, frame_buffer, non_blocking=True)
-                    if frame.shape[2] > self.frame_height:
-                        frame = TF.resize(frame, size=(self.frame_height, self.frame_width),
-                                          interpolation=InterpolationMode.BILINEAR,
-                                          antialias=True)
+                    if tuple(frame.shape[-2:]) != (self.frame_height, self.frame_width):
+                        frame = fit_frame_chw(frame, self.frame_height, self.frame_width)
                 frame.record_stream(self.cuda_stream)
             else:
                 frame = to_tensor(frame, self.device, frame_buffer)
-                if frame.shape[2] > self.frame_height:
-                    frame = TF.resize(frame, size=(self.frame_height, self.frame_width),
-                                      interpolation=InterpolationMode.BILINEAR,
-                                      antialias=True)
+                if tuple(frame.shape[-2:]) != (self.frame_height, self.frame_width):
+                    frame = fit_frame_chw(frame, self.frame_height, self.frame_width)
 
             with self.frame_lock:
                 self.frame = frame

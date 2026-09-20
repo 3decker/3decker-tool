@@ -12,6 +12,7 @@ import numpy as np
 import sys
 import wx
 from typing import Any
+from .frame_fit import fit_frame_hwc, is_window_effect_size
 
 
 _x11_connection_pool: dict[int, Any] = {}
@@ -325,10 +326,11 @@ def estimate_fps(fps_counter):
 def capture_process(
         frame_size, monitor_index, window_name,
         frame_shm, frame_pos, frame_lock, frame_event, stop_event, backend="mss",
-        crop_top=0, crop_left=0, crop_right=0, crop_bottom=0
+        crop_top=0, crop_left=0, crop_right=0, crop_bottom=0, size_changes=None
 ):
     frame_buffer = np.ndarray(frame_size, dtype=np.uint8, buffer=frame_shm.buf)
     frame_count = 0
+    last_source_shape = None
 
     if backend == "mss":
         capture = WindowsCaptureMSS(monitor_index=monitor_index, window_name=window_name)
@@ -357,7 +359,7 @@ def capture_process(
     def on_frame_arrived(frame, capture_control):
         nonlocal frame_shm, frame_event, frame_lock, stop_event, \
                   frame_buffer, frame_pos, window_name, frame_count, \
-                  crop_top, crop_left, crop_right, crop_bottom  # noqa
+                  crop_top, crop_left, crop_right, crop_bottom, last_source_shape  # noqa
         if not frame_event.is_set():
             with frame_lock:
                 source_frame = frame.frame_buffer
@@ -370,9 +372,18 @@ def capture_process(
                     right = w - crop_right if crop_right > 0 else w
                     source_frame = source_frame[top:bottom, left:right, :]
 
+                src_h, src_w = source_frame.shape[:2]
+                if last_source_shape is None:
+                    last_source_shape = (src_h, src_w)
+                elif (src_h, src_w) != last_source_shape and not is_window_effect_size(src_h, src_w, *last_source_shape):
+                    last_source_shape = (src_h, src_w)
+                    if size_changes is not None:
+                        size_changes.value += 1
+
                 if frame_buffer.shape != source_frame.shape:
-                    if window_name is not None:
-                        # NOTE: The size may differ due to resizing, Window effects, etc.
+                    if window_name is not None and is_window_effect_size(
+                            src_h, src_w, frame_buffer.shape[0], frame_buffer.shape[1]):
+                        # NOTE: only window effects (borders/shadows) differ: keep the exact top-left copy
                         # I wanted to use replication padding, but since the edges of the Windows screen are black, it's meaningless
                         min_h = min(frame_buffer.shape[0], source_frame.shape[0])
                         min_w = min(frame_buffer.shape[1], source_frame.shape[1])
@@ -383,7 +394,10 @@ def capture_process(
                         if frame_count > 0xffff:
                             frame_count = 0
                     else:
-                        raise RuntimeError(f"Screen size missmatch. frame_buffer={frame_buffer.shape}, frame={source_frame.shape}")
+                        # a real size change (window resized / monitor resolution changed): fit the picture inside
+                        # the fixed buffer, aspect kept. This used to raise "Screen size missmatch" for a monitor
+                        # (ending the live session) and crop or leave black borders for a window.
+                        fit_frame_hwc(frame_buffer, source_frame)
                 else:
                     frame_buffer[:] = source_frame
 
@@ -459,6 +473,7 @@ class ScreenshotProcess(threading.Thread):
         self.process_stop_event = mp.Event()
         self.process_frame_event = mp.Event()
         self.process_frame_lock = mp.Lock()
+        self.process_size_changes = mp.Value("i", 0, lock=False)
         self.process = mp.Process(
             target=capture_process,
             args=(tuple(template.shape),
@@ -473,8 +488,15 @@ class ScreenshotProcess(threading.Thread):
                   self.crop_top,
                   self.crop_left,
                   self.crop_right,
-                  self.crop_bottom))
+                  self.crop_bottom,
+                  self.process_size_changes))
         self.process.start()
+
+    @property
+    def size_change_count(self):
+        """how many times the captured picture really changed size (read by the main loop to reset smoothing)"""
+        counter = getattr(self, "process_size_changes", None)
+        return counter.value if counter is not None else 0
 
     def run(self):
         self.start_process()

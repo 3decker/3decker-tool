@@ -15,6 +15,20 @@ it matters.
 
 ## Latest Update — September 19, 2026
 
+**Fixed: RIFE (smoother motion) and Preserve Dolby Vision now work together.** Before,
+the two options refused to run in one job because RIFE creates new in-between frames that
+have no Dolby Vision data, so a smoothed file always lost its Dolby Vision. Now you can tick
+both: the app converts, smooths with RIFE (forced to H.265, which Dolby Vision needs), and then
+automatically puts the original Dolby Vision data back, giving each new in-between frame a copy
+of its nearest real frame's data. Checked on a real 4K Dolby Vision movie. If putting it back
+ever fails, you still get the smoothed video (just without Dolby Vision) and the log says why.
+Only Dolby Vision is carried over this way, not HDR10+.
+
+**Fixed: Live 3D no longer breaks when you resize the captured window.** Resizing the window
+you're streaming (or changing screen resolution) used to crash the stream, cut off the picture,
+or stretch it. The stream now keeps its size, fits the new picture inside it with black bars
+instead of distorting it, and resets its depth smoothing so the 3D effect doesn't wobble.
+
 **New: 3D Blu-ray Import (Tools tab).** Got a real 3D Blu-ray disc (a disc image
 or a ripped disc folder)? Pick it, pick where to save, and 3DECKER turns it into a
 normal 3D video file you can play in VLC, MPC-HC or on a 3D TV. It finds the main

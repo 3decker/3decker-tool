@@ -371,6 +371,7 @@ def iw3_desktop_main(args, init_wxapp=True):
                 args.state["fps_event"].set_url(None)
 
         count = last_status_time = 0
+        last_size_changes = 0
         fps_counter = deque(maxlen=120)
         prev_divergence = args.divergence
 
@@ -380,6 +381,16 @@ def iw3_desktop_main(args, init_wxapp=True):
                 frame = screenshot_thread.get_frame()
                 if frame is None:
                     break
+                size_changes = getattr(screenshot_thread, "size_change_count", 0)
+                if size_changes != last_size_changes:
+                    # The captured picture changed size (window resized / resolution changed). It is fitted into
+                    # the fixed output frame by the capture thread; drop the smoothing state built for the old
+                    # picture so the depth scale and convergence don't drift or jump.
+                    last_size_changes = size_changes
+                    depth_model.enable_ema(args.ema_decay, buffer_size=1)
+                    if args.state["convergence_model"] is not None:
+                        args.state["convergence_model"].reset(enable_ema=True, decay=0.98)
+                    print("\n[iw3-desktop] captured picture changed size; depth smoothing reset", file=sys.stderr)
                 sbs = IW3U.process_image(frame, args, depth_model, side_model, autocrop_uncrop=True)
 
                 if not args.local_viewer:

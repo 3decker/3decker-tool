@@ -15,6 +15,11 @@ it matters.
 
 ## Latest Update — September 20, 2026
 
+**Improved: the RIFE step of a normal conversion now shows real progress.** During "Interpolate
+frames with RIFE after conversion" the bar used to show only how long the step had been running.
+It now shows frames done, speed (FPS), elapsed time and the estimated time left, like the other
+steps. Pressing Cancel during RIFE now also stops it and removes the unfinished file.
+
 **Fixed: "SBS to 3D Blu-ray MVC" now includes text subtitles.** Most MKV files carry text
 subtitles (SRT/ASS), which a Blu-ray can't hold directly, so they were silently left out and the
 disc image played with audio but no subtitles. The tool now turns them into real Blu-ray subtitles

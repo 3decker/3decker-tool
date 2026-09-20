@@ -250,6 +250,61 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
     return succeeded
 
 
+def _run_cli_with_progress(cmd, cwd, args, progress_prefix, desc):
+    """Runs a helper program (currently iw3.rife_cli) as a subprocess and feeds the "<progress_prefix> <done>
+    <total>" lines it prints on stdout into this job's own progress bar (args.state["tqdm_fn"]: the GUI's bar with
+    frames / FPS / elapsed / ETA, or a console bar on the command line). Before this, the whole post-conversion RIFE
+    step ran with its output thrown away, so the bar just showed "running MM:SS" for the whole step.
+
+    stderr is drained on a thread (no pipe deadlock) and returned for error messages. If the job's stop_event is
+    set the helper is killed. Returns (returncode, stderr_text, cancelled). A progress bar that fails must never
+    break the step itself, so every call into it is guarded."""
+    tqdm_fn = (getattr(args, "state", None) or {}).get("tqdm_fn")
+    stop_event = (getattr(args, "state", None) or {}).get("stop_event")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, cwd=cwd)
+    stderr_chunks = []
+
+    def _drain_stderr():
+        for err_line in proc.stderr:
+            stderr_chunks.append(err_line)
+
+    drain = threading.Thread(target=_drain_stderr, daemon=True)
+    drain.start()
+    bar, last_done, cancelled = None, 0, False
+    try:
+        for line in proc.stdout:
+            if stop_event is not None and stop_event.is_set():
+                proc.kill()
+                cancelled = True
+                break
+            parts = line.split()
+            if len(parts) != 3 or parts[0] != progress_prefix:
+                continue
+            try:
+                done, total = int(parts[1]), int(parts[2])
+            except ValueError:
+                continue
+            if tqdm_fn is None:
+                continue
+            try:
+                if bar is None:
+                    bar = tqdm_fn(total=total or 1, desc=desc, ncols=80)
+                if done > last_done:
+                    bar.update(done - last_done)
+                    last_done = done
+            except Exception:
+                tqdm_fn = None
+    finally:
+        proc.wait()
+        drain.join(timeout=5)
+        if bar is not None:
+            try:
+                bar.close()
+            except Exception:
+                pass
+    return proc.returncode, "".join(stderr_chunks), cancelled
+
+
 def _run_rife_interpolation(output_path, args, force_hevc=False):
     """Optionally invokes RIFE (iw3.rife_cli, a thin wrapper around the
     Practical-RIFE model -- see docs/ai/AI_DECISIONS.md ADR-029) as a subprocess
@@ -306,11 +361,19 @@ def _run_rife_interpolation(output_path, args, force_hevc=False):
 
     _notify_stage(args, STAGE_RIFE_INTERPOLATE)
     print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
-    except subprocess.CalledProcessError as e:
-        msg = e.stderr.decode(errors="replace").strip()
-        print(f"[iw3] RIFE interpolation failed: {msg[:300]}", file=sys.stderr)
+    returncode, stderr_text, cancelled = _run_cli_with_progress(
+        cmd, nunif_dir, args, "IW3_RIFE_PROGRESS", f"{path.basename(str(output_path))} [RIFE {rife_model}]")
+    if cancelled:
+        print("[iw3] RIFE interpolation cancelled.", file=sys.stderr)
+        for leftover in (interpolated_path, interpolated_path + ".rife_manifest.json"):
+            try:
+                if path.exists(leftover):
+                    os.remove(leftover)
+            except OSError:
+                pass
+        return None
+    if returncode != 0:
+        print(f"[iw3] RIFE interpolation failed: {stderr_text.strip()[-600:]}", file=sys.stderr)
         return None
     if not path.exists(interpolated_path):
         print("[iw3] RIFE interpolation exited 0 but produced no output file", file=sys.stderr)

@@ -18065,6 +18065,96 @@ def _self_test_rife_standalone_dv_and_cancel():
     print("_self_test_rife_standalone_dv_and_cancel: PASS")
 
 
+def _self_test_rife_progress_reaches_job_bar():
+    """The post-conversion RIFE step used to discard the helper's output, so the progress bar showed only
+    "running MM:SS". Its "IW3_RIFE_PROGRESS <done> <total>" lines now drive the job's tqdm bar (frames/FPS/ETA in
+    the GUI). A fake helper stands in for RIFE: no GPU. Also: a failing helper reports its error, a set stop_event
+    kills the helper and removes partial output, and a broken progress callback never breaks the step."""
+    import tempfile
+    import threading
+    import types
+    from . import utils as U
+
+    good = ("import sys,time\n"
+            "print('IW3_RIFE_PROGRESS 0 50', flush=True)\n"
+            "for i in (10, 25, 25, 50):\n"
+            "    print('IW3_RIFE_PROGRESS', i, 50, flush=True); time.sleep(0.05)\n"
+            "print('noise line', flush=True)\n"
+            "print('a stderr message', file=sys.stderr)\n")
+
+    class FakeBar:
+        instances = []
+
+        def __init__(self, **kw):
+            self.kw, self.total_updates, self.closed = kw, 0, False
+            FakeBar.instances.append(self)
+
+        def update(self, n=1):
+            self.total_updates += n
+
+        def close(self):
+            self.closed = True
+
+    args = types.SimpleNamespace(state={"tqdm_fn": FakeBar, "stop_event": None})
+    code, err, cancelled = U._run_cli_with_progress([sys.executable, "-c", good], ".", args, "IW3_RIFE_PROGRESS", "clip [RIFE x]")
+    bar = FakeBar.instances[-1]
+    assert code == 0 and not cancelled and "a stderr message" in err, (code, err, cancelled)
+    assert bar.kw["total"] == 50 and bar.kw["desc"] == "clip [RIFE x]", bar.kw
+    assert bar.total_updates == 50 and bar.closed, (bar.total_updates, bar.closed)
+
+    # failing helper -> non-zero code and its stderr text
+    code, err, cancelled = U._run_cli_with_progress(
+        [sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"], ".", args, "IW3_RIFE_PROGRESS", "x")
+    assert code == 3 and "boom" in err and not cancelled
+
+    # no progress callback at all (CLI without a bar) still works
+    code, err, cancelled = U._run_cli_with_progress(
+        [sys.executable, "-c", good], ".", types.SimpleNamespace(state={}), "IW3_RIFE_PROGRESS", "x")
+    assert code == 0
+
+    # a progress callback that raises must not break the step
+    class BrokenBar:
+        def __init__(self, **kw):
+            raise RuntimeError("bar broke")
+
+    code, err, cancelled = U._run_cli_with_progress(
+        [sys.executable, "-c", good], ".", types.SimpleNamespace(state={"tqdm_fn": BrokenBar}), "IW3_RIFE_PROGRESS", "x")
+    assert code == 0 and not cancelled
+
+    # cancel: helper is killed, and _run_rife_interpolation removes partial output
+    slow = ("import time,sys\n"
+            "for i in range(1, 400):\n"
+            "    print('IW3_RIFE_PROGRESS', i, 400, flush=True); time.sleep(0.05)\n")
+    stop = threading.Event()
+    args_cancel = types.SimpleNamespace(state={"tqdm_fn": FakeBar, "stop_event": stop})
+    threading.Timer(0.6, stop.set).start()
+    started = time()
+    code, err, cancelled = U._run_cli_with_progress([sys.executable, "-c", slow], ".", args_cancel, "IW3_RIFE_PROGRESS", "x")
+    assert cancelled and time() - started < 10, (cancelled, time() - started)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x")
+        partial = path.join(tmp, "movie_rife.mkv")
+        real_run = U._run_cli_with_progress
+
+        def fake_cancelled(cmd, cwd, a, prefix, desc):
+            for p_ in (partial, partial + ".rife_manifest.json"):
+                with open(p_, "wb") as f:
+                    f.write(b"partial")
+            return 1, "", True
+
+        U._run_cli_with_progress = fake_cancelled
+        try:
+            result = U._run_rife_interpolation(src, types.SimpleNamespace(rife_interpolate=True, state={}))
+        finally:
+            U._run_cli_with_progress = real_run
+        assert result is None and not path.exists(partial) and not path.exists(partial + ".rife_manifest.json")
+
+    print("_self_test_rife_progress_reaches_job_bar: PASS")
+
+
 def _self_test_sbs2mvc_text_subtitles():
     """Text subtitles (SRT/ASS/...) used to be silently dropped from the 3D Blu-ray ISO (a tester saw an ISO with
     audio but no subtitles). They are now extracted to .srt and handed to tsMuxeR as rendered Blu-ray subtitles,
@@ -18238,6 +18328,7 @@ def _run_self_tests():
         _self_test_rife_with_preserve_dolby_vision,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
+        _self_test_rife_progress_reaches_job_bar,
         _self_test_standalone_tool_titles_share_accent_colour,
     ]
     failures = []

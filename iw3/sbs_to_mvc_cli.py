@@ -200,15 +200,38 @@ def eye_filter(layout, width, height, crop=None):
     return f"split[a][b];[a]{crop_l},{fit}[l];[b]{crop_r},{fit}[r];[l][r]hstack"
 
 
-def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av):
+# A Blu-ray only holds picture subtitles (PGS). Text subtitles (SRT/ASS/... -- what most MKV files carry) are
+# turned into PGS by tsMuxeR itself, which draws the text with a font; the font must have the language's
+# letters, so the non-Latin languages get their own Windows font (everything else: Arial).
+_SUB_FONT_BY_LANG = {
+    "chi": "Microsoft YaHei", "zho": "Microsoft YaHei", "jpn": "Yu Gothic", "kor": "Malgun Gothic",
+    "tha": "Leelawadee UI", "hin": "Nirmala UI", "ben": "Nirmala UI", "tam": "Nirmala UI", "tel": "Nirmala UI",
+    "ara": "Segoe UI", "heb": "Segoe UI", "per": "Segoe UI", "fas": "Segoe UI", "urd": "Segoe UI",
+}
+_MAX_BD_SUBTITLES = 32          # the Blu-ray limit for picture-subtitle streams
+_SUB_STYLE = "font-size=65, font-color=0xffffffff, bottom-offset=24, font-border=5, text-align=center"
+
+
+def _text_sub_meta(srt_path, lang, fps_text, width, height):
+    font = _SUB_FONT_BY_LANG.get((lang or "").lower(), "Arial")
+    lang_part = f", lang={lang}" if lang else ""
+    return (f'S_TEXT/UTF8, "{srt_path.replace(chr(92), "/")}", font-name="{font}", {_SUB_STYLE}, '
+            f"video-width={width}, video-height={height}, fps={fps_text}{lang_part}")
+
+
+def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av, fps_text="23.976",
+                     width=1920, height=1080):
     """Returns (meta_lines, notes). Compatible audio goes in as-is, anything else is
-    converted to AC-3 (a Blu-ray-legal format) first; PGS subtitles go in as-is, text
-    subtitles can't be used on a Blu-ray and are skipped with a note."""
+    converted to AC-3 (a Blu-ray-legal format) first; PGS subtitles go in as-is; text subtitles
+    (SRT/ASS/...) are extracted to .srt and rendered into Blu-ray subtitles by tsMuxeR (up to the disc's
+    limit of 32); only bitmap formats a Blu-ray cannot hold (e.g. VobSub) are skipped, with a note."""
     lines, notes = [], []
     if not include_av:
         return lines, notes
     src = path.abspath(input_path).replace(chr(92), "/")
     audio_index = 0
+    subtitle_index = 0          # position among ALL subtitle streams, same order ffmpeg's 0:s:N uses
+    subtitle_count = 0
     for t in list_tracks(input_path, tsmuxer_bin):
         codec = t["codec"]
         lang = f", lang={t['lang']}" if t["lang"] else ""
@@ -232,10 +255,27 @@ def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av):
                 else:
                     notes.append(f"audio track {audio_index + 1} ({codec}) skipped: could not convert it")
             audio_index += 1
-        elif codec == "S_HDMV/PGS":
-            lines.append(f"{codec}, {src}, track={t['id']}{lang}")
         elif codec.startswith("S_"):
-            notes.append(f"subtitle track ({codec}) skipped: only picture-based (PGS) subtitles work on a Blu-ray")
+            label = f"subtitle track {subtitle_index + 1} ({t['lang'] or 'unknown language'}, {codec})"
+            if subtitle_count >= _MAX_BD_SUBTITLES:
+                notes.append(f"{label} skipped: a Blu-ray holds at most {_MAX_BD_SUBTITLES} subtitle tracks")
+            elif codec == "S_HDMV/PGS":
+                lines.append(f"{codec}, {src}, track={t['id']}{lang}")
+                subtitle_count += 1
+            elif codec.startswith("S_TEXT"):
+                out = path.join(work_dir, f"subtitle_{subtitle_index}.srt")
+                r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                                    f"0:s:{subtitle_index}", "-c:s", "srt", out],
+                                   capture_output=True, text=True)
+                if r.returncode == 0 and path.exists(out) and path.getsize(out) > 0:
+                    lines.append(_text_sub_meta(out, t["lang"], fps_text, width, height))
+                    subtitle_count += 1
+                    notes.append(f"{label} converted to a Blu-ray picture subtitle")
+                else:
+                    notes.append(f"{label} skipped: could not extract its text")
+            else:
+                notes.append(f"{label} skipped: this subtitle format cannot be put on a Blu-ray")
+            subtitle_index += 1
     return lines, notes
 
 
@@ -365,7 +405,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 
         av_lines, notes = ([], [])
         if include_av:
-            av_lines, notes = _plan_audio_subs(input_path, tsmuxer, work_dir, ffmpeg, True)
+            av_lines, notes = _plan_audio_subs(input_path, tsmuxer, work_dir, ffmpeg, True, fps_text=fps_text)
         for n in notes:
             print(f"[sbs2mvc] note: {n}", file=sys.stderr)
 

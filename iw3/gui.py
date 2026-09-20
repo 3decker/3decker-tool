@@ -5670,7 +5670,13 @@ class MainFrame(wx.Frame):
             T("What it's for: carries the input's audio and subtitle tracks into the disc.\n"
               "How: Blu-ray-legal audio (AC-3, DTS, TrueHD, PCM) is copied unchanged; anything else "
               "(AAC, Opus, FLAC...) is converted to AC-3 first. Picture-based (PGS) subtitles are copied; "
-              "text subtitles (SRT/ASS) can't be used on a Blu-ray and are skipped -- the log says so.\n"
+              "text subtitles (SRT/ASS -- what most MKV files carry) are drawn into Blu-ray picture "
+              "subtitles, with a suitable font for Chinese, Japanese, Korean, Thai, Hindi and Arabic. A "
+              "Blu-ray holds at most 32 subtitle tracks; the log lists every track that was converted or "
+              "skipped.\n"
+              "Con: some players and programs (for example MakeMKV) may not list the audio and subtitle "
+              "tracks of a disc image made this way even though a player shows them; subtitles sit at "
+              "screen depth (they do not float in 3D).\n"
               "Recommended: on."))
 
         self.btn_sbs2mvc_run = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Run"))
@@ -18059,6 +18065,64 @@ def _self_test_rife_standalone_dv_and_cancel():
     print("_self_test_rife_standalone_dv_and_cancel: PASS")
 
 
+def _self_test_sbs2mvc_text_subtitles():
+    """Text subtitles (SRT/ASS/...) used to be silently dropped from the 3D Blu-ray ISO (a tester saw an ISO with
+    audio but no subtitles). They are now extracted to .srt and handed to tsMuxeR as rendered Blu-ray subtitles,
+    with a font that has the language's letters; PGS goes in as-is; unsupported formats are skipped with a note; at
+    most 32 subtitle streams. tsMuxeR/ffmpeg are faked: nothing real runs."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    tracks = [
+        {"id": 1, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
+        {"id": 2, "codec": "A_AC3", "lang": "eng"},
+        {"id": 3, "codec": "S_TEXT/UTF8", "lang": "eng"},
+        {"id": 4, "codec": "S_HDMV/PGS", "lang": "fre"},
+        {"id": 5, "codec": "S_TEXT/UTF8", "lang": "chi"},
+        {"id": 6, "codec": "S_TEXT/UTF8", "lang": "kor"},
+        {"id": 7, "codec": "S_VOBSUB", "lang": "ger"},
+    ]
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = cmd[-1]
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:01,000 --> 00:00:02,000\nx\n")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(S, "list_tracks", return_value=tracks), \
+            mock.patch.object(S.subprocess, "run", fake_run):
+        lines, notes = S._plan_audio_subs("movie.mkv", "tsMuxeR", tmp, "ffmpeg", True, fps_text="23.976")
+        assert lines[0].startswith("A_AC3, ") and "track=2" in lines[0]
+        text_lines = [line for line in lines if line.startswith("S_TEXT/UTF8")]
+        assert len(text_lines) == 3, lines
+        assert 'font-name="Arial"' in text_lines[0] and "lang=eng" in text_lines[0]
+        assert 'font-name="Microsoft YaHei"' in text_lines[1] and "lang=chi" in text_lines[1]
+        assert 'font-name="Malgun Gothic"' in text_lines[2] and "lang=kor" in text_lines[2]
+        assert all("video-width=1920" in x and "video-height=1080" in x and "fps=23.976" in x for x in text_lines)
+        assert any(line.startswith("S_HDMV/PGS, ") and "track=4" in line for line in lines), lines
+        # ffmpeg is asked for the right subtitle by its position among ALL subtitle streams (eng=0, chi=2, kor=3)
+        maps = [c[c.index("-map") + 1] for c in calls]
+        assert maps == ["0:s:0", "0:s:2", "0:s:3"], maps
+        assert any("VOBSUB" in n.upper() and "skipped" in n for n in notes), notes
+
+        # the 32-stream Blu-ray limit
+        many = [{"id": 1, "codec": "V_MPEG4/ISO/AVC", "lang": ""}] + \
+               [{"id": 10 + i, "codec": "S_TEXT/UTF8", "lang": "eng"} for i in range(40)]
+        with mock.patch.object(S, "list_tracks", return_value=many):
+            lines, notes = S._plan_audio_subs("movie.mkv", "tsMuxeR", tmp, "ffmpeg", True)
+        assert len([line for line in lines if line.startswith("S_TEXT")]) == 32
+        assert sum("at most 32" in n for n in notes) == 8, notes
+
+        # Video-only mode adds nothing
+        assert S._plan_audio_subs("movie.mkv", "tsMuxeR", tmp, "ffmpeg", False) == ([], [])
+
+    print("_self_test_sbs2mvc_text_subtitles: PASS")
+
+
 def _self_test_standalone_tool_titles_share_accent_colour():
     """Every Standalone Tools group title uses the same accent (blue) colour as the first tools,
     in both themes -- a title left at the default black is unreadable on the dark theme. The tools
@@ -18173,6 +18237,7 @@ def _run_self_tests():
         _self_test_upscale_panel,
         _self_test_rife_with_preserve_dolby_vision,
         _self_test_rife_standalone_dv_and_cancel,
+        _self_test_sbs2mvc_text_subtitles,
         _self_test_standalone_tool_titles_share_accent_colour,
     ]
     failures = []

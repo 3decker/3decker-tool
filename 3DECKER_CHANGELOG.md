@@ -15,6 +15,13 @@ it matters.
 
 ## Latest Update — September 20, 2026
 
+**Fixed: "SBS to 3D Blu-ray MVC" now includes text subtitles.** Most MKV files carry text
+subtitles (SRT/ASS), which a Blu-ray can't hold directly, so they were silently left out and the
+disc image played with audio but no subtitles. The tool now turns them into real Blu-ray subtitles
+(with a suitable font for Chinese, Japanese, Korean, Thai, Hindi and Arabic), up to the disc's limit
+of 32 tracks, and the log lists every track it converted or skipped. Subtitles on the disc sit at
+screen depth (they don't float in 3D).
+
 **New: make objects come out MORE toward the audience.** The old "Max Pop-Out Limit" could
 only reduce how far things come out of the screen. It is now "Pop-Out Limit / Boost" and works in
 both directions: below 1.0 it limits pop-out as before, 1.0 is off, and above 1.0 (1.25, 1.5, 2.0 or

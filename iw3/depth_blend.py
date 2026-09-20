@@ -1265,6 +1265,10 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
         rife_output_path = _run_rife_interpolation(output_path, args, force_hevc=bool(dv_source))
         if dv_source:
             _reinject_dv_after_rife(dv_source, rife_output_path, args)
+        # "Restore Audio & Subtitles" used to be silently ignored in Depth Blend mode. Same rule as the main
+        # conversion: build the tracks onto the file the user keeps (the RIFE output when RIFE ran).
+        from .utils import _run_audio_subtitle_restore
+        _run_audio_subtitle_restore(rife_output_path or output_path, args)
 
     print(f"[depth-blend] done. Working files (full rgb/depth dumps from both passes) are still in:\n"
           f"  {work_dir}\n"

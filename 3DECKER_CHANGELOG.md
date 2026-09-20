@@ -25,7 +25,8 @@ made again.
 **Fixed: "Restore Audio & Subtitles" together with RIFE.** The restored-tracks file used to be built
 from the un-smoothed video, so you got one file with smooth motion but no extra tracks and another
 with all the tracks but no smoothing. It now adds the tracks to the smoothed file
-(`..._rife_alldub.mkv`).
+(`..._rife_alldub.mkv`). The Dual-Pass Depth Blend mode also used to ignore "Restore Audio &
+Subtitles" completely; it now honours it too.
 
 ## Update — September 19, 2026
 

@@ -22,7 +22,14 @@ both: the app converts, smooths with RIFE (forced to H.265, which Dolby Vision n
 automatically puts the original Dolby Vision data back, giving each new in-between frame a copy
 of its nearest real frame's data. Checked on a real 4K Dolby Vision movie. If putting it back
 ever fails, you still get the smoothed video (just without Dolby Vision) and the log says why.
-Only Dolby Vision is carried over this way, not HDR10+.
+Only Dolby Vision is carried over this way, not HDR10+. This also works when the Dual-Pass
+Depth Blend option is on.
+
+**New: Dolby Vision + Cancel in the standalone RIFE tool (Tools tab).** Under "Original DV
+Source" you can pick your original Dolby Vision movie; after smoothing, the tool
+automatically puts the Dolby Vision back (it switches the output to H.265 for you). Leave it
+empty for the old behaviour. There is also a new Cancel button that stops the job; if you cancel
+during smoothing, the unfinished file is deleted.
 
 **Fixed: Live 3D no longer breaks when you resize the captured window.** Resizing the window
 you're streaming (or changing screen resolution) used to crash the stream, cut off the picture,

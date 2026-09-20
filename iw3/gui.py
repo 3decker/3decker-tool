@@ -5176,6 +5176,37 @@ class MainFrame(wx.Frame):
               "Retroactive HDR/DV Reinjection tool afterward -- then pick libx265 (works everywhere) or "
               "hevc_nvenc (faster, if your GPU supports it)."))
 
+        # Optional: re-attach Dolby Vision after RIFE (ADR-193 follow-up)
+        self.lbl_rife_standalone_dv_source = wx.StaticText(self.cpn_rife_standalone.GetPane(),
+                                                             label=T("Original DV Source (optional)"))
+        self.txt_rife_standalone_dv_source = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
+                                                           name="txt_rife_standalone_dv_source")
+        self.txt_rife_standalone_dv_source.SetToolTip(
+            T("What it's for: leave EMPTY normally. Fill it in ONLY if the movie this 3D video was made from "
+              "has Dolby Vision (or HDR10+) and you want it kept. RIFE creates new in-between frames that have "
+              "no Dolby Vision data, so a smoothed file always loses it. With the ORIGINAL movie (the one with "
+              "Dolby Vision, not the converted 3D file) picked here, this tool forces H.265 output and, right "
+              "after RIFE finishes, automatically puts the Dolby Vision data back -- each in-between frame "
+              "reuses its nearest real frame's data.\n"
+              "How it's safe: the smoothed file is only replaced when re-attaching fully succeeded. If it "
+              "fails, you keep the smoothed video (without Dolby Vision) and the log explains why.\n"
+              "Con: only Dolby Vision is carried over this way, not HDR10+. Takes a few extra minutes on a "
+              "long movie. If the 3D video was made from only PART of the movie, fill in Start/End Time "
+              "below with exactly that part.\n"
+              "Recommended: leave empty for anything that isn't Dolby Vision."))
+        self.btn_rife_standalone_dv_source = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("..."))
+        self.lbl_rife_standalone_dv_times = wx.StaticText(self.cpn_rife_standalone.GetPane(),
+                                                            label=T("DV Source Start / End"))
+        self.txt_rife_standalone_dv_start = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
+                                                          name="txt_rife_standalone_dv_start")
+        self.txt_rife_standalone_dv_end = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
+                                                        name="txt_rife_standalone_dv_end")
+        _dv_time_tip = T("Only used together with Original DV Source. The part of the ORIGINAL movie that this "
+                         "3D video covers, as HH:MM:SS, MM:SS or seconds (the same start/end you used when you "
+                         "converted). Leave both empty if the 3D video covers the whole movie.")
+        self.txt_rife_standalone_dv_start.SetToolTip(_dv_time_tip)
+        self.txt_rife_standalone_dv_end.SetToolTip(_dv_time_tip)
+
         self.btn_rife_standalone_run = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Run"))
         self.btn_rife_standalone_run.SetToolTip(
             T("What it's for: runs RIFE interpolation as a separate background process (python -m "
@@ -5184,16 +5215,26 @@ class MainFrame(wx.Frame):
               "How it's safe: writes to a new output file only; a '<output>.rife_manifest.json' sidecar "
               "is always written alongside it too, recording which output frames are real and which are "
               "RIFE-synthetic.\n"
-              "Important -- Dolby Vision/HDR: RIFE itself does NOT touch DV/HDR10+ metadata at all (it "
-              "doesn't even look at it). If the video you're interpolating has Dolby Vision, don't stop "
-              "here -- first, set Output Codec above to an HEVC option (DV/HDR10+ reinjection requires "
-              "HEVC output, and this tool's H.264 default can never accept it). Then use the Retroactive "
-              "HDR/DV Reinjection tool above, pointing its \"Converted\" field at this Run's output and "
-              "its \"RIFE Manifest\" field at the '.rife_manifest.json' sidecar this Run writes, against "
-              "your ORIGINAL Dolby Vision source. Skipping either step means the output plays back "
-              "without correct Dolby Vision metadata.\n"
+              "Important -- Dolby Vision/HDR: RIFE itself does NOT touch DV/HDR10+ metadata at all. If the "
+              "movie has Dolby Vision, the EASY way: pick the ORIGINAL movie in \"Original DV Source\" above "
+              "(Output Codec is then forced to H.265 for you) and this Run puts the Dolby Vision back "
+              "automatically at the end. The manual way still works too: set Output Codec above to an HEVC "
+              "option, Run, then use the Retroactive HDR/DV Reinjection tool with this Run's output and its "
+              "\"RIFE Manifest\" field pointing at the '.rife_manifest.json' sidecar. Skipping both means the output plays back without Dolby "
+              "Vision.\n"
               "Recommended: check the log box below afterward to confirm it actually succeeded rather "
               "than refused, and note the printed manifest file path if you'll need it for Dolby Vision."))
+
+        self.btn_rife_standalone_cancel = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Cancel"))
+        self.btn_rife_standalone_cancel.Disable()
+        self.btn_rife_standalone_cancel.SetToolTip(
+            T("Stops the running RIFE job (and the Dolby Vision step, if it has started) and all the programs "
+              "it started. If it is stopped during RIFE itself, the unfinished output file is removed. If it "
+              "is stopped during the Dolby Vision step, the finished smoothed file is kept, without Dolby "
+              "Vision."))
+        self.rife_standalone_proc = None
+        self.rife_standalone_cancelled = False
+        self.rife_standalone_stage = "rife"
 
         self.txt_rife_standalone_log = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
                                                      style=wx.TE_MULTILINE | wx.TE_READONLY,
@@ -5230,6 +5271,8 @@ class MainFrame(wx.Frame):
         self.btn_rife_standalone_output.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_output)
         self.cbo_rife_standalone_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_standalone_mode)
         self.btn_rife_standalone_run.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_run)
+        self.btn_rife_standalone_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_cancel)
+        self.btn_rife_standalone_dv_source.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_dv_source)
         self.btn_rife_standalone_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_rife_standalone_log.Clear())
         self.update_rife_standalone_mode()
 
@@ -5248,11 +5291,18 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_rife_standalone_gpu, (h, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_standalone_codec, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_dv_source, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_rife_standalone_dv_source, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_rife_standalone_dv_source, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_dv_times, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_rife_standalone_dv_start, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.txt_rife_standalone_dv_end, (h, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_mode, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_standalone_mode, (h, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_standalone_target_fps, (h, 2), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_run, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_rife_standalone, (h := h + 1, 0), (0, 3), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.btn_rife_standalone_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_clear, (h := h + 1, 3), flag=wx.EXPAND)
@@ -9205,6 +9255,7 @@ class MainFrame(wx.Frame):
         "txt_sharpen_input", "txt_sharpen_output", "txt_sharpen_log",
         "txt_rife_standalone_input", "txt_rife_standalone_output",
         "txt_rife_standalone_target_fps", "txt_rife_standalone_log",
+        "txt_rife_standalone_dv_source", "txt_rife_standalone_dv_start", "txt_rife_standalone_dv_end",
         "txt_bluray_disc", "txt_bluray_output", "txt_bluray_log",
         "txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log",
         "txt_upscale_input", "txt_upscale_output", "txt_upscale_log",
@@ -11787,7 +11838,37 @@ class MainFrame(wx.Frame):
             self.lbl_rife_standalone_progress.SetLabel(
                 f"{done} {T('frames')} [{T('elapsed')} {elapsed_str}]")
 
-    def run_rife_standalone(self, cmd):
+    def on_click_btn_rife_standalone_dv_source(self, event):
+        with wx.FileDialog(self, message=T("Select the ORIGINAL Dolby Vision movie"),
+                           wildcard="Video files (*.mkv;*.mp4;*.m2ts;*.ts)|*.mkv;*.mp4;*.m2ts;*.ts|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_rife_standalone_dv_source.GetValue():
+                dlg.SetPath(self.txt_rife_standalone_dv_source.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_rife_standalone_dv_source.SetValue(dlg.GetPath())
+
+    def on_click_btn_rife_standalone_cancel(self, event):
+        proc = self.rife_standalone_proc
+        if proc is not None and proc.poll() is None:
+            self.rife_standalone_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_rife_standalone_cancel.Disable()
+
+    def _cleanup_after_rife_standalone_cancel(self):
+        """A cancel during RIFE itself leaves a half-written output (+ its manifest): remove them, but only
+        files this run created. A cancel during the Dolby Vision step keeps the finished smoothed file."""
+        if self.rife_standalone_stage != "rife":
+            return
+        output_path = self.txt_rife_standalone_output.GetValue().strip()
+        for candidate in (output_path, output_path + ".rife_manifest.json"):
+            try:
+                if (candidate and path.exists(candidate)
+                        and path.getmtime(candidate) >= self.rife_standalone_start_time - 1):
+                    os.remove(candidate)
+            except OSError:
+                pass
+
+    def run_rife_standalone(self, cmd, dv=None):
         # Runs on a background thread via startWorker -- never blocks the GUI thread.
         # Kept out-of-process the same way the other standalone tools in this column
         # are (this app's own GPU/model state is never touched).
@@ -11803,6 +11884,8 @@ class MainFrame(wx.Frame):
         # returned.
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True, bufsize=1)
+        self.rife_standalone_proc = proc
+        self.rife_standalone_stage = "rife"
         stderr_chunks = []
 
         def _drain_stderr():
@@ -11825,11 +11908,32 @@ class MainFrame(wx.Frame):
 
         proc.wait()
         stderr_thread.join(timeout=5)
-        return proc.returncode, "".join(stderr_chunks)
+        output = "".join(stderr_chunks)
+
+        if dv and proc.returncode == 0 and not self.rife_standalone_cancelled:
+            # Optional second step: put the ORIGINAL movie's Dolby Vision back on the smoothed file
+            import types
+            from . import utils as iw3_utils
+            self.rife_standalone_stage = "dv"
+            wx.CallAfter(self.lbl_rife_standalone_progress.SetLabel, T("Re-attaching Dolby Vision..."))
+            wx.CallAfter(self.gauge_rife_standalone.Pulse)
+            dv_lines = []
+
+            def _hook(dv_proc):
+                self.rife_standalone_proc = dv_proc
+
+            iw3_utils._reinject_dv_after_rife(
+                dv["source"], dv["output"],
+                types.SimpleNamespace(start_time=dv.get("start"), end_time=dv.get("end"), state={}),
+                log=dv_lines.append, proc_hook=_hook)
+            output = output + "\n" + "\n".join(dv_lines)
+        return proc.returncode, output
 
     def on_exit_rife_standalone_worker(self, result):
         self.btn_rife_standalone_run.Enable()
         self.btn_rife_standalone_clear.Enable()
+        self.btn_rife_standalone_cancel.Disable()
+        self.rife_standalone_proc = None
         try:
             returncode, output = result.get()
         except: # noqa
@@ -11843,7 +11947,13 @@ class MainFrame(wx.Frame):
 
         self.txt_rife_standalone_log.SetValue(output)
         self.txt_rife_standalone_log.ShowPosition(self.txt_rife_standalone_log.GetLastPosition())
-        if returncode == 0:
+        if self.rife_standalone_cancelled:
+            self._cleanup_after_rife_standalone_cancel()
+            kept = self.rife_standalone_stage != "rife"
+            self.lbl_rife_standalone_progress.SetLabel(
+                T("Cancelled -- the smoothed file was kept, without Dolby Vision") if kept else T("Cancelled"))
+            self.SetStatusText(T("RIFE interpolation cancelled"))
+        elif returncode == 0:
             # Force the bar/label to a clean 100% rather than trusting the last
             # live update landed exactly on the final frame (it's throttled -- see
             # rife_cli.py's _SubprocessProgressPrinter -- so the very last partial
@@ -11854,7 +11964,13 @@ class MainFrame(wx.Frame):
                 elapsed_str = self._format_duration(time() - self.rife_standalone_start_time)
                 self.lbl_rife_standalone_progress.SetLabel(
                     f"{total}/{total} {T('frames')} (100%) [{T('elapsed')} {elapsed_str}]")
-            self.SetStatusText(T("RIFE interpolation applied successfully"))
+            if "Dolby Vision after RIFE FAILED" in output or "Dolby Vision after RIFE skipped" in output:
+                self.SetStatusText(T("RIFE done, but Dolby Vision could not be re-attached -- see the log"))
+                wx.MessageBox(T("The smoothed video was made, but Dolby Vision could not be re-attached to it "
+                                "(it plays, without Dolby Vision). See the log box for the exact reason."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+            else:
+                self.SetStatusText(T("RIFE interpolation applied successfully"))
         else:
             self.SetStatusText(T("RIFE interpolation failed -- see the log below"))
             wx.MessageBox(T("RIFE interpolation failed or refused -- see the log box for the "
@@ -11893,6 +12009,26 @@ class MainFrame(wx.Frame):
         gpu_id = int(self.cbo_rife_standalone_gpu.GetClientData(self.cbo_rife_standalone_gpu.GetSelection()))
         video_codec = self.cbo_rife_standalone_codec.GetClientData(self.cbo_rife_standalone_codec.GetSelection())
 
+        dv = None
+        dv_source = self.txt_rife_standalone_dv_source.GetValue().strip()
+        if dv_source:
+            if not path.exists(dv_source):
+                wx.MessageBox(T("The Original DV Source file was not found. Pick the original Dolby Vision "
+                                "movie, or empty the field."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
+            if path.abspath(dv_source) in (path.abspath(input_path), path.abspath(output_path)):
+                wx.MessageBox(T("Original DV Source must be the ORIGINAL movie, not the 3D video or the output "
+                                "file."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
+            if video_codec not in ("libx265", "hevc_nvenc"):
+                # Dolby Vision only exists in HEVC: force it (GPU encode when a GPU is selected)
+                video_codec = "hevc_nvenc" if gpu_id >= 0 else "libx265"
+            dv = {"source": dv_source, "output": output_path,
+                  "start": self.txt_rife_standalone_dv_start.GetValue().strip() or None,
+                  "end": self.txt_rife_standalone_dv_end.GetValue().strip() or None}
+
         cmd = [sys.executable, "-m", "iw3.rife_cli",
                "--input", input_path, "--output", output_path,
                "--rife-model", self.cbo_rife_standalone_model.GetValue(),
@@ -11916,8 +12052,11 @@ class MainFrame(wx.Frame):
         self.rife_standalone_start_time = time()
         self.btn_rife_standalone_run.Disable()
         self.btn_rife_standalone_clear.Disable()
+        self.rife_standalone_cancelled = False
+        self.rife_standalone_stage = "rife"
+        self.btn_rife_standalone_cancel.Enable()
         self.SetStatusText(T("Applying RIFE interpolation..."))
-        startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd,))
+        startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd, dv))
 
     # --- 3D Blu-ray Import (standalone tool, see ADR-182) ---
 
@@ -17734,6 +17873,109 @@ def _self_test_rife_with_preserve_dolby_vision():
     print("_self_test_rife_with_preserve_dolby_vision: PASS")
 
 
+def _self_test_rife_standalone_dv_and_cancel():
+    """Standalone RIFE tool: optional Original DV Source (forces HEVC, passes the DV job to the worker) and the
+    Cancel button (kills the running process, removes a half-written output only when cancelled during RIFE).
+    startWorker is monkeypatched and the 'running process' is a fake: nothing real runs, no GPU."""
+    import tempfile
+    import types
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_run = subprocess.run
+    orig_box = wx.MessageBox
+    try:
+        frame = gui_mod.MainFrame()
+        pane = frame.cpn_rife_standalone.GetPane()
+        for name in ("txt_rife_standalone_dv_source", "txt_rife_standalone_dv_start",
+                     "txt_rife_standalone_dv_end", "btn_rife_standalone_dv_source", "btn_rife_standalone_cancel"):
+            assert getattr(frame, name).GetParent() is pane, name
+        assert not frame.btn_rife_standalone_cancel.IsEnabled()
+
+        captured = {}
+        gui_mod.startWorker = lambda on_exit, fn, wargs=(), **kw: captured.update(wargs=wargs)
+        boxes = []
+        wx.MessageBox = lambda *a, **kw: boxes.append(a[0])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = path.join(tmp, "movie_3d.mkv")
+            src = path.join(tmp, "original_dv.mkv")
+            out = path.join(tmp, "movie_3d_rife.mkv")
+            for p_ in (inp, src):
+                with open(p_, "wb") as f:
+                    f.write(b"x")
+            frame.txt_rife_standalone_input.SetValue(inp)
+            frame.txt_rife_standalone_output.SetValue(out)
+            frame.cbo_rife_standalone_mode.SetValue("2x")
+            frame.update_rife_standalone_mode()
+            gpu_sel = frame.cbo_rife_standalone_gpu.GetSelection()
+
+            # 1. no DV source: exactly the old command, no dv job, Cancel enabled while "running"
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd, dv = captured["wargs"]
+            assert dv is None and "--video-codec" not in cmd, (cmd, dv)
+            assert frame.btn_rife_standalone_cancel.IsEnabled()
+            frame.btn_rife_standalone_cancel.Disable()
+
+            # 2. DV source: HEVC forced, dv job carries source/output/times
+            captured.clear()
+            frame.txt_rife_standalone_dv_source.SetValue(src)
+            frame.txt_rife_standalone_dv_start.SetValue("00:25:00")
+            frame.txt_rife_standalone_dv_end.SetValue("")
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd, dv = captured["wargs"]
+            assert cmd[cmd.index("--video-codec") + 1] in ("hevc_nvenc", "libx265"), cmd
+            assert dv == {"source": src, "output": out, "start": "00:25:00", "end": None}, dv
+
+            # 3. refusals: missing file, source == input
+            captured.clear()
+            frame.txt_rife_standalone_dv_source.SetValue(path.join(tmp, "nope.mkv"))
+            frame.on_click_btn_rife_standalone_run(None)
+            frame.txt_rife_standalone_dv_source.SetValue(inp)
+            frame.on_click_btn_rife_standalone_run(None)
+            assert "wargs" not in captured and len(boxes) == 2, (captured, boxes)
+            frame.txt_rife_standalone_dv_source.SetValue("")
+
+            # 4. Cancel: kills the running process and flags it
+            class _FakeProc:
+                pid = 4242
+
+                def poll(self):
+                    return None
+
+            killed = []
+            subprocess.run = lambda cmd, **kw: killed.append(cmd)
+            frame.rife_standalone_proc = _FakeProc()
+            frame.btn_rife_standalone_cancel.Enable()
+            frame.on_click_btn_rife_standalone_cancel(None)
+            assert frame.rife_standalone_cancelled and not frame.btn_rife_standalone_cancel.IsEnabled()
+            assert killed and killed[0][:2] == ["taskkill", "/PID"] and "4242" in killed[0], killed
+            subprocess.run = orig_run
+
+            # 5. cleanup: cancelled during RIFE removes the half output + manifest; during DV keeps them
+            frame.rife_standalone_start_time = time() - 5
+            for stage, expect_exists in (("rife", False), ("dv", True)):
+                for p_ in (out, out + ".rife_manifest.json"):
+                    with open(p_, "wb") as f:
+                        f.write(b"partial")
+                frame.rife_standalone_stage = stage
+                frame._cleanup_after_rife_standalone_cancel()
+                assert path.exists(out) is expect_exists, (stage, path.exists(out))
+                assert path.exists(out + ".rife_manifest.json") is expect_exists, stage
+    finally:
+        subprocess.run = orig_run
+        wx.MessageBox = orig_box
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_dv_and_cancel: PASS")
+
+
 def _self_test_standalone_tool_titles_share_accent_colour():
     """Every Standalone Tools group title uses the same accent (blue) colour as the first tools,
     in both themes -- a title left at the default black is unreadable on the dark theme. The tools
@@ -17847,6 +18089,7 @@ def _run_self_tests():
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,
         _self_test_rife_with_preserve_dolby_vision,
+        _self_test_rife_standalone_dv_and_cancel,
         _self_test_standalone_tool_titles_share_accent_colour,
     ]
     failures = []

@@ -180,26 +180,34 @@ def _dv_after_rife_wanted(args):
             and not getattr(args, "hdr_to_sdr", False) and not getattr(args, "keyframe", False))
 
 
-def _reinject_dv_after_rife(source_path, rife_path, args):
+def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None):
     """ADR-192: after RIFE, re-attach the ORIGINAL source's Dolby Vision RPU to RIFE's output through
     iw3.reinject_hdr_cli --rife-manifest (each in-between frame gets a copy of its nearest real frame's entry).
     The RIFE file is only replaced when the injection fully succeeded; otherwise it is left as it was
-    (plays fine, just without DV) and the reason is printed. Never raises."""
+    (plays fine, just without DV) and the reason is reported. Never raises. Returns True only on success.
+
+    `log` (optional callable) receives the messages instead of stderr -- used by the standalone RIFE tool's
+    log box. `proc_hook` (optional callable) receives the running Popen so a Cancel button can kill it."""
+    def say(message):
+        if log is None:
+            print(message, file=sys.stderr)
+        else:
+            log(message)
+
     if not rife_path or not path.exists(rife_path):
-        return
+        return False
     manifest = rife_path + ".rife_manifest.json"
     try:
         hdr_types = _detect_hdr_types(source_path, _find_ffprobe())
     except Exception as e:
-        print(f"[iw3] Dolby Vision after RIFE: could not inspect the source ({e}); skipped.", file=sys.stderr)
-        return
+        say(f"[iw3] Dolby Vision after RIFE: could not inspect the source ({e}); skipped.")
+        return False
     if not hdr_types["dv"] and not hdr_types["hdr10plus"]:
-        print("[iw3] Preserve Dolby Vision: no DV or HDR10+ found in the source, nothing to re-attach.",
-              file=sys.stderr)
-        return
+        say("[iw3] Preserve Dolby Vision: no DV or HDR10+ found in the source, nothing to re-attach.")
+        return False
     if not path.exists(manifest):
-        print(f"[iw3] Dolby Vision after RIFE skipped: RIFE's frame list is missing ({manifest}).", file=sys.stderr)
-        return
+        say(f"[iw3] Dolby Vision after RIFE skipped: RIFE's frame list is missing ({manifest}).")
+        return False
     base, ext = path.splitext(str(rife_path))
     tmp_out = f"{base}_dvtmp{ext}"
     cmd = [sys.executable, "-m", "iw3.reinject_hdr_cli",
@@ -211,26 +219,35 @@ def _reinject_dv_after_rife(source_path, rife_path, args):
         cmd += ["--end-time", str(args.end_time)]
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
     _notify_stage(args, STAGE_HDR_REINJECT)
-    print("[iw3] Re-attaching Dolby Vision/HDR metadata to the RIFE output...", file=sys.stderr)
+    say("[iw3] Re-attaching Dolby Vision/HDR metadata to the RIFE output...")
+    succeeded = False
     try:
-        result = subprocess.run(cmd, capture_output=True, cwd=nunif_dir)
+        if proc_hook is None:
+            result = subprocess.run(cmd, capture_output=True, cwd=nunif_dir)
+        else:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=nunif_dir)
+            proc_hook(proc)
+            out, err = proc.communicate()
+            result = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
         ok = result.returncode == 0 and path.exists(tmp_out)
         if ok:
             os.replace(tmp_out, rife_path)
-            print(f"[iw3] Dolby Vision re-attached to: {rife_path}", file=sys.stderr)
+            say(f"[iw3] Dolby Vision re-attached to: {rife_path}")
+            succeeded = True
         else:
             msg = (result.stderr or b"").decode(errors="replace").strip() or (result.stdout or b"").decode(errors="replace").strip()
-            print(f"[iw3] Dolby Vision after RIFE FAILED (the RIFE file was left unchanged, without DV): "
-                  f"{msg[-1500:]}", file=sys.stderr)
+            say(f"[iw3] Dolby Vision after RIFE FAILED (the RIFE file was left unchanged, without DV): "
+                f"{msg[-1500:]}")
     except Exception as e:
-        print(f"[iw3] Dolby Vision after RIFE FAILED ({e.__class__.__name__}: {e}); "
-              "the RIFE file was left unchanged, without DV.", file=sys.stderr)
+        say(f"[iw3] Dolby Vision after RIFE FAILED ({e.__class__.__name__}: {e}); "
+            "the RIFE file was left unchanged, without DV.")
     finally:
         if path.exists(tmp_out):
             try:
                 os.remove(tmp_out)
             except Exception:
                 pass
+    return succeeded
 
 
 def _run_rife_interpolation(output_path, args, force_hevc=False):

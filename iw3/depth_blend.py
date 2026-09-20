@@ -567,6 +567,27 @@ def run_depth_blend(args, depth_model, side_model):
     work_dir = output_path + ".depth_blend_work"
     pass_a_dir = path.join(work_dir, "pass_a")
     pass_b_dir = path.join(work_dir, "pass_b")
+
+    # ADR-193: RIFE + Preserve Dolby Vision together. RIFE would strip any DV injected into this job's own
+    # output, so skip this job's own DV extraction/injection and instead re-attach DV to the RIFE output
+    # afterwards (see the RIFE call at the end of _run_depth_blend_passes). Restored in `finally`.
+    from .utils import _dv_after_rife_wanted
+    saved_preserve_dowi = getattr(args, "preserve_dowi", False)
+    args._dv_after_rife_source = None
+    if _dv_after_rife_wanted(args):
+        args._dv_after_rife_source = input_path
+        args.preserve_dowi = False
+
+    try:
+        return _run_depth_blend_job(args, depth_model, input_path, output_path, work_dir,
+                                    pass_a_dir, pass_b_dir, export_main, iw3_main, create_depth_model, gc_collect)
+    finally:
+        args.preserve_dowi = saved_preserve_dowi
+        args._dv_after_rife_source = None
+
+
+def _run_depth_blend_job(args, depth_model, input_path, output_path, work_dir, pass_a_dir, pass_b_dir,
+                         export_main, iw3_main, create_depth_model, gc_collect):
     resuming = _prepare_work_dir(args, input_path, work_dir, pass_a_dir, pass_b_dir)
     steps, hdr_active = _build_active_steps(args, input_path)
 
@@ -1234,13 +1255,16 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
     if not cancelled():
         from .utils import (
             _run_rife_interpolation, _run_waifu2x_upscale, _run_waifu2x_upscale_stereo,
-            _should_use_stereo_upscale,
+            _should_use_stereo_upscale, _reinject_dv_after_rife,
         )
         if _should_use_stereo_upscale(args):
             _run_waifu2x_upscale_stereo(output_path, args)
         else:
             _run_waifu2x_upscale(output_path, args)
-        _run_rife_interpolation(output_path, args)
+        dv_source = getattr(args, "_dv_after_rife_source", None)
+        rife_output_path = _run_rife_interpolation(output_path, args, force_hevc=bool(dv_source))
+        if dv_source:
+            _reinject_dv_after_rife(dv_source, rife_output_path, args)
 
     print(f"[depth-blend] done. Working files (full rgb/depth dumps from both passes) are still in:\n"
           f"  {work_dir}\n"

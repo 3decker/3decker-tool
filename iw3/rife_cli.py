@@ -293,12 +293,23 @@ def _resolve_encoder_options(video_codec, gpu):
     return {}
 
 
-def _build_output_config(target_fps, video_codec, gpu):
+_HEVC_FAMILY = ("libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf")
+
+
+def _output_pix_fmt(high_bit_source, video_codec):
+    """10-bit output for a 10-bit source when the codec is HEVC. RIFE used to always write 8-bit, which put
+    visible banding into 10-bit / HDR (PQ) movies. H.264 stays 8-bit on purpose: 10-bit H.264 is poorly
+    supported by TVs and hardware players, and HDR needs HEVC anyway."""
+    return "yuv420p10le" if (high_bit_source and video_codec in _HEVC_FAMILY) else "yuv420p"
+
+
+def _build_output_config(target_fps, video_codec, gpu, high_bit_source=False):
     """Builds the VideoOutputConfig for run()'s config_callback -- pulled out into
     its own function so --video-codec's effect on the real config object is
     directly unit-testable without needing a GPU/real video decode (see
     _test_rife_video_codec_options)."""
     return VU.VideoOutputConfig(
+        pix_fmt=_output_pix_fmt(high_bit_source, video_codec),
         fps=None,  # no input resampling -- every real decoded frame is kept
         output_fps=float(target_fps),
         video_codec=video_codec,
@@ -365,7 +376,8 @@ def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         ratio_state["ratio"] = target_fps / orig_fps_frac
         fps_info["orig_fps"] = float(orig_fps_frac)
         fps_info["target_fps"] = float(target_fps)
-        return _build_output_config(target_fps, video_codec, gpu)
+        return _build_output_config(target_fps, video_codec, gpu,
+                                    high_bit_source=bool(getattr(sw_format, "use_16bit", False)))
 
     VU.process_video(
         input_path,
@@ -834,6 +846,19 @@ def _test_rife_video_codec_options():
     print("_test_rife_video_codec_options: PASS")
 
 
+def _test_rife_output_pix_fmt():
+    """RIFE used to always write 8-bit, putting banding into 10-bit/HDR movies. 10-bit source + HEVC codec ->
+    yuv420p10le; H.264/default codec or 8-bit source -> yuv420p (unchanged); old callers (no flag) unchanged."""
+    cfg = lambda codec, high: _build_output_config(Fraction(48), codec, 0, high_bit_source=high).pix_fmt  # noqa
+    for codec in ("libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf"):
+        assert cfg(codec, True) == "yuv420p10le", codec
+        assert cfg(codec, False) == "yuv420p", codec
+    for codec in (None, "libx264", "h264_nvenc"):
+        assert cfg(codec, True) == "yuv420p", codec
+    assert _build_output_config(Fraction(48), "hevc_nvenc", 0).pix_fmt == "yuv420p"
+    print("_test_rife_output_pix_fmt: PASS")
+
+
 def _run_self_tests():
     _test_ensure_rife_model_downloads_model_package()
     _test_rife_cpu_device_not_overridden_by_cuda_availability()
@@ -842,6 +867,7 @@ def _run_self_tests():
     _test_rife_fps_validation()
     _test_rife_manifest_emission()
     _test_rife_video_codec_options()
+    _test_rife_output_pix_fmt()
     print("All iw3.rife_cli self-tests PASSED")
 
 

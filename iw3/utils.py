@@ -4505,7 +4505,10 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
         rife_output_path = _run_rife_interpolation(final_output_path, args, force_hevc=dv_after_rife)
         if dv_after_rife:
             _reinject_dv_after_rife(original_input_filename, rife_output_path, args)
-        _run_audio_subtitle_restore(final_output_path, args)
+        # Restore audio/subtitles onto the file the user will actually keep: the RIFE output when RIFE ran
+        # (it used to be the pre-RIFE file, so the smoothed video never got its tracks and the "_alldub" file
+        # had no RIFE at all).
+        _run_audio_subtitle_restore(rife_output_path or final_output_path, args)
 
 
 def export_images(input_path, output_dir, args, title=None):

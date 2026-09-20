@@ -13,7 +13,21 @@ it matters.
 
 ---
 
-## Latest Update — September 19, 2026
+## Latest Update — September 20, 2026
+
+**Fixed: RIFE (smoother motion) no longer causes colour banding on HDR/10-bit movies.**
+RIFE used to save its result in 8-bit colour even when your movie was 10-bit, which shows up
+as visible stripes in skies, dark scenes and fades. It now keeps 10-bit when the movie is 10-bit
+and the output is H.265 (the normal choice for HDR). H.264 output stays 8-bit on purpose for
+player compatibility. Files smoothed before this update still have the banding and need to be
+made again.
+
+**Fixed: "Restore Audio & Subtitles" together with RIFE.** The restored-tracks file used to be built
+from the un-smoothed video, so you got one file with smooth motion but no extra tracks and another
+with all the tracks but no smoothing. It now adds the tracks to the smoothed file
+(`..._rife_alldub.mkv`).
+
+## Update — September 19, 2026
 
 **Fixed: RIFE (smoother motion) and Preserve Dolby Vision now work together.** Before,
 the two options refused to run in one job because RIFE creates new in-between frames that

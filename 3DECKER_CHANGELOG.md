@@ -15,6 +15,14 @@ it matters.
 
 ## Latest Update — September 20, 2026
 
+**New: make objects come out MORE toward the audience.** The old "Max Pop-Out Limit" could
+only reduce how far things come out of the screen. It is now "Pop-Out Limit / Boost" and works in
+both directions: below 1.0 it limits pop-out as before, 1.0 is off, and above 1.0 (1.25, 1.5, 2.0 or
+anything up to 2.0) it makes things in front of the screen come out further (1.5 = 50% more). Things
+behind the screen are not changed. Very strong values are tiring to watch and stretch the picture
+edges harder, so try 1.25 first on a short clip. (If Convergence is 0, nothing is behind the screen,
+so this then acts like raising 3D Strength.)
+
 **Fixed: RIFE (smoother motion) no longer causes colour banding on HDR/10-bit movies.**
 RIFE used to save its result in 8-bit colour even when your movie was 10-bit, which shows up
 as visible stripes in skies, dark scenes and fades. It now keeps 10-bit when the movie is 10-bit

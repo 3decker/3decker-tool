@@ -2133,7 +2133,15 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
     # slider itself, which only sets where the zero-parallax reference plane sits.
     # 1.0 (default) is a no-op: depth is already <= 1.0, so the cap never engages.
     max_negative_parallax = getattr(args, "max_negative_parallax", 1.0)
-    if max_negative_parallax < 1.0:
+    if max_negative_parallax > 1.0:
+        # ADR-196: values ABOVE 1.0 are a pop-out BOOST (the same control works in both directions): only the
+        # part of the depth in front of the Convergence plane is stretched, by this factor; anything at or
+        # behind the plane is left exactly as it was. Depth above 1.0 is fine downstream -- Foreground/
+        # Midground Pop already produce it. (At Convergence 0 nothing is behind the plane, so this then equals
+        # raising the 3D Strength for the whole picture.)
+        relative = depth - convergence
+        depth = torch.where(relative > 0, convergence + relative * max_negative_parallax, depth)
+    elif max_negative_parallax < 1.0:
         parallax_cap = convergence + max_negative_parallax
         if torch.is_tensor(parallax_cap):
             depth = torch.minimum(depth, parallax_cap)
@@ -5376,13 +5384,15 @@ def create_parser(required_true=True):
                         help=("EMA decay for auto convergence modes (sod_v1/face_detect). "
                               "Higher = smoother but slower to react. Lower = more aggressive/dynamic. "
                               "0 = no smoothing"))
-    parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 1.0)],
-                        help=("ADR-179: hard safety cap on negative parallax (how far anything is allowed "
-                              "to pop out in front of the Convergence plane), independent of the Convergence "
-                              "value itself. Normalized 0-1, same units as Convergence: 1.0 = no cap (off, "
-                              "default). 0.0 = no pop-out allowed at all (nothing sits in front of the "
-                              "screen). Applied as a final clamp on (depth - convergence) after every other "
-                              "depth edit (mapper, auto-convergence, Foreground/Midground/Background Pop)."))
+    parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 2.0)],
+                        help=("Pop-out limit (0-1) / boost (1-2), independent of the Convergence value itself. "
+                              "ADR-179 limit: below 1.0 is a hard safety cap on negative parallax (how far anything "
+                              "is allowed to pop out in front of the Convergence plane), same units as "
+                              "Convergence: 0.0 = no pop-out allowed at all (nothing sits in front of the screen). "
+                              "1.0 = off (default). ADR-196 boost: ABOVE 1.0 multiplies how far things pop out in "
+                              "front of the screen (1.5 = 50%% more pop-out; things behind the screen are not "
+                              "changed). Applied after every other depth edit (mapper, auto-convergence, "
+                              "Foreground/Midground/Background Pop)."))
     parser.add_argument("--update", action="store_true",
                         help="force update midas models from torch hub")
     parser.add_argument("--recursive", "-r", action="store_true",

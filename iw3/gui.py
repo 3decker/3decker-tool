@@ -773,7 +773,7 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_divergence", "sld_stereo_divergence", 1.0, 5.0, 10, False, "update_divergence_warning"),
     ("cbo_convergence", "sld_stereo_convergence", 0.0, 1.0, 100, False, None),
     ("cbo_convergence_smoothing", "sld_stereo_convergence_smoothing", 0.0, 0.95, 100, False, None),
-    ("cbo_max_negative_parallax", "sld_stereo_max_negative_parallax", 0.0, 1.0, 100, False, None),
+    ("cbo_max_negative_parallax", "sld_stereo_max_negative_parallax", 0.0, 2.0, 100, False, None),
     ("cbo_splat_blend_temperature", "sld_stereo_splat_blend_temperature", 10.0, 85.0, 1, False, None),
     ("cbo_depth_refine_strength", "sld_stereo_depth_refine_strength", 0.25, 1.5, 100, False, None),
     ("cbo_temporal_stabilize_strength", "sld_stereo_temporal_stabilize_strength", 0.3, 0.9, 100, False, None),
@@ -1226,26 +1226,29 @@ class MainFrame(wx.Frame):
         self.sld_stereo_convergence_smoothing = _build_stereo_slider(
             self.grp_stereo, self.cbo_convergence_smoothing, 0.0, 0.95, 100)
 
-        self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Max Pop-Out Limit"))
-        self.cbo_max_negative_parallax = EditableComboBox(self.grp_stereo, choices=["1.0", "0.7", "0.4", "0.0"],
-                                                           name="cbo_max_negative_parallax")
+        self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Pop-Out Limit / Boost"))
+        self.cbo_max_negative_parallax = EditableComboBox(
+            self.grp_stereo, choices=["1.0", "1.25", "1.5", "2.0", "0.7", "0.4", "0.0"],
+            name="cbo_max_negative_parallax")
         self.cbo_max_negative_parallax.SetSelection(0)
         self.cbo_max_negative_parallax.SetToolTip(
-            T("What it's for: a hard safety cap on negative parallax — how far anything is allowed to "
-              "pop out in front of the screen — kept separate from Convergence Plane. Convergence only "
-              "sets WHERE the zero-parallax reference plane sits; it doesn't limit how far past that "
-              "plane a close object can end up popping out. This setting caps that resulting pop-out "
-              "amount directly, no matter where Convergence or 3D Strength are set.\n"
+            T("What it's for: one control for how far things come out of the screen toward the audience, "
+              "kept separate from Convergence Plane (which only sets WHERE the screen plane sits).\n"
+              "Below 1.0 = LIMIT: a hard cap on pop-out. 1.0 = off (default). 0.0 = nothing may come out "
+              "of the screen at all. Above 1.0 = BOOST: multiplies how far things in front of the screen "
+              "come out -- 1.25 = 25% more, 1.5 = 50% more, 2.0 = double. Things behind the screen are not "
+              "changed by the boost.\n"
               "How it works: applied last, after every other depth adjustment (Convergence Mode, "
-              "Foreground/Midground/Background Pop), so it's a real final ceiling.\n"
-              "Values: 1.0 = off (no cap, default) down to 0.0 = no pop-out allowed at all — everything "
-              "is pushed back to sit at or behind the screen.\n"
-              "Con: lowering it flattens the nearest objects to a uniform pop-out amount rather than "
-              "gently compressing them, so very low values can look noticeably flat up close.\n"
-              "Recommended: 1.0 (off) unless a specific shot's close-up pop-out feels uncomfortable — "
-              "then try 0.7 or 0.4 rather than going straight to 0.0."))
+              "Foreground/Midground/Background Pop), so it acts on the final result.\n"
+              "Con: lowering it flattens the nearest objects to a uniform pop-out amount, so very low "
+              "values can look flat up close. Boosting makes close objects come out further, which is "
+              "more tiring to watch, stretches picture edges harder (more filled-in areas) and makes "
+              "objects cut off by the screen border look wrong. If Convergence is 0, nothing is behind "
+              "the screen, so the boost acts like raising 3D Strength for the whole picture.\n"
+              "Recommended: 1.0 (off). For MORE pop-out try 1.25, then 1.5, on a short clip first. Use "
+              "0.7 or 0.4 (not 0.0) when a close-up shot feels uncomfortable."))
         self.sld_stereo_max_negative_parallax = _build_stereo_slider(
-            self.grp_stereo, self.cbo_max_negative_parallax, 0.0, 1.0, 100)
+            self.grp_stereo, self.cbo_max_negative_parallax, 0.0, 2.0, 100)
 
         self.lbl_ipd_offset = wx.StaticText(self.grp_stereo, label=T("Your Own Size"))
         # SpinCtrlDouble is better, but cannot save with PersistenceManager
@@ -17286,6 +17289,17 @@ def _self_test_max_negative_parallax_field():
         frame.apply_parsed_args_to_gui(args_probe)
         assert frame.cbo_max_negative_parallax.GetValue() == "1.0"
 
+        # ADR-196: values above 1.0 (boost) are accepted, round-trip and reach the CLI command
+        frame.cbo_max_negative_parallax.SetValue("1.5")
+        args_boost = frame.parse_args(skip_set_state=True)
+        assert args_boost.max_negative_parallax == 1.5, args_boost.max_negative_parallax
+        assert "--max-negative-parallax 1.5" in frame.get_cli_command()
+        args_probe.max_negative_parallax = 2.0
+        frame.apply_parsed_args_to_gui(args_probe)
+        assert frame.cbo_max_negative_parallax.GetValue() == "2.0"
+        assert (frame.sld_stereo_max_negative_parallax.GetMin(), frame.sld_stereo_max_negative_parallax.GetMax()) == (0, 200), \
+            "slider spans 0..2"
+
         frame.cbo_max_negative_parallax.SetValue("1.0")
         command_off = frame.get_cli_command()
         assert "--max-negative-parallax" not in command_off, command_off
@@ -17334,6 +17348,21 @@ def _self_test_max_negative_parallax_field():
         iw3_utils.apply_divergence(depth.clone(), im.clone(), warp_args, None)
         unclamped_depth = captured["depth"]
         assert torch.equal(unclamped_depth, depth), "1.0 (off) must not alter depth at all"
+
+        # ADR-196 boost: only the part in front of the convergence plane (0.5) is stretched
+        warp_args.max_negative_parallax = 1.5
+        iw3_utils.apply_divergence(depth.clone(), im.clone(), warp_args, None)
+        boosted = captured["depth"]
+        expected = torch.where(depth > 0.5, 0.5 + (depth - 0.5) * 1.5, depth)
+        assert torch.allclose(boosted, expected, atol=1e-6), (boosted, expected)
+        assert torch.equal(boosted[..., :6], depth[..., :6]), "at/behind the screen plane must be untouched"
+        assert float(boosted.max()) > 1.0 and float(boosted.max()) == 0.5 + 0.5 * 1.5
+
+        # tensor (per-frame auto) convergence works too
+        warp_args.state = {"convergence_model": lambda im_, d_, reset_pts=None: torch.full((1, 1, 1, 1), 0.5)}
+        iw3_utils.apply_divergence(depth.clone(), im.clone(), warp_args, None)
+        assert torch.allclose(captured["depth"], expected, atol=1e-6)
+        warp_args.state = {"convergence_model": None}
     finally:
         iw3_utils.apply_divergence_grid_sample = real_grid_sample_fn
 

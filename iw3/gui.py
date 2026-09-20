@@ -8912,6 +8912,13 @@ class MainFrame(wx.Frame):
     def on_tqdm(self, event):
         type, value, desc = event.GetValue()
         desc = desc if desc else ""
+        # Steps that do not process frames (copying/extracting/muxing files) report in other units, marked by a
+        # prefix on the bar's description: "@PCT " = values are permille of the step, "@MB " = megabytes.
+        unit = "frames"
+        for prefix, unit_name in (("@PCT ", "pct"), ("@MB ", "mb")):
+            if desc.startswith(prefix):
+                unit, desc = unit_name, desc[len(prefix):]
+                break
         if type == 0:
             # initialize
             # Real per-item progress data is available again (this is what every
@@ -8927,7 +8934,10 @@ class MainFrame(wx.Frame):
             self.prg_tqdm.SetValue(0)
             self.start_time = time()
             self.suspend_pos = 0
-            self.SetStatusText(f"{self._stage_prefix()} -- {0}/{value} {desc}")
+            if unit == "frames":
+                self.SetStatusText(f"{self._stage_prefix()} -- {0}/{value} {desc}")
+            else:
+                self.SetStatusText(f"{self._stage_prefix()} -- {desc}")
             self._set_title_progress(self._stage_prefix())
         elif type == 1:
             # update
@@ -8946,9 +8956,19 @@ class MainFrame(wx.Frame):
                 remaining_time = (end_pos - pos) / fps
                 eta = self._format_duration(remaining_time)
                 elapsed_str = self._format_duration(elapsed)
-                self.SetStatusText(
-                    f"{self._stage_prefix()} -- {pos}/{end_pos} frames "
-                    f"[{fps:.2f} FPS, elapsed {elapsed_str}, ETA {eta}] {desc}")
+                if unit == "mb":
+                    self.SetStatusText(
+                        f"{self._stage_prefix()} -- {desc}: {pos / 1024:.2f}/{end_pos / 1024:.2f} GB "
+                        f"({int(pos / end_pos * 100) if end_pos else 0}%) "
+                        f"[{fps:.0f} MB/s, elapsed {elapsed_str}, ETA {eta}]")
+                elif unit == "pct":
+                    self.SetStatusText(
+                        f"{self._stage_prefix()} -- {desc}: {pos / max(1, end_pos) * 100:.1f}% "
+                        f"[elapsed {elapsed_str}, ETA {eta}]")
+                else:
+                    self.SetStatusText(
+                        f"{self._stage_prefix()} -- {pos}/{end_pos} frames "
+                        f"[{fps:.2f} FPS, elapsed {elapsed_str}, ETA {eta}] {desc}")
                 percent = int(pos / end_pos * 100) if end_pos else 0
                 self._set_title_progress(f"{percent}% -- {self._stage_prefix()}")
         elif type == 2:
@@ -10870,7 +10890,25 @@ class MainFrame(wx.Frame):
         # see reinject_hdr_cli.py's _probe_frames_and_duration ADR-166), each its own decode
         # pass with its own total, so the label always names which one is in progress rather
         # than implying a single combined percentage across both.
-        stage_label = {"source": T("Source"), "converted": T("Converted")}.get(stage, stage)
+        stage_label = {"source": T("Source"), "converted": T("Converted"),
+                       "copy": T("Copying the converted file"), "extract": T("Extracting the video stream"),
+                       "rpu": T("Extracting the Dolby Vision data"), "prepare": T("Preparing the video"),
+                       "inject": T("Attaching Dolby Vision"), "remux": T("Packing the final file")}.get(stage, stage)
+        if stage in ("copy", "extract", "rpu", "prepare", "inject", "remux") and total is not None and total > 0:
+            # these stages report BYTES (of a temporary file growing), not seconds
+            if getattr(self, "reinject_byte_stage", None) != stage:
+                self.reinject_byte_stage = stage
+                self.reinject_byte_stage_start = time()
+            self.gauge_reinject.SetRange(1000)
+            self.gauge_reinject.SetValue(min(1000, int(current / total * 1000)))
+            elapsed = time() - self.reinject_byte_stage_start
+            rate = current / (elapsed + 1e-6)
+            text = f"{stage_label}: {current / 1e9:.2f} / {total / 1e9:.2f} GB ({min(100, int(current / total * 100))}%)"
+            if rate > 0 and current > 0:
+                text += (f" [{rate / 1e6:.0f} MB/s, {T('elapsed')} {self._format_duration(elapsed)}, "
+                         f"ETA {self._format_duration(max(0, total - current) / rate)}]")
+            self.lbl_reinject_progress.SetLabel(text)
+            return
         if total is not None and total > 0:
             total_i = max(1, int(round(total)))
             self.gauge_reinject.SetRange(total_i)
@@ -11879,6 +11917,25 @@ class MainFrame(wx.Frame):
             except OSError:
                 pass
 
+    def _update_rife_standalone_dv_progress(self, label, done, total):
+        """Dolby Vision step of the standalone RIFE tool: frames done, FPS, elapsed and ETA for the CURRENT stage
+        (each stage has its own clock, restarted when the stage changes)."""
+        if getattr(self, "rife_standalone_dv_stage", None) != label:
+            self.rife_standalone_dv_stage = label
+            self.rife_standalone_dv_stage_start = time()
+        if total <= 0:
+            return
+        self.gauge_rife_standalone.SetRange(total)
+        self.gauge_rife_standalone.SetValue(min(done, total))
+        elapsed = time() - self.rife_standalone_dv_stage_start
+        percent = min(100, int(done / total * 100))
+        text = f"{T('Dolby Vision')}: {T(label)} -- {done}/{total} {T('frames')} ({percent}%)"
+        fps = done / (elapsed + 1e-6)
+        if done > 0 and fps > 0:
+            text += (f" [{fps:.1f} FPS, {T('elapsed')} {self._format_duration(elapsed)}, "
+                     f"ETA {self._format_duration((total - done) / fps)}]")
+        self.lbl_rife_standalone_progress.SetLabel(text)
+
     def run_rife_standalone(self, cmd, dv=None):
         # Runs on a background thread via startWorker -- never blocks the GUI thread.
         # Kept out-of-process the same way the other standalone tools in this column
@@ -11927,7 +11984,7 @@ class MainFrame(wx.Frame):
             from . import utils as iw3_utils
             self.rife_standalone_stage = "dv"
             wx.CallAfter(self.lbl_rife_standalone_progress.SetLabel, T("Re-attaching Dolby Vision..."))
-            wx.CallAfter(self.gauge_rife_standalone.Pulse)
+            self.rife_standalone_dv_stage = None
             dv_lines = []
 
             def _hook(dv_proc):
@@ -11936,7 +11993,9 @@ class MainFrame(wx.Frame):
             iw3_utils._reinject_dv_after_rife(
                 dv["source"], dv["output"],
                 types.SimpleNamespace(start_time=dv.get("start"), end_time=dv.get("end"), state={}),
-                log=dv_lines.append, proc_hook=_hook)
+                log=dv_lines.append, proc_hook=_hook,
+                progress_cb=lambda label, done, total: wx.CallAfter(
+                    self._update_rife_standalone_dv_progress, label, done, total))
             output = output + "\n" + "\n".join(dv_lines)
         return proc.returncode, output
 
@@ -18155,6 +18214,244 @@ def _self_test_rife_progress_reaches_job_bar():
     print("_self_test_rife_progress_reaches_job_bar: PASS")
 
 
+def _self_test_dolby_vision_step_progress():
+    """The Dolby Vision step after RIFE used to show no frames / FPS / ETA. reinject_hdr_cli prints
+    "IW3_REINJECT_PROGRESS <stage> <done> <total>" (seconds for the two decode passes, BYTES of a growing temp file
+    for the copy / extract / inject / remux stages); iw3.utils turns them into frame progress. Checks: the
+    growth watcher, the frame scaling, per-stage completion, both sinks (callback and tqdm bar), and the GUI label
+    with frames, FPS, elapsed and ETA. No GPU, no real movie."""
+    import io
+    import tempfile
+    import threading
+    import time as _time
+    import types
+    from contextlib import redirect_stdout
+    from . import utils as U
+    from . import reinject_hdr_cli as R
+
+    # 1. growth watcher: stage names follow the temp files, totals follow the sizes
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_output = path.join(tmp, "out.hdr_inject_tmp.mkv")
+        work = path.join(tmp, "work")
+        os.makedirs(work)
+        watcher = R._GrowthProgress(tmp_output, converted_size=1000, source_size=5000, source_frames=100)
+        watcher.work_dir = work
+        buf = io.StringIO()
+
+        def writer():
+            for name, chunks in ((tmp_output, 4), (path.join(work, "_hdr_src.hevc"), 5), (path.join(work, "dv_rpu.bin"), 3),
+                                 (path.join(work, "_iw3_out.hevc"), 4), (path.join(work, "_iw3_out_dv.hevc"), 4)):
+                with open(name, "wb") as f:
+                    for _ in range(chunks):
+                        f.write(b"x" * 100)
+                        f.flush()
+                        _time.sleep(0.7)
+
+        with redirect_stdout(buf):
+            watcher.start()
+            th = threading.Thread(target=writer)
+            th.start()
+            th.join()
+            _time.sleep(0.8)
+            watcher.stop()
+        lines = [x.split() for x in buf.getvalue().splitlines() if x.startswith("IW3_REINJECT_PROGRESS")]
+        stages = []
+        for ln in lines:
+            if not stages or stages[-1] != ln[1]:
+                stages.append(ln[1])
+        assert stages == ["copy", "extract", "rpu", "prepare", "inject"], stages
+        assert all(int(ln[2]) <= int(ln[3]) for ln in lines)
+        totals = {ln[1]: int(ln[3]) for ln in lines}
+        assert totals == {"copy": 1000, "extract": 5000, "rpu": 100 * R._RPU_BYTES_PER_FRAME_ESTIMATE,
+                          "prepare": 1000, "inject": 1000}, totals
+        assert R._handle_size(path.join(tmp, "nope")) is None
+
+    # 2. frame scaling + per-stage completion, callback sink
+    seen = []
+    tracker = U._DvProgress(types.SimpleNamespace(state={}), lambda l, d, t: seen.append((l, d, t)), 172, 343)
+    for line in ("IW3_REINJECT_PROGRESS source 2.00 8.00", "IW3_REINJECT_PROGRESS source 4.00 8.00",
+                 "IW3_REINJECT_PROGRESS converted 8.00 8.00", "garbage line", "IW3_REINJECT_PROGRESS copy 1 unknown",
+                 "IW3_REINJECT_PROGRESS inject 500 1000"):
+        tracker.feed(line)
+    tracker.close(completed=True)
+    assert seen[0] == ("reading the original movie", 43, 172), seen[0]
+    assert seen[1] == ("reading the original movie", 86, 172), seen[1]
+    assert ("reading the original movie", 172, 172) in seen, "first stage topped up to 100% when the next began"
+    assert ("reading the smoothed video", 343, 343) in seen
+    assert ("attaching Dolby Vision", 171, 343) in seen and seen[-1] == ("attaching Dolby Vision", 343, 343), seen[-3:]
+    seen2 = []
+    tracker = U._DvProgress(types.SimpleNamespace(state={}), lambda l, d, t: seen2.append((l, d, t)), 10, 20)
+    tracker.feed("IW3_REINJECT_PROGRESS inject 500 1000")
+    tracker.close(completed=False)
+    assert seen2[-1] == ("attaching Dolby Vision", 10, 20), "a failed step is NOT shown as complete"
+
+    # 3. tqdm sink (the job's own bar): one bar per stage, totals in frames
+    class FakeBar:
+        made = []
+
+        def __init__(self, **kw):
+            self.kw, self.n, self.closed = kw, 0, False
+            FakeBar.made.append(self)
+
+        def update(self, n=1):
+            self.n += n
+
+        def close(self):
+            self.closed = True
+
+    tracker = U._DvProgress(types.SimpleNamespace(state={"tqdm_fn": FakeBar}), None, 172, 343)
+    for line in ("IW3_REINJECT_PROGRESS source 4.00 8.00", "IW3_REINJECT_PROGRESS converted 2.00 8.00",
+                 "IW3_REINJECT_PROGRESS remux 700 1000"):
+        tracker.feed(line)
+    tracker.close(completed=True)
+    assert [(b.kw["total"], b.n, b.closed) for b in FakeBar.made] == [(172, 172, True), (343, 343, True), (343, 343, True)], \
+        [(b.kw["total"], b.n, b.closed) for b in FakeBar.made]
+    assert "[Dolby Vision]" in FakeBar.made[0].kw["desc"]
+
+    # 4. GUI label of the standalone RIFE tool: frames / FPS / elapsed / ETA per stage
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.rife_standalone_dv_stage = None
+        frame._update_rife_standalone_dv_progress("attaching Dolby Vision", 1, 100)
+        frame.rife_standalone_dv_stage_start = time() - 10
+        frame._update_rife_standalone_dv_progress("attaching Dolby Vision", 50, 100)
+        label = frame.lbl_rife_standalone_progress.GetLabel()
+        assert frame.gauge_rife_standalone.GetRange() == 100 and frame.gauge_rife_standalone.GetValue() == 50
+        assert "50/100" in label and "(50%)" in label and "FPS" in label and "ETA" in label, label
+        stage_start = frame.rife_standalone_dv_stage_start
+        frame._update_rife_standalone_dv_progress("packing the final file", 1, 100)
+        assert frame.rife_standalone_dv_stage_start != stage_start, "each stage restarts its own clock"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_dolby_vision_step_progress: PASS")
+
+
+def _self_test_every_step_shows_progress():
+    """Every step of a job now feeds the progress bar with what it can measure: frames / FPS / ETA where frames
+    exist, GB / MB per second / ETA for file work (copy, extract, inject, mux), percent / ETA for the audio & subtitle
+    restore. Fake helper programs stand in for ffmpeg / dovi_tool / mkvmerge / waifu2x: no GPU, no movie."""
+    import types
+    from . import utils as U
+
+    class FakeBar:
+        made = []
+
+        def __init__(self, **kw):
+            self.kw, self.n, self.closed = kw, 0, False
+            FakeBar.made.append(self)
+
+        def update(self, n=1):
+            self.n += n
+
+        def close(self):
+            self.closed = True
+
+    args = types.SimpleNamespace(state={"tqdm_fn": FakeBar})
+    U._STAGE_ARGS["args"] = args
+    try:
+        # 1. file work: progress follows the growing output file, in MB, and finishes at 100%
+        with tempfile.TemporaryDirectory() as tmp:
+            out_file = path.join(tmp, "growing.bin")
+            code = ("import time,sys\nf=open(sys.argv[1],'wb')\n"
+                    "for i in range(6):\n    f.write(b'x'*(1024*1024)); f.flush(); time.sleep(0.4)\n")
+            FakeBar.made.clear()
+            result = U._run_watched([sys.executable, "-c", code, out_file], "[HDR] test copy",
+                                    total_bytes=6 * 1024 * 1024, paths=[out_file])
+            assert result.returncode == 0
+            bar = FakeBar.made[0]
+            assert bar.kw["desc"] == "@MB [HDR] test copy" and bar.kw["total"] == 6, bar.kw
+            assert bar.n == 6 and bar.closed, (bar.n, bar.closed)
+
+            # a helper that reads a file: progress follows the bytes it has read
+            src_file = path.join(tmp, "src.bin")
+            with open(src_file, "wb") as f:
+                f.write(b"y" * (8 * 1024 * 1024))
+            FakeBar.made.clear()
+            read_code = ("import sys,time\nf=open(sys.argv[1],'rb')\n"
+                         "while f.read(1024*1024): time.sleep(0.15)\n")
+            U._run_watched([sys.executable, "-c", read_code, src_file], "[HDR] test read",
+                           total_bytes=8 * 1024 * 1024, reads=True)
+            assert FakeBar.made[0].n == 8 and FakeBar.made[0].closed
+
+            # failure -> CalledProcessError (like check=True) and the bar is NOT completed
+            FakeBar.made.clear()
+            try:
+                U._run_watched([sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"], "x",
+                               total_bytes=10 * 1024 * 1024, paths=[path.join(tmp, "nothing")])
+                assert False, "must raise"
+            except subprocess.CalledProcessError as e:
+                assert e.returncode == 3 and b"boom" in e.stderr
+            assert FakeBar.made[0].n < FakeBar.made[0].kw["total"]
+
+        # no bar (command line): exactly the old blocking call
+        U._STAGE_ARGS["args"] = types.SimpleNamespace(state={})
+        FakeBar.made.clear()
+        assert U._run_watched([sys.executable, "-c", "pass"], "x", total_bytes=1000, paths=["nope"]).returncode == 0
+        assert not FakeBar.made
+        U._STAGE_ARGS["args"] = args
+
+        # 2. upscaler: tqdm lines on stderr become FRAME progress
+        FakeBar.made.clear()
+        w2x = ("import sys,time\nfor i in (0,40,80,120,160):\n"
+               "    sys.stderr.write(f'\\rmovie {i}/160 [00:0{i//40}<00:04, 20.00it/s]'); sys.stderr.flush(); time.sleep(0.1)\n"
+               "sys.stderr.write('\\nall done\\n')\n")
+        U._run_stderr_progress([sys.executable, "-c", w2x], ".", args, "[waifu2x] movie")
+        bar = FakeBar.made[0]
+        assert bar.kw["desc"] == "[waifu2x] movie" and bar.kw["total"] == 160 and bar.n == 160 and bar.closed, (bar.kw, bar.n)
+
+        # 3. audio & subtitle restore: two stages in percent
+        FakeBar.made.clear()
+        av = ("import time\nfor stage,cur,tot in (('trim',10,100),('trim',100,100),('mux',30,100),('mux',100,100)):\n"
+              "    print(f'IW3_AVRESTORE_PROGRESS {stage} {cur:.2f} {tot:.2f}', flush=True); time.sleep(0.1)\n")
+        U._run_av_restore_with_progress([sys.executable, "-c", av], ".", args)
+        assert [(b.kw["desc"], b.n, b.closed) for b in FakeBar.made] == [
+            ("@PCT Restoring audio & subtitles: reading the audio & subtitles from the source", 1000, True),
+            ("@PCT Restoring audio & subtitles: writing them into the video", 1000, True)], \
+            [(b.kw["desc"], b.n, b.closed) for b in FakeBar.made]
+    finally:
+        U._STAGE_ARGS["args"] = None
+
+    # 4. the GUI's status text for each unit
+    class Ev:
+        def __init__(self, type_, value, desc):
+            self.v = (type_, value, desc)
+
+        def GetValue(self):
+            return self.v
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.job_stages = ["Restoring Audio & Subtitles"]
+        frame.job_stage_index = 1
+        frame.current_stage_name = "Restoring Audio & Subtitles"
+        frame.stage_pulse_timer.Stop()
+        for desc, total, step, expect in (
+                ("@MB [HDR] extracting the video stream", 20480, 5120, ("GB", "MB/s", "ETA", "%")),
+                ("@PCT Restoring audio & subtitles: writing them into the video", 1000, 250, ("25.0%", "ETA")),
+                ("clip.mkv [RIFE rife_425]", 1000, 250, ("frames", "FPS", "ETA"))):
+            frame.on_tqdm(Ev(0, total, desc))
+            frame.start_time = time() - 10
+            frame.on_tqdm(Ev(1, step, desc))
+            text = frame.GetStatusBar().GetStatusText() if frame.GetStatusBar() else ""
+            assert all(token in text for token in expect), (desc, text)
+            assert "@MB" not in text and "@PCT" not in text, text
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_every_step_shows_progress: PASS")
+
+
 def _self_test_sbs2mvc_text_subtitles():
     """Text subtitles (SRT/ASS/...) used to be silently dropped from the 3D Blu-ray ISO (a tester saw an ISO with
     audio but no subtitles). They are now extracted to .srt and handed to tsMuxeR as rendered Blu-ray subtitles,
@@ -18328,6 +18625,8 @@ def _run_self_tests():
         _self_test_rife_with_preserve_dolby_vision,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
+        _self_test_dolby_vision_step_progress,
+        _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,
         _self_test_standalone_tool_titles_share_accent_colour,
     ]

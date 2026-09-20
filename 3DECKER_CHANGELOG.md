@@ -15,6 +15,15 @@ it matters.
 
 ## Latest Update — September 20, 2026
 
+**Improved: every step after the conversion now shows real progress in the main bar.** Before,
+steps like "Restoring Audio & Subtitles", the Dolby Vision steps and the waifu2x upscale showed only
+"running 01:05" with a full bar. Now each one fills the bar and shows the numbers that fit it:
+frames done, speed (FPS) and time left where frames exist (RIFE, the upscaler, reading the movie for
+Dolby Vision); GB done, MB/s and time left for file work (copying, pulling out the video and Dolby
+Vision data, attaching it, packing the file); and percent plus time left for restoring audio and
+subtitles. The same live numbers appear in the standalone RIFE tool's Dolby Vision step. Steps that
+finish in a second still jump straight to done.
+
 **Improved: the RIFE step of a normal conversion now shows real progress.** During "Interpolate
 frames with RIFE after conversion" the bar used to show only how long the step had been running.
 It now shows frames done, speed (FPS), elapsed time and the estimated time left, like the other

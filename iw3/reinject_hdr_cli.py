@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from os import path
 
@@ -259,6 +260,68 @@ def _source_duration_hint(start_time, end_time, source_path, ffprobe_bin):
         start_sec = parse_time(start_time) if start_time else 0.0
         return parse_time(end_time) - start_sec
     return _probe_container_duration(source_path, ffprobe_bin)
+
+
+# The slow, otherwise SILENT stages after the two decode passes (copying the converted file, pulling the video
+# stream out of the source, extracting the RPU, preparing/injecting/remuxing) print nothing themselves. A watcher
+# thread follows how big their temporary files have grown and prints
+# "IW3_REINJECT_PROGRESS <stage> <bytes_done> <bytes_total>" for whichever stage is currently writing, so a caller
+# (iw3.gui / iw3.utils) can show percent, speed and ETA for them too. The stage names are the contract:
+_BYTE_PROGRESS_STAGES = ("copy", "extract", "rpu", "prepare", "inject", "remux")
+_RPU_BYTES_PER_FRAME_ESTIMATE = 200      # measured 150-180 bytes per frame on real movies
+
+
+def _handle_size(file_path):
+    """True current size of a file that may be open for writing in another process. A directory listing can show
+    a stale size (even 0) for such a file, so ask through an open handle instead."""
+    try:
+        with open(file_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            return f.tell()
+    except OSError:
+        return None
+
+
+class _GrowthProgress(threading.Thread):
+    def __init__(self, tmp_output, converted_size, source_size, source_frames):
+        super().__init__(daemon=True)
+        self.tmp_output = tmp_output
+        self.converted_size = max(1, converted_size)
+        self.source_size = max(1, source_size)
+        self.rpu_total = max(1, int((source_frames or 0) * _RPU_BYTES_PER_FRAME_ESTIMATE))
+        self.work_dir = None
+        self._stop_evt = threading.Event()
+
+    def stop(self):
+        self._stop_evt.set()
+        self.join(timeout=3)
+
+    def _targets(self):
+        stem, ext = path.splitext(self.tmp_output)
+        targets = [(self.tmp_output, "copy", self.converted_size),
+                   (stem + ".hdr_inject" + ext, "remux", self.converted_size)]
+        if self.work_dir:
+            targets += [(path.join(self.work_dir, "_hdr_src.hevc"), "extract", self.source_size),
+                        (path.join(self.work_dir, "dv_rpu.bin"), "rpu", self.rpu_total),
+                        (path.join(self.work_dir, "_iw3_out.hevc"), "prepare", self.converted_size),
+                        (path.join(self.work_dir, "_iw3_out_dv.hevc"), "inject", self.converted_size)]
+        return targets
+
+    def run(self):
+        last = {}
+        while not self._stop_evt.wait(0.5):
+            active = None
+            for file_path, stage, total in self._targets():
+                size = _handle_size(file_path)
+                if size is None:
+                    continue
+                if size != last.get(file_path):
+                    if size > 0:
+                        active = (stage, size, total)
+                    last[file_path] = size
+            if active:
+                stage, size, total = active
+                print(f"IW3_REINJECT_PROGRESS {stage} {min(size, total)} {total}", flush=True)
 
 
 # Throttle for IW3_REINJECT_PROGRESS lines -- matches tqdm's own default ~0.1s
@@ -795,9 +858,12 @@ def _run_with_rife_manifest(args):
     os.makedirs(out_dir, exist_ok=True)
     tmp_output = path.splitext(output)[0] + ".hdr_inject_tmp" + path.splitext(output)[1]
     print(f"[reinject-hdr] copying --converted to a working copy: {tmp_output}", file=sys.stderr)
+    growth = _GrowthProgress(tmp_output, path.getsize(converted), path.getsize(source), source_frame_count)
+    growth.start()
     shutil.copyfile(converted, tmp_output)
 
     work_dir = tempfile.mkdtemp(prefix="iw3_reinject_hdr_rife_")
+    growth.work_dir = work_dir
     hdr_rpu_path = path.join(work_dir, "dv_rpu.bin")
     hdr_h10p_path = path.join(work_dir, "hdr10plus.json")
     try:
@@ -848,6 +914,7 @@ def _run_with_rife_manifest(args):
         print(f"[reinject-hdr] done -- wrote {output}", file=sys.stderr)
         return 0
     finally:
+        growth.stop()
         if path.exists(tmp_output):
             try:
                 os.remove(tmp_output)
@@ -965,9 +1032,12 @@ def _run_strict(args):
     os.makedirs(out_dir, exist_ok=True)
     tmp_output = path.splitext(output)[0] + ".hdr_inject_tmp" + path.splitext(output)[1]
     print(f"[reinject-hdr] copying --converted to a working copy: {tmp_output}", file=sys.stderr)
+    growth = _GrowthProgress(tmp_output, path.getsize(converted), path.getsize(source), src_frames)
+    growth.start()
     shutil.copyfile(converted, tmp_output)
 
     work_dir = tempfile.mkdtemp(prefix="iw3_reinject_hdr_")
+    growth.work_dir = work_dir
     hdr_rpu_path = path.join(work_dir, "dv_rpu.bin")
     hdr_h10p_path = path.join(work_dir, "hdr10plus.json")
     try:
@@ -1013,6 +1083,7 @@ def _run_strict(args):
         print(f"[reinject-hdr] done -- wrote {output}", file=sys.stderr)
         return 0
     finally:
+        growth.stop()
         if path.exists(tmp_output):
             try:
                 os.remove(tmp_output)

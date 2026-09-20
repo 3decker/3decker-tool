@@ -40,10 +40,12 @@ audio_restore_cli.py already uses.
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from os import path
 
 import av
@@ -112,7 +114,70 @@ def _count_av_tracks(source_path):
     return audio_count, subtitle_count, None
 
 
-def _trim_all_av(ffmpeg_bin, source_path, start_time, end_time, work_dir):
+_FFMPEG_TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+_FFMPEG_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_MKV_PROGRESS_RE = re.compile(r"Progress:\s*(\d+)%")
+
+
+def _emit_progress(stage, current, total):
+    """Progress channel on STDOUT ("IW3_AVRESTORE_PROGRESS <stage> <current> <total>"), read by iw3.utils and
+    iw3.gui; every human-readable message stays on stderr. Stages: "trim" (seconds) and "mux" (percent)."""
+    print(f"IW3_AVRESTORE_PROGRESS {stage} {current:.2f} {total:.2f}", flush=True)
+
+
+class _Result:
+    def __init__(self, returncode, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _run_trim_with_progress(cmd, start_sec, end_sec):
+    """The trim ffmpeg, read live so its "time=" lines become progress."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
+    chunks, total, last = [], None, 0.0
+    for line in proc.stderr:
+        chunks.append(line)
+        if total is None:
+            m = _FFMPEG_DURATION_RE.search(line)
+            if m:
+                duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                total = max(0.1, (end_sec if end_sec is not None else duration) - start_sec)
+        m = _FFMPEG_TIME_RE.search(line)
+        if m and total:
+            now = time.monotonic()
+            if now - last >= 0.2:
+                last = now
+                current = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                _emit_progress("trim", min(current, total), total)
+    proc.wait()
+    if total and proc.returncode == 0:
+        _emit_progress("trim", total, total)
+    return _Result(proc.returncode, "", "".join(chunks))
+
+
+def _run_mkvmerge_with_progress(cmd):
+    """mkvmerge prints "Progress: NN%" (carriage-return separated) on stdout; turn it into progress lines."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    err_chunks = []
+    drain = __import__("threading").Thread(target=lambda: err_chunks.extend(proc.stderr), daemon=True)
+    drain.start()
+    out_chunks, last = [], -1
+    for line in proc.stdout:
+        m = _MKV_PROGRESS_RE.search(line)
+        if m:
+            pct = int(m.group(1))
+            if pct != last:
+                last = pct
+                _emit_progress("mux", pct, 100)
+        else:
+            out_chunks.append(line)
+    proc.wait()
+    drain.join(timeout=5)
+    if proc.returncode < 2:
+        _emit_progress("mux", 100, 100)
+    return _Result(proc.returncode, "".join(out_chunks), "".join(err_chunks))
+
+
+def _trim_all_av(ffmpeg_bin, source_path, start_time, end_time, work_dir, progress=False):
     """Extracts every audio AND subtitle track from source_path over [start_time,
     end_time) into a new temp .mkv in work_dir, in ONE ffmpeg pass, ALSO shifting
     the result to start at t=0 -- see module docstring's "Trimming" section for
@@ -146,7 +211,8 @@ def _trim_all_av(ffmpeg_bin, source_path, start_time, end_time, work_dir):
     copy_cmd = _build_cmd(use_copy=True)
     cmds_tried.append(_format_cmd(copy_cmd))
     try:
-        proc = subprocess.run(copy_cmd, capture_output=True, text=True)
+        proc = (_run_trim_with_progress(copy_cmd, start_sec, end_sec) if progress
+                else subprocess.run(copy_cmd, capture_output=True, text=True))
     except Exception as e:
         return None, f"ERROR: failed to run ffmpeg for audio/subtitle trim (stream copy): {e}", cmds_tried
 
@@ -162,7 +228,8 @@ def _trim_all_av(ffmpeg_bin, source_path, start_time, end_time, work_dir):
     reencode_cmd = _build_cmd(use_copy=False)
     cmds_tried.append(_format_cmd(reencode_cmd))
     try:
-        proc2 = subprocess.run(reencode_cmd, capture_output=True, text=True)
+        proc2 = (_run_trim_with_progress(reencode_cmd, start_sec, end_sec) if progress
+                 else subprocess.run(reencode_cmd, capture_output=True, text=True))
     except Exception as e:
         return None, f"ERROR: failed to run ffmpeg for audio/subtitle trim (re-encode fallback): {e}", cmds_tried
 
@@ -225,7 +292,7 @@ def run(args):
                   f"[{args.source_start_time or '0'}, {args.source_end_time or 'end'}) and "
                   f"shifting to start at 0...", file=sys.stderr)
             trimmed_path, trim_error, cmds_tried = _trim_all_av(
-                ffmpeg_bin, source_path, args.source_start_time, args.source_end_time, work_dir)
+                ffmpeg_bin, source_path, args.source_start_time, args.source_end_time, work_dir, progress=True)
             for cmd_str in cmds_tried:
                 print(f"[av-restore] running: {cmd_str}", file=sys.stderr)
             if trim_error:
@@ -248,7 +315,7 @@ def run(args):
         print(f"[av-restore] running: {_format_cmd(cmd)}", file=sys.stderr)
 
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = _run_mkvmerge_with_progress(cmd)
         except Exception as e:
             print(f"ERROR: failed to run mkvmerge: {e}", file=sys.stderr)
             return 1

@@ -650,21 +650,20 @@ def _extract_hdr_rpu_files(input_path, work_dir, args, hdr_rpu_path, hdr_h10p_pa
     dv_ok = not hdr_types.get("dv")
     h10p_ok = not hdr_types.get("hdr10plus")
     try:
-        subprocess.run(
+        from .utils import _run_watched, _sz
+        _run_watched(
             [ffmpeg_bin, "-y", *trim_args, "-i", str(input_path),
              "-c:v", "copy", "-an", "-f", "hevc", tmp_hevc],
-            check=True, capture_output=True,
-        )
+            "[HDR] extracting the video stream", total_bytes=_sz(input_path), paths=[tmp_hevc])
         if hdr_types.get("dv"):
             dovi_bin = _find_dovi_tool()
             if not dovi_bin:
                 failures.append("dovi_tool not found")
             else:
                 try:
-                    subprocess.run(
+                    _run_watched(
                         [dovi_bin, "extract-rpu", "-i", tmp_hevc, "-o", hdr_rpu_path],
-                        check=True, capture_output=True,
-                    )
+                        "[HDR] extracting the Dolby Vision data", total_bytes=_sz(tmp_hevc), reads=True)
                     dv_ok = path.exists(hdr_rpu_path)
                     if not dv_ok:
                         failures.append("dovi_tool exited 0 but produced no rpu file")

@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torchvision.transforms import functional as TF, InterpolationMode
 import argparse
 from concurrent.futures import ThreadPoolExecutor as PoolExecutor
+import re
 import threading
 import math
 from tqdm import tqdm
@@ -120,7 +121,7 @@ def _invoke_waifu2x_cli(input_path, output_path, method, noise_level, style, nun
            "-m", method, "-n", str(int(noise_level)),
            "--style", style, "-y"]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+        _run_stderr_progress(cmd, nunif_dir, _STAGE_ARGS["args"], f"[waifu2x] {path.basename(str(input_path))}")
     except subprocess.CalledProcessError as e:
         msg = e.stderr.decode(errors="replace").strip()
         print(f"{log_prefix} waifu2x upscale failed: {msg[:300]}", file=sys.stderr)
@@ -170,6 +171,207 @@ def _run_waifu2x_upscale(output_path, args):
     return upscaled_path
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Progress for the SILENT steps of a job (copying / extracting / muxing / upscaling): the job's own bar (tqdm_fn ->
+# the GUI's progress bar with elapsed / ETA / speed) is fed by watching how much a helper program has read or how big
+# its output file has grown, or by reading the numbers the helper prints. The GUI shows a bar's unit from a prefix on
+# its description: "@MB " = megabytes, "@PCT " = permille of the step, nothing = frames.
+_STAGE_ARGS = {"args": None}        # set by _notify_stage(): the job whose bar the current step should feed
+_MB = 1024 * 1024
+
+
+def _sz(file_path):
+    try:
+        return path.getsize(file_path)
+    except OSError:
+        return 0
+
+
+def _handle_size(file_path):
+    """Current size of a file another process may still be writing (a directory listing can show a stale size)."""
+    try:
+        with open(file_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            return f.tell()
+    except OSError:
+        return None
+
+
+class _StageBar:
+    """One tqdm-style bar for one step, or nothing at all when the job has no bar (command line). Never raises."""
+
+    def __init__(self, args, desc, total, unit="frames"):
+        self.total = max(1, int(total))
+        self.done = 0
+        self.bar = None
+        tqdm_fn = (getattr(args, "state", None) or {}).get("tqdm_fn") if args is not None else None
+        if tqdm_fn is not None:
+            prefix = {"mb": "@MB ", "pct": "@PCT "}.get(unit, "")
+            try:
+                self.bar = tqdm_fn(total=self.total, desc=prefix + desc, ncols=80)
+            except Exception:
+                self.bar = None
+
+    def set(self, done):
+        done = int(min(max(0, done), self.total))
+        if self.bar is not None and done > self.done:
+            try:
+                self.bar.update(done - self.done)
+                self.done = done
+            except Exception:
+                self.bar = None
+
+    def close(self, complete=True):
+        if self.bar is None:
+            return
+        try:
+            if complete:
+                self.set(self.total)
+            self.bar.close()
+        except Exception:
+            pass
+        self.bar = None
+
+
+def _run_watched(cmd, desc, *, total_bytes=0, paths=(), reads=False, check=True, cwd=None):
+    """subprocess.run(cmd, check=..., capture_output=True) that also feeds the job's bar in MB: progress is the
+    combined size of `paths` (a file the command is writing) or, with reads=True, how many bytes the command has
+    read so far. Without a bar (or a size to compare to) it is exactly the old blocking call."""
+    args = _STAGE_ARGS["args"]
+    has_bar = args is not None and (getattr(args, "state", None) or {}).get("tqdm_fn") is not None
+    if not has_bar or total_bytes <= 0 or not (paths or reads):
+        return subprocess.run(cmd, check=check, capture_output=True, cwd=cwd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    out, err = [], []
+    readers = [threading.Thread(target=lambda: out.append(proc.stdout.read()), daemon=True),
+               threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)]
+    for r in readers:
+        r.start()
+    bar = _StageBar(args, desc, total_bytes / _MB, "mb")
+    ps = None
+    if reads:
+        try:
+            import psutil
+            ps = psutil.Process(proc.pid)
+        except Exception:
+            ps = None
+
+    def measure():
+        try:
+            if paths:
+                return sum(_handle_size(p) or 0 for p in paths)
+            if ps is not None:
+                total = ps.io_counters().read_bytes
+                for child in ps.children(recursive=True):
+                    total += child.io_counters().read_bytes
+                return total
+        except Exception:
+            pass
+        return 0
+
+    try:
+        while True:
+            try:
+                proc.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                bar.set(min(measure(), total_bytes * 0.99) / _MB)
+    finally:
+        proc.wait()
+        for r in readers:
+            r.join(timeout=5)
+        bar.close(complete=proc.returncode == 0)
+    result = subprocess.CompletedProcess(cmd, proc.returncode, b"".join(out), b"".join(err))
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
+    return result
+
+
+_TQDM_FRAMES_RE = re.compile(r"\b(\d+)/(\d+) \[")
+
+
+def _run_stderr_progress(cmd, cwd, args, desc):
+    """Runs a helper whose stderr carries tqdm bars ("12/340 [..."), feeding them to the job's bar as FRAMES.
+    Returns a CompletedProcess (stderr bytes); raises CalledProcessError on failure like subprocess.run(check=True)."""
+    if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
+        return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    out = []
+    reader = threading.Thread(target=lambda: out.append(proc.stdout.read()), daemon=True)
+    reader.start()
+    tail, bar, buf = [], None, b""
+    try:
+        while True:
+            chunk = proc.stderr.read(256)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                m = re.search(rb"[\r\n]", buf)
+                if not m:
+                    break
+                line, buf = buf[:m.start()], buf[m.end():]
+                text = line.decode(errors="replace").strip()
+                pm = _TQDM_FRAMES_RE.search(text)
+                if pm:
+                    if bar is None:
+                        bar = _StageBar(args, desc, int(pm.group(2)) or 1, "frames")
+                    bar.set(int(pm.group(1)))
+                elif text:
+                    tail.append(text)
+                    del tail[:-40]
+    finally:
+        proc.wait()
+        reader.join(timeout=5)
+        if bar is not None:
+            bar.close(complete=proc.returncode == 0)
+    result = subprocess.CompletedProcess(cmd, proc.returncode, b"".join(out), "\n".join(tail).encode())
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
+    return result
+
+
+_AVRESTORE_LABELS = {"trim": "reading the audio & subtitles from the source", "mux": "writing them into the video"}
+
+
+def _run_av_restore_with_progress(cmd, cwd, args):
+    """iw3.av_restore_cli with live progress from its "IW3_AVRESTORE_PROGRESS <stage> <cur> <total>" lines
+    (ffmpeg's time= while reading, mkvmerge's percent while writing), shown as percent / elapsed / ETA."""
+    if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
+        return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    err = []
+    drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
+    drain.start()
+    bar, stage = None, None
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            parts = raw.decode(errors="replace").split()
+            if len(parts) != 4 or parts[0] != "IW3_AVRESTORE_PROGRESS":
+                continue
+            try:
+                name, cur, tot = parts[1], float(parts[2]), float(parts[3])
+            except ValueError:
+                continue
+            if tot <= 0:
+                continue
+            if name != stage:
+                if bar is not None:
+                    bar.close(complete=True)
+                stage = name
+                bar = _StageBar(args, "Restoring audio & subtitles: " + _AVRESTORE_LABELS.get(name, name), 1000, "pct")
+            bar.set(int(min(1.0, cur / tot) * 1000))
+    finally:
+        proc.wait()
+        drain.join(timeout=5)
+        if bar is not None:
+            bar.close(complete=proc.returncode == 0)
+    result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err))
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
+    return result
+
+
 _HEVC_ENCODERS = ("libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf")
 
 
@@ -180,14 +382,114 @@ def _dv_after_rife_wanted(args):
             and not getattr(args, "hdr_to_sdr", False) and not getattr(args, "keyframe", False))
 
 
-def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None):
+_DV_STAGE_LABELS = {
+    "source": "reading the original movie",
+    "converted": "reading the smoothed video",
+    "copy": "copying the smoothed video",
+    "extract": "extracting the video stream",
+    "rpu": "extracting the Dolby Vision data",
+    "prepare": "preparing the smoothed video",
+    "inject": "attaching Dolby Vision",
+    "remux": "packing the final file",
+}
+
+
+class _DvProgress:
+    """Turns reinject_hdr_cli's "IW3_REINJECT_PROGRESS <stage> <done> <total>" lines into FRAME progress: each
+    stage's fraction is scaled to the number of frames it represents (the original movie's frames for reading it,
+    the smoothed video's frames for everything else), so a bar shows frames done, FPS, elapsed and ETA like the
+    other steps. Sends to `progress_cb(label, done_frames, total_frames)` if given, else feeds a tqdm-style bar per
+    stage (the job's own bar via args.state["tqdm_fn"]). Never raises."""
+
+    def __init__(self, args, progress_cb, source_frames, output_frames):
+        self.progress_cb = progress_cb
+        self.tqdm_fn = (getattr(args, "state", None) or {}).get("tqdm_fn")
+        self.source_frames = max(1, int(source_frames or 10000))
+        self.output_frames = max(1, int(output_frames or 10000))
+        self.stage = None
+        self.stage_label = None
+        self.stage_total = 0
+        self.bar = None
+        self.last_done = 0
+
+    def _finish_stage(self):
+        """Top the finished stage up to 100% (its last live update is throttled and can stop a little short)."""
+        try:
+            if self.stage is None or self.stage_total <= 0 or self.last_done >= self.stage_total:
+                return
+            if self.progress_cb is not None:
+                self.progress_cb(self.stage_label, self.stage_total, self.stage_total)
+            elif self.bar is not None:
+                self.bar.update(self.stage_total - self.last_done)
+            self.last_done = self.stage_total
+        except Exception:
+            pass
+
+    def _close_bar(self):
+        if self.bar is not None:
+            try:
+                self.bar.close()
+            except Exception:
+                pass
+            self.bar = None
+
+    def feed(self, line):
+        parts = line.split()
+        if len(parts) != 4 or parts[0] != "IW3_REINJECT_PROGRESS" or parts[3] == "unknown":
+            return
+        try:
+            stage, current, total = parts[1], float(parts[2]), float(parts[3])
+        except ValueError:
+            return
+        if total <= 0:
+            return
+        total_frames = self.source_frames if stage == "source" else self.output_frames
+        done = int(min(1.0, max(0.0, current / total)) * total_frames)
+        label = _DV_STAGE_LABELS.get(stage, stage)
+        try:
+            if stage != self.stage:
+                self._finish_stage()
+                self._close_bar()
+                self.stage, self.stage_label, self.stage_total, self.last_done = stage, label, total_frames, 0
+                if self.progress_cb is None and self.tqdm_fn is not None:
+                    self.bar = self.tqdm_fn(total=total_frames, desc=f"[Dolby Vision] {label}", ncols=80)
+            if done > self.last_done:
+                if self.progress_cb is not None:
+                    self.progress_cb(label, done, total_frames)
+                elif self.bar is not None:
+                    self.bar.update(done - self.last_done)
+                self.last_done = done
+        except Exception:
+            self.tqdm_fn = None
+            self.progress_cb = None
+
+    def close(self, completed=True):
+        if completed:
+            self._finish_stage()
+        self._close_bar()
+
+
+def _rife_manifest_frame_counts(manifest_path):
+    """(source_frames, output_frames) from a RIFE manifest, or (None, None)."""
+    try:
+        import json as _json
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = _json.load(f)
+        return manifest.get("source_frame_count"), len(manifest.get("frames", [])) or None
+    except Exception:
+        return None, None
+
+
+def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None, progress_cb=None):
     """ADR-192: after RIFE, re-attach the ORIGINAL source's Dolby Vision RPU to RIFE's output through
     iw3.reinject_hdr_cli --rife-manifest (each in-between frame gets a copy of its nearest real frame's entry).
     The RIFE file is only replaced when the injection fully succeeded; otherwise it is left as it was
     (plays fine, just without DV) and the reason is reported. Never raises. Returns True only on success.
 
     `log` (optional callable) receives the messages instead of stderr -- used by the standalone RIFE tool's
-    log box. `proc_hook` (optional callable) receives the running Popen so a Cancel button can kill it."""
+    log box. `proc_hook` (optional callable) receives the running Popen so a Cancel button can kill it.
+    `progress_cb(label, done_frames, total_frames)` (optional) receives live progress; without it the job's own
+    bar (args.state["tqdm_fn"]) is used when there is one -- frames, FPS, elapsed and ETA for every stage."""
     def say(message):
         if log is None:
             print(message, file=sys.stderr)
@@ -221,14 +523,31 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
     _notify_stage(args, STAGE_HDR_REINJECT)
     say("[iw3] Re-attaching Dolby Vision/HDR metadata to the RIFE output...")
     succeeded = False
+    have_bar = progress_cb is not None or (getattr(args, "state", None) or {}).get("tqdm_fn") is not None
     try:
-        if proc_hook is None:
+        if proc_hook is None and not have_bar:
             result = subprocess.run(cmd, capture_output=True, cwd=nunif_dir)
         else:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=nunif_dir)
-            proc_hook(proc)
-            out, err = proc.communicate()
-            result = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+            if proc_hook is not None:
+                proc_hook(proc)
+            err_chunks = []
+
+            def _drain_err():
+                for chunk in iter(lambda: proc.stderr.read(4096), b""):
+                    err_chunks.append(chunk)
+
+            drain = threading.Thread(target=_drain_err, daemon=True)
+            drain.start()
+            tracker = _DvProgress(args, progress_cb, *_rife_manifest_frame_counts(manifest))
+            try:
+                for raw_line in iter(proc.stdout.readline, b""):
+                    tracker.feed(raw_line.decode(errors="replace"))
+            finally:
+                proc.wait()
+                drain.join(timeout=5)
+                tracker.close(completed=proc.returncode == 0)
+            result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err_chunks))
         ok = result.returncode == 0 and path.exists(tmp_out)
         if ok:
             os.replace(tmp_out, rife_path)
@@ -431,7 +750,7 @@ def _run_audio_subtitle_restore(output_path, args):
     _notify_stage(args, STAGE_RESTORE_AV)
     print("[iw3] Restoring audio/subtitle tracks from source...", file=sys.stderr)
     try:
-        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+        _run_av_restore_with_progress(cmd, nunif_dir, args)
     except subprocess.CalledProcessError as e:
         msg = e.stderr.decode(errors="replace").strip()
         print(f"[iw3] Audio/subtitle restore failed: {msg[:300]}", file=sys.stderr)
@@ -444,14 +763,12 @@ def _run_audio_subtitle_restore(output_path, args):
 
 
 def _extract_dovi_rpu(input_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_hevc):
-    subprocess.run(
+    _run_watched(
         [ffmpeg_bin, "-y", "-i", str(input_path), "-c:v", "copy", "-an", "-f", "hevc", str(tmp_hevc)],
-        check=True, capture_output=True,
-    )
-    subprocess.run(
+        "[HDR] extracting the video stream", total_bytes=_sz(input_path), paths=[str(tmp_hevc)])
+    _run_watched(
         [dovi_bin, "extract-rpu", "-i", str(tmp_hevc), "-o", str(rpu_path)],
-        check=True, capture_output=True,
-    )
+        "[HDR] extracting the Dolby Vision data", total_bytes=_sz(tmp_hevc), reads=True)
 
 
 def _inject_dovi_rpu(output_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_dir):
@@ -459,22 +776,20 @@ def _inject_dovi_rpu(output_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_dir):
     hevc_dv = path.join(tmp_dir, "_iw3_out_dv.hevc")
     final_tmp = path.splitext(output_path)[0] + ".dv_inject" + path.splitext(output_path)[1]
     try:
-        subprocess.run(
+        _run_watched(
             [ffmpeg_bin, "-y", "-i", str(output_path), "-c:v", "copy", "-an", "-f", "hevc", hevc_out],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
+            "[Dolby Vision] preparing the video", total_bytes=_sz(output_path), paths=[hevc_out])
+        _run_watched(
             [dovi_bin, "inject-rpu", "-i", hevc_out, "-r", str(rpu_path), "-o", hevc_dv],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
+            "[Dolby Vision] attaching Dolby Vision", total_bytes=_sz(hevc_out), paths=[hevc_dv])
+        _run_watched(
             [ffmpeg_bin, "-y",
              "-i", str(output_path),
              "-i", hevc_dv,
              "-map", "1:v", "-map", "0:a?",
              "-c", "copy", "-copyts", final_tmp],
-            check=True, capture_output=True,
-        )
+            "[Dolby Vision] packing the final file", total_bytes=_sz(hevc_dv) + _sz(output_path) // 20,
+            paths=[final_tmp])
         os.replace(final_tmp, output_path)
     finally:
         for f in (hevc_out, hevc_dv):
@@ -1266,17 +1581,15 @@ def _inject_hdr_rpu(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin,
     hevc_out = path.join(tmp_dir, "_iw3_out.hevc")
     hevc_dv = path.join(tmp_dir, "_iw3_out_dv.hevc")
     hevc_h10p = path.join(tmp_dir, "_iw3_out_h10p.hevc")
-    subprocess.run(
+    _run_watched(
         [ffmpeg_bin, "-y", "-i", str(output_path), "-c:v", "copy", "-an", "-f", "hevc", hevc_out],
-        check=True, capture_output=True,
-    )
+        "[HDR] preparing the video", total_bytes=_sz(output_path), paths=[hevc_out])
     current = hevc_out
     try:
         if rpu_path and path.exists(str(rpu_path)):
-            subprocess.run(
+            _run_watched(
                 [dovi_bin, "inject-rpu", "-i", current, "-r", str(rpu_path), "-o", hevc_dv],
-                check=True, capture_output=True,
-            )
+                "[HDR] attaching Dolby Vision", total_bytes=_sz(hevc_out), paths=[hevc_dv])
             current = hevc_dv
 
         if hdr10plus_json and path.exists(str(hdr10plus_json)):
@@ -1307,22 +1620,22 @@ def _remux_injected_hevc(output_path, injected_hevc_path, fps_str, ffmpeg_bin, t
         mkvmerge_bin = _find_mkvmerge() if ext == ".mkv" else None
         if mkvmerge_bin:
             # mkvmerge correctly handles raw HEVC timestamps
-            subprocess.run(
+            _run_watched(
                 [mkvmerge_bin, "-o", final_tmp,
                  "--default-duration", f"0:{fps_str}",
                  injected_hevc_path,
                  "--no-video", str(output_path)],
-                check=True, capture_output=True,
-            )
+                "[HDR] packing the final file", total_bytes=_sz(injected_hevc_path) + _sz(output_path) // 20,
+                paths=[final_tmp])
         else:
-            subprocess.run(
+            _run_watched(
                 [ffmpeg_bin, "-y",
                  "-i", str(output_path),
                  "-i", injected_hevc_path,
                  "-map", "1:v", "-map", "0:a?",
                  "-c", "copy", "-copyts", final_tmp],
-                check=True, capture_output=True,
-            )
+                "[HDR] packing the final file", total_bytes=_sz(injected_hevc_path) + _sz(output_path) // 20,
+                paths=[final_tmp])
         os.replace(final_tmp, output_path)
     finally:
         for f in (injected_hevc_path, final_tmp):
@@ -1964,6 +2277,7 @@ def _notify_stage(args, name):
     to the job being finished or hung. This is purely a display signal: it computes
     nothing and changes no processing behavior, matching every other tqdm_fn call
     site in this module."""
+    _STAGE_ARGS["args"] = args
     stage_fn = (getattr(args, "state", None) or {}).get("stage_fn")
     if stage_fn is not None:
         try:
@@ -3591,20 +3905,18 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             if getattr(args, "end_time", None):
                 _hdr_trim_args += ["-to", str(parse_time(args.end_time))]
             try:
-                subprocess.run(
+                _run_watched(
                     [_hdr_ffmpeg_bin, "-y", *_hdr_trim_args, "-i", str(input_filename),
                      "-c:v", "copy", "-an", "-f", "hevc", _hdr_tmp_hevc],
-                    check=True, capture_output=True,
-                )
+                    "[HDR] extracting the video stream", total_bytes=_sz(input_filename), paths=[_hdr_tmp_hevc])
                 if hdr_types["dv"]:
                     _hdr_dovi_bin = _find_dovi_tool()
                     if _hdr_dovi_bin:
                         _hdr_rpu_path = path.join(_hdr_out_dir, "_iw3_rpu.bin")
                         try:
-                            subprocess.run(
+                            _run_watched(
                                 [_hdr_dovi_bin, "extract-rpu", "-i", _hdr_tmp_hevc, "-o", _hdr_rpu_path],
-                                check=True, capture_output=True,
-                            )
+                                "[HDR] extracting the Dolby Vision data", total_bytes=_sz(_hdr_tmp_hevc), reads=True)
                         except subprocess.CalledProcessError as e:
                             print(f"--preserve-dowi: DV RPU extraction failed: "
                                   f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
@@ -4401,16 +4713,14 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
                     trim_args += ["-ss", str(effective_start)]
                 if duration and effective_end < duration:
                     trim_args += ["-to", str(effective_end)]
-                subprocess.run(
+                _run_watched(
                     [fb, "-y", *trim_args, "-i", str(input_filename),
                      "-c:v", "copy", "-an", "-f", "hevc", tmp_hevc],
-                    check=True, capture_output=True,
-                )
+                    "[HDR] extracting the video stream", total_bytes=_sz(input_filename), paths=[tmp_hevc])
                 if rpu_path and dovi_b:
-                    subprocess.run(
+                    _run_watched(
                         [dovi_b, "extract-rpu", "-i", tmp_hevc, "-o", rpu_path],
-                        check=True, capture_output=True,
-                    )
+                        "[HDR] extracting the Dolby Vision data", total_bytes=_sz(tmp_hevc), reads=True)
                 if h10p_path and h10p_b:
                     subprocess.run(
                         [h10p_b, "extract", "-i", tmp_hevc, "-o", h10p_path],

@@ -28,7 +28,9 @@ Depth Blend option is on.
 **New: Dolby Vision + Cancel in the standalone RIFE tool (Tools tab).** Under "Original DV
 Source" you can pick your original Dolby Vision movie; after smoothing, the tool
 automatically puts the Dolby Vision back (it switches the output to H.265 for you). Leave it
-empty for the old behaviour. There is also a new Cancel button that stops the job; if you cancel
+empty for the old behaviour. If your 3D video already has Dolby Vision (you converted with
+"Preserve Dolby Vision"), you don't need the original movie at all: pick the 3D video itself
+there, or leave it empty and answer Yes when the tool asks whether to keep it. There is also a new Cancel button that stops the job; if you cancel
 during smoothing, the unfinished file is deleted.
 
 **Fixed: Live 3D no longer breaks when you resize the captured window.** Resizing the window

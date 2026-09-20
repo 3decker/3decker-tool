@@ -5184,10 +5184,12 @@ class MainFrame(wx.Frame):
         self.txt_rife_standalone_dv_source.SetToolTip(
             T("What it's for: leave EMPTY normally. Fill it in ONLY if the movie this 3D video was made from "
               "has Dolby Vision (or HDR10+) and you want it kept. RIFE creates new in-between frames that have "
-              "no Dolby Vision data, so a smoothed file always loses it. With the ORIGINAL movie (the one with "
-              "Dolby Vision, not the converted 3D file) picked here, this tool forces H.265 output and, right "
-              "after RIFE finishes, automatically puts the Dolby Vision data back -- each in-between frame "
-              "reuses its nearest real frame's data.\n"
+              "no Dolby Vision data, so a smoothed file always loses it. With a movie that has Dolby Vision "
+              "picked here, this tool forces H.265 output and, right after RIFE finishes, automatically puts "
+              "the Dolby Vision data back -- each in-between frame reuses its nearest real frame's data.\n"
+              "Which file: if the 3D video above ALREADY has Dolby Vision (you converted with Preserve Dolby "
+              "Vision), you can pick that same 3D video here (or just leave this empty and answer Yes when "
+              "asked) -- Start/End are then not needed. If it has none, pick the ORIGINAL movie instead.\n"
               "How it's safe: the smoothed file is only replaced when re-attaching fully succeeded. If it "
               "fails, you keep the smoothed video (without Dolby Vision) and the log explains why.\n"
               "Con: only Dolby Vision is carried over this way, not HDR10+. Takes a few extra minutes on a "
@@ -12010,24 +12012,44 @@ class MainFrame(wx.Frame):
         video_codec = self.cbo_rife_standalone_codec.GetClientData(self.cbo_rife_standalone_codec.GetSelection())
 
         dv = None
+        dv = None
         dv_source = self.txt_rife_standalone_dv_source.GetValue().strip()
+        if not dv_source:
+            # The 3D video itself may already carry Dolby Vision (converted with Preserve Dolby Vision). RIFE
+            # would silently drop it, so offer to keep it, using the 3D video itself as the source.
+            try:
+                from . import utils as iw3_utils
+                already_dv = bool(iw3_utils._detect_hdr_types(input_path, iw3_utils._find_ffprobe())["dv"])
+            except Exception:
+                already_dv = False
+            if already_dv:
+                answer = wx.MessageBox(
+                    T("This 3D video already contains Dolby Vision, and RIFE would remove it.\n\n"
+                      "Keep it? (Yes = the Dolby Vision is copied onto the smoothed video afterwards, output "
+                      "becomes H.265. No = smooth without Dolby Vision.)"),
+                    T("RIFE Frame Interpolation"), wx.YES_NO | wx.YES_DEFAULT | wx.ICON_QUESTION)
+                if answer == wx.YES:
+                    dv_source = input_path
         if dv_source:
             if not path.exists(dv_source):
-                wx.MessageBox(T("The Original DV Source file was not found. Pick the original Dolby Vision "
-                                "movie, or empty the field."),
+                wx.MessageBox(T("The Original DV Source file was not found. Pick the movie that has Dolby "
+                                "Vision (the original movie, or this 3D video itself if it already has it), "
+                                "or empty the field."),
                               T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
                 return
-            if path.abspath(dv_source) in (path.abspath(input_path), path.abspath(output_path)):
-                wx.MessageBox(T("Original DV Source must be the ORIGINAL movie, not the 3D video or the output "
-                                "file."),
+            if path.abspath(dv_source) == path.abspath(output_path):
+                wx.MessageBox(T("Original DV Source can't be the Output File."),
                               T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
                 return
             if video_codec not in ("libx265", "hevc_nvenc"):
                 # Dolby Vision only exists in HEVC: force it (GPU encode when a GPU is selected)
                 video_codec = "hevc_nvenc" if gpu_id >= 0 else "libx265"
+            same_file = path.abspath(dv_source) == path.abspath(input_path)
+            # When the 3D video itself is the source, its Dolby Vision already covers exactly the frames RIFE
+            # reads, so Start/End (which describe a range of an original movie) do not apply.
             dv = {"source": dv_source, "output": output_path,
-                  "start": self.txt_rife_standalone_dv_start.GetValue().strip() or None,
-                  "end": self.txt_rife_standalone_dv_end.GetValue().strip() or None}
+                  "start": None if same_file else (self.txt_rife_standalone_dv_start.GetValue().strip() or None),
+                  "end": None if same_file else (self.txt_rife_standalone_dv_end.GetValue().strip() or None)}
 
         cmd = [sys.executable, "-m", "iw3.rife_cli",
                "--input", input_path, "--output", output_path,
@@ -17929,13 +17951,45 @@ def _self_test_rife_standalone_dv_and_cancel():
             assert cmd[cmd.index("--video-codec") + 1] in ("hevc_nvenc", "libx265"), cmd
             assert dv == {"source": src, "output": out, "start": "00:25:00", "end": None}, dv
 
-            # 3. refusals: missing file, source == input
+            # 3. refusals: missing file, source == output
             captured.clear()
             frame.txt_rife_standalone_dv_source.SetValue(path.join(tmp, "nope.mkv"))
             frame.on_click_btn_rife_standalone_run(None)
-            frame.txt_rife_standalone_dv_source.SetValue(inp)
+            with open(out, "wb") as f:
+                f.write(b"x")
+            frame.txt_rife_standalone_dv_source.SetValue(out)
             frame.on_click_btn_rife_standalone_run(None)
             assert "wargs" not in captured and len(boxes) == 2, (captured, boxes)
+            os.remove(out)
+
+            # 3b. the 3D video itself as the DV source is ALLOWED (it already has Dolby Vision); Start/End ignored
+            captured.clear()
+            frame.txt_rife_standalone_dv_source.SetValue(inp)
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd, dv = captured["wargs"]
+            assert dv == {"source": inp, "output": out, "start": None, "end": None}, dv
+            assert cmd[cmd.index("--video-codec") + 1] in ("hevc_nvenc", "libx265")
+
+            # 3c. empty field + input that HAS Dolby Vision -> asks; Yes uses the input itself, No does not
+            from . import utils as U
+            orig_detect = U._detect_hdr_types
+            U._detect_hdr_types = lambda *a, **k: {"dv": True, "hdr10plus": False}
+            try:
+                frame.txt_rife_standalone_dv_source.SetValue("")
+                for answer, expect_dv in ((wx.YES, True), (wx.NO, False)):
+                    captured.clear()
+                    wx.MessageBox = lambda *a, _ans=answer, **kw: _ans
+                    frame.on_click_btn_rife_standalone_run(None)
+                    cmd, dv = captured["wargs"]
+                    assert (dv is not None) is expect_dv, (answer, dv)
+                    if expect_dv:
+                        assert dv["source"] == inp and dv["start"] is None
+                    else:
+                        assert "--video-codec" not in cmd
+                    frame.btn_rife_standalone_cancel.Disable()
+            finally:
+                U._detect_hdr_types = orig_detect
+                wx.MessageBox = lambda *a, **kw: boxes.append(a[0])
             frame.txt_rife_standalone_dv_source.SetValue("")
 
             # 4. Cancel: kills the running process and flags it

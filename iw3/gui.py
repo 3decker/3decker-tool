@@ -5810,7 +5810,8 @@ class MainFrame(wx.Frame):
               "setting below is how the INPUT is packed.\n"
               "A Dolby Vision / HDR video is kept 10-bit HDR (HEVC) and gets its Dolby Vision data back.\n"
               "Con: the stereo-aware modes make several full passes over the video, so they take clearly "
-              "longer, and they always write H.264.\n"
+              "longer. They use the GPU's video encoder (HEVC) when there is one, so the CPU is not the "
+              "bottleneck; otherwise H.264.\n"
               "Recommended: Whole frame for 2D; Stereo-aware 4K for 3D if you want the cleaner per-eye "
               "result."))
 
@@ -12767,6 +12768,8 @@ class MainFrame(wx.Frame):
                 cmd += iw3_utils._waifu2x_hdr_cli_args()       # 10-bit HEVC + HDR colour tags (overrides the codec box)
             elif codec:
                 cmd += ["--video-codec", codec]
+            elif iw3_utils._sdr_upscale_codec(gpu):
+                cmd += ["--video-codec", iw3_utils._sdr_upscale_codec(gpu)]     # "auto" = the GPU's video encoder
         else:
             axis = self.cbo_upscale_layout.GetClientData(self.cbo_upscale_layout.GetSelection())
             cmd = [sys.executable, "-m", "iw3.waifu2x_upscale_stereo_cli", "-i", input_path, "-o", output_path,
@@ -17946,7 +17949,10 @@ def _self_test_upscale_panel():
             assert cmd[cmd.index("-i") + 1] == video and cmd[cmd.index("-o") + 1] == out
             assert cmd[cmd.index("-m", 3) + 1] == "noise_scale2x"
             assert cmd[cmd.index("-n") + 1] == "1" and cmd[cmd.index("--style") + 1] == "photo"
-            assert cmd[cmd.index("--crf") + 1] == "20" and "-y" in cmd and "--video-codec" not in cmd
+            assert cmd[cmd.index("--crf") + 1] == "20" and "-y" in cmd
+            # "auto" codec = the GPU video encoder when there is one (ADR-208), otherwise no codec option at all
+            from . import utils as _Ux
+            assert ("--video-codec" in cmd) == (_Ux._sdr_upscale_codec(0) is not None), cmd
 
             frame.cbo_upscale_codec.SetSelection(2)
             cmd, err = frame.build_upscale_command()

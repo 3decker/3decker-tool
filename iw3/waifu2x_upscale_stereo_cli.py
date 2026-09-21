@@ -93,9 +93,23 @@ def _pick_hdr_codec(ffmpeg_bin, gpu=0):
     return codec
 
 
-def _video_encode_args(hdr_codec, crf, preset, gpu=0):
-    """ffmpeg output options for the split / join passes: 8-bit H.264 normally (unchanged), 10-bit HEVC with HDR
-    colour tags for an HDR video (hdr_codec = "hevc_nvenc" or "libx265"; None = SDR)."""
+def _pick_sdr_codec(ffmpeg_bin, gpu=0):
+    """ADR-208: "hevc_nvenc" for the passes of an SDR job when PyAV, this ffmpeg and a GPU all have it, else None
+    (software H.264, the old behaviour). Keeps the CPU free while waifu2x works the GPU."""
+    from .utils import _sdr_upscale_codec
+    codec = _sdr_upscale_codec(gpu)
+    if codec and not _has_ffmpeg_encoder(ffmpeg_bin, codec):
+        return None
+    return codec
+
+
+def _video_encode_args(hdr_codec, crf, preset, gpu=0, sdr_codec=None):
+    """ffmpeg output options for the split / join passes: 8-bit H.264 normally (unchanged), 8-bit hevc_nvenc when the
+    GPU encoder is available (sdr_codec, ADR-208), 10-bit HEVC with HDR colour tags for an HDR video
+    (hdr_codec = "hevc_nvenc" or "libx265"; None = SDR)."""
+    if hdr_codec is None and sdr_codec == "hevc_nvenc":
+        return ["-c:v", "hevc_nvenc", "-rc", "constqp", "-qp", crf, "-preset", "p5", "-gpu", str(gpu),
+                "-pix_fmt", "yuv420p"]
     if hdr_codec is None:
         return ["-c:v", "libx264", "-crf", crf, "-preset", preset]
     if hdr_codec == "hevc_nvenc":
@@ -141,7 +155,7 @@ def _run_ffmpeg_with_progress(cmd, total_frames, label):
 
 
 def _split_video(input_path, axis, left_path, right_path, ffmpeg_bin, crf, preset,
-                 hdr_codec=None, gpu=0, total_frames=None):
+                 hdr_codec=None, gpu=0, total_frames=None, sdr_codec=None):
     """Crops the packed source into two eye videos in ONE ffmpeg pass (both crop
     filters read from the same [0:v] input link, so the source is only decoded
     once). The crop geometry is the video-codec equivalent of
@@ -154,7 +168,7 @@ def _split_video(input_path, axis, left_path, right_path, ffmpeg_bin, crf, prese
         left_filter = "crop=w=iw:h=ih/2:x=0:y=0"
         right_filter = "crop=w=iw:h=ih-ih/2:x=0:y=ih/2"
     filter_complex = f"[0:v]{left_filter}[l];[0:v]{right_filter}[r]"
-    enc = _video_encode_args(hdr_codec, crf, preset, gpu)
+    enc = _video_encode_args(hdr_codec, crf, preset, gpu, sdr_codec)
     cmd = [ffmpeg_bin, "-y", "-i", input_path,
            "-filter_complex", filter_complex,
            "-map", "[l]"] + enc + ["-an", left_path,
@@ -163,7 +177,7 @@ def _split_video(input_path, axis, left_path, right_path, ffmpeg_bin, crf, prese
 
 
 def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength, device, crf, preset,
-                           hdr_codec=None, gpu=0):
+                           hdr_codec=None, gpu=0, sdr_codec=None):
     """Single-pass decode -> RGBTemporalStabilizer.stabilize() -> resize to the
     exact per-eye target -> encode, for ONE eye's already-upscaled video.
     Follows iw3.rife_cli's exact VU.process_video template."""
@@ -182,6 +196,14 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
         return x
 
     def config_callback(sw_format):
+        if hdr_codec is None and sdr_codec == "hevc_nvenc":
+            return VU.VideoOutputConfig(
+                fps=None,
+                output_fps=None,
+                pix_fmt="yuv420p",
+                video_codec="hevc_nvenc",
+                options={"rc": "constqp", "qp": str(crf), "gpu": str(gpu)},
+            )
         if hdr_codec is None:
             return VU.VideoOutputConfig(
                 fps=None,
@@ -210,7 +232,7 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
 
 
 def _join_video(left_path, right_path, audio_source_path, axis, output_path, ffmpeg_bin, crf, preset,
-                hdr_codec=None, gpu=0, total_frames=None):
+                hdr_codec=None, gpu=0, total_frames=None, sdr_codec=None):
     """Inverse of _split_video -- hstack ("sbs") / vstack ("tb") the two final
     eye videos back together, the video-codec equivalent of
     iw3.utils.join_stereo_frame, and re-muxes the ORIGINAL packed source's own
@@ -223,7 +245,7 @@ def _join_video(left_path, right_path, audio_source_path, axis, output_path, ffm
     cmd = [ffmpeg_bin, "-y",
            "-i", left_path, "-i", right_path, "-i", audio_source_path,
            "-filter_complex", f"[0:v][1:v]{stack_filter}[v]",
-           "-map", "[v]", "-map", "2:a?"] + _video_encode_args(hdr_codec, crf, preset, gpu) + [
+           "-map", "[v]", "-map", "2:a?"] + _video_encode_args(hdr_codec, crf, preset, gpu, sdr_codec) + [
            "-c:a", "aac",
            output_path]
     _run_ffmpeg_with_progress(cmd, total_frames, "[4/4] joining")
@@ -242,6 +264,7 @@ def run(input_path, output_path, split_axis, target_packed_width,
     ffmpeg_bin = _get_ffmpeg_bin()
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
     hdr_codec = _pick_hdr_codec(ffmpeg_bin, gpu) if hdr else None
+    sdr_codec = None if hdr else _pick_sdr_codec(ffmpeg_bin, gpu)
 
     sw_format = VU.VideoMetadata.from_file(input_path)
     if full_4k_layout:
@@ -255,6 +278,8 @@ def run(input_path, output_path, split_axis, target_packed_width,
     if hdr_codec:
         extra_args = ["--video-codec", hdr_codec, "--pix-fmt", "yuv420p10le", "--colorspace", "bt2020-pq-tv",
                       "--crf", str(crf)]
+    elif sdr_codec:
+        extra_args = ["--video-codec", sdr_codec, "--crf", str(crf)]
 
     out_dir = path.dirname(path.abspath(output_path)) or "."
     base = path.splitext(path.basename(output_path))[0]
@@ -269,7 +294,7 @@ def run(input_path, output_path, split_axis, target_packed_width,
     try:
         print(f"[iw3] [1/4] splitting {split_axis} into two eye videos...", file=sys.stderr, flush=True)
         _split_video(input_path, split_axis, left_src, right_src, ffmpeg_bin, crf, preset,
-                     hdr_codec=hdr_codec, gpu=gpu, total_frames=total_frames)
+                     hdr_codec=hdr_codec, gpu=gpu, total_frames=total_frames, sdr_codec=sdr_codec)
 
         print(f"[iw3] [2/4] upscaling each eye with waifu2x ({method})...", file=sys.stderr, flush=True)
         for src, up in ((left_src, left_up), (right_src, right_up)):
@@ -283,12 +308,12 @@ def run(input_path, output_path, split_axis, target_packed_width,
         for up, final in ((left_up, left_final), (right_up, right_final)):
             _smooth_and_resize_eye(up, final, plan["target_eye_w"], plan["target_eye_h"],
                                     temporal_stabilize_strength, device, crf, preset,
-                                    hdr_codec=hdr_codec, gpu=gpu)
+                                    hdr_codec=hdr_codec, gpu=gpu, sdr_codec=sdr_codec)
 
         print(f"[iw3] [4/4] recombining ({out_axis}) to {plan['target_packed_w']}x{plan['target_packed_h']}...",
               file=sys.stderr, flush=True)
         _join_video(left_final, right_final, input_path, out_axis, output_path, ffmpeg_bin, crf, preset,
-                    hdr_codec=hdr_codec, gpu=gpu, total_frames=total_frames)
+                    hdr_codec=hdr_codec, gpu=gpu, total_frames=total_frames, sdr_codec=sdr_codec)
     finally:
         for f in tmp_files:
             if path.exists(f):

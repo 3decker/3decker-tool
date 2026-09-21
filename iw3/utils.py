@@ -177,6 +177,12 @@ def _run_waifu2x_upscale(output_path, args):
         extra_args = _waifu2x_hdr_cli_args()
         if ext.lower() != ".mkv":
             upscaled_path = f"{base}_w2x.mkv"
+    else:
+        sdr_codec = _sdr_upscale_codec()
+        if sdr_codec:
+            extra_args = ["--video-codec", sdr_codec]
+    if extra_args and getattr(args, "crf", None) is not None:
+        extra_args = list(extra_args) + ["--crf", str(int(args.crf))]
 
     _notify_stage(args, STAGE_WAIFU2X_UPSCALE)
     print(f"[iw3] Upscaling finished output with waifu2x ({method}, noise={noise_level}, "
@@ -673,6 +679,23 @@ def _hdr_upscale_codec():
 def _waifu2x_hdr_cli_args():
     """waifu2x.cli options that keep an HDR video HDR: 10-bit HEVC with BT.2020/PQ colour tags."""
     return ["--video-codec", _hdr_upscale_codec(), "--pix-fmt", "yuv420p10le", "--colorspace", "bt2020-pq-tv"]
+
+
+def _sdr_upscale_codec(gpu=0):
+    """ADR-208: "hevc_nvenc" (the GPU's own video encoder) for the video an upscale writes, when this machine has
+    one, else None (= the tool's default software encoder). Without it the CPU compressed every enlarged frame
+    (12 of 24 cores busy, the GPU waiting for it). HEVC rather than H.264 because H.264 NVENC stops at 4096 pixels
+    and an upscaled eye / a Full SBS frame is wider or taller than that."""
+    if gpu is not None and gpu < 0:
+        return None
+    try:
+        import av
+        av.codec.Codec("hevc_nvenc", "w")
+        if torch.cuda.is_available():
+            return "hevc_nvenc"
+    except Exception:
+        pass
+    return None
 
 
 def _reinject_dv_after_upscale(source_path, upscaled_path, args, log=None, proc_hook=None, progress_cb=None):

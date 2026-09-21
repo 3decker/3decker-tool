@@ -18332,6 +18332,57 @@ def _self_test_dolby_vision_step_progress():
     print("_self_test_dolby_vision_step_progress: PASS")
 
 
+def _self_test_inpaint_download_errors():
+    """A failed inpainting-model download (the optional "Aether" models point at a GitHub release that may not exist:
+    ADR-131 / ADR-200) must give a plain-language message, not a raw "HTTP Error 404". Other errors and the success
+    path must be untouched. Fake downloads only."""
+    import urllib.error
+    from unittest import mock
+    from . import inpaint_utils as IU
+
+    IU.INPAINT_MODELS["Fake_Test_Model"] = {"video": "https://example.invalid/v.pth", "image": "https://example.invalid/i.pth"}
+    try:
+        def http404(*a, **k):
+            raise urllib.error.HTTPError("https://example.invalid/v.pth", 404, "Not Found", {}, None)
+
+        with mock.patch.object(IU, "load_model", http404):
+            for loader in (IU.load_video_inpaint_model, IU.load_image_inpaint_model):
+                try:
+                    loader("Fake_Test_Model", 0)
+                    assert False, "must raise"
+                except RuntimeError as e:
+                    text = str(e)
+                    assert "Fake_Test_Model" in text and "404" in text and IU.INPAINT_MODEL_DEFAULT in text, text
+                    assert "https://example.invalid" in text and isinstance(e.__cause__, urllib.error.HTTPError)
+
+        def offline(*a, **k):
+            raise urllib.error.URLError("getaddrinfo failed")
+
+        with mock.patch.object(IU, "load_model", offline):
+            try:
+                IU.load_video_inpaint_model("Fake_Test_Model", 0)
+                assert False, "must raise"
+            except RuntimeError as e:
+                assert "internet connection" in str(e) and "getaddrinfo failed" in str(e)
+
+        with mock.patch.object(IU, "load_model", lambda *a, **k: (_ for _ in ()).throw(ValueError("bad file"))):
+            try:
+                IU.load_video_inpaint_model("Fake_Test_Model", 0)
+                assert False, "must raise"
+            except ValueError as e:
+                assert str(e) == "bad file", "other errors must stay untouched"
+
+        class _Model:
+            def eval(self):
+                return self
+
+        with mock.patch.object(IU, "load_model", lambda *a, **k: (_Model(), None)):
+            assert isinstance(IU.load_video_inpaint_model("Fake_Test_Model", 0), _Model)
+    finally:
+        IU.INPAINT_MODELS.pop("Fake_Test_Model", None)
+    print("_self_test_inpaint_download_errors: PASS")
+
+
 def _self_test_every_step_shows_progress():
     """Every step of a job now feeds the progress bar with what it can measure: frames / FPS / ETA where frames
     exist, GB / MB per second / ETA for file work (copy, extract, inject, mux), percent / ETA for the audio & subtitle
@@ -18626,6 +18677,7 @@ def _run_self_tests():
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_dolby_vision_step_progress,
+        _self_test_inpaint_download_errors,
         _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,
         _self_test_standalone_tool_titles_share_accent_colour,

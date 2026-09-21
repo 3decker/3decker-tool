@@ -113,13 +113,34 @@ def _load_inpaint_model_list():
 INPAINT_MODELS = _load_inpaint_model_list()
 
 
+def _load_inpaint_checkpoint(name, which, device_id):
+    """load_model() for an inpaint checkpoint, but a failed DOWNLOAD becomes a plain-language message. The three optional
+    "Aether" models are registered with download addresses on the project's GitHub releases; if that file was never
+    uploaded (or the PC is offline) the raw "HTTP Error 404: Not Found" gave no hint what to do."""
+    import urllib.error
+    location = INPAINT_MODELS[name][which]
+    try:
+        return load_model(location, device_ids=[device_id], weights_only=True)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"The inpainting model '{name}' could not be downloaded (the server answered: {e.code} {e.reason}). "
+            f"Its file is not available at: {location}\n\n"
+            f"What to do: choose the '{INPAINT_MODEL_DEFAULT}' inpainting model instead (it is the recommended "
+            f"one), or copy this model's .pth file into iw3/pretrained_models/hub/checkpoints/ yourself.") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"The inpainting model '{name}' could not be downloaded: {e.reason}. Check the internet connection "
+            f"and try again, or choose the '{INPAINT_MODEL_DEFAULT}' inpainting model (it is downloaded once "
+            f"during installation).") from e
+
+
 def load_image_inpaint_model(name, device_id):
     with TorchHubDir(HUB_MODEL_DIR):
         if name is None:
             name = INPAINT_MODEL_DEFAULT
         if name not in INPAINT_MODELS:
             raise ValueError(f"inpaint model `{name}` is not defined")
-        model, _ = load_model(INPAINT_MODELS[name]["image"], device_ids=[device_id], weights_only=True)
+        model, _ = _load_inpaint_checkpoint(name, "image", device_id)
         return model.eval()
 
 
@@ -129,7 +150,7 @@ def load_video_inpaint_model(name, device_id):
             name = INPAINT_MODEL_DEFAULT
         if name not in INPAINT_MODELS:
             raise ValueError(f"inpaint model `{name}` is not defined")
-        model, _ = load_model(INPAINT_MODELS[name]["video"], device_ids=[device_id], weights_only=True)
+        model, _ = _load_inpaint_checkpoint(name, "video", device_id)
         return model.eval()
 
 

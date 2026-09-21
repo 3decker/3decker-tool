@@ -15,6 +15,12 @@ it matters.
 
 ## Latest Update — September 20, 2026
 
+**Fixed: a confusing "HTTP Error 404" when an optional inpainting model can't be downloaded.**
+The three optional "Aether" inpainting models are downloaded from the project's GitHub page the
+first time you use one. If a model can't be downloaded, you now get a clear message that names the
+model, says what went wrong and tells you what to do (pick "light_inpaint_v1", the recommended one,
+or check your internet connection) instead of a raw error code.
+
 **Improved: every step after the conversion now shows real progress in the main bar.** Before,
 steps like "Restoring Audio & Subtitles", the Dolby Vision steps and the waifu2x upscale showed only
 "running 01:05" with a full bar. Now each one fills the bar and shows the numbers that fit it:

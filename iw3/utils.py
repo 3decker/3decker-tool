@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import traceback
 import os
 import csv
@@ -1968,7 +1968,8 @@ def make_output_filename(input_filename, args, video=False):
         inpaint_methods = {"forward_inpaint", "mlbw_l2_inpaint", "monobw_inpaint"}
         if args.method in inpaint_methods:
             inpaint_model_val = getattr(args, "inpaint_model", None) or "light_inpaint_v1"
-            im_tag = f"_im{inpaint_model_val}" if inpaint_model_val != "light_inpaint_v1" else ""
+            # Always named (even the default light_inpaint_v1), so a file always says which inpainting model made it.
+            im_tag = "_im" + re.sub(r"[^A-Za-z0-9._-]", "_", str(inpaint_model_val))
 
             overlap = getattr(args, "inpaint_overlap_frames", None) or [3, 3]
             overlap = list(overlap) if isinstance(overlap, (list, tuple)) else [overlap, overlap]

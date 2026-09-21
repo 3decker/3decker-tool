@@ -18383,6 +18383,29 @@ def _self_test_inpaint_download_errors():
     print("_self_test_inpaint_download_errors: PASS")
 
 
+def _self_test_inpaint_model_in_filename_and_metadata():
+    """Every output made with an inpaint method names its inpainting model in the filename (even the default
+    light_inpaint_v1) and in the embedded metadata; non-inpaint methods get neither."""
+    from . import utils as U
+    parser = U.create_parser(required_true=False)
+
+    def build(*extra):
+        a = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename", *extra])
+        a.video_extension = ".mkv"
+        return a
+
+    a = build("--method", "mlbw_l2_inpaint")
+    assert "_imlight_inpaint_v1" in U.make_output_filename("a.mp4", a, video=True)
+    assert "iw3_inpaint_model=light_inpaint_v1" in U._build_iw3_comment_metadata(a, video=True)
+    a = build("--method", "forward_inpaint", "--inpaint-model", "Rowan_High-Depth_Inpaint_e594-Medium")
+    assert "_imRowan_High-Depth_Inpaint_e594-Medium" in U.make_output_filename("a.mp4", a, video=True)
+    assert "iw3_inpaint_model=Rowan_High-Depth_Inpaint_e594-Medium" in U._build_iw3_comment_metadata(a, video=True)
+    a = build("--method", "row_flow_v3")
+    assert "_im" not in U.make_output_filename("a.mp4", a, video=True)
+    assert "iw3_inpaint_model" not in U._build_iw3_comment_metadata(a, video=True)
+    print("_self_test_inpaint_model_in_filename_and_metadata: PASS")
+
+
 def _self_test_rowan_model_registration():
     """Rowan's inpainting model must be registered on a fresh install AND appended to an existing
     inpaint_models.yml (without touching the user's own lines), and never added twice."""
@@ -18714,6 +18737,7 @@ def _run_self_tests():
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,
+        _self_test_inpaint_model_in_filename_and_metadata,
         _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,
         _self_test_standalone_tool_titles_share_accent_colour,

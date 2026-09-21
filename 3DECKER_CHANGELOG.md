@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — September 21, 2026
 
+**Improved: the Pop-Out Boost now goes up to 3.0 (it stopped at 2.0).** Useful when you use a higher Convergence (which leaves less room in front of the screen) and want the same pop-out: for example Convergence 0.6 needs a boost of 2.25 to match Convergence 0.4 with 1.5. The dropdown now also offers 2.25, 2.5 and 3.0, and the slider covers the whole range. Very large boosts stretch the picture edges harder, so keep Edge Fix at 3 and 2 or higher and check for halos on close objects.
+
 **Fixed: the 3D tag is now kept on the final file when you use RIFE or Restore Audio & Subtitles.** The file name said `_smtag` (3D tag on), but the tag was only set on the first file. RIFE, the Dolby Vision re-attach and the audio/subtitle restore each make a new file, so the final one was not marked as 3D and VLC or a TV could not switch to 3D by itself. It is now set again on every file those steps produce.
 
 **Improved: your file name now always says which inpainting model was used.** With any inpainting method, the name now includes `_im` plus the model (for example `_imlight_inpaint_v1` or `_imRowan_High-Depth_Inpaint_e594-Medium`). Before, the default model was left out. The model is also stored inside the file's information (the `iw3_inpaint_model` note). The Pop-Out Boost / Limit is now named too: `_pob125` means a boost of 1.25, `_pol70` means a limit of 0.7 (nothing is added when it is off), and it is stored inside the file as `iw3_max_negative_parallax`. Names for methods that don't use inpainting are unchanged. Note: because the default now appears in the name, the resume feature will not recognise a half-finished file made under the old naming.

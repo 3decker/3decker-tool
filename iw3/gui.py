@@ -773,7 +773,7 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_divergence", "sld_stereo_divergence", 1.0, 5.0, 10, False, "update_divergence_warning"),
     ("cbo_convergence", "sld_stereo_convergence", 0.0, 1.0, 100, False, None),
     ("cbo_convergence_smoothing", "sld_stereo_convergence_smoothing", 0.0, 0.95, 100, False, None),
-    ("cbo_max_negative_parallax", "sld_stereo_max_negative_parallax", 0.0, 2.0, 100, False, None),
+    ("cbo_max_negative_parallax", "sld_stereo_max_negative_parallax", 0.0, 3.0, 100, False, None),
     ("cbo_splat_blend_temperature", "sld_stereo_splat_blend_temperature", 10.0, 85.0, 1, False, None),
     ("cbo_depth_refine_strength", "sld_stereo_depth_refine_strength", 0.25, 1.5, 100, False, None),
     ("cbo_temporal_stabilize_strength", "sld_stereo_temporal_stabilize_strength", 0.3, 0.9, 100, False, None),
@@ -1228,7 +1228,7 @@ class MainFrame(wx.Frame):
 
         self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Pop-Out Limit / Boost"))
         self.cbo_max_negative_parallax = EditableComboBox(
-            self.grp_stereo, choices=["1.0", "1.25", "1.5", "2.0", "0.7", "0.4", "0.0"],
+            self.grp_stereo, choices=["1.0", "1.25", "1.5", "2.0", "2.25", "2.5", "3.0", "0.7", "0.4", "0.0"],
             name="cbo_max_negative_parallax")
         self.cbo_max_negative_parallax.SetSelection(0)
         self.cbo_max_negative_parallax.SetToolTip(
@@ -1236,7 +1236,7 @@ class MainFrame(wx.Frame):
               "kept separate from Convergence Plane (which only sets WHERE the screen plane sits).\n"
               "Below 1.0 = LIMIT: a hard cap on pop-out. 1.0 = off (default). 0.0 = nothing may come out "
               "of the screen at all. Above 1.0 = BOOST: multiplies how far things in front of the screen "
-              "come out -- 1.25 = 25% more, 1.5 = 50% more, 2.0 = double. Things behind the screen are not "
+              "come out -- 1.25 = 25% more, 1.5 = 50% more, 2.0 = double, 3.0 = triple (the maximum). Things behind the screen are not "
               "changed by the boost.\n"
               "How it works: applied last, after every other depth adjustment (Convergence Mode, "
               "Foreground/Midground/Background Pop), so it acts on the final result.\n"
@@ -1248,7 +1248,7 @@ class MainFrame(wx.Frame):
               "Recommended: 1.0 (off). For MORE pop-out try 1.25, then 1.5, on a short clip first. Use "
               "0.7 or 0.4 (not 0.0) when a close-up shot feels uncomfortable."))
         self.sld_stereo_max_negative_parallax = _build_stereo_slider(
-            self.grp_stereo, self.cbo_max_negative_parallax, 0.0, 2.0, 100)
+            self.grp_stereo, self.cbo_max_negative_parallax, 0.0, 3.0, 100)
 
         self.lbl_ipd_offset = wx.StaticText(self.grp_stereo, label=T("Your Own Size"))
         # SpinCtrlDouble is better, but cannot save with PersistenceManager
@@ -17362,7 +17362,7 @@ def _self_test_max_negative_parallax_field():
         args_probe.max_negative_parallax = 2.0
         frame.apply_parsed_args_to_gui(args_probe)
         assert frame.cbo_max_negative_parallax.GetValue() == "2.0"
-        assert (frame.sld_stereo_max_negative_parallax.GetMin(), frame.sld_stereo_max_negative_parallax.GetMax()) == (0, 200), \
+        assert (frame.sld_stereo_max_negative_parallax.GetMin(), frame.sld_stereo_max_negative_parallax.GetMax()) == (0, 300), \
             "slider spans 0..2"
 
         frame.cbo_max_negative_parallax.SetValue("1.0")
@@ -18400,10 +18400,15 @@ def _self_test_inpaint_model_in_filename_and_metadata():
     a = build("--method", "forward_inpaint", "--inpaint-model", "Rowan_High-Depth_Inpaint_e594-Medium")
     assert "_imRowan_High-Depth_Inpaint_e594-Medium" in U.make_output_filename("a.mp4", a, video=True)
     assert "iw3_inpaint_model=Rowan_High-Depth_Inpaint_e594-Medium" in U._build_iw3_comment_metadata(a, video=True)
-    for value, tag in (("1.25", "_pob125"), ("1.15", "_pob115"), ("2.0", "_pob200"), ("0.7", "_pol70")):
+    for value, tag in (("1.25", "_pob125"), ("1.15", "_pob115"), ("2.0", "_pob200"), ("2.25", "_pob225"), ("3.0", "_pob300"), ("0.7", "_pol70")):
         a = build("--method", "mlbw_l2_inpaint", "--max-negative-parallax", value)
         assert tag + "_" in U.make_output_filename("a.mp4", a, video=True), value
         assert f"iw3_max_negative_parallax={float(value)}" in U._build_iw3_comment_metadata(a, video=True), value
+    try:  # the boost ceiling is 3.0
+        build("--method", "mlbw_l2_inpaint", "--max-negative-parallax", "3.1")
+        raise AssertionError("3.1 must be rejected")
+    except SystemExit:
+        pass
     a = build("--method", "mlbw_l2_inpaint")
     assert "_pob" not in U.make_output_filename("a.mp4", a, video=True) and "_pol" not in U.make_output_filename("a.mp4", a, video=True)
     assert "max_negative_parallax" not in U._build_iw3_comment_metadata(a, video=True)

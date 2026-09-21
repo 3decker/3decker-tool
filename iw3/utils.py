@@ -5776,8 +5776,8 @@ def create_parser(required_true=True):
                         help=("EMA decay for auto convergence modes (sod_v1/face_detect). "
                               "Higher = smoother but slower to react. Lower = more aggressive/dynamic. "
                               "0 = no smoothing"))
-    parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 2.0)],
-                        help=("Pop-out limit (0-1) / boost (1-2), independent of the Convergence value itself. "
+    parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 3.0)],
+                        help=("Pop-out limit (0-1) / boost (1-3), independent of the Convergence value itself. "
                               "ADR-179 limit: below 1.0 is a hard safety cap on negative parallax (how far anything "
                               "is allowed to pop out in front of the Convergence plane), same units as "
                               "Convergence: 0.0 = no pop-out allowed at all (nothing sits in front of the screen). "

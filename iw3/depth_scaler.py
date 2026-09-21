@@ -23,7 +23,7 @@ _FARNEBACK_PARAMS_FAST = (0.5, 2, 13, 1, 5, 1.1, 0)
 
 def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
                                   strength, max_shift_velocity, flat_region_boost, edge_protection,
-                                  fast=False):
+                                  fast=False, flow_downscale=1):
     """Core motion-warped blend shared by TemporalStabilizer (single-channel depth,
     (H,W) arrays) and RGBTemporalStabilizer (3-channel RGB, (H,W,3) arrays) below --
     extracted verbatim from TemporalStabilizer.stabilize()'s body so depth's existing,
@@ -45,7 +45,16 @@ def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
     prev_value bookkeeping (this function is stateless)."""
     h, w = gray.shape
     farneback_params = _FARNEBACK_PARAMS_FAST if fast else _FARNEBACK_PARAMS_ACCURATE
-    flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, *farneback_params)
+    if flow_downscale > 1:
+        # ADR-210: analyse the motion at 1/flow_downscale size and scale the flow field back up (the flow of a smooth
+        # video is smooth, so little is lost); the warp and the blend still run at full size. Default 1 = unchanged.
+        small = (max(8, w // flow_downscale), max(8, h // flow_downscale))
+        flow_small = cv2.calcOpticalFlowFarneback(
+            cv2.resize(prev_gray, small, interpolation=cv2.INTER_AREA),
+            cv2.resize(gray, small, interpolation=cv2.INTER_AREA), None, *farneback_params)
+        flow = cv2.resize(flow_small, (w, h), interpolation=cv2.INTER_LINEAR) * float(flow_downscale)
+    else:
+        flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, *farneback_params)
     grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
     map_x = grid_x + flow[..., 0]
     map_y = grid_y + flow[..., 1]
@@ -231,12 +240,17 @@ class RGBTemporalStabilizer:
     math they share now lives in exactly one place regardless."""
 
     def __init__(self, enabled=False, strength=0.5,
-                 max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0):
+                 max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0, fast=False,
+                 flow_downscale=1):
         self.enabled = enabled
         self.strength = strength
         self.max_shift_velocity = max_shift_velocity
         self.flat_region_boost = float(flat_region_boost)
         self.edge_protection = float(edge_protection)
+        self.flow_downscale = max(1, int(flow_downscale))
+        # fast=True uses the lighter Farneback settings (_FARNEBACK_PARAMS_FAST, the same ones TemporalStabilizer
+        # offers): several times quicker motion analysis for a small loss of accuracy (ADR-210). Default False = unchanged.
+        self.fast = bool(fast)
         self.prev_gray = None
         self.prev_rgb = None
 
@@ -276,6 +290,7 @@ class RGBTemporalStabilizer:
         stabilized = _optical_flow_temporal_blend(
             value_np, gray, self.prev_gray, self.prev_rgb,
             self.strength, self.max_shift_velocity, self.flat_region_boost, self.edge_protection,
+            fast=self.fast, flow_downscale=self.flow_downscale,
         )
 
         self.prev_gray = gray

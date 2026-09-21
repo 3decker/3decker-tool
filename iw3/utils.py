@@ -1359,6 +1359,11 @@ def _run_waifu2x_upscale_stereo(output_path, args):
            "--preset", str(preset)]
     if hdr["hdr"]:
         cmd += ["--hdr"]
+    smoothing = getattr(args, "waifu2x_smoothing", None) or "fast"
+    if smoothing == "off":
+        cmd += ["--temporal-stabilize-strength", "0"]
+    elif smoothing == "accurate":
+        cmd += ["--smoothing-quality", "accurate"]
     gpu = getattr(args, "gpu", None)
     if isinstance(gpu, (list, tuple)) and len(gpu) > 0:
         cmd += ["--gpu", str(gpu[0])]
@@ -6250,6 +6255,10 @@ def create_parser(required_true=True):
                               "\"fsbs4k\" / \"ftb4k\" are the FULL 4K layouts: every eye becomes a real 3840-wide "
                               "picture (3840x2160 for 16:9) and the two are packed side by side (7680x2160) or "
                               "top/bottom (3840x4320), whatever the source packing was."))
+    parser.add_argument("--waifu2x-smoothing", type=str, default="fast", choices=["fast", "accurate", "off"],
+                        help=("Flicker smoothing of the stereo-aware upscale (--waifu2x-upscale-target 4k/8k/fsbs4k/"
+                              "ftb4k): 'fast' (default), 'accurate' (the slow original motion analysis) or 'off' "
+                              "(no smoothing at all: about 70x faster for that step)."))
     parser.add_argument("--foreground-scale", type=float, choices=[Range(-3.0, 3.0)], default=0,
                         help="foreground scaling level. 0 is disabled")
     parser.add_argument("--mapper-type", type=str, choices=["div", "mul", "shift"], default=None,

@@ -27,6 +27,7 @@ Pipeline (each step is its own full pass over the video):
 """
 import argparse
 import os
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 import threading
@@ -56,7 +57,12 @@ def create_parser():
     parser.add_argument("--waifu2x-method", type=str, default="noise_scale2x")
     parser.add_argument("--waifu2x-noise-level", type=int, default=1)
     parser.add_argument("--waifu2x-style", type=str, default="photo")
-    parser.add_argument("--temporal-stabilize-strength", type=float, default=0.5)
+    parser.add_argument("--temporal-stabilize-strength", type=float, default=0.5,
+                        help="flicker smoothing of each upscaled eye, 0 = off (the fastest, skips the motion analysis "
+                             "that dominates the run time)")
+    parser.add_argument("--smoothing-quality", type=str, default="fast", choices=["fast", "accurate"],
+                        help=("motion analysis used by the flicker smoothing: 'fast' (default, several times quicker) "
+                              "or 'accurate' (the original settings)"))
     parser.add_argument("--crf", type=str, default="20")
     parser.add_argument("--preset", type=str, default="medium")
     parser.add_argument("--gpu", type=int, default=0)
@@ -176,24 +182,62 @@ def _split_video(input_path, axis, left_path, right_path, ffmpeg_bin, crf, prese
     _run_ffmpeg_with_progress(cmd, total_frames, "[1/4] splitting")
 
 
+class _SharedProgress:
+    """One progress line for several passes that run at the same time (the two eyes): their frame counts are added
+    together, so the window sees a single steadily rising "N/M [" line instead of two interleaved ones."""
+
+    def __init__(self, label, total):
+        self.label, self.total, self.done, self.start, self.last = label, max(1, int(total)), 0, time.time(), 0.0
+        self.lock = threading.Lock()
+
+    def make_bar(self, desc=None, total=None, ncols=None):
+        return _SharedBar(self)
+
+    def add(self, n):
+        with self.lock:
+            self.done = min(self.total, self.done + n)
+            now = time.time()
+            if self.done >= self.total or now - self.last >= 0.5:
+                self.last = now
+                print(_progress_line(self.label, self.done, self.total, self.start), file=sys.stderr, flush=True)
+
+
+class _SharedBar:
+    """The tiny tqdm-like object VU.process_video needs (update / close)."""
+
+    def __init__(self, shared):
+        self.shared = shared
+
+    def update(self, n=1):
+        self.shared.add(n)
+
+    def close(self):
+        pass
+
+
 def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength, device, crf, preset,
-                           hdr_codec=None, gpu=0, sdr_codec=None):
-    """Single-pass decode -> RGBTemporalStabilizer.stabilize() -> resize to the
-    exact per-eye target -> encode, for ONE eye's already-upscaled video.
-    Follows iw3.rife_cli's exact VU.process_video template."""
-    stabilizer = RGBTemporalStabilizer(enabled=True, strength=strength)
+                           hdr_codec=None, gpu=0, sdr_codec=None, quality="fast", tqdm_fn=None):
+    """Single-pass decode -> resize to the exact per-eye target -> RGBTemporalStabilizer.stabilize() -> encode, for
+    ONE eye's already-upscaled video. Follows iw3.rife_cli's exact VU.process_video template.
+
+    ADR-210: the resize now comes BEFORE the flicker smoothing. The smoothing is a CPU optical-flow analysis whose
+    cost grows with the pixel count; running it on the full enlarged frame (3840x3216) took ~2 s a frame and made
+    it the slowest part of the whole upscale. At the final size it has 2-4x fewer pixels, and flicker only has to
+    be calm at the size that is delivered. strength <= 0 skips the smoothing completely."""
+    fast = quality != "accurate"
+    stabilizer = RGBTemporalStabilizer(enabled=strength > 0, strength=strength, fast=fast,
+                                       flow_downscale=2 if fast else 1)
 
     @torch.inference_mode()
     def frame_callback(frame):
         if frame is None:
             return None
         x = VU.to_tensor(frame, device=device)
-        x = stabilizer.stabilize(x)
         h, w = x.shape[-2:]
         if (w, h) != (target_w, target_h):
             x = F.interpolate(x.unsqueeze(0), size=(target_h, target_w),
                                mode="bicubic", antialias=True).squeeze(0).clamp(0, 1)
-        return x
+        return stabilizer.stabilize(x)
 
     def config_callback(sw_format):
         if hdr_codec is None and sdr_codec == "hevc_nvenc":
@@ -228,6 +272,7 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
         config_callback=config_callback,
         title="Stereo Upscale Smooth",
         device=device,
+        tqdm_fn=tqdm_fn,
     )
 
 
@@ -254,7 +299,7 @@ def _join_video(left_path, right_path, audio_source_path, axis, output_path, ffm
 def run(input_path, output_path, split_axis, target_packed_width,
         waifu2x_method="noise_scale2x", waifu2x_noise_level=1, waifu2x_style="photo",
         temporal_stabilize_strength=0.5, crf="20", preset="medium", gpu=0,
-        hdr=False, full_4k_layout=None):
+        hdr=False, full_4k_layout=None, smoothing_quality="fast"):
     from .utils import (
         _estimate_video_frames, _get_ffmpeg_bin, _invoke_waifu2x_cli, compute_full_4k_plan,
         compute_stereo_upscale_plan, resolve_waifu2x_method_for_tier,
@@ -305,10 +350,18 @@ def run(input_path, output_path, split_axis, target_packed_width,
 
         print("[iw3] [3/4] temporal-smoothing + resizing each eye "
               f"to {plan['target_eye_w']}x{plan['target_eye_h']}...", file=sys.stderr, flush=True)
-        for up, final in ((left_up, left_final), (right_up, right_final)):
-            _smooth_and_resize_eye(up, final, plan["target_eye_w"], plan["target_eye_h"],
-                                    temporal_stabilize_strength, device, crf, preset,
-                                    hdr_codec=hdr_codec, gpu=gpu, sdr_codec=sdr_codec)
+        # ADR-210: both eyes at once. Each pass is limited by one CPU core (decode / optical flow), so two passes
+        # take about the time of one.
+        shared = _SharedProgress("[3/4] smoothing", (total_frames or 0) * 2) if total_frames else None
+        tqdm_fn = shared.make_bar if shared else None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [pool.submit(_smooth_and_resize_eye, up, final, plan["target_eye_w"], plan["target_eye_h"],
+                                temporal_stabilize_strength, device, crf, preset,
+                                hdr_codec=hdr_codec, gpu=gpu, sdr_codec=sdr_codec,
+                                quality=smoothing_quality, tqdm_fn=tqdm_fn)
+                    for up, final in ((left_up, left_final), (right_up, right_final))]
+            for job in jobs:
+                job.result()
 
         print(f"[iw3] [4/4] recombining ({out_axis}) to {plan['target_packed_w']}x{plan['target_packed_h']}...",
               file=sys.stderr, flush=True)
@@ -335,7 +388,7 @@ def main(argv=None):
         waifu2x_style=args.waifu2x_style,
         temporal_stabilize_strength=args.temporal_stabilize_strength,
         crf=args.crf, preset=args.preset, gpu=args.gpu,
-        hdr=args.hdr, full_4k_layout=args.full_4k_layout,
+        hdr=args.hdr, full_4k_layout=args.full_4k_layout, smoothing_quality=args.smoothing_quality,
     )
 
 def _self_test():

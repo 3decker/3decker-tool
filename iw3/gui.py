@@ -5855,6 +5855,25 @@ class MainFrame(wx.Frame):
             T("waifu2x model style. \"photo\" is the better default for real movie footage; \"art\" is "
               "tuned for illustration and anime."))
 
+        self.lbl_upscale_smoothing = wx.StaticText(self.cpn_upscale.GetPane(), label=T("Flicker Smoothing"))
+        self.cbo_upscale_smoothing = wx.ComboBox(self.cpn_upscale.GetPane(), name="cbo_upscale_smoothing")
+        self.cbo_upscale_smoothing.SetEditable(False)
+        self.cbo_upscale_smoothing.Append(T("Fast (recommended)"), "fast")
+        self.cbo_upscale_smoothing.Append(T("Accurate (slower)"), "accurate")
+        self.cbo_upscale_smoothing.Append(T("Off (fastest)"), "off")
+        self.cbo_upscale_smoothing.SetSelection(0)
+        self.cbo_upscale_smoothing.SetToolTip(
+            T("What it's for: only for the Stereo-aware modes. After each eye is enlarged, a smoothing pass "
+              "calms flicker between frames by analysing the motion and blending each frame with the "
+              "previous one. That analysis is the slowest part after the enlargement itself.\n"
+              "Fast: the default; several times quicker than the original settings for almost the same "
+              "result.\n"
+              "Accurate: the original, more careful motion analysis. Much slower.\n"
+              "Off: no smoothing at all. About 70 times faster for that step (minutes instead of "
+              "hours on a movie); the enlarged picture is the same but small frame-to-frame shimmer in "
+              "fine detail is not calmed.\n"
+              "Recommended: Fast. Off if you are short on time or the picture is already stable."))
+
         self.lbl_upscale_layout = wx.StaticText(self.cpn_upscale.GetPane(), label=T("3D Layout"))
         self.cbo_upscale_layout = wx.ComboBox(self.cpn_upscale.GetPane(), name="cbo_upscale_layout")
         self.cbo_upscale_layout.SetEditable(False)
@@ -5972,6 +5991,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_upscale_layout, (h, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_upscale_gpu, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_upscale_gpu, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_upscale_smoothing, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_upscale_smoothing, (h, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_upscale_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_upscale_codec, (h, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_upscale_quality, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12593,6 +12614,7 @@ class MainFrame(wx.Frame):
     def on_changed_upscale_mode(self, event):
         whole = self.cbo_upscale_mode.GetClientData(self.cbo_upscale_mode.GetSelection()) == "whole"
         self.cbo_upscale_layout.Enable(not whole)
+        self.cbo_upscale_smoothing.Enable(not whole)
         self.cbo_upscale_codec.Enable(whole)
         # keep an auto-filled output name in step with the mode ("_w2x" vs "_w2x4k")
         current = self.txt_upscale_output.GetValue().strip()
@@ -12789,6 +12811,11 @@ class MainFrame(wx.Frame):
                     "--crf", crf, "--gpu", str(max(gpu, 0))]
             if hdr["hdr"]:
                 cmd += ["--hdr"]
+            smoothing = self.cbo_upscale_smoothing.GetClientData(self.cbo_upscale_smoothing.GetSelection())
+            if smoothing == "off":
+                cmd += ["--temporal-stabilize-strength", "0"]
+            elif smoothing == "accurate":
+                cmd += ["--smoothing-quality", "accurate"]
         return cmd, None
 
     def on_click_btn_upscale_run(self, event):
@@ -17991,6 +18018,14 @@ def _self_test_upscale_panel():
             assert frame.txt_upscale_output.GetValue().endswith("_w2xftb4k.mkv"), frame.txt_upscale_output.GetValue()
             cmd, err = frame.build_upscale_command()
             assert cmd[cmd.index("--full-4k-layout") + 1] == "tb" and "--hdr" not in cmd, cmd
+            assert frame.cbo_upscale_smoothing.IsEnabled() and "--temporal-stabilize-strength" not in cmd, cmd
+            frame.cbo_upscale_smoothing.SetSelection(2)
+            cmd, err = frame.build_upscale_command()
+            assert cmd[cmd.index("--temporal-stabilize-strength") + 1] == "0", cmd
+            frame.cbo_upscale_smoothing.SetSelection(1)
+            cmd, err = frame.build_upscale_command()
+            assert cmd[cmd.index("--smoothing-quality") + 1] == "accurate", cmd
+            frame.cbo_upscale_smoothing.SetSelection(0)
             # ADR-206: an HDR / Dolby Vision input keeps 10-bit HEVC HDR and gets its Dolby Vision data back
             from unittest import mock as _mock
             from . import utils as _U
@@ -18160,6 +18195,37 @@ def _self_test_upscale_full4k_hdr_and_progress():
             with contextlib.redirect_stderr(io.StringIO()):
                 assert U._apply_stereo_mode_tag(f, types.SimpleNamespace(stereo_mode_tag=True), value_override=1)
         assert "stereo-mode=1" in seen[0], seen
+    # -- ADR-210: the flicker smoothing is faster (half-size motion analysis, lighter settings) but still smooths, keeps
+    #    the shape, and is a no-op when off; the two eyes share ONE rising progress line
+    import torch as _torch
+    from .depth_scaler import RGBTemporalStabilizer
+    _torch.manual_seed(0)
+    base = _torch.linspace(0, 0.6, 96).expand(3, 64, 96).clone()
+    noisy = [(base + 0.08 * _torch.randn_like(base)).clamp(0, 1) for _ in range(10)]
+
+    def flicker(frames):
+        return sum((frames[i] - frames[i - 1]).abs().mean().item() for i in range(1, len(frames))) / (len(frames) - 1)
+
+    for kwargs in ({"fast": True, "flow_downscale": 2}, {"fast": False}):
+        stab = RGBTemporalStabilizer(enabled=True, strength=0.8, **kwargs)
+        out = [stab.stabilize(f) for f in noisy]
+        assert out[3].shape == noisy[3].shape and flicker(out) < flicker(noisy) * 0.8, kwargs
+    off = RGBTemporalStabilizer(enabled=False, strength=0.8)
+    assert _torch.equal(off.stabilize(noisy[0]), noisy[0])
+    assert RGBTemporalStabilizer(enabled=True).flow_downscale == 1 and not RGBTemporalStabilizer(enabled=True).fast
+
+    err = io.StringIO()
+    shared = C._SharedProgress("[3/4] smoothing", 20)
+    with contextlib.redirect_stderr(err):
+        bars = [shared.make_bar(), shared.make_bar()]
+        for _ in range(10):
+            bars[0].update(1)
+            bars[1].update(1)
+        bars[0].close()
+    lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+    assert lines and lines[-1].startswith("[3/4] smoothing: 20/20 [") and shared.done == 20, lines
+    counts = [int(__import__("re").search(r": (\d+)/", ln).group(1)) for ln in lines]
+    assert counts == sorted(counts), counts
     print("_self_test_upscale_full4k_hdr_and_progress: PASS")
 
 

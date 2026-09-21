@@ -5962,6 +5962,10 @@ class MainFrame(wx.Frame):
         self.btn_upscale_input.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_input)
         self.btn_upscale_output.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_output)
         self.cbo_upscale_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_upscale_mode)
+        # On Windows the selection can still be the OLD one while EVT_COMBOBOX runs, which left the boxes below in the
+        # state of the previous mode (Flicker Smoothing greyed out in a stereo-aware mode). Refresh again once the
+        # dropdown has closed and the selection is final.
+        self.cbo_upscale_mode.Bind(wx.EVT_COMBOBOX_CLOSEUP, self.on_upscale_mode_closeup)
         self.btn_upscale_run.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_run)
         self.btn_upscale_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_cancel)
         self.btn_upscale_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_upscale_log.Clear())
@@ -12611,11 +12615,22 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_upscale_output.SetValue(dlg.GetPath())
 
-    def on_changed_upscale_mode(self, event):
+    def _refresh_upscale_mode_controls(self):
+        """Enable only the boxes that matter for the selected mode (whole frame: codec; stereo-aware: 3D layout and
+        flicker smoothing)."""
         whole = self.cbo_upscale_mode.GetClientData(self.cbo_upscale_mode.GetSelection()) == "whole"
         self.cbo_upscale_layout.Enable(not whole)
         self.cbo_upscale_smoothing.Enable(not whole)
         self.cbo_upscale_codec.Enable(whole)
+
+    def on_upscale_mode_closeup(self, event):
+        event.Skip()
+        wx.CallAfter(self._refresh_upscale_mode_controls)
+
+    def on_changed_upscale_mode(self, event):
+        self._refresh_upscale_mode_controls()
+        if event is not None:
+            wx.CallAfter(self._refresh_upscale_mode_controls)     # again once the new selection is really in place
         # keep an auto-filled output name in step with the mode ("_w2x" vs "_w2x4k")
         current = self.txt_upscale_output.GetValue().strip()
         if current:
@@ -18007,6 +18022,17 @@ def _self_test_upscale_panel():
             cmd, err = frame.build_upscale_command()
             assert cmd[cmd.index("--target-packed-width") + 1] == "7680"
             assert frame.txt_upscale_output.GetValue().endswith("_w2x8k.mkv")
+            # the boxes follow the selected mode on their own (the state must never be left as the previous mode's)
+            frame.cbo_upscale_mode.SetSelection(1)
+            frame._refresh_upscale_mode_controls()
+            assert frame.cbo_upscale_smoothing.IsEnabled() and frame.cbo_upscale_layout.IsEnabled() \
+                and not frame.cbo_upscale_codec.IsEnabled()
+            frame.cbo_upscale_mode.SetSelection(0)
+            frame._refresh_upscale_mode_controls()
+            assert not frame.cbo_upscale_smoothing.IsEnabled() and not frame.cbo_upscale_layout.IsEnabled() \
+                and frame.cbo_upscale_codec.IsEnabled()
+            frame.cbo_upscale_mode.SetSelection(2)
+            frame.on_changed_upscale_mode(None)
             # ADR-207: Full SBS 4K / Full Top-Bottom 4K use --full-4k-layout, not a packed width
             frame.cbo_upscale_mode.SetSelection(3)
             frame.on_changed_upscale_mode(None)

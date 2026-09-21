@@ -551,6 +551,8 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
         ok = result.returncode == 0 and path.exists(tmp_out)
         if ok:
             os.replace(tmp_out, rife_path)
+            # the remux above drops the MKV StereoMode tag; put it back (no-op unless --stereo-mode-tag)
+            _apply_stereo_mode_tag(rife_path, args)
             say(f"[iw3] Dolby Vision re-attached to: {rife_path}")
             succeeded = True
         else:
@@ -698,6 +700,8 @@ def _run_rife_interpolation(output_path, args, force_hevc=False):
         print("[iw3] RIFE interpolation exited 0 but produced no output file", file=sys.stderr)
         return None
     print(f"[iw3] RIFE interpolation done: {interpolated_path}", file=sys.stderr)
+    # RIFE re-encodes into a new file, which has no StereoMode tag yet (no-op unless --stereo-mode-tag)
+    _apply_stereo_mode_tag(interpolated_path, args)
     return interpolated_path
 
 
@@ -759,6 +763,8 @@ def _run_audio_subtitle_restore(output_path, args):
         print("[iw3] Audio/subtitle restore exited 0 but produced no output file", file=sys.stderr)
         return None
     print(f"[iw3] Audio/subtitle restore done: {restored_path}", file=sys.stderr)
+    # the restore remuxes into a new file, so re-apply the StereoMode tag (no-op unless --stereo-mode-tag)
+    _apply_stereo_mode_tag(restored_path, args)
     return restored_path
 
 

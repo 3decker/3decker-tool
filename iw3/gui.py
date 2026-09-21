@@ -18413,6 +18413,32 @@ def _self_test_inpaint_model_in_filename_and_metadata():
     print("_self_test_inpaint_model_in_filename_and_metadata: PASS")
 
 
+def _self_test_stereo_tag_survives_post_steps():
+    """--stereo-mode-tag must be re-applied to the file each post step produces (RIFE, Dolby Vision re-attach,
+    Restore Audio & Subtitles remux): the tag used to be set once on the first file, so the FINAL 3D file
+    had no StereoMode even though its name said _smtag."""
+    import tempfile
+    import types
+    from unittest.mock import patch
+    from . import utils as U
+    tagged = []
+    with tempfile.TemporaryDirectory() as d:
+        base = os.path.join(d, "clip.mkv")
+        open(base, "wb").close()
+        args = types.SimpleNamespace(restore_audio_subtitles=True, input="src.mkv", start_time=None, end_time=None,
+                                     state={}, stereo_mode_tag=True)
+
+        def fake_restore(cmd, cwd, a):
+            open(cmd[cmd.index("-o") + 1], "wb").close()
+
+        with patch.object(U, "_run_av_restore_with_progress", fake_restore), \
+                patch.object(U, "_notify_stage", lambda *a, **k: None), \
+                patch.object(U, "_apply_stereo_mode_tag", lambda p, a, *r, **k: tagged.append(p)):
+            out = U._run_audio_subtitle_restore(base, args)
+        assert out and tagged == [out], (out, tagged)
+    print("_self_test_stereo_tag_survives_post_steps: PASS")
+
+
 def _self_test_rowan_model_registration():
     """Rowan's inpainting model must be registered on a fresh install AND appended to an existing
     inpaint_models.yml (without touching the user's own lines), and never added twice."""
@@ -18744,6 +18770,7 @@ def _run_self_tests():
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,
+        _self_test_stereo_tag_survives_post_steps,
         _self_test_inpaint_model_in_filename_and_metadata,
         _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,

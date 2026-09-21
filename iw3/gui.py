@@ -3487,7 +3487,7 @@ class MainFrame(wx.Frame):
             T("waifu2x model style. \"photo\" is the better default for real movie footage; \"art\" is "
               "tuned for illustration/anime source material."))
         self.cbo_waifu2x_target = wx.ComboBox(self.grp_postprocess,
-                                              choices=["auto", "4k", "8k"],
+                                              choices=["auto", "4k", "8k", "fsbs4k", "ftb4k"],
                                               name="cbo_waifu2x_target")
         self.cbo_waifu2x_target.SetEditable(False)
         self.cbo_waifu2x_target.SetSelection(0)
@@ -3503,6 +3503,10 @@ class MainFrame(wx.Frame):
               "source's real resolution and split direction, so the final packed video actually lands on "
               "the requested width (3840 for 4k, 7680 for 8k) rather than assuming a fixed multiplier "
               "happens to fit.\n"
+              "\"fsbs4k\" and \"ftb4k\" are the FULL 4K layouts: every eye becomes a real 3840-wide picture "
+              "(3840x2160 for a 16:9 movie) and the two are packed side by side (7680x2160) or "
+              "top/bottom (3840x4320), whatever the file was packed as before. A Dolby Vision / HDR "
+              "video stays 10-bit HDR and gets its Dolby Vision data back.\n"
               "Con: several extra full passes over the video beyond the plain whole-frame path above, so "
               "real processing time is meaningfully longer -- expect this to matter most on a full-length "
               "video.\n"
@@ -5788,6 +5792,8 @@ class MainFrame(wx.Frame):
         self.cbo_upscale_mode.Append(T("Whole frame (2x / 4x)"), "whole")
         self.cbo_upscale_mode.Append(T("Stereo-aware 4K (each eye separately, 3840 wide)"), "4k")
         self.cbo_upscale_mode.Append(T("Stereo-aware 8K (each eye separately, 7680 wide)"), "8k")
+        self.cbo_upscale_mode.Append(T("Stereo-aware Full SBS 4K (each eye 3840x2160, 7680 wide)"), "fsbs4k")
+        self.cbo_upscale_mode.Append(T("Stereo-aware Full Top-Bottom 4K (each eye 3840x2160, 4320 tall)"), "ftb4k")
         self.cbo_upscale_mode.SetSelection(0)
         self.cbo_upscale_mode.SetToolTip(
             T("What it's for: how the picture is upscaled.\n"
@@ -5798,6 +5804,11 @@ class MainFrame(wx.Frame):
               "between the eyes), smoothed frame-to-frame to reduce flicker, then put back together at "
               "exactly 3840 (4K) or 7680 (8K) wide. The exact enlargement is worked out from your video's "
               "real size.\n"
+              "Full SBS 4K / Full Top-Bottom 4K: the same per-eye upscale, but every eye is made a real "
+              "3840-wide picture (3840x2160 for 16:9) and packed side by side (7680x2160) or top/bottom "
+              "(3840x4320). Use these to turn a Half SBS / Half TB file into a Full one; the 3D Layout "
+              "setting below is how the INPUT is packed.\n"
+              "A Dolby Vision / HDR video is kept 10-bit HDR (HEVC) and gets its Dolby Vision data back.\n"
               "Con: the stereo-aware modes make several full passes over the video, so they take clearly "
               "longer, and they always write H.264.\n"
               "Recommended: Whole frame for 2D; Stereo-aware 4K for 3D if you want the cleaner per-eye "
@@ -12579,29 +12590,44 @@ class MainFrame(wx.Frame):
         current = self.txt_upscale_output.GetValue().strip()
         if current:
             stem, ext = path.splitext(current)
-            for old in ("_w2x8k", "_w2x4k", "_w2x"):
+            for old in ("_w2xfsbs4k", "_w2xftb4k", "_w2x8k", "_w2x4k", "_w2x"):
                 if stem.endswith(old):
                     self.txt_upscale_output.SetValue(stem[:-len(old)] + self._upscale_suffix() + ext)
                     break
 
-    def _update_upscale_progress(self, done, total):
-        # Called via wx.CallAfter from run_upscale's reader thread.
+    def _update_upscale_progress(self, done, total, info=""):
+        # Called via wx.CallAfter from run_upscale's reader thread. Shows the step, frames done, speed and time left
+        # (speed and time left are measured for the current pass, so they restart with each pass).
         if total > 0:
             self.gauge_upscale.SetRange(int(total))
             self.gauge_upscale.SetValue(int(min(done, total)))
-            elapsed = time() - self.upscale_start_time
-            self.lbl_upscale_progress.SetLabel(
-                f"{int(done)}/{int(total)} {T('frames')} ({min(100, int(done / total * 100))}%) "
-                f"[{T('elapsed')} {self._format_duration(elapsed)}]")
+            now = time()
+            pass_elapsed = now - getattr(self, "upscale_pass_start", self.upscale_start_time)
+            fps = done / pass_elapsed if (pass_elapsed > 0.5 and done > 0) else 0.0
+            parts = [f"{info}{int(done)}/{int(total)} {T('frames')} ({min(100, int(done / total * 100))}%)"]
+            if fps > 0:
+                parts.append(f"{fps:.1f} {T('fps')}")
+            parts.append(f"{T('elapsed')} {self._format_duration(now - self.upscale_start_time)}")
+            if fps > 0:
+                parts.append(f"{T('ETA')} {self._format_duration((total - done) / fps)}")
+            self.lbl_upscale_progress.SetLabel(" | ".join(parts))
+
+    def _update_upscale_dv_progress(self, label, done, total):
+        # The Dolby Vision re-attach step after an HDR upscale (same numbers as the other steps).
+        self.upscale_pass_start = getattr(self, "upscale_pass_start", time())
+        self._update_upscale_progress(done, total, f"[Dolby Vision] {label}: ")
 
     def run_upscale(self, cmd):
         # Runs on a background thread via startWorker. waifu2x prints its progress as tqdm
         # bars on stderr (carriage-return separated); everything is kept for the log.
+        # The stereo-aware modes have 4 steps ("[iw3] [2/4] ..." lines) and the eye pass runs once per eye; each new
+        # step or pass restarts the speed / time-left measurement.
         self.upscale_proc = proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=path.dirname(path.dirname(path.abspath(__file__))),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         tail = []
         buf = b""
+        stage_info, pass_index, last_done, last_total = "", 0, 0, 0
         while True:
             chunk = proc.stdout.read(256)
             if not chunk:
@@ -12615,14 +12641,51 @@ class MainFrame(wx.Frame):
                 text = line.decode(errors="replace").strip()
                 if not text:
                     continue
+                sm = re.search(r"\[iw3\] \[(\d)/4\]\s*([^.(]*)", text)
                 pm = re.search(r"\b(\d+)/(\d+) \[", text)
-                if pm:
-                    wx.CallAfter(self._update_upscale_progress, int(pm.group(1)), int(pm.group(2)))
+                if sm:
+                    stage_info = f"{T('Step')} {sm.group(1)}/4 ({sm.group(2).strip()}): "
+                    pass_index, last_done, last_total = 0, 0, 0
+                    self.upscale_pass_start = time()
+                    tail.append(text)
+                    del tail[:-40]
+                elif pm:
+                    done, total = int(pm.group(1)), int(pm.group(2))
+                    if total != last_total or done < last_done:
+                        pass_index += 1
+                        self.upscale_pass_start = time()
+                    last_done, last_total = done, total
+                    info = stage_info
+                    if stage_info.startswith(f"{T('Step')} 2/4"):
+                        info = f"{stage_info[:-2]}, {T('eye')} {min(pass_index, 2)}/2): "
+                    wx.CallAfter(self._update_upscale_progress, done, total, info)
                 else:
                     tail.append(text)
                     del tail[:-40]
         proc.wait()
-        return proc.returncode, "\n".join(tail)
+        returncode, output = proc.returncode, "\n".join(tail)
+        job = getattr(self, "upscale_dv_job", None)
+        if job and returncode == 0 and not self.upscale_cancelled:
+            # HDR / Dolby Vision video: the upscale is 10-bit HDR HEVC without the Dolby Vision data, so put the
+            # ORIGINAL file's Dolby Vision data back on it (ADR-206).
+            import types
+            from . import utils as iw3_utils
+            wx.CallAfter(self.lbl_upscale_progress.SetLabel, T("Re-attaching Dolby Vision..."))
+            self.upscale_pass_start = time()
+            dv_lines = []
+
+            def _hook(dv_proc):
+                self.upscale_proc = dv_proc
+
+            ok = iw3_utils._reinject_dv_after_upscale(
+                job["source"], job["output"], types.SimpleNamespace(state={}),
+                log=dv_lines.append, proc_hook=_hook,
+                progress_cb=lambda label, done, total: wx.CallAfter(
+                    self._update_upscale_dv_progress, label, done, total))
+            output = output + "\n" + "\n".join(dv_lines)
+            if not ok and not self.upscale_cancelled:
+                returncode = 1     # the file has no Dolby Vision: say so instead of "finished successfully"
+        return returncode, output
 
     def _cleanup_after_upscale_cancel(self):
         output_path = self.txt_upscale_output.GetValue().strip()
@@ -12688,18 +12751,34 @@ class MainFrame(wx.Frame):
         style = self.cbo_upscale_style.GetValue()
         gpu = int(self.cbo_upscale_gpu.GetClientData(self.cbo_upscale_gpu.GetSelection()))
         crf = str(int(float(self.txt_upscale_quality.GetValue())))
+        # ADR-206: an HDR / Dolby Vision video must stay 10-bit HEVC HDR; its Dolby Vision data is put back afterwards
+        from . import utils as iw3_utils
+        hdr = iw3_utils._upscale_hdr_info(input_path)
+        wants_dv = hdr["dv"] or hdr["hdr10plus"]
+        if wants_dv and path.splitext(output_path)[1].lower() != ".mkv":
+            return None, T("This video has Dolby Vision / HDR10+. Save the upscaled video as an .mkv file so the "
+                           "Dolby Vision data can be put back.")
+        self.upscale_dv_job = {"source": input_path, "output": output_path} if wants_dv else None
         if mode == "whole":
             cmd = [sys.executable, "-m", "waifu2x.cli", "-i", input_path, "-o", output_path,
                    "-m", method, "-n", noise, "--style", style, "--gpu", str(gpu), "--crf", crf, "-y"]
             codec = self.cbo_upscale_codec.GetClientData(self.cbo_upscale_codec.GetSelection())
-            if codec:
+            if hdr["hdr"]:
+                cmd += iw3_utils._waifu2x_hdr_cli_args()       # 10-bit HEVC + HDR colour tags (overrides the codec box)
+            elif codec:
                 cmd += ["--video-codec", codec]
         else:
             axis = self.cbo_upscale_layout.GetClientData(self.cbo_upscale_layout.GetSelection())
             cmd = [sys.executable, "-m", "iw3.waifu2x_upscale_stereo_cli", "-i", input_path, "-o", output_path,
-                   "--split-axis", axis, "--target-packed-width", "3840" if mode == "4k" else "7680",
-                   "--waifu2x-method", method, "--waifu2x-noise-level", noise, "--waifu2x-style", style,
-                   "--crf", crf, "--gpu", str(max(gpu, 0))]
+                   "--split-axis", axis]
+            if mode in ("fsbs4k", "ftb4k"):
+                cmd += ["--full-4k-layout", "sbs" if mode == "fsbs4k" else "tb"]
+            else:
+                cmd += ["--target-packed-width", "3840" if mode == "4k" else "7680"]
+            cmd += ["--waifu2x-method", method, "--waifu2x-noise-level", noise, "--waifu2x-style", style,
+                    "--crf", crf, "--gpu", str(max(gpu, 0))]
+            if hdr["hdr"]:
+                cmd += ["--hdr"]
         return cmd, None
 
     def on_click_btn_upscale_run(self, event):
@@ -17888,6 +17967,36 @@ def _self_test_upscale_panel():
             cmd, err = frame.build_upscale_command()
             assert cmd[cmd.index("--target-packed-width") + 1] == "7680"
             assert frame.txt_upscale_output.GetValue().endswith("_w2x8k.mkv")
+            # ADR-207: Full SBS 4K / Full Top-Bottom 4K use --full-4k-layout, not a packed width
+            frame.cbo_upscale_mode.SetSelection(3)
+            frame.on_changed_upscale_mode(None)
+            assert frame.txt_upscale_output.GetValue().endswith("_w2xfsbs4k.mkv"), frame.txt_upscale_output.GetValue()
+            cmd, err = frame.build_upscale_command()
+            assert cmd[cmd.index("--full-4k-layout") + 1] == "sbs" and "--target-packed-width" not in cmd, cmd
+            frame.cbo_upscale_mode.SetSelection(4)
+            frame.on_changed_upscale_mode(None)
+            assert frame.txt_upscale_output.GetValue().endswith("_w2xftb4k.mkv"), frame.txt_upscale_output.GetValue()
+            cmd, err = frame.build_upscale_command()
+            assert cmd[cmd.index("--full-4k-layout") + 1] == "tb" and "--hdr" not in cmd, cmd
+            # ADR-206: an HDR / Dolby Vision input keeps 10-bit HEVC HDR and gets its Dolby Vision data back
+            from unittest import mock as _mock
+            from . import utils as _U
+            fake_dv = {"dv": True, "hdr10plus": False, "hdr": True}
+            with _mock.patch.object(_U, "_upscale_hdr_info", return_value=fake_dv):
+                cmd, err = frame.build_upscale_command()
+                assert "--hdr" in cmd and frame.upscale_dv_job == {"source": video, "output": frame.txt_upscale_output.GetValue()}
+                frame.cbo_upscale_mode.SetSelection(0)
+                frame.on_changed_upscale_mode(None)
+                cmd, err = frame.build_upscale_command()
+                assert cmd[cmd.index("--pix-fmt") + 1] == "yuv420p10le" and "--colorspace" in cmd, cmd
+                assert cmd[cmd.index("--video-codec") + 1] in ("hevc_nvenc", "libx265"), cmd
+                frame.txt_upscale_output.SetValue(path.join(tmpdir, "movie_sbs_w2x.mp4"))
+                cmd, err = frame.build_upscale_command()
+                assert cmd is None and "mkv" in err, "Dolby Vision cannot go into an .mp4"
+                frame.txt_upscale_output.SetValue(out)
+            with _mock.patch.object(_U, "_upscale_hdr_info", return_value={"dv": False, "hdr10plus": False, "hdr": False}):
+                cmd, err = frame.build_upscale_command()
+                assert "--hdr" not in cmd and frame.upscale_dv_job is None
             frame.cbo_upscale_mode.SetSelection(0)
             frame.on_changed_upscale_mode(None)
             assert frame.txt_upscale_output.GetValue().endswith("_w2x.mkv")
@@ -17913,6 +18022,132 @@ def _self_test_upscale_panel():
         app.Destroy()
 
     print("_self_test_upscale_panel: PASS")
+
+
+def _self_test_upscale_full4k_hdr_and_progress():
+    """ADR-206 / ADR-207: the Full 4K plan, the manifest-free Dolby Vision re-attach for an upscale, the
+    forwarded progress lines of the stereo upscale CLI, and the stereo-mode tag override. No GPU, nothing real."""
+    import contextlib
+    import io
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+    from . import waifu2x_upscale_stereo_cli as C
+
+    # -- Full 4K plan: every eye becomes a real 3840-wide picture, packed the way the user asked
+    p = U.compute_full_4k_plan(1920, 1080, "sbs", "sbs")      # Half SBS 1080p -> Full SBS 4K
+    assert (p["target_eye_w"], p["target_eye_h"], p["target_packed_w"], p["target_packed_h"]) == (3840, 2160, 7680, 2160), p
+    assert p["scale_tier"] == 4 and p["out_axis"] == "sbs", p
+    p = U.compute_full_4k_plan(1920, 1080, "sbs", "tb")       # Half SBS 1080p -> Full TB 4K
+    assert (p["target_packed_w"], p["target_packed_h"]) == (3840, 4320), p
+    p = U.compute_full_4k_plan(3840, 1608, "sbs", "sbs")      # the scope Mario file (already 3840 wide): 7680x1608
+    assert (p["target_eye_w"], p["target_eye_h"], p["target_packed_w"], p["target_packed_h"]) == (3840, 1608, 7680, 1608), p
+    assert p["scale_tier"] == 2, p
+    p = U.compute_full_4k_plan(3840, 1080, "sbs", "sbs")      # Full SBS 1080p (16:9 eyes)
+    assert (p["target_eye_w"], p["target_eye_h"]) == (3840, 2160) and p["scale_tier"] == 2, p
+    p = U.compute_full_4k_plan(1920, 2160, "tb", "sbs")       # Full TB 1080p, output SBS
+    assert (p["target_eye_w"], p["target_eye_h"], p["target_packed_w"]) == (3840, 2160, 7680), p
+    assert abs(U.true_eye_aspect(1920, 1080, "sbs") - 16 / 9) < 1e-6 and abs(U.true_eye_aspect(3840, 1080, "sbs") - 16 / 9) < 1e-6
+    assert abs(U.true_eye_aspect(1920, 2160, "tb") - 16 / 9) < 1e-6
+    try:
+        U.compute_full_4k_plan(0, 1080, "sbs", "sbs")
+        raise AssertionError("bad size must raise")
+    except ValueError:
+        pass
+    assert U.WAIFU2X_TARGET_FULL_4K_LAYOUT == {"fsbs4k": "sbs", "ftb4k": "tb"}
+    a = types.SimpleNamespace(waifu2x_upscale=True, waifu2x_upscale_target="fsbs4k", format="half_sbs",
+                              vr180=False, anaglyph=None, rgbd=False, half_rgbd=False, debug_depth=False,
+                              stereo_width=None)
+    assert U._should_use_stereo_upscale(a) in (True, False)   # must not raise for the new keys
+
+    # -- Dolby Vision re-attach for an upscale: one-to-one, never trimmed, no RIFE frame list
+    with tempfile.TemporaryDirectory() as tmp:
+        up = path.join(tmp, "movie_w2x.mkv")
+        with open(up, "wb") as f:
+            f.write(b"old")
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            with open(cmd[cmd.index("--output") + 1], "wb") as f:
+                f.write(b"new-with-dv")
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+        args = types.SimpleNamespace(start_time="00:25:00", end_time="00:25:08", state={})
+        with mock.patch.object(U, "_detect_hdr_types", return_value={"dv": True, "hdr10plus": False}), \
+                mock.patch.object(U, "_find_ffprobe", return_value="ffprobe"), \
+                mock.patch.object(U.subprocess, "run", fake_run):
+            assert U._reinject_dv_after_upscale("src.mkv", up, args) is True
+        cmd = calls[0]
+        assert cmd[cmd.index("--source") + 1] == "src.mkv" and cmd[cmd.index("--converted") + 1] == up
+        assert "--rife-manifest" not in cmd and "--start-time" not in cmd and "--end-time" not in cmd, cmd
+        assert open(up, "rb").read() == b"new-with-dv"
+
+    # -- HDR detection is off for a file that cannot be read, and a plain SDR file is not HDR
+    assert U._upscale_hdr_info(path.join(tempfile.gettempdir(), "does-not-exist.mkv")) == \
+        {"dv": False, "hdr10plus": False, "hdr": False}
+
+    # -- stereo CLI: SDR encode is unchanged, HDR encode is 10-bit HEVC with colour tags
+    assert C._video_encode_args(None, "20", "medium")[:2] == ["-c:v", "libx264"]
+    hdr_args = C._video_encode_args("hevc_nvenc", "15", "medium", 0)
+    assert "p010le" in hdr_args and "smpte2084" in hdr_args and "bt2020nc" in hdr_args, hdr_args
+    assert "yuv420p10le" in C._video_encode_args("libx265", "15", "medium")
+    line = C._progress_line("[4/4] joining", 12, 340, time() - 2)
+    assert __import__("re").search(r"\b(\d+)/(\d+) \[", line), line
+    for bad in ([], ["--split-axis", "sbs", "-i", "a", "-o", "b"]):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                C.main(bad)
+            raise AssertionError("must refuse: no target given")
+        except SystemExit:
+            pass
+
+    # -- progress lines of a helper are forwarded when there is no bar of our own, and a second pass gets its own bar
+    child = ("import sys\n"
+             "for i in (1, 2, 3):\n"
+             "    sys.stderr.write('eye: %d/3 [00:0%d<00:01, 1.0it/s]\\r' % (i, i))\n"
+             "for i in (1, 2):\n"
+             "    sys.stderr.write('eye: %d/2 [00:0%d<00:01, 1.0it/s]\\r' % (i, i))\n"
+             "sys.stderr.write('done\\n')\n")
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        U._run_stderr_progress([sys.executable, "-c", child], ".", types.SimpleNamespace(state={}), "x", forward=True)
+    lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+    assert len(lines) == 5 and lines[0].startswith("eye: 1/3") and lines[-1].startswith("eye: 2/2"), lines
+    # without forward and without a bar it stays silent (unchanged)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        U._run_stderr_progress([sys.executable, "-c", child], ".", types.SimpleNamespace(state={}), "x")
+    assert err.getvalue() == ""
+    # with a bar: one bar per pass (a new total starts a new bar)
+    bars = []
+
+    class _Bar:
+        def __init__(self, total=0, desc="", ncols=0):
+            self.total, self.n = total, 0
+            bars.append(self)
+
+        def update(self, k):
+            self.n += k
+
+        def close(self):
+            pass
+
+    U._run_stderr_progress([sys.executable, "-c", child], ".", types.SimpleNamespace(state={"tqdm_fn": _Bar}), "x")
+    assert [b.total for b in bars] == [3, 2], [b.total for b in bars]
+
+    # -- the stereo-mode tag can be forced (a Full SBS target can turn a TB file into SBS)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = path.join(tmp, "x.mkv")
+        open(f, "wb").close()
+        seen = []
+        with mock.patch.object(U, "_find_mkvpropedit", return_value="mkvpropedit"), \
+                mock.patch.object(U.subprocess, "run", lambda cmd, **kw: seen.append(cmd)):
+            with contextlib.redirect_stderr(io.StringIO()):
+                assert U._apply_stereo_mode_tag(f, types.SimpleNamespace(stereo_mode_tag=True), value_override=1)
+        assert "stereo-mode=1" in seen[0], seen
+    print("_self_test_upscale_full4k_hdr_and_progress: PASS")
 
 
 def _self_test_rife_with_preserve_dolby_vision():
@@ -18775,6 +19010,7 @@ def _run_self_tests():
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,
+        _self_test_upscale_full4k_hdr_and_progress,
         _self_test_stereo_tag_survives_post_steps,
         _self_test_inpaint_model_in_filename_and_metadata,
         _self_test_every_step_shows_progress,

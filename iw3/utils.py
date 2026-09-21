@@ -97,9 +97,14 @@ def _get_ffmpeg_bin():
 # "auto" (default, off) means: don't compute a target at all, keep today's plain
 # whole-frame _run_waifu2x_upscale behavior (fixed 2x/4x per the Method combo).
 WAIFU2X_TARGET_PACKED_WIDTH = {"4k": 3840, "8k": 7680}
+# ADR-207: "Full 4K" targets. Each eye becomes a real 3840-wide picture and the two are packed either side by side
+# (7680 wide) or top/bottom (twice as tall), whatever the source packing was. Value = the axis of the OUTPUT packing.
+WAIFU2X_TARGET_FULL_4K_LAYOUT = {"fsbs4k": "sbs", "ftb4k": "tb"}
+FULL_4K_EYE_WIDTH = 3840
 
 
-def _invoke_waifu2x_cli(input_path, output_path, method, noise_level, style, nunif_dir, log_prefix="[iw3]"):
+def _invoke_waifu2x_cli(input_path, output_path, method, noise_level, style, nunif_dir, log_prefix="[iw3]",
+                        forward_progress=False, extra_args=None):
     """The actual waifu2x.cli subprocess invocation, factored out of
     _run_waifu2x_upscale() so it is the single place this call is ever built --
     both the plain whole-frame upscale path (_run_waifu2x_upscale) and the
@@ -120,8 +125,11 @@ def _invoke_waifu2x_cli(input_path, output_path, method, noise_level, style, nun
            "-i", str(input_path), "-o", str(output_path),
            "-m", method, "-n", str(int(noise_level)),
            "--style", style, "-y"]
+    if extra_args:
+        cmd += [str(a) for a in extra_args]     # e.g. the 10-bit HEVC + HDR colour options for a Dolby Vision video
     try:
-        _run_stderr_progress(cmd, nunif_dir, _STAGE_ARGS["args"], f"[waifu2x] {path.basename(str(input_path))}")
+        _run_stderr_progress(cmd, nunif_dir, _STAGE_ARGS["args"], f"[waifu2x] {path.basename(str(input_path))}",
+                             forward=forward_progress)
     except subprocess.CalledProcessError as e:
         msg = e.stderr.decode(errors="replace").strip()
         print(f"{log_prefix} waifu2x upscale failed: {msg[:300]}", file=sys.stderr)
@@ -161,12 +169,24 @@ def _run_waifu2x_upscale(output_path, args):
 
     base, ext = path.splitext(str(output_path))
     upscaled_path = f"{base}_w2x{ext}"
+    # ADR-206: an HDR / Dolby Vision video is upscaled as 10-bit HEVC with HDR colour tags (a plain upscale writes
+    # 8-bit H.264 and destroys the HDR), into an .mkv, and its Dolby Vision data is put back afterwards.
+    hdr = _upscale_hdr_info(output_path)
+    extra_args = None
+    if hdr["hdr"]:
+        extra_args = _waifu2x_hdr_cli_args()
+        if ext.lower() != ".mkv":
+            upscaled_path = f"{base}_w2x.mkv"
 
     _notify_stage(args, STAGE_WAIFU2X_UPSCALE)
     print(f"[iw3] Upscaling finished output with waifu2x ({method}, noise={noise_level}, "
-          f"style={style})...", file=sys.stderr)
-    if not _invoke_waifu2x_cli(output_path, upscaled_path, method, noise_level, style, nunif_dir):
+          f"style={style}{', 10-bit HDR' if hdr['hdr'] else ''})...", file=sys.stderr)
+    if not _invoke_waifu2x_cli(output_path, upscaled_path, method, noise_level, style, nunif_dir,
+                               extra_args=extra_args):
         return None
+    if hdr["dv"] or hdr["hdr10plus"]:
+        _reinject_dv_after_upscale(output_path, upscaled_path, args)
+    _apply_stereo_mode_tag(upscaled_path, args)
     print(f"[iw3] waifu2x upscale done: {upscaled_path}", file=sys.stderr)
     return upscaled_path
 
@@ -290,10 +310,15 @@ def _run_watched(cmd, desc, *, total_bytes=0, paths=(), reads=False, check=True,
 _TQDM_FRAMES_RE = re.compile(r"\b(\d+)/(\d+) \[")
 
 
-def _run_stderr_progress(cmd, cwd, args, desc):
+def _run_stderr_progress(cmd, cwd, args, desc, forward=False):
     """Runs a helper whose stderr carries tqdm bars ("12/340 [..."), feeding them to the job's bar as FRAMES.
-    Returns a CompletedProcess (stderr bytes); raises CalledProcessError on failure like subprocess.run(check=True)."""
-    if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
+    Returns a CompletedProcess (stderr bytes); raises CalledProcessError on failure like subprocess.run(check=True).
+
+    forward=True is for a helper that is itself run by a GUI (the stereo upscale CLI): with no bar of our own the
+    helper's progress lines are passed on to our stderr, one per line, so the window that started us can still read
+    them. Before this they were swallowed and the biggest step of the stereo-aware upscale showed no progress."""
+    has_bar = (getattr(args, "state", None) or {}).get("tqdm_fn") is not None
+    if not has_bar and not forward:
         return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
     out = []
@@ -314,8 +339,15 @@ def _run_stderr_progress(cmd, cwd, args, desc):
                 text = line.decode(errors="replace").strip()
                 pm = _TQDM_FRAMES_RE.search(text)
                 if pm:
+                    if forward and not has_bar:
+                        print(text, file=sys.stderr, flush=True)
+                        continue
+                    total = int(pm.group(2)) or 1
+                    if bar is not None and bar.total != total:
+                        bar.close(complete=False)   # a new pass (e.g. the second eye) has its own frame count
+                        bar = None
                     if bar is None:
-                        bar = _StageBar(args, desc, int(pm.group(2)) or 1, "frames")
+                        bar = _StageBar(args, desc, total, "frames")
                     bar.set(int(pm.group(1)))
                 elif text:
                     tail.append(text)
@@ -401,7 +433,8 @@ class _DvProgress:
     other steps. Sends to `progress_cb(label, done_frames, total_frames)` if given, else feeds a tqdm-style bar per
     stage (the job's own bar via args.state["tqdm_fn"]). Never raises."""
 
-    def __init__(self, args, progress_cb, source_frames, output_frames):
+    def __init__(self, args, progress_cb, source_frames, output_frames, new_video_name="smoothed video"):
+        self.new_video_name = new_video_name    # what the step's new file is called in the labels (RIFE / upscale)
         self.progress_cb = progress_cb
         self.tqdm_fn = (getattr(args, "state", None) or {}).get("tqdm_fn")
         self.source_frames = max(1, int(source_frames or 10000))
@@ -445,7 +478,7 @@ class _DvProgress:
             return
         total_frames = self.source_frames if stage == "source" else self.output_frames
         done = int(min(1.0, max(0.0, current / total)) * total_frames)
-        label = _DV_STAGE_LABELS.get(stage, stage)
+        label = _DV_STAGE_LABELS.get(stage, stage).replace("smoothed video", self.new_video_name)
         try:
             if stage != self.stage:
                 self._finish_stage()
@@ -480,11 +513,17 @@ def _rife_manifest_frame_counts(manifest_path):
         return None, None
 
 
-def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None, progress_cb=None):
+def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None, progress_cb=None,
+                            use_manifest=True, what="RIFE output", trim_source=True):
     """ADR-192: after RIFE, re-attach the ORIGINAL source's Dolby Vision RPU to RIFE's output through
     iw3.reinject_hdr_cli --rife-manifest (each in-between frame gets a copy of its nearest real frame's entry).
     The RIFE file is only replaced when the injection fully succeeded; otherwise it is left as it was
     (plays fine, just without DV) and the reason is reported. Never raises. Returns True only on success.
+
+    use_manifest=False (ADR-206, the waifu2x upscale): the new video has exactly the same frames as the source, so
+    the RPU is re-attached one-to-one and there is no RIFE frame list. `what` is only used in the messages.
+    trim_source=False: do not cut the source to args.start_time/end_time (the upscaled file was made from the already
+    cut conversion output, not from the original movie).
 
     `log` (optional callable) receives the messages instead of stderr -- used by the standalone RIFE tool's
     log box. `proc_hook` (optional callable) receives the running Popen so a Cancel button can kill it.
@@ -502,26 +541,28 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
     try:
         hdr_types = _detect_hdr_types(source_path, _find_ffprobe())
     except Exception as e:
-        say(f"[iw3] Dolby Vision after RIFE: could not inspect the source ({e}); skipped.")
+        say(f"[iw3] Dolby Vision after {what}: could not inspect the source ({e}); skipped.")
         return False
     if not hdr_types["dv"] and not hdr_types["hdr10plus"]:
         say("[iw3] Preserve Dolby Vision: no DV or HDR10+ found in the source, nothing to re-attach.")
         return False
-    if not path.exists(manifest):
+    if use_manifest and not path.exists(manifest):
         say(f"[iw3] Dolby Vision after RIFE skipped: RIFE's frame list is missing ({manifest}).")
         return False
     base, ext = path.splitext(str(rife_path))
     tmp_out = f"{base}_dvtmp{ext}"
     cmd = [sys.executable, "-m", "iw3.reinject_hdr_cli",
            "--source", str(source_path), "--converted", str(rife_path),
-           "--output", tmp_out, "--rife-manifest", manifest]
-    if getattr(args, "start_time", None):
+           "--output", tmp_out]
+    if use_manifest:
+        cmd += ["--rife-manifest", manifest]
+    if trim_source and getattr(args, "start_time", None):
         cmd += ["--start-time", str(args.start_time)]
-    if getattr(args, "end_time", None):
+    if trim_source and getattr(args, "end_time", None):
         cmd += ["--end-time", str(args.end_time)]
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
     _notify_stage(args, STAGE_HDR_REINJECT)
-    say("[iw3] Re-attaching Dolby Vision/HDR metadata to the RIFE output...")
+    say(f"[iw3] Re-attaching Dolby Vision/HDR metadata to the {what}...")
     succeeded = False
     have_bar = progress_cb is not None or (getattr(args, "state", None) or {}).get("tqdm_fn") is not None
     try:
@@ -539,7 +580,9 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
 
             drain = threading.Thread(target=_drain_err, daemon=True)
             drain.start()
-            tracker = _DvProgress(args, progress_cb, *_rife_manifest_frame_counts(manifest))
+            counts = _rife_manifest_frame_counts(manifest) if use_manifest else _estimate_video_frames(rife_path)
+            tracker = _DvProgress(args, progress_cb, *counts,
+                                  new_video_name="smoothed video" if use_manifest else what)
             try:
                 for raw_line in iter(proc.stdout.readline, b""):
                     tracker.feed(raw_line.decode(errors="replace"))
@@ -557,11 +600,11 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
             succeeded = True
         else:
             msg = (result.stderr or b"").decode(errors="replace").strip() or (result.stdout or b"").decode(errors="replace").strip()
-            say(f"[iw3] Dolby Vision after RIFE FAILED (the RIFE file was left unchanged, without DV): "
+            say(f"[iw3] Dolby Vision after {what} FAILED (the file was left unchanged, without DV): "
                 f"{msg[-1500:]}")
     except Exception as e:
-        say(f"[iw3] Dolby Vision after RIFE FAILED ({e.__class__.__name__}: {e}); "
-            "the RIFE file was left unchanged, without DV.")
+        say(f"[iw3] Dolby Vision after {what} FAILED ({e.__class__.__name__}: {e}); "
+            f"the {what} was left unchanged, without DV.")
     finally:
         if path.exists(tmp_out):
             try:
@@ -569,6 +612,74 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
             except Exception:
                 pass
     return succeeded
+
+
+def _estimate_video_frames(video_path):
+    """(frames, frames) estimate for a progress bar: duration x average frame rate from ffprobe, or (None, None)."""
+    try:
+        import json as _json
+        proc = subprocess.run(
+            [_find_ffprobe(), "-v", "quiet", "-print_format", "json", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate,nb_frames:format=duration", str(video_path)],
+            capture_output=True, text=True, timeout=60)
+        data = _json.loads(proc.stdout)
+        stream = (data.get("streams") or [{}])[0]
+        nb = stream.get("nb_frames")
+        if nb and str(nb).isdigit() and int(nb) > 0:
+            return int(nb), int(nb)
+        num, _, den = str(stream.get("avg_frame_rate", "0/1")).partition("/")
+        fps = float(num) / float(den or 1)
+        frames = int(float(data["format"]["duration"]) * fps)
+        return (frames, frames) if frames > 0 else (None, None)
+    except Exception:
+        return None, None
+
+
+def _upscale_hdr_info(video_path):
+    """What has to survive an upscale of this video (ADR-206): {"dv", "hdr10plus", "hdr"}. "hdr" is True for a
+    Dolby Vision / HDR10+ video or one whose transfer is PQ -- those must be re-encoded as 10-bit HEVC with HDR
+    colour tags (an 8-bit H.264 upscale turns them into a washed-out SDR file), and Dolby Vision / HDR10+ data is
+    put back afterwards. Never raises; an unreadable file counts as plain SDR (the old behaviour)."""
+    info = {"dv": False, "hdr10plus": False, "hdr": False}
+    try:
+        import json as _json
+        ffprobe = _find_ffprobe()
+        types = _detect_hdr_types(video_path, ffprobe)
+        info["dv"], info["hdr10plus"] = bool(types["dv"]), bool(types["hdr10plus"])
+        proc = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-select_streams", "v:0",
+             "-show_entries", "stream=color_transfer", str(video_path)],
+            capture_output=True, text=True, timeout=60)
+        streams = _json.loads(proc.stdout).get("streams") or [{}]
+        pq = streams[0].get("color_transfer", "") == "smpte2084"
+        info["hdr"] = pq or info["dv"] or info["hdr10plus"]
+    except Exception:
+        pass
+    return info
+
+
+def _hdr_upscale_codec():
+    """HEVC encoder for a 10-bit HDR upscale: hevc_nvenc (GPU) when this machine has it, else libx265."""
+    try:
+        import av
+        av.codec.Codec("hevc_nvenc", "w")
+        if torch.cuda.is_available():
+            return "hevc_nvenc"
+    except Exception:
+        pass
+    return "libx265"
+
+
+def _waifu2x_hdr_cli_args():
+    """waifu2x.cli options that keep an HDR video HDR: 10-bit HEVC with BT.2020/PQ colour tags."""
+    return ["--video-codec", _hdr_upscale_codec(), "--pix-fmt", "yuv420p10le", "--colorspace", "bt2020-pq-tv"]
+
+
+def _reinject_dv_after_upscale(source_path, upscaled_path, args, log=None, proc_hook=None, progress_cb=None):
+    """ADR-206: re-attach the Dolby Vision / HDR10+ data of `source_path` to its waifu2x-upscaled copy. Same
+    frames in and out, so this is a one-to-one copy (no RIFE frame list). Never raises; True only on success."""
+    return _reinject_dv_after_rife(source_path, upscaled_path, args, log=log, proc_hook=proc_hook,
+                                   progress_cb=progress_cb, use_manifest=False, what="upscaled video", trim_source=False)
 
 
 def _run_cli_with_progress(cmd, cwd, args, progress_prefix, desc):
@@ -1055,6 +1166,54 @@ def compute_stereo_upscale_plan(src_packed_w, src_packed_h, axis, target_packed_
     }
 
 
+def true_eye_aspect(src_packed_w, src_packed_h, axis):
+    """Width / height one eye really has on screen (the picture's own shape), from a packed frame's size. A Half
+    SBS / Half TB file keeps the picture's shape in the packed frame (1920x1080 = 16:9), a Full one does not
+    (3840x1080 SBS or 1920x2160 TB = 32:9 / 8:9), so the value that lands in a normal film range (1.3 - 2.7) wins."""
+    a = src_packed_w / src_packed_h
+    for candidate in ((a, a / 2) if axis == "sbs" else (a, a * 2)):
+        if 1.3 <= candidate <= 2.7:
+            return candidate
+    return a
+
+
+def compute_full_4k_plan(src_packed_w, src_packed_h, split_axis, out_axis):
+    """Plan for the "Full 4K" upscale targets (ADR-207): every eye ends up FULL_4K_EYE_WIDTH (3840) wide with the
+    height its real shape needs (2160 for 16:9), packed side by side (out_axis "sbs" -> 7680 x 2160) or top/bottom
+    ("tb" -> 3840 x 4320). Returns the same keys as compute_stereo_upscale_plan plus "out_axis".
+
+    Unlike compute_stereo_upscale_plan the scale is not always uniform: a Half SBS eye is squeezed to half its
+    width, so width and height need different factors. scale_tier is chosen from the larger of the two (so the
+    squeezed direction gets a real AI upscale) and the caller resizes the other direction down to the exact target."""
+    if src_packed_w <= 0 or src_packed_h <= 0:
+        raise ValueError(f"invalid source packed resolution: {src_packed_w}x{src_packed_h}")
+    if split_axis not in ("sbs", "tb") or out_axis not in ("sbs", "tb"):
+        raise ValueError(f"unknown stereo axis: {split_axis!r} / {out_axis!r}")
+    target_eye_w = FULL_4K_EYE_WIDTH
+    target_eye_h = round(target_eye_w / true_eye_aspect(src_packed_w, src_packed_h, split_axis))
+    target_eye_h += target_eye_h % 2
+    if split_axis == "sbs":
+        src_eye_w, src_eye_h = src_packed_w // 2, src_packed_h
+    else:
+        src_eye_w, src_eye_h = src_packed_w, src_packed_h // 2
+    if out_axis == "sbs":
+        target_packed_w, target_packed_h = target_eye_w * 2, target_eye_h
+    else:
+        target_packed_w, target_packed_h = target_eye_w, target_eye_h * 2
+    needed_scale = max(target_eye_w / src_eye_w, target_eye_h / src_eye_h)
+    return {
+        "target_packed_w": target_packed_w,
+        "target_packed_h": target_packed_h,
+        "src_eye_w": src_eye_w,
+        "src_eye_h": src_eye_h,
+        "target_eye_w": target_eye_w,
+        "target_eye_h": target_eye_h,
+        "needed_scale": needed_scale,
+        "scale_tier": 2 if needed_scale <= 2.0 else 4,
+        "out_axis": out_axis,
+    }
+
+
 def resolve_waifu2x_method_for_tier(method, scale_tier):
     """Rewrites a user-chosen waifu2x --method string (e.g. "noise_scale2x") to use
     the given scale_tier (2 or 4, from compute_stereo_upscale_plan) instead,
@@ -1083,7 +1242,7 @@ def _should_use_stereo_upscale(args):
     if not getattr(args, "waifu2x_upscale", False):
         return False
     target = getattr(args, "waifu2x_upscale_target", None) or "auto"
-    if target not in WAIFU2X_TARGET_PACKED_WIDTH:
+    if target not in WAIFU2X_TARGET_PACKED_WIDTH and target not in WAIFU2X_TARGET_FULL_4K_LAYOUT:
         return False
     return _resolve_stereo_split_axis(args) is not None
 
@@ -1110,7 +1269,8 @@ def _run_waifu2x_upscale_stereo(output_path, args):
         return None
     axis = _resolve_stereo_split_axis(args)
     target_key = getattr(args, "waifu2x_upscale_target", None) or "auto"
-    target_packed_w = WAIFU2X_TARGET_PACKED_WIDTH[target_key]
+    full_4k_axis = WAIFU2X_TARGET_FULL_4K_LAYOUT.get(target_key)      # None for the plain 4k / 8k targets
+    target_packed_w = WAIFU2X_TARGET_PACKED_WIDTH.get(target_key, 0)
     method = getattr(args, "waifu2x_method", None) or "noise_scale2x"
     noise_level = getattr(args, "waifu2x_noise_level", None)
     if noise_level is None:
@@ -1130,17 +1290,25 @@ def _run_waifu2x_upscale_stereo(output_path, args):
     # '_w2x' suffix already marks it".
     base, ext = path.splitext(str(output_path))
     upscaled_path = f"{base}_w2x{target_key}{ext}"
+    hdr = _upscale_hdr_info(output_path)      # ADR-206: HDR / Dolby Vision must stay 10-bit HEVC, DV put back after
+    if hdr["hdr"] and ext.lower() != ".mkv":
+        upscaled_path = f"{base}_w2x{target_key}.mkv"
 
     _notify_stage(args, STAGE_WAIFU2X_UPSCALE)
     cmd = [sys.executable, "-m", "iw3.waifu2x_upscale_stereo_cli",
            "-i", str(output_path), "-o", upscaled_path,
-           "--split-axis", axis,
-           "--target-packed-width", str(target_packed_w),
-           "--waifu2x-method", method,
+           "--split-axis", axis]
+    if full_4k_axis:
+        cmd += ["--full-4k-layout", full_4k_axis]
+    else:
+        cmd += ["--target-packed-width", str(target_packed_w)]
+    cmd += ["--waifu2x-method", method,
            "--waifu2x-noise-level", str(int(noise_level)),
            "--waifu2x-style", style,
            "--crf", crf,
            "--preset", str(preset)]
+    if hdr["hdr"]:
+        cmd += ["--hdr"]
     gpu = getattr(args, "gpu", None)
     if isinstance(gpu, (list, tuple)) and len(gpu) > 0:
         cmd += ["--gpu", str(gpu[0])]
@@ -1148,10 +1316,11 @@ def _run_waifu2x_upscale_stereo(output_path, args):
         cmd += ["--gpu", str(gpu)]
 
     print(f"[iw3] Stereo-aware upscaling finished output with waifu2x (split={axis}, "
-          f"target={target_key}, method={method}, noise={noise_level}, style={style})...",
-          file=sys.stderr)
+          f"target={target_key}, method={method}, noise={noise_level}, style={style}"
+          f"{', 10-bit HDR' if hdr['hdr'] else ''})...", file=sys.stderr)
     try:
-        subprocess.run(cmd, check=True, capture_output=True, cwd=nunif_dir)
+        # live progress for every pass (split, each eye, smoothing, join) instead of one silent call
+        _run_stderr_progress(cmd, nunif_dir, args, "Stereo-aware upscale")
     except subprocess.CalledProcessError as e:
         msg = e.stderr.decode(errors="replace").strip()
         print(f"[iw3] stereo-aware waifu2x upscale failed: {msg[:300]}", file=sys.stderr)
@@ -1159,11 +1328,18 @@ def _run_waifu2x_upscale_stereo(output_path, args):
     if not path.exists(upscaled_path):
         print("[iw3] stereo-aware waifu2x upscale exited 0 but produced no output file", file=sys.stderr)
         return None
+    if hdr["dv"] or hdr["hdr10plus"]:
+        _reinject_dv_after_upscale(output_path, upscaled_path, args)
+    # a Full SBS / Full TB target can change the packing (e.g. SBS in, TB out), so tag the OUTPUT layout
+    tag_value = None
+    if full_4k_axis and full_4k_axis != axis:
+        tag_value = STEREO_MODE_SBS_LEFT_FIRST if full_4k_axis == "sbs" else STEREO_MODE_TB_LEFT_FIRST
+    _apply_stereo_mode_tag(upscaled_path, args, value_override=tag_value)
     print(f"[iw3] stereo-aware waifu2x upscale done: {upscaled_path}", file=sys.stderr)
     return upscaled_path
 
 
-def _apply_stereo_mode_tag(output_path, args, mkvpropedit_bin=None):
+def _apply_stereo_mode_tag(output_path, args, mkvpropedit_bin=None, value_override=None):
     """Tags an already-produced MKV's video track with the Matroska StereoMode
     property (see _resolve_stereo_mode_value's docstring for the verified eye-order
     mapping) via mkvpropedit, so 3D-aware players/TVs (VLC, Kodi, compatible smart
@@ -1190,7 +1366,7 @@ def _apply_stereo_mode_tag(output_path, args, mkvpropedit_bin=None):
         return False
     if not path.exists(output_path):
         return False
-    stereo_value = _resolve_stereo_mode_value(args)
+    stereo_value = value_override if value_override is not None else _resolve_stereo_mode_value(args)
     if stereo_value is None:
         print("[iw3] --stereo-mode-tag has no effect on this Stereo Format -- RGB-D, Half "
               "RGB-D, Anaglyph, and Debug Depth are not a two-eye stereo pair Matroska's "
@@ -2256,7 +2432,7 @@ def _build_iw3_comment_metadata(args, video=True):
             f"iw3_waifu2x_noise_level={int(w2x_noise)} iw3_waifu2x_style={w2x_style}"
         )
         w2x_target = getattr(args, "waifu2x_upscale_target", None) or "auto"
-        if w2x_target in WAIFU2X_TARGET_PACKED_WIDTH:
+        if w2x_target in WAIFU2X_TARGET_PACKED_WIDTH or w2x_target in WAIFU2X_TARGET_FULL_4K_LAYOUT:
             comment_parts.append(f"iw3_waifu2x_upscale_target={w2x_target}")
 
     return " ".join(comment_parts) if comment_parts else None
@@ -6019,7 +6195,7 @@ def create_parser(required_true=True):
                               "track type (e.g. no subtitles) is not an error -- whatever it has gets "
                               "restored."))
     parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
-                        choices=["auto", "4k", "8k"],
+                        choices=["auto", "4k", "8k", "fsbs4k", "ftb4k"],
                         help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "
                               "stereo video output (Half/Full SBS, Half/Full TB, Cross-Eyed, VR180). "
                               "'auto' (default) leaves --waifu2x-upscale's plain whole-frame behavior "
@@ -6029,7 +6205,10 @@ def create_parser(required_true=True):
                               "apply RGB temporal smoothing to each eye's own frame sequence to reduce "
                               "flicker at very high output resolutions, then recombine at the requested "
                               "FINAL PACKED width (3840 for 4k, 7680 for 8k) -- the actual per-eye scale "
-                              "factor needed is computed from your source's real resolution, not assumed."))
+                              "factor needed is computed from your source's real resolution, not assumed. "
+                              "\"fsbs4k\" / \"ftb4k\" are the FULL 4K layouts: every eye becomes a real 3840-wide "
+                              "picture (3840x2160 for 16:9) and the two are packed side by side (7680x2160) or "
+                              "top/bottom (3840x4320), whatever the source packing was."))
     parser.add_argument("--foreground-scale", type=float, choices=[Range(-3.0, 3.0)], default=0,
                         help="foreground scaling level. 0 is disabled")
     parser.add_argument("--mapper-type", type=str, choices=["div", "mul", "shift"], default=None,

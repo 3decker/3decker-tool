@@ -15,6 +15,12 @@ it matters.
 
 ## Latest Update — September 21, 2026
 
+**New: upscaling a Dolby Vision or HDR video now keeps it Dolby Vision / HDR.** Before, the waifu2x upscale wrote an ordinary 8-bit picture, which threw away the Dolby Vision data and turned HDR colours washed-out. Now an HDR or Dolby Vision video is upscaled as 10-bit HEVC with the right HDR colour tags, and the original Dolby Vision data is put back afterwards (for both the standalone Upscale tool and the after-conversion option, in every mode). A Dolby Vision file must be saved as .mkv.
+
+**New: Full SBS 4K and Full Top-Bottom 4K for the stereo-aware upscale.** Pick "Stereo-aware Full SBS 4K" to make every eye a real 3840-wide picture (3840x2160 for a normal movie) packed side by side (7680x2160), or "Full Top-Bottom 4K" for 3840x4320. It works from any Half or Full SBS / TB file, so a 1080p Half SBS movie becomes a true Full 4K one. (The old "4K" choice only makes the whole frame 3840 wide, so a file that is already 3840 wide does not get any bigger.) The same two choices are in the after-conversion "Target" box.
+
+**Fixed: the standalone Upscale tool now shows real progress in every mode.** The stereo-aware modes run four steps (split, upscale each eye, smooth, join) and the biggest one showed nothing. Every step now shows its frames done, speed (fps), time elapsed and time left, and says which step and which eye it is on. The after-conversion stereo upscale shows progress in the main bar too.
+
 **Improved: the Pop-Out Boost now goes up to 3.0 (it stopped at 2.0).** Useful when you use a higher Convergence (which leaves less room in front of the screen) and want the same pop-out: for example Convergence 0.6 needs a boost of 2.25 to match Convergence 0.4 with 1.5. The dropdown now also offers 2.25, 2.5 and 3.0, and the slider covers the whole range. Very large boosts stretch the picture edges harder, so keep Edge Fix at 3 and 2 or higher and check for halos on close objects.
 
 **Fixed: the 3D tag is now kept on the final file when you use RIFE or Restore Audio & Subtitles.** The file name said `_smtag` (3D tag on), but the tag was only set on the first file. RIFE, the Dolby Vision re-attach and the audio/subtitle restore each make a new file, so the final one was not marked as 3D and VLC or a TV could not switch to 3D by itself. It is now set again on every file those steps produce.

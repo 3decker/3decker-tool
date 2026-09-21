@@ -1,4 +1,4 @@
-﻿"""python -m iw3.waifu2x_upscale_stereo_cli -- standalone per-eye, stereo-aware
+"""python -m iw3.waifu2x_upscale_stereo_cli -- standalone per-eye, stereo-aware
 waifu2x upscale + RGB temporal-smoothing post-processing entry point.
 
 Invoked as a SEPARATE subprocess by iw3.utils._run_waifu2x_upscale_stereo() only
@@ -29,6 +29,8 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
+import time
 from os import path
 
 import numpy as np
@@ -45,7 +47,12 @@ def create_parser():
     parser.add_argument("--input", "-i", type=str, required=True)
     parser.add_argument("--output", "-o", type=str, required=True)
     parser.add_argument("--split-axis", type=str, required=True, choices=["sbs", "tb"])
-    parser.add_argument("--target-packed-width", type=int, required=True)
+    parser.add_argument("--target-packed-width", type=int, default=0,
+                        help="final packed width: 3840 (4K) or 7680 (8K). Not used with --full-4k-layout.")
+    parser.add_argument("--full-4k-layout", type=str, default=None, choices=["sbs", "tb"],
+                        help=("Full 4K output (ADR-207): every eye becomes a real 3840-wide picture (3840x2160 for "
+                              "16:9) packed side by side (7680x2160) or top/bottom (3840x4320), whatever the "
+                              "source packing was."))
     parser.add_argument("--waifu2x-method", type=str, default="noise_scale2x")
     parser.add_argument("--waifu2x-noise-level", type=int, default=1)
     parser.add_argument("--waifu2x-style", type=str, default="photo")
@@ -53,10 +60,88 @@ def create_parser():
     parser.add_argument("--crf", type=str, default="20")
     parser.add_argument("--preset", type=str, default="medium")
     parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--hdr", action="store_true",
+                        help=("the video is HDR / Dolby Vision (ADR-206): use 10-bit HEVC with BT.2020/PQ colour "
+                              "tags for every pass instead of 8-bit H.264. Dolby Vision data is NOT copied here; "
+                              "the caller puts it back afterwards."))
     return parser
 
 
-def _split_video(input_path, axis, left_path, right_path, ffmpeg_bin, crf, preset):
+_HDR_COLOR_ARGS = ["-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc",
+                   "-color_range", "tv"]
+
+
+def _has_ffmpeg_encoder(ffmpeg_bin, name):
+    """True when this ffmpeg lists `name` among its video encoders."""
+    try:
+        out = subprocess.run([ffmpeg_bin, "-hide_banner", "-encoders"], capture_output=True, text=True,
+                             timeout=30).stdout
+    except Exception:
+        return False
+    return any(line.startswith(" V") and line.split()[1:2] == [name] for line in out.splitlines())
+
+
+def _pick_hdr_codec(ffmpeg_bin, gpu=0):
+    """One HEVC encoder used by EVERY pass of an HDR job: hevc_nvenc (GPU) when both PyAV and this ffmpeg have it
+    and a GPU is there (and the job is not forced onto the CPU with --gpu -1), else libx265."""
+    from .utils import _hdr_upscale_codec
+    if gpu is not None and gpu < 0:
+        return "libx265"
+    codec = _hdr_upscale_codec()
+    if codec == "hevc_nvenc" and not _has_ffmpeg_encoder(ffmpeg_bin, "hevc_nvenc"):
+        codec = "libx265"
+    return codec
+
+
+def _video_encode_args(hdr_codec, crf, preset, gpu=0):
+    """ffmpeg output options for the split / join passes: 8-bit H.264 normally (unchanged), 10-bit HEVC with HDR
+    colour tags for an HDR video (hdr_codec = "hevc_nvenc" or "libx265"; None = SDR)."""
+    if hdr_codec is None:
+        return ["-c:v", "libx264", "-crf", crf, "-preset", preset]
+    if hdr_codec == "hevc_nvenc":
+        return (["-c:v", "hevc_nvenc", "-rc", "constqp", "-qp", crf, "-preset", "p5", "-gpu", str(gpu),
+                 "-pix_fmt", "p010le"] + _HDR_COLOR_ARGS)
+    return ["-c:v", "libx265", "-crf", crf, "-preset", preset, "-pix_fmt", "yuv420p10le"] + _HDR_COLOR_ARGS
+
+
+def _progress_line(label, done, total, start):
+    """A tqdm-looking line ("label: 12/340 [00:01<00:26, 11.2it/s]") so the GUI and iw3's own progress reader,
+    which both look for "N/M [", treat these steps like every other one."""
+    elapsed = max(1e-6, time.time() - start)
+    rate = done / elapsed
+    eta = (total - done) / rate if rate > 0 else 0
+    fmt = lambda t: f"{int(t) // 60:02d}:{int(t) % 60:02d}"   # noqa: E731
+    return f"{label}: {done}/{total} [{fmt(elapsed)}<{fmt(eta)}, {rate:.1f}it/s]"
+
+
+def _run_ffmpeg_with_progress(cmd, total_frames, label):
+    """subprocess.run(cmd, check=True, capture_output=True) that also prints live progress lines (frames done of
+    total) to stderr, read from ffmpeg's own -progress output. Before this the split and join passes were silent."""
+    full = [cmd[0], "-progress", "pipe:1", "-nostats", "-loglevel", "error"] + list(cmd[1:])
+    proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    err = []
+    drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
+    drain.start()
+    start, total, last = time.time(), max(1, int(total_frames or 1)), -1
+    try:
+        for line in proc.stdout:
+            if line.startswith("frame="):
+                try:
+                    done = min(int(line.split("=", 1)[1].strip()), total)
+                except ValueError:
+                    continue
+                if done != last:
+                    last = done
+                    print(_progress_line(label, done, total, start), file=sys.stderr, flush=True)
+    finally:
+        proc.wait()
+        drain.join(timeout=5)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, full, stderr="".join(err).encode())
+
+
+def _split_video(input_path, axis, left_path, right_path, ffmpeg_bin, crf, preset,
+                 hdr_codec=None, gpu=0, total_frames=None):
     """Crops the packed source into two eye videos in ONE ffmpeg pass (both crop
     filters read from the same [0:v] input link, so the source is only decoded
     once). The crop geometry is the video-codec equivalent of
@@ -69,14 +154,16 @@ def _split_video(input_path, axis, left_path, right_path, ffmpeg_bin, crf, prese
         left_filter = "crop=w=iw:h=ih/2:x=0:y=0"
         right_filter = "crop=w=iw:h=ih-ih/2:x=0:y=ih/2"
     filter_complex = f"[0:v]{left_filter}[l];[0:v]{right_filter}[r]"
+    enc = _video_encode_args(hdr_codec, crf, preset, gpu)
     cmd = [ffmpeg_bin, "-y", "-i", input_path,
            "-filter_complex", filter_complex,
-           "-map", "[l]", "-c:v", "libx264", "-crf", crf, "-preset", preset, "-an", left_path,
-           "-map", "[r]", "-c:v", "libx264", "-crf", crf, "-preset", preset, "-an", right_path]
-    subprocess.run(cmd, check=True, capture_output=True)
+           "-map", "[l]"] + enc + ["-an", left_path,
+           "-map", "[r]"] + enc + ["-an", right_path]
+    _run_ffmpeg_with_progress(cmd, total_frames, "[1/4] splitting")
 
 
-def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength, device, crf, preset):
+def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength, device, crf, preset,
+                           hdr_codec=None, gpu=0):
     """Single-pass decode -> RGBTemporalStabilizer.stabilize() -> resize to the
     exact per-eye target -> encode, for ONE eye's already-upscaled video.
     Follows iw3.rife_cli's exact VU.process_video template."""
@@ -95,10 +182,23 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
         return x
 
     def config_callback(sw_format):
+        if hdr_codec is None:
+            return VU.VideoOutputConfig(
+                fps=None,
+                output_fps=None,
+                options={"preset": preset, "crf": crf},
+            )
+        if hdr_codec == "hevc_nvenc":
+            options = {"rc": "constqp", "qp": str(crf), "gpu": str(gpu)}
+        else:
+            options = {"preset": preset, "crf": str(crf)}
         return VU.VideoOutputConfig(
             fps=None,
             output_fps=None,
-            options={"preset": preset, "crf": crf},
+            pix_fmt="yuv420p10le",
+            video_codec=hdr_codec,
+            colorspace="bt2020-pq-tv",
+            options=options,
         )
 
     VU.process_video(
@@ -109,36 +209,52 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
     )
 
 
-def _join_video(left_path, right_path, audio_source_path, axis, output_path, ffmpeg_bin, crf, preset):
+def _join_video(left_path, right_path, audio_source_path, axis, output_path, ffmpeg_bin, crf, preset,
+                hdr_codec=None, gpu=0, total_frames=None):
     """Inverse of _split_video -- hstack ("sbs") / vstack ("tb") the two final
     eye videos back together, the video-codec equivalent of
     iw3.utils.join_stereo_frame, and re-muxes the ORIGINAL packed source's own
     audio track (never re-encoded)."""
     stack_filter = "hstack=inputs=2" if axis == "sbs" else "vstack=inputs=2"
+    if hdr_codec is not None:
+        # the stack filter drops the colour tags of its inputs; without this the final .mkv comes out with an
+        # "unknown" transfer / primaries and a TV would not treat it as HDR
+        stack_filter += ",setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv"
     cmd = [ffmpeg_bin, "-y",
            "-i", left_path, "-i", right_path, "-i", audio_source_path,
            "-filter_complex", f"[0:v][1:v]{stack_filter}[v]",
-           "-map", "[v]", "-map", "2:a?",
-           "-c:v", "libx264", "-crf", crf, "-preset", preset,
+           "-map", "[v]", "-map", "2:a?"] + _video_encode_args(hdr_codec, crf, preset, gpu) + [
            "-c:a", "aac",
            output_path]
-    subprocess.run(cmd, check=True, capture_output=True)
+    _run_ffmpeg_with_progress(cmd, total_frames, "[4/4] joining")
 
 
 def run(input_path, output_path, split_axis, target_packed_width,
         waifu2x_method="noise_scale2x", waifu2x_noise_level=1, waifu2x_style="photo",
-        temporal_stabilize_strength=0.5, crf="20", preset="medium", gpu=0):
+        temporal_stabilize_strength=0.5, crf="20", preset="medium", gpu=0,
+        hdr=False, full_4k_layout=None):
     from .utils import (
-        _get_ffmpeg_bin, _invoke_waifu2x_cli, compute_stereo_upscale_plan, resolve_waifu2x_method_for_tier,
+        _estimate_video_frames, _get_ffmpeg_bin, _invoke_waifu2x_cli, compute_full_4k_plan,
+        compute_stereo_upscale_plan, resolve_waifu2x_method_for_tier,
     )
 
     device = create_device(gpu)
     ffmpeg_bin = _get_ffmpeg_bin()
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+    hdr_codec = _pick_hdr_codec(ffmpeg_bin, gpu) if hdr else None
 
     sw_format = VU.VideoMetadata.from_file(input_path)
-    plan = compute_stereo_upscale_plan(sw_format.width, sw_format.height, split_axis, target_packed_width)
+    if full_4k_layout:
+        plan = compute_full_4k_plan(sw_format.width, sw_format.height, split_axis, full_4k_layout)
+    else:
+        plan = compute_stereo_upscale_plan(sw_format.width, sw_format.height, split_axis, target_packed_width)
+    out_axis = plan.get("out_axis", split_axis)     # where the two eyes are packed in the OUTPUT
     method = resolve_waifu2x_method_for_tier(waifu2x_method, plan["scale_tier"])
+    total_frames = _estimate_video_frames(input_path)[0]
+    extra_args = None
+    if hdr_codec:
+        extra_args = ["--video-codec", hdr_codec, "--pix-fmt", "yuv420p10le", "--colorspace", "bt2020-pq-tv",
+                      "--crf", str(crf)]
 
     out_dir = path.dirname(path.abspath(output_path)) or "."
     base = path.splitext(path.basename(output_path))[0]
@@ -151,24 +267,28 @@ def run(input_path, output_path, split_axis, target_packed_width,
     tmp_files = [left_src, right_src, left_up, right_up, left_final, right_final]
 
     try:
-        print(f"[iw3] [1/4] splitting {split_axis} into two eye videos...", file=sys.stderr)
-        _split_video(input_path, split_axis, left_src, right_src, ffmpeg_bin, crf, preset)
+        print(f"[iw3] [1/4] splitting {split_axis} into two eye videos...", file=sys.stderr, flush=True)
+        _split_video(input_path, split_axis, left_src, right_src, ffmpeg_bin, crf, preset,
+                     hdr_codec=hdr_codec, gpu=gpu, total_frames=total_frames)
 
-        print(f"[iw3] [2/4] upscaling each eye with waifu2x ({method})...", file=sys.stderr)
+        print(f"[iw3] [2/4] upscaling each eye with waifu2x ({method})...", file=sys.stderr, flush=True)
         for src, up in ((left_src, left_up), (right_src, right_up)):
             if not _invoke_waifu2x_cli(src, up, method, waifu2x_noise_level, waifu2x_style, nunif_dir,
-                                        log_prefix="[iw3] stereo-upscale"):
+                                        log_prefix="[iw3] stereo-upscale", forward_progress=True,
+                                        extra_args=extra_args):
                 raise RuntimeError(f"waifu2x upscale failed for {src}")
 
         print("[iw3] [3/4] temporal-smoothing + resizing each eye "
-              f"to {plan['target_eye_w']}x{plan['target_eye_h']}...", file=sys.stderr)
+              f"to {plan['target_eye_w']}x{plan['target_eye_h']}...", file=sys.stderr, flush=True)
         for up, final in ((left_up, left_final), (right_up, right_final)):
             _smooth_and_resize_eye(up, final, plan["target_eye_w"], plan["target_eye_h"],
-                                    temporal_stabilize_strength, device, crf, preset)
+                                    temporal_stabilize_strength, device, crf, preset,
+                                    hdr_codec=hdr_codec, gpu=gpu)
 
-        print(f"[iw3] [4/4] recombining to {plan['target_packed_w']}x{plan['target_packed_h']}...",
-              file=sys.stderr)
-        _join_video(left_final, right_final, input_path, split_axis, output_path, ffmpeg_bin, crf, preset)
+        print(f"[iw3] [4/4] recombining ({out_axis}) to {plan['target_packed_w']}x{plan['target_packed_h']}...",
+              file=sys.stderr, flush=True)
+        _join_video(left_final, right_final, input_path, out_axis, output_path, ffmpeg_bin, crf, preset,
+                    hdr_codec=hdr_codec, gpu=gpu, total_frames=total_frames)
     finally:
         for f in tmp_files:
             if path.exists(f):
@@ -179,7 +299,10 @@ def run(input_path, output_path, split_axis, target_packed_width,
 
 
 def main(argv=None):
-    args = create_parser().parse_args(argv)
+    parser = create_parser()
+    args = parser.parse_args(argv)
+    if not args.full_4k_layout and args.target_packed_width <= 0:
+        parser.error("give either --target-packed-width or --full-4k-layout")
     run(
         args.input, args.output, args.split_axis, args.target_packed_width,
         waifu2x_method=args.waifu2x_method,
@@ -187,8 +310,8 @@ def main(argv=None):
         waifu2x_style=args.waifu2x_style,
         temporal_stabilize_strength=args.temporal_stabilize_strength,
         crf=args.crf, preset=args.preset, gpu=args.gpu,
+        hdr=args.hdr, full_4k_layout=args.full_4k_layout,
     )
-
 
 def _self_test():
     """Synthetic, GPU-free regression coverage (CS-TEST-001) -- run via

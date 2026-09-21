@@ -13,7 +13,18 @@ it matters.
 
 ---
 
-## Latest Update — September 20, 2026
+## Latest Update — September 21, 2026
+
+**New: Rowan's High-Depth inpainting model, bundled.** A community-made inpainting model (by Rowan) built for
+strong 3D. It fills the gaps that open up behind popped-out objects more cleanly, and it comes with three
+helpers: better detection of the smeared band at depth edges, a mode that runs the model small but keeps your
+full-resolution picture, and a screen-edge fix so "Preserve Screen Border" works with forward_inpaint. Pick
+"Rowan_High-Depth_Inpaint_e594-Medium" in "Inpainting Model" (Method: forward_inpaint, Inpaint Max Width 1280 or
+1920). Best at divergence 8 and up. It downloads by itself the first time you use it (about 83 MB). On a first short
+test it was about as fast as the default and used a little less video memory; the picture differs mainly along
+depth edges. Works from the command line too.
+
+## Update — September 20, 2026
 
 **Fixed: a confusing "HTTP Error 404" when an optional inpainting model can't be downloaded.**
 The three optional "Aether" inpainting models are downloaded from the project's GitHub page the

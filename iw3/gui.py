@@ -18383,6 +18383,41 @@ def _self_test_inpaint_download_errors():
     print("_self_test_inpaint_download_errors: PASS")
 
 
+def _self_test_rowan_model_registration():
+    """Rowan's inpainting model must be registered on a fresh install AND appended to an existing
+    inpaint_models.yml (without touching the user's own lines), and never added twice."""
+    import tempfile
+    from . import inpaint_utils as iu
+    old = iu.INPAINT_CONFIG_FILE
+    name = iu.ROWAN_INPAINT_MODEL_NAME
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            iu.INPAINT_CONFIG_FILE = os.path.join(d, "fresh.yml")
+            assert iu.ensure_optional_inpaint_models_registered() is True
+            fresh = open(iu.INPAINT_CONFIG_FILE, encoding="utf-8").read()
+            assert name + ":" in fresh and "Video_Medium_Aether_v2:" in fresh
+            assert iu.ensure_optional_inpaint_models_registered() is False
+            assert open(iu.INPAINT_CONFIG_FILE, encoding="utf-8").read() == fresh
+
+            iu.INPAINT_CONFIG_FILE = os.path.join(d, "existing.yml")
+            mine = "my_model:\n  video: C:/x/mine.pth"  # no trailing newline on purpose
+            with open(iu.INPAINT_CONFIG_FILE, "w", encoding="utf-8") as f:
+                f.write(mine)
+            assert iu.ensure_optional_inpaint_models_registered() is True
+            text = open(iu.INPAINT_CONFIG_FILE, encoding="utf-8").read()
+            assert text.startswith(mine + "\n") and text.count(name + ":") == 1
+            assert iu.ensure_optional_inpaint_models_registered() is False
+
+            iu.INPAINT_CONFIG_FILE = os.path.join(d, "installer.yml")  # entry written by Rowan's own installer
+            with open(iu.INPAINT_CONFIG_FILE, "w", encoding="utf-8") as f:
+                f.write("# added by the iw3 inpaint installer\n" + name + ":\n  video: C:/local.pth\n")
+            assert iu.ensure_optional_inpaint_models_registered() is False
+            assert open(iu.INPAINT_CONFIG_FILE, encoding="utf-8").read().count(name + ":") == 1
+    finally:
+        iu.INPAINT_CONFIG_FILE = old
+    print("_self_test_rowan_model_registration: PASS")
+
+
 def _self_test_every_step_shows_progress():
     """Every step of a job now feeds the progress bar with what it can measure: frames / FPS / ETA where frames
     exist, GB / MB per second / ETA for file work (copy, extract, inject, mux), percent / ETA for the audio & subtitle
@@ -18678,6 +18713,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_text_subtitles,
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
+        _self_test_rowan_model_registration,
         _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,
         _self_test_standalone_tool_titles_share_accent_colour,

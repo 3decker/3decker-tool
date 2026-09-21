@@ -45,19 +45,40 @@ Video_Medium_Aether_v2:
 """
 
 
-def ensure_optional_inpaint_models_registered():
-    """Write INPAINT_CONFIG_FILE with the 3 optional Aether models if it
-    doesn't already exist. Idempotent, safe to call on every setup/update
-    run -- never overwrites a file that's already there (which may hold a
-    user's own hand-edited customization)."""
-    if path.exists(INPAINT_CONFIG_FILE):
-        print(f"{INPAINT_CONFIG_FILE} already exists -- leaving it alone.")
-        return False
-    with open(INPAINT_CONFIG_FILE, "w", encoding="utf-8") as f:
-        f.write(OPTIONAL_INPAINT_MODELS_YAML)
-    print(f"Wrote {INPAINT_CONFIG_FILE} (3 optional inpaint models registered, not yet downloaded).")
-    return True
+# Rowan's trained inpainting model (see nt_inpaint/README.md). Kept apart from the
+# Aether block so it can be appended to an existing inpaint_models.yml.
+ROWAN_INPAINT_MODEL_NAME = "Rowan_High-Depth_Inpaint_e594-Medium"
+ROWAN_INPAINT_MODEL_YAML = """\
 
+# Rowan's High-Depth inpainting model (needs the nt_inpaint extras that ship with
+# 3DECKER; downloaded on first use, ~83 MB). Best at divergence 8 and above.
+Rowan_High-Depth_Inpaint_e594-Medium:
+  video: https://github.com/3decker/3decker-tool/releases/download/inpaint-models-v1/Rowan_High-Depth_Inpaint_e594-Medium.pth
+"""
+
+
+def ensure_optional_inpaint_models_registered():
+    """Make sure INPAINT_CONFIG_FILE lists the optional models. Idempotent, safe
+    to call on every setup/update run. A new file gets the Aether models and
+    Rowan's model; an existing file is never rewritten, but Rowan's model is
+    appended to it if no entry of that name is there yet (this keeps a user's own
+    hand-edited customization intact)."""
+    if not path.exists(INPAINT_CONFIG_FILE):
+        with open(INPAINT_CONFIG_FILE, "w", encoding="utf-8") as f:
+            f.write(OPTIONAL_INPAINT_MODELS_YAML + ROWAN_INPAINT_MODEL_YAML)
+        print(f"Wrote {INPAINT_CONFIG_FILE} (4 optional inpaint models registered, not yet downloaded).")
+        return True
+    with open(INPAINT_CONFIG_FILE, encoding="utf-8") as f:
+        text = f.read()
+    if any(line.startswith(ROWAN_INPAINT_MODEL_NAME + ":") for line in text.splitlines()):
+        print(f"{INPAINT_CONFIG_FILE} already lists {ROWAN_INPAINT_MODEL_NAME} -- leaving it alone.")
+        return False
+    with open(INPAINT_CONFIG_FILE, "a", encoding="utf-8") as f:
+        if text and not text.endswith("\n"):
+            f.write("\n")
+        f.write(ROWAN_INPAINT_MODEL_YAML)
+    print(f"Added {ROWAN_INPAINT_MODEL_NAME} to {INPAINT_CONFIG_FILE}.")
+    return True
 
 def _resolve_path(path_or_url):
     if not path_or_url:

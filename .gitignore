@@ -45,6 +45,12 @@ tmp
 /iw3/pretrained_models/rembg
 /iw3/pretrained_models/rife
 /iw3/inpaint_models.yml
+# Rowan's inpaint extras (nt_inpaint/nt_iw3 code is tracked; the 83 MB model,
+# the standalone installer's settings/uninstaller and caches are not)
+/nt_inpaint/models/
+/nt_inpaint/config.json
+/nt_inpaint/uninstall.bat
+/nt_inpaint/**/__pycache__/
 
 /iw3/player/public/lib
 /iw3/player/public/environments

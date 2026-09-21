@@ -3450,7 +3450,12 @@ class MainFrame(wx.Frame):
               "upscaler bundled with this app) as one extra step, so you don't need to run waifu2x by hand "
               "afterward.\n"
               "How it's safe: saved to a separate '_w2x' file — the original conversion output is always "
-              "left untouched, even if the upscale step itself fails.\n"
+              "left untouched, even if the upscale step itself fails. A Dolby Vision / HDR video stays "
+              "10-bit HDR and gets its Dolby Vision data back.\n"
+              "The steps chain: with RIFE and/or Restore Audio & Subtitles also on, RIFE works on the "
+              "UPSCALED file and the audio/subtitles go onto the last file in the chain, so you end up with "
+              "ONE file (for example '..._w2x_rife_alldub.mkv'). The upscale runs first because it is the "
+              "slowest step and RIFE doubles the frame count.\n"
               "Con: real extra processing time after the main conversion already finished, roughly "
               "proportional to the upscale factor chosen below.\n"
               "Recommended: on if you specifically want a higher-resolution final delivery file; off if "
@@ -3530,11 +3535,13 @@ class MainFrame(wx.Frame):
               "interpolates the FINAL PACKED stereo frame (both eyes already combined) as one image, so it "
               "will see the seam between the two packed eyes -- it wasn't trained on that, though in "
               "practice it moves both eyes together so this doesn't cause left/right desync.\n"
-              "Cannot be combined with Preserve Dolby Vision: there's no way to assign correct DV/HDR10+ "
-              "metadata to RIFE's synthetic in-between frames.\n"
+              "Works together with Preserve Dolby Vision: RIFE's in-between frames get a copy of their "
+              "nearest real frame's Dolby Vision data, attached after RIFE finishes.\n"
+              "Chained with the other after-conversion steps: if Upscale with waifu2x is also on, RIFE works "
+              "on the upscaled file (upscale first: it is the slowest step and RIFE doubles the frames), and "
+              "Restore Audio & Subtitles goes onto the last file in the chain.\n"
               "Recommended: on if your source is naturally low frame rate (e.g. 24fps film) and you want "
-              "smoother motion for VR viewing; off if you're already happy with the source's frame rate or "
-              "you need Dolby Vision preserved."))
+              "smoother motion; off if you're already happy with the source's frame rate."))
         self.cbo_rife_model = wx.ComboBox(self.grp_postprocess,
                                           choices=["rife_425", "rife_425_lite"],
                                           name="cbo_rife_model")
@@ -18156,6 +18163,65 @@ def _self_test_upscale_full4k_hdr_and_progress():
     print("_self_test_upscale_full4k_hdr_and_progress: PASS")
 
 
+def _self_test_post_steps_are_chained():
+    """ADR-209: upscale -> RIFE -> Dolby Vision -> Restore Audio & Subtitles each work on the PREVIOUS step's file
+    (before, every step started again from the plain converted file). A step that is off or fails is skipped."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def run(upscaled, rife, restored, dv_source=None, stereo=False):
+        calls = []
+
+        def up(p, a):
+            calls.append(("upscale", p))
+            return upscaled
+
+        def rf(p, a, force_hevc=False):
+            calls.append(("rife", p, force_hevc))
+            return rife
+
+        def dv(src, p, a):
+            calls.append(("dv", src, p))
+            return True
+
+        def rs(p, a):
+            calls.append(("restore", p))
+            return restored
+
+        with mock.patch.object(U, "_should_use_stereo_upscale", lambda a: stereo), \
+                mock.patch.object(U, "_run_waifu2x_upscale", up), \
+                mock.patch.object(U, "_run_waifu2x_upscale_stereo", lambda p, a: (calls.append(("stereo", p)), upscaled)[1]), \
+                mock.patch.object(U, "_run_rife_interpolation", rf), \
+                mock.patch.object(U, "_reinject_dv_after_rife", dv), \
+                mock.patch.object(U, "_run_audio_subtitle_restore", rs):
+            result = U._run_post_conversion_steps("m.mkv", types.SimpleNamespace(), dv_source=dv_source)
+        return calls, result
+
+    # everything on: each step gets the previous step's file, the result is the last file
+    calls, result = run("m_w2x.mkv", "m_w2x_rife.mkv", "m_w2x_rife_alldub.mkv", dv_source="orig.mkv")
+    assert calls == [("upscale", "m.mkv"), ("rife", "m_w2x.mkv", True), ("dv", "orig.mkv", "m_w2x_rife.mkv"),
+                     ("restore", "m_w2x_rife.mkv")], calls
+    assert result == "m_w2x_rife_alldub.mkv", result
+    # the stereo-aware upscale takes the same place in the chain
+    calls, result = run("m_w2x4k.mkv", "m_w2x4k_rife.mkv", None, stereo=True)
+    assert calls[0] == ("stereo", "m.mkv") and calls[1][:2] == ("rife", "m_w2x4k.mkv") and calls[1][2] is False, calls
+    assert result == "m_w2x4k_rife.mkv", "no restore -> the RIFE file is the result"
+    # upscale off (returns None): RIFE starts from the converted file, as before
+    calls, result = run(None, "m_rife.mkv", "m_rife_alldub.mkv")
+    assert calls[1][:2] == ("rife", "m.mkv") and calls[-1] == ("restore", "m_rife.mkv"), calls
+    # RIFE off or failed: the restore goes onto the upscaled file
+    calls, result = run("m_w2x.mkv", None, "m_w2x_alldub.mkv")
+    assert calls[-1] == ("restore", "m_w2x.mkv") and result == "m_w2x_alldub.mkv", calls
+    # nothing on: only the (no-op) restore sees the converted file, nothing changes
+    calls, result = run(None, None, None)
+    assert calls[-1] == ("restore", "m.mkv") and result == "m.mkv", calls
+    # no Dolby Vision re-attach unless a DV source was given
+    calls, _ = run("m_w2x.mkv", "m_w2x_rife.mkv", None)
+    assert not any(c[0] == "dv" for c in calls), calls
+    print("_self_test_post_steps_are_chained: PASS")
+
+
 def _self_test_rife_with_preserve_dolby_vision():
     """ADR-192: RIFE + Preserve Dolby Vision are allowed together (no start-time refusal); the conversion
     itself is run without DV injection and DV is re-attached after RIFE. The whole helper flow is exercised
@@ -19016,6 +19082,7 @@ def _run_self_tests():
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,
+        _self_test_post_steps_are_chained,
         _self_test_upscale_full4k_hdr_and_progress,
         _self_test_stereo_tag_survives_post_steps,
         _self_test_inpaint_model_in_filename_and_metadata,

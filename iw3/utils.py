@@ -839,6 +839,33 @@ def _run_rife_interpolation(output_path, args, force_hevc=False):
     return interpolated_path
 
 
+def _run_post_conversion_steps(video_path, args, dv_source=None):
+    """ADR-209: the steps that run after the conversion, CHAINED so each one works on the previous one's result:
+    waifu2x upscale -> RIFE -> Dolby Vision re-attach (only when `dv_source` is given, i.e. RIFE + Preserve Dolby
+    Vision) -> Restore Audio & Subtitles. Before this every step started again from the plain converted file, so
+    ticking upscale AND RIFE gave two separate files (one upscaled, one smoothed) instead of one that was both.
+
+    Upscaling comes before RIFE on purpose: the upscale is by far the slowest step and RIFE doubles the frame count,
+    so upscaling first does half the frames. The names simply stack: "<name>_w2x_rife_alldub.mkv". A step that is
+    off, or fails, is skipped and the chain carries on with the file it had (each step already reports its own
+    failure). Returns the path of the file the user should keep."""
+    current = video_path
+    if _should_use_stereo_upscale(args):
+        upscaled = _run_waifu2x_upscale_stereo(current, args)
+    else:
+        upscaled = _run_waifu2x_upscale(current, args)
+    if upscaled:
+        current = upscaled
+    rife_output_path = _run_rife_interpolation(current, args, force_hevc=bool(dv_source))
+    if dv_source:
+        _reinject_dv_after_rife(dv_source, rife_output_path, args)
+    if rife_output_path:
+        current = rife_output_path
+    # Restore audio/subtitles onto the file the user will actually keep (the last one in the chain).
+    restored = _run_audio_subtitle_restore(current, args)
+    return restored or current
+
+
 def _run_audio_subtitle_restore(output_path, args):
     """Optionally invokes iw3.av_restore_cli as a subprocess against a
     just-finished iw3 output, when the user explicitly opted in (GUI: "Restore
@@ -5097,17 +5124,8 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     # cancellation without raising, so a cancelled job would otherwise still reach here.
     stop_event = args.state.get("stop_event") if getattr(args, "state", None) else None
     if not (stop_event is not None and stop_event.is_set()):
-        if _should_use_stereo_upscale(args):
-            _run_waifu2x_upscale_stereo(final_output_path, args)
-        else:
-            _run_waifu2x_upscale(final_output_path, args)
-        rife_output_path = _run_rife_interpolation(final_output_path, args, force_hevc=dv_after_rife)
-        if dv_after_rife:
-            _reinject_dv_after_rife(original_input_filename, rife_output_path, args)
-        # Restore audio/subtitles onto the file the user will actually keep: the RIFE output when RIFE ran
-        # (it used to be the pre-RIFE file, so the smoothed video never got its tracks and the "_alldub" file
-        # had no RIFE at all).
-        _run_audio_subtitle_restore(rife_output_path or final_output_path, args)
+        _run_post_conversion_steps(final_output_path, args,
+                                   dv_source=original_input_filename if dv_after_rife else None)
 
 
 def export_images(input_path, output_dir, args, title=None):

@@ -1252,22 +1252,9 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
                       f"a resumed run, or usable for a manual recovery.", file=sys.stderr)
 
     if not cancelled():
-        from .utils import (
-            _run_rife_interpolation, _run_waifu2x_upscale, _run_waifu2x_upscale_stereo,
-            _should_use_stereo_upscale, _reinject_dv_after_rife,
-        )
-        if _should_use_stereo_upscale(args):
-            _run_waifu2x_upscale_stereo(output_path, args)
-        else:
-            _run_waifu2x_upscale(output_path, args)
-        dv_source = getattr(args, "_dv_after_rife_source", None)
-        rife_output_path = _run_rife_interpolation(output_path, args, force_hevc=bool(dv_source))
-        if dv_source:
-            _reinject_dv_after_rife(dv_source, rife_output_path, args)
-        # "Restore Audio & Subtitles" used to be silently ignored in Depth Blend mode. Same rule as the main
-        # conversion: build the tracks onto the file the user keeps (the RIFE output when RIFE ran).
-        from .utils import _run_audio_subtitle_restore
-        _run_audio_subtitle_restore(rife_output_path or output_path, args)
+        # Same chained steps as the main conversion (upscale -> RIFE -> Dolby Vision -> audio & subtitles), ADR-209.
+        from .utils import _run_post_conversion_steps
+        _run_post_conversion_steps(output_path, args, dv_source=getattr(args, "_dv_after_rife_source", None))
 
     print(f"[depth-blend] done. Working files (full rgb/depth dumps from both passes) are still in:\n"
           f"  {work_dir}\n"

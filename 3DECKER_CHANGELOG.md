@@ -15,7 +15,7 @@ it matters.
 
 ## Latest Update — September 21, 2026
 
-**Improved: your file name now always says which inpainting model was used.** With any inpainting method, the name now includes `_im` plus the model (for example `_imlight_inpaint_v1` or `_imRowan_High-Depth_Inpaint_e594-Medium`). Before, the default model was left out. The model is also stored inside the file's information (the `iw3_inpaint_model` note). Names for methods that don't use inpainting are unchanged. Note: because the default now appears in the name, the resume feature will not recognise a half-finished file made under the old naming.
+**Improved: your file name now always says which inpainting model was used.** With any inpainting method, the name now includes `_im` plus the model (for example `_imlight_inpaint_v1` or `_imRowan_High-Depth_Inpaint_e594-Medium`). Before, the default model was left out. The model is also stored inside the file's information (the `iw3_inpaint_model` note). The Pop-Out Boost / Limit is now named too: `_pob125` means a boost of 1.25, `_pol70` means a limit of 0.7 (nothing is added when it is off), and it is stored inside the file as `iw3_max_negative_parallax`. Names for methods that don't use inpainting are unchanged. Note: because the default now appears in the name, the resume feature will not recognise a half-finished file made under the old naming.
 
 **Fixed: an update no longer fails because of one dropped internet connection.** Updates and first-time setup download a few helper packages from GitHub. If the connection was reset for a moment, the whole update used to stop with a long error. It now waits 10 seconds and tries again, up to 3 times, and says so on screen, before giving up.
 

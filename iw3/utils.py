@@ -1900,6 +1900,15 @@ def make_output_filename(input_filename, args, video=False):
                 mp += f"hi{to_deciaml(mg_high, 100, 2)}"
         else:
             mp = ""
+        # Pop-Out Limit (<1.0) / Boost (>1.0), the --max-negative-parallax setting; 1.0 = off = not named.
+        mnp_val = getattr(args, "max_negative_parallax", 1.0)
+        mnp_val = 1.0 if mnp_val is None else mnp_val
+        if mnp_val > 1.0:
+            po = f"_pob{int(round(mnp_val * 100)):03d}"
+        elif mnp_val < 1.0:
+            po = f"_pol{int(round(mnp_val * 100)):02d}"
+        else:
+            po = ""
         if getattr(args, "depth_refine", False):
             drefine = "_dr"
             dr_strength = getattr(args, "depth_refine_strength", 1.0) or 1.0
@@ -2045,7 +2054,7 @@ def make_output_filename(input_filename, args, video=False):
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}_"
+                    f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}{po}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
                     f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{sharp_tag}{rife_tag}{smtag}{bitrate}")
     else:
@@ -2101,6 +2110,9 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_midground_threshold_low={args.midground_threshold_low}")
         if getattr(args, "midground_threshold_high", 0.85) != 0.85:
             comment_parts.append(f"iw3_midground_threshold_high={args.midground_threshold_high}")
+    mnp_val = getattr(args, "max_negative_parallax", 1.0)
+    if mnp_val is not None and mnp_val != 1.0:
+        comment_parts.append(f"iw3_max_negative_parallax={mnp_val}")
     comment_parts.append(f"iw3_ipd_offset={args.ipd_offset}")
     if video:
         if args.video_codec == "libopenh264":

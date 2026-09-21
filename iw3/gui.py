@@ -1,4 +1,4 @@
-﻿import nunif.pythonw_fix  # noqa
+import nunif.pythonw_fix  # noqa
 import nunif.gui.subprocess_patch  # noqa
 import sys
 import os
@@ -18400,6 +18400,13 @@ def _self_test_inpaint_model_in_filename_and_metadata():
     a = build("--method", "forward_inpaint", "--inpaint-model", "Rowan_High-Depth_Inpaint_e594-Medium")
     assert "_imRowan_High-Depth_Inpaint_e594-Medium" in U.make_output_filename("a.mp4", a, video=True)
     assert "iw3_inpaint_model=Rowan_High-Depth_Inpaint_e594-Medium" in U._build_iw3_comment_metadata(a, video=True)
+    for value, tag in (("1.25", "_pob125"), ("1.15", "_pob115"), ("2.0", "_pob200"), ("0.7", "_pol70")):
+        a = build("--method", "mlbw_l2_inpaint", "--max-negative-parallax", value)
+        assert tag + "_" in U.make_output_filename("a.mp4", a, video=True), value
+        assert f"iw3_max_negative_parallax={float(value)}" in U._build_iw3_comment_metadata(a, video=True), value
+    a = build("--method", "mlbw_l2_inpaint")
+    assert "_pob" not in U.make_output_filename("a.mp4", a, video=True) and "_pol" not in U.make_output_filename("a.mp4", a, video=True)
+    assert "max_negative_parallax" not in U._build_iw3_comment_metadata(a, video=True)
     a = build("--method", "row_flow_v3")
     assert "_im" not in U.make_output_filename("a.mp4", a, video=True)
     assert "iw3_inpaint_model" not in U._build_iw3_comment_metadata(a, video=True)

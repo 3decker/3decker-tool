@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — September 21, 2026
 
+**Fixed: an update no longer fails because of one dropped internet connection.** Updates and first-time setup download a few helper packages from GitHub. If the connection was reset for a moment, the whole update used to stop with a long error. It now waits 10 seconds and tries again, up to 3 times, and says so on screen, before giving up.
+
 **New: Rowan's High-Depth inpainting model, bundled.** A community-made inpainting model (by Rowan) built for
 strong 3D. It fills the gaps that open up behind popped-out objects more cleanly, and it comes with three
 helpers: better detection of the smeared band at depth edges, a mode that runs the model small but keeps your

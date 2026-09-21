@@ -46,6 +46,21 @@ function Write-Step($msg) {
     Write-Host "==> $msg" -ForegroundColor Cyan
 }
 
+# Runs "python -m pip install --no-cache-dir <args>" and retries up to 3 times.
+# Real user report: one dropped GitHub connection ("Connection was reset" while pip
+# cloned a git-based requirement) failed the whole install/update. Returns the last
+# exit code so callers keep their own error messages.
+function Invoke-PipInstall {
+    param([string[]]$PipArgs)
+    $attempt = 1
+    while ($true) {
+        & $pythonExe -m pip install --no-cache-dir @PipArgs
+        if ($LASTEXITCODE -eq 0 -or $attempt -ge 3) { return }
+        $attempt++
+        Write-Host "  Download failed - probably a connection problem. Retrying in 10 seconds (attempt $attempt of 3)..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 10
+    }
+}
 function Get-File($url, $destination) {
     Write-Host "  Downloading $url"
     Start-BitsTransfer -Source $url -Destination $destination
@@ -342,16 +357,16 @@ if (-not (Test-Path $torchReq)) {
     throw "No requirements-torch-$TorchVariant.txt found in nunif\ -- valid -TorchVariant values are whatever requirements-torch-*.txt files exist there (cu126, rocm, xpu)."
 }
 
-& $pythonExe -m pip install --no-cache-dir --upgrade pip
+Invoke-PipInstall @("--upgrade", "pip")
 if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed with exit code $LASTEXITCODE" }
 
-& $pythonExe -m pip install --no-cache-dir --upgrade -r $torchReq
+Invoke-PipInstall @("--upgrade", "-r", $torchReq)
 if ($LASTEXITCODE -ne 0) { throw "pip install of $torchReq failed with exit code $LASTEXITCODE" }
 
-& $pythonExe -m pip install --no-cache-dir --upgrade -r (Join-Path $nunifDir "requirements.txt")
+Invoke-PipInstall @("--upgrade", "-r", (Join-Path $nunifDir "requirements.txt"))
 if ($LASTEXITCODE -ne 0) { throw "pip install of requirements.txt failed with exit code $LASTEXITCODE" }
 
-& $pythonExe -m pip install --no-cache-dir --upgrade -r (Join-Path $nunifDir "requirements-gui.txt")
+Invoke-PipInstall @("--upgrade", "-r", (Join-Path $nunifDir "requirements-gui.txt"))
 if ($LASTEXITCODE -ne 0) { throw "pip install of requirements-gui.txt failed with exit code $LASTEXITCODE" }
 
 Write-Host "  All Python packages installed."

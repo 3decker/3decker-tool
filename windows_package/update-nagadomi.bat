@@ -55,13 +55,13 @@ xcopy "%NUNIF_DIR%\windows_package\torch_compile" "%~dp0..\..\torch_compile" /E 
 if exist "%~dp0..\..\torch_compile\install_triton_windows.bat" del /f /q "%~dp0..\..\torch_compile\install_triton_windows.bat"
 
 echo Installing Python Packages...
-python -m pip install --no-cache-dir --upgrade pip
+call :pip_retry --upgrade pip
 if %ERRORLEVEL% neq 0 goto :on_error
-python -m pip install --no-cache-dir --upgrade -r "%NUNIF_DIR%\requirements-torch.txt"
+call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-torch.txt"
 if %ERRORLEVEL% neq 0 goto :on_error
-python -m pip install --no-cache-dir --upgrade -r "%NUNIF_DIR%\requirements.txt"
+call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements.txt"
 if %ERRORLEVEL% neq 0 goto :on_error
-python -m pip install --no-cache-dir --upgrade -r "%NUNIF_DIR%\requirements-gui.txt"
+call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-gui.txt"
 if %ERRORLEVEL% neq 0 goto :on_error
 
 
@@ -87,6 +87,22 @@ exit /b 0
 
 @rem ADR-143: same real, user-reported confusion as update-3decker.bat's
 @rem identical fix -- see that file's comment for the full explanation.
+@rem Runs "pip install --no-cache-dir <args>" and retries up to 3 times if it fails.
+@rem Real user report: one dropped GitHub connection ("Connection was reset" while
+@rem pip cloned a git-based requirement) failed the whole update. ping is used as the
+@rem delay because `timeout` errors out when there is no console (the GUI runs this
+@rem with no keyboard attached).
+:pip_retry
+  set "PIP_TRY=1"
+:pip_retry_loop
+  python -m pip install --no-cache-dir %*
+  if !ERRORLEVEL! equ 0 exit /b 0
+  if !PIP_TRY! geq 3 exit /b 1
+  set /a PIP_TRY+=1
+  echo Download failed - probably a connection problem. Retrying in 10 seconds (attempt !PIP_TRY! of 3^)...
+  ping -n 11 127.0.0.1 > nul
+  goto :pip_retry_loop
+
 :on_error
   echo Error!
   exit /b 1

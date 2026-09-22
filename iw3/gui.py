@@ -753,10 +753,30 @@ def _apply_combo_value(combo, value):
     (SetValue) when the value isn't one of the preset choices -- mirrors how
     apply_quick_preset() already sets fixed-choice vs. free-typed fields by
     hand (see docs/ai/AI_DECISIONS.md ADR-074), without needing to know which
-    kind of combobox each field actually is."""
+    kind of combobox each field actually is.
+
+    Real bug found while adding Pop Feather % (ADR-217): a restored value that's a
+    whole-number float (e.g. a percentile threshold, stored as fraction * 100.0 --
+    0.15 * 100.0 is exactly 15.0) used to go through plain str(), giving "15.0" --
+    which matches none of a percentage field's own choices ("15"), so
+    SetStringSelection always missed and the box fell back to showing "15.0"
+    instead of cleanly selecting "15". First attempt at a fix (unconditionally
+    stripping the trailing ".0") broke three OTHER, unrelated fields whose own
+    choices are themselves written WITH a decimal (cbo_divergence's "2.0",
+    cbo_max_negative_parallax's "1.0", cbo_nt_div_min's "3.0") -- confirmed by the
+    self-test suite immediately catching all three. Correct fix: try the plain
+    str() form first (unchanged behavior, matches any field whose choices already
+    include the decimal), and only fall back to the no-".0" form when THAT one is
+    what actually matches a real choice -- so no field's own choice format decides
+    the outcome by accident, whichever one is real wins."""
     text = str(value)
-    if not combo.SetStringSelection(text):
-        combo.SetValue(text)
+    if combo.SetStringSelection(text):
+        return
+    if isinstance(value, float) and value == value and abs(value) != float("inf") and value == int(value):
+        alt_text = str(int(value))
+        if combo.SetStringSelection(alt_text):
+            return
+    combo.SetValue(text)
 
 
 # "Guided Light" pilot (ADR-097): a wx.Slider companion for each of these continuous
@@ -787,6 +807,7 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_midground_pop", "sld_stereo_midground_pop", -1.0, 1.0, 100, False, None),
     ("cbo_midground_threshold_low", "sld_stereo_midground_threshold_low", 0, 50, 1, True, None),
     ("cbo_midground_threshold_high", "sld_stereo_midground_threshold_high", 50, 100, 1, True, None),
+    ("cbo_pop_feather", "sld_stereo_pop_feather", 0, 25, 1, True, None),
     ("cbo_edge_repair", "sld_stereo_edge_repair", 0.0, 1.0, 100, False, None),
     ("cbo_sharpen_strength", "sld_stereo_sharpen_strength", 0.25, 1.0, 100, False, None),
     ("cbo_ema_decay", "sld_stereo_ema_decay", 0.0, 0.99, 100, False, None),
@@ -2137,6 +2158,38 @@ class MainFrame(wx.Frame):
         self.cpn_stereo_pop_divergence.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
                                             self.on_toggled_stereo_collapsible_pane)
         self.cpn_stereo_pop_divergence.GetPane().SetName("cpn_stereo_pop_divergence_pane")
+
+        # ADR-217: real user report (2026-09-22) -- a visible line right at Midground Pop's own
+        # band edge, even at a modest strength on the default 15/85 threshold. Shared by all three
+        # Pop tools below (same DE.apply_depth_band_pop primitive, same hard-edge math), so one
+        # setting here softens all three instead of needing a separate feather per tool.
+        self.lbl_pop_feather = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Pop Feather %"))
+        self.cbo_pop_feather = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+                                                choices=["0", "5", "10", "15", "20"],
+                                                name="cbo_pop_feather")
+        self.cbo_pop_feather.SetSelection(0)
+        self.cbo_pop_feather.SetToolTip(
+            T("What it's for: softens the edge of Foreground/Midground/Background Pop's band instead of "
+              "a hard on/off cutoff. Shared by all three -- one value affects whichever of them are "
+              "active.\n"
+              "How it helps: each Pop tool only affects a restricted slice of the picture, chosen by "
+              "depth percentile (e.g. Midground Pop's default \"middle 70%\"). Right at one edge of that "
+              "slice, the push reaches its full amount and then the very next pixel outside gets none at "
+              "all -- a real, visible line, confirmed on real footage even at a modest strength. This "
+              "ramps the effect smoothly across a band straddling each threshold (half outside the "
+              "original slice, half inside it) instead of stopping abruptly, the same idea Protect Faces "
+              "uses to soften its own detection box edges.\n"
+              "Values: 0 = off (default) -- original behavior, byte-for-byte unchanged. Higher = a wider, "
+              "gentler ramp; the trade-off is the transition reaches a little further into the "
+              "surrounding, untouched part of the scene.\n"
+              "Con: no cost when off; when on, a very high value can noticeably shrink how much of the "
+              "picture is at full strength, since more of the band's own width is spent easing in and "
+              "out rather than at the full push.\n"
+              "Recommended: 0 unless you've actually seen a line at one of the Pop tools' edges; try 10 "
+              "first if you do."))
+        self.sld_stereo_pop_feather = _build_stereo_slider(
+            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_pop_feather, 0, 25, 1)
+
         self.lbl_foreground_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Pop"))
         self.cbo_foreground_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                    choices=["-1.0", "-0.5", "0.0", "0.5", "1.0"],
@@ -3021,7 +3074,11 @@ class MainFrame(wx.Frame):
         pane_layout = wx.GridBagSizer(vgap=4, hgap=4)
         pane_layout.SetEmptyCellSize((0, 0))
         k = 0
-        pane_layout.Add(self.lbl_foreground_pop, (k, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.lbl_pop_feather, (k, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout.Add(self.cbo_pop_feather, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(self.sld_stereo_pop_feather, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout.Add(wx.StaticLine(self.cpn_stereo_pop_divergence.GetPane()), (k := k + 1, 0), (0, 3), flag=wx.EXPAND)
+        pane_layout.Add(self.lbl_foreground_pop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout.Add(self.cbo_foreground_pop, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.sld_stereo_foreground_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.lbl_foreground_pop_threshold_low, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -7905,6 +7962,7 @@ class MainFrame(wx.Frame):
             self.cbo_midground_pop,
             self.cbo_midground_threshold_low,
             self.cbo_midground_threshold_high,
+            self.cbo_pop_feather,
             self.cbo_edge_repair,
             self.cbo_sharpen_strength,
             self.cbo_pad,
@@ -8782,6 +8840,7 @@ class MainFrame(wx.Frame):
             midground_pop=float(self.cbo_midground_pop.GetValue()),
             midground_threshold_low=float(self.cbo_midground_threshold_low.GetValue()) / 100.0,
             midground_threshold_high=float(self.cbo_midground_threshold_high.GetValue()) / 100.0,
+            pop_feather=float(self.cbo_pop_feather.GetValue()) / 100.0,
             edge_repair_strength=float(self.cbo_edge_repair.GetValue()),
             sharpen=self.chk_sharpen.GetValue(),
             sharpen_strength=float(self.cbo_sharpen_strength.GetValue()),
@@ -9941,6 +10000,7 @@ class MainFrame(wx.Frame):
             self.cbo_midground_threshold_low, getattr(args, "midground_threshold_low", 0.15) * 100.0)
         _apply_combo_value(
             self.cbo_midground_threshold_high, getattr(args, "midground_threshold_high", 0.85) * 100.0)
+        _apply_combo_value(self.cbo_pop_feather, getattr(args, "pop_feather", 0.0) * 100.0)
         _apply_combo_value(self.cbo_edge_repair, args.edge_repair_strength)
         self.chk_sharpen.SetValue(bool(args.sharpen))
         _apply_combo_value(self.cbo_sharpen_strength, args.sharpen_strength)
@@ -19484,6 +19544,82 @@ def _self_test_standalone_tool_titles_share_accent_colour():
     print("_self_test_standalone_tool_titles_share_accent_colour: PASS")
 
 
+def _self_test_pop_feather():
+    """ADR-217: real user report (2026-09-22) -- a visible line at Midground Pop's band edge,
+    even at a modest strength on the default 15/85 threshold. New shared "Pop Feather %" control
+    softens Foreground/Midground/Background Pop's band edge instead of a hard cutoff. Confirms:
+    default 0 (off) both as the combo's own default and end-to-end through parse_args(); a
+    non-zero value round-trips through parse_args() -> apply_parsed_args_to_gui() and back; it's
+    wired into the slider-sync table (STEREO_SLIDER_FIELDS); get_cli_command() reflects a
+    non-default value but omits the flag at the 0 default; and the filename/embedded-metadata tag
+    only appears when the feather is on AND at least one Pop tool is actually active -- a feather
+    value with every Pop strength still at 0.0 does nothing and must not be named."""
+    import iw3.gui as gui_mod
+    from . import utils as U
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.cbo_pop_feather.GetValue() == "0"
+        assert any(name == "cbo_pop_feather" for name, *_ in gui_mod.STEREO_SLIDER_FIELDS), \
+            "cbo_pop_feather must be registered in STEREO_SLIDER_FIELDS for slider<->combo sync"
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        args_default = frame.parse_args(skip_set_state=True)
+        assert args_default.pop_feather == 0.0, args_default.pop_feather
+        assert "--pop-feather" not in frame.get_cli_command()
+
+        frame.cbo_pop_feather.SetValue("10")
+        args_feathered = frame.parse_args(skip_set_state=True)
+        assert abs(args_feathered.pop_feather - 0.10) < 1e-9, args_feathered.pop_feather
+        assert "--pop-feather 0.1" in frame.get_cli_command(), frame.get_cli_command()
+
+        args_probe = frame.parse_args(skip_set_state=True)
+        args_probe.pop_feather = 0.15
+        frame.apply_parsed_args_to_gui(args_probe)
+        assert frame.cbo_pop_feather.GetValue() == "15"
+
+        # a loaded config from before this feature existed has no such attribute at all
+        del args_probe.pop_feather
+        frame.cbo_pop_feather.SetValue("15")
+        frame.apply_parsed_args_to_gui(args_probe)
+        assert frame.cbo_pop_feather.GetValue() == "0"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    # Filename/metadata tag: only meaningful, and only shown, when the feather is on AND at
+    # least one Pop tool is actually active.
+    parser = U.create_parser(required_true=False)
+
+    def build(*extra):
+        a = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename", *extra])
+        a.video_extension = ".mkv"
+        return a
+
+    a = build("--method", "row_flow_v3", "--midground-pop", "0.25", "--pop-feather", "0.1")
+    assert "_pf10" in U.make_output_filename("a.mp4", a, video=True)
+    assert "iw3_pop_feather=0.1" in U._build_iw3_comment_metadata(a, video=True)
+
+    a = build("--method", "row_flow_v3", "--pop-feather", "0.1")  # feather on, but no Pop tool active
+    assert "_pf" not in U.make_output_filename("a.mp4", a, video=True)
+    assert "iw3_pop_feather" not in U._build_iw3_comment_metadata(a, video=True)
+
+    a = build("--method", "row_flow_v3", "--midground-pop", "0.25")  # Pop active, feather off (default)
+    assert "_pf" not in U.make_output_filename("a.mp4", a, video=True)
+    assert "iw3_pop_feather" not in U._build_iw3_comment_metadata(a, video=True)
+
+    print("_self_test_pop_feather: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -19581,6 +19717,7 @@ def _run_self_tests():
         _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,
         _self_test_standalone_tool_titles_share_accent_colour,
+        _self_test_pop_feather,
     ]
     failures = []
     for test in tests:

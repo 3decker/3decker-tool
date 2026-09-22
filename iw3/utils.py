@@ -2142,6 +2142,10 @@ def make_output_filename(input_filename, args, video=False):
                 mp += f"hi{to_deciaml(mg_high, 100, 2)}"
         else:
             mp = ""
+        # Only meaningful (and only named) when at least one Pop tool is actually
+        # active -- a feather value with all three Pop strengths at 0.0 does nothing.
+        pop_feather_val = getattr(args, "pop_feather", 0.0) or 0.0
+        pf = f"_pf{to_deciaml(pop_feather_val, 100, 2)}" if pop_feather_val > 0.0 and (fp or bp or mp) else ""
         # Pop-Out Limit (<1.0) / Boost (>1.0), the --max-negative-parallax setting; 1.0 = off = not named.
         mnp_val = getattr(args, "max_negative_parallax", 1.0)
         mnp_val = 1.0 if mnp_val is None else mnp_val
@@ -2299,7 +2303,7 @@ def make_output_filename(input_filename, args, video=False):
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}{po}_"
+                    f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}{pf}{po}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
                     f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{fprot_tag}"
                     f"{sharp_tag}{rife_tag}{smtag}{bitrate}")
@@ -2356,6 +2360,10 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_midground_threshold_low={args.midground_threshold_low}")
         if getattr(args, "midground_threshold_high", 0.85) != 0.85:
             comment_parts.append(f"iw3_midground_threshold_high={args.midground_threshold_high}")
+    if (getattr(args, "pop_feather", 0.0) or 0.0) > 0.0 and (
+            getattr(args, "foreground_pop", 0.0) or getattr(args, "background_pop", 0.0)
+            or getattr(args, "midground_pop", 0.0)):
+        comment_parts.append(f"iw3_pop_feather={args.pop_feather}")
     mnp_val = getattr(args, "max_negative_parallax", 1.0)
     if mnp_val is not None and mnp_val != 1.0:
         comment_parts.append(f"iw3_max_negative_parallax={mnp_val}")
@@ -2739,27 +2747,31 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
     # positive pushes toward the audience, negative pulls back/away) and its own
     # independently adjustable Low/High threshold pair. No per-zone wrapper
     # functions or special-casing.
+    pop_feather = getattr(args, "pop_feather", 0.0) or 0.0
     foreground_pop = getattr(args, "foreground_pop", 0.0)
     if foreground_pop != 0.0:
         foreground_pop_threshold_low = getattr(args, "foreground_pop_threshold_low", 0.85)
         foreground_pop_threshold_high = getattr(args, "foreground_pop_threshold_high", 1.0)
         depth = DE.apply_depth_band_pop(depth, foreground_pop,
                                         threshold_low=foreground_pop_threshold_low,
-                                        threshold_high=foreground_pop_threshold_high)
+                                        threshold_high=foreground_pop_threshold_high,
+                                        feather=pop_feather)
     background_pop = getattr(args, "background_pop", 0.0)
     if background_pop != 0.0:
         background_pop_threshold_low = getattr(args, "background_pop_threshold_low", 0.0)
         background_pop_threshold_high = getattr(args, "background_pop_threshold_high", 0.15)
         depth = DE.apply_depth_band_pop(depth, background_pop,
                                         threshold_low=background_pop_threshold_low,
-                                        threshold_high=background_pop_threshold_high)
+                                        threshold_high=background_pop_threshold_high,
+                                        feather=pop_feather)
     midground_pop = getattr(args, "midground_pop", 0.0)
     if midground_pop != 0.0:
         midground_threshold_low = getattr(args, "midground_threshold_low", 0.15)
         midground_threshold_high = getattr(args, "midground_threshold_high", 0.85)
         depth = DE.apply_depth_band_pop(depth, midground_pop,
                                         threshold_low=midground_threshold_low,
-                                        threshold_high=midground_threshold_high)
+                                        threshold_high=midground_threshold_high,
+                                        feather=pop_feather)
 
     # ADR-214: Face Protection -- real user report, 2026-09-22: at strong Divergence/Pop-Out Boost, a
     # close-up face's own tiny nose-to-eye depth relief gets stretched along with everything else, and
@@ -6186,6 +6198,13 @@ def create_parser(required_true=True):
     parser.add_argument("--midground-threshold-high", type=float, default=0.85,
                         help="upper edge (by depth percentile) of the band Midground Pop affects -- pixels "
                              "above this are treated as foreground and left untouched. 0.0-1.0, default 0.85")
+    parser.add_argument("--pop-feather", type=float, default=0.0,
+                        help="softens Foreground/Midground/Background Pop's band edge instead of a hard "
+                             "on/off cutoff -- ramps the effect over this many percentile-points straddling "
+                             "each threshold (half outside the band, half inside), fixing a real visible "
+                             "line at the sharp edge of a restricted band (confirmed on real footage even "
+                             "at modest strength). 0.0-0.5, 0.0=off (default, original hard-edge behavior, "
+                             "unchanged)")
     parser.add_argument("--edge-repair-strength", type=float, default=0.0,
                         help=("final cleanup pass on the RENDERED stereo output (after whichever stereo "
                               "method made it), gently smoothing only a thin band right around real depth "

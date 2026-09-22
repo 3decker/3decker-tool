@@ -7,7 +7,7 @@ _BLUR3 = torch.tensor([[1., 2., 1.], [2., 4., 2.], [1., 2., 1.]])
 _BLUR3 = _BLUR3 / _BLUR3.sum()
 
 
-def apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=1.0):
+def apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=1.0, feather=0.0):
     """
     Single shared primitive behind ALL THREE Pop tools -- Foreground Pop,
     Midground Pop, and Background Pop each call this exact same function
@@ -30,14 +30,59 @@ def apply_depth_band_pop(depth, strength, threshold_low=0.0, threshold_high=1.0)
     band's NEAR edge (threshold_high), pushing toward the FAR/background
     direction. strength == 0 is an exact no-op (callers should still guard with
     strength != 0 to skip the work entirely).
+
+    feather: 0.0-0.5, real user report (2026-09-22) -- a hard mask edge (the
+    old, and still default, behavior below) means one specific boundary of the
+    band always has a genuine value discontinuity: the offset above is
+    anchored at threshold_low for positive strength (so it's already exactly
+    zero there -- that edge was always smooth) and grows to its MAXIMUM right
+    at threshold_high, where the mask then cuts off completely, so the very
+    next pixel outside the band gets zero push. That's a real, visible line,
+    confirmed on real footage even at a modest strength on the default 15/85
+    Midground band -- not a rare edge case. Negative strength mirrors this:
+    threshold_high is the smooth edge, threshold_low is the sharp one.
+    feather > 0.0 softens exactly that sharp edge (and, harmlessly, re-fades
+    the already-smooth one too, since it's already a no-op there) by ramping
+    the mask from 0 to 1 over a band straddling EACH threshold -- half the
+    feather width outside the original band, half inside it -- centered
+    exactly on the threshold, the same box-blur-straddle idea already used
+    for Protect Faces' own box edges (see face_protect.py). 0.0 (default) is
+    the original hard-edge behavior, byte-for-byte unchanged.
     """
     B = depth.shape[0]
     result = []
     for i in range(B):
         d = depth[i]
-        t_low = d.flatten().quantile(threshold_low)
-        t_high = d.flatten().quantile(threshold_high)
-        mask = ((d >= t_low) & (d <= t_high)).to(d.dtype)
+        flat = d.flatten()
+        t_low = flat.quantile(threshold_low)
+        t_high = flat.quantile(threshold_high)
+
+        if feather > 0.0:
+            lo_outer_p = max(0.0, threshold_low - feather)
+            lo_inner_p = min(threshold_high, threshold_low + feather)
+            hi_inner_p = max(threshold_low, threshold_high - feather)
+            hi_outer_p = min(1.0, threshold_high + feather)
+            t_lo_outer = flat.quantile(lo_outer_p)
+            t_lo_inner = flat.quantile(lo_inner_p)
+            t_hi_inner = flat.quantile(hi_inner_p)
+            t_hi_outer = flat.quantile(hi_outer_p)
+
+            mask = torch.ones_like(d)
+            if t_lo_inner > t_lo_outer:
+                lo_ramp = ((d - t_lo_outer) / (t_lo_inner - t_lo_outer)).clamp(0.0, 1.0)
+                mask = torch.where(d < t_lo_inner, lo_ramp, mask)
+            else:
+                mask = torch.where(d < t_lo_outer, torch.zeros_like(d), mask)
+            if t_hi_outer > t_hi_inner:
+                hi_ramp = ((t_hi_outer - d) / (t_hi_outer - t_hi_inner)).clamp(0.0, 1.0)
+                mask = torch.where(d > t_hi_inner, hi_ramp, mask)
+            else:
+                mask = torch.where(d > t_hi_outer, torch.zeros_like(d), mask)
+            mask = torch.where(d < t_lo_outer, torch.zeros_like(d), mask)
+            mask = torch.where(d > t_hi_outer, torch.zeros_like(d), mask)
+        else:
+            mask = ((d >= t_low) & (d <= t_high)).to(d.dtype)
+
         if strength >= 0:
             offset = (d - t_low).clamp(min=0)
             d_shifted = d + offset * strength * 2.0
@@ -309,7 +354,52 @@ def _test_apply_depth_band_pop_background_shape():
     print("_test_apply_depth_band_pop_background_shape: PASS")
 
 
+def _test_apply_depth_band_pop_feather():
+    """Real user report (2026-09-22): a visible line at Midground Pop's band edge,
+    even at a modest strength on the default 15/85 threshold -- confirmed by
+    the user on real footage. Confirms feather=0.0 is byte-identical to the old
+    hard-edge behavior (default, unchanged -- nobody's existing preset is
+    affected), that feather>0.0 actually shrinks the worst-case jump between
+    two adjacent depth values near the sharp edge (for both strength signs,
+    since the sharp edge flips sides -- threshold_high for positive,
+    threshold_low for negative), and that true background/foreground well
+    outside the feathered zone stay completely untouched either way."""
+    ramp = torch.linspace(0.0, 1.0, steps=100).view(1, 1, 10, 10)
+
+    out_default = apply_depth_band_pop(ramp, 0.5, threshold_low=0.15, threshold_high=0.85)
+    out_explicit_zero = apply_depth_band_pop(ramp, 0.5, threshold_low=0.15, threshold_high=0.85, feather=0.0)
+    assert torch.equal(out_default, out_explicit_zero), \
+        "feather=0.0 must be byte-identical to the old (no feather argument at all) behavior"
+
+    def _max_adjacent_jump(out_flat, in_flat):
+        # ramp is already sorted ascending, but sort explicitly anyway so this
+        # helper stays correct even if the fixture ever changes.
+        order = in_flat.argsort()
+        sorted_out = out_flat[order]
+        return (sorted_out[1:] - sorted_out[:-1]).abs().max().item()
+
+    for strength in (0.5, -0.5):
+        out_hard = apply_depth_band_pop(ramp, strength, threshold_low=0.15, threshold_high=0.85, feather=0.0)
+        out_feathered = apply_depth_band_pop(ramp, strength, threshold_low=0.15, threshold_high=0.85, feather=0.1)
+        jump_hard = _max_adjacent_jump(out_hard.flatten(), ramp.flatten())
+        jump_feathered = _max_adjacent_jump(out_feathered.flatten(), ramp.flatten())
+        assert jump_feathered < jump_hard * 0.5, (
+            f"strength={strength}: feathering must clearly shrink the worst-case adjacent jump, "
+            f"got hard={jump_hard} feathered={jump_feathered}")
+
+    out_feathered = apply_depth_band_pop(ramp, 0.5, threshold_low=0.15, threshold_high=0.85, feather=0.1)
+    far_bg_mask = ramp < ramp.flatten().quantile(0.04)
+    far_fg_mask = ramp > ramp.flatten().quantile(0.96)
+    assert torch.allclose(out_feathered[far_bg_mask], ramp[far_bg_mask]), \
+        "true background well outside the feather zone must stay untouched"
+    assert torch.allclose(out_feathered[far_fg_mask], ramp[far_fg_mask]), \
+        "true foreground well outside the feather zone must stay untouched"
+
+    print("_test_apply_depth_band_pop_feather: PASS")
+
+
 if __name__ == "__main__":
     _test_apply_depth_band_pop()
     _test_apply_depth_band_pop_foreground_shape()
     _test_apply_depth_band_pop_background_shape()
+    _test_apply_depth_band_pop_feather()

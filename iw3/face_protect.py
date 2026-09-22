@@ -35,8 +35,13 @@ Runs once per frame; no temporal smoothing of its own (matches Edge Fix's own
 behaviour) -- Flicker Reduction, if on, still smooths the RESULT same as
 always. A frame with no detected face, or no OpenCV, is returned unchanged.
 """
+import os
+import sys
+
 import torch
 import torch.nn.functional as F
+
+_DEBUG = bool(os.environ.get("IW3_FACE_PROTECT_DEBUG"))
 
 try:
     import cv2
@@ -57,13 +62,19 @@ def detect_face_boxes(rgb_chw):
     frame_rgb = (rgb_chw.permute(1, 2, 0).detach().cpu().float() * 255).clamp(0, 255).byte().numpy()
     gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
     faces = _face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    return [tuple(int(v) for v in box) for box in faces]
+    boxes = [tuple(int(v) for v in box) for box in faces]
+    if _DEBUG:
+        print(f"iw3 face protect: {len(boxes)} face(s) detected, frame {rgb_chw.shape[-2]}x{rgb_chw.shape[-1]}, "
+              f"boxes={boxes}", file=sys.stderr, flush=True)
+    return boxes
 
 
 def _feathered_box_mask(H, W, boxes, device):
-    """(H, W) float mask: 1.0 inside each detected box, fading smoothly to 0 over a single feather band
-    (20% of the box's own longer side, so a small, distant face gets a finer edge than a large, close
-    one) -- the mask reaches `feather` pixels beyond the raw box and no further. Several boxes take a
+    """(H, W) float mask: a box-blur feather straddling each detected box's own edge -- 1.0 in the box's
+    inset core, fading through 0.5 exactly AT the edge, down to 0 outside it, over a band `feather` (20%
+    of the box's own longer side, so a small, distant face gets a finer edge than a large, close one)
+    pixels wide on EACH side of the edge -- so a full-strength flatten fully covers the box's inner
+    ~60% and gently tapers over its outer rim rather than ending in a hard line. Several boxes take a
     pointwise maximum, so overlapping faces blend into one region with no seam.
 
     (Real bug found live in testing: an earlier version both padded the box outward for a hair/chin
@@ -86,19 +97,32 @@ def _feathered_box_mask(H, W, boxes, device):
 
 
 def protect_faces(depth, im, strength):
-    """depth: (B, 1, H, W), im: (B, 3, H, W) -- already the shape apply_divergence works with. Returns
-    depth with each detected face's own internal relief pulled toward its median by `strength` (0 = no-op,
-    returns depth unchanged; 1 = each face fully flattened to one plane). Never raises: a batch with no
-    detected faces anywhere, or no OpenCV, returns the original tensor untouched (no wasted clone)."""
+    """depth: (B, 1, DH, DW), im: (B, 3, IH, IW) -- already the shape/batch apply_divergence works with,
+    but NOT necessarily the same spatial resolution: depth is the depth MODEL's own processing size
+    (e.g. 658x1162 for --resolution 648 on a 1920x1080 source), im is the full source frame. (Real bug
+    found live, fixed before this was correct: an earlier version assumed depth and im always matched
+    and positioned the mask directly in depth's pixel space using im's own pixel coordinates -- so on
+    any real conversion it quietly protected the wrong, misaligned patch of the depth map, never the
+    actual face. Confirmed live: depth.shape were (1, 658, 1162) against im's (3, 1080, 1920) at the
+    real apply_divergence call site.)
+
+    Returns depth with each detected face's own internal relief pulled toward its median by `strength`
+    (0 = no-op, returns depth unchanged; 1 = each face fully flattened to one plane). Never raises: a
+    batch with no detected faces anywhere, or no OpenCV, returns the original tensor untouched (no
+    wasted clone)."""
     if strength <= 0.0 or not FACE_CASCADE_AVAILABLE:
         return depth
-    B, _, H, W = depth.shape
+    B, _, DH, DW = depth.shape
+    IH, IW = im.shape[-2:]
+    sx, sy = DW / IW, DH / IH        # im pixels -> depth pixels; 1.0 when they already match
     out = None
     for i in range(B):
-        boxes = detect_face_boxes(im[i])
+        boxes = detect_face_boxes(im[i])          # detected in im's own pixel space -- it's the real picture
         if not boxes:
             continue
-        mask = _feathered_box_mask(H, W, boxes, depth.device).view(1, 1, H, W)
+        depth_boxes = [(int(round(x * sx)), int(round(y * sy)), int(round(w * sx)), int(round(h * sy)))
+                      for (x, y, w, h) in boxes]
+        mask = _feathered_box_mask(DH, DW, depth_boxes, depth.device).view(1, 1, DH, DW)
         d = depth[i:i + 1]
         face_depth = d[mask > 0.5]
         if face_depth.numel() == 0:

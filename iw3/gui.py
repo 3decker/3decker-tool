@@ -19092,6 +19092,31 @@ def _self_test_face_protect():
         raw_std = depth[0, 0, 100, 60:140].std().item()
         assert full_std < half_std < raw_std, (raw_std, half_std, full_std)
 
+    # ADR-214 addendum: a real bug shipped and only caught by a LIVE render, not this synthetic suite --
+    # depth and im are NOT the same spatial resolution in the real pipeline (confirmed live: depth
+    # (1, 658, 1162) against im (3, 1080, 1920) at the real apply_divergence call site, for a 1920x1080
+    # source at --resolution 648). The first version detected the face in im's pixel space and used
+    # those same numbers directly as depth's pixel space -- on real footage this silently protected the
+    # wrong, misaligned patch of the depth map, never the actual face, and a live relief measurement on
+    # a real frame showed EXACTLY ZERO change at any strength. This is the permanent regression test:
+    # a depth map at a different, non-uniform resolution from im must still get the right region.
+    depth_small = torch.zeros(1, 1, 60, 60)                      # depth at 30% of im's resolution
+    depth_small[0, 0, :, :] = 0.5
+    depth_small[0, 0, 15:45, 15:45] = torch.linspace(0.2, 0.8, 30).view(1, 30).expand(30, 30)  # relief at 50..150 in im-space
+    im_big = torch.rand(1, 3, 200, 200)
+    with mock.patch.object(FP, "detect_face_boxes", return_value=[(50, 50, 100, 100)]):
+        out_small = FP.protect_faces(depth_small, im_big, 1.0)
+        # the feather band erodes some distance in from the box's own edge too (by design -- see
+        # _feathered_box_mask), so check well inside the scaled box's core, not right at its edge
+        flattened_core_std = out_small[0, 0, 24:36, 24:36].std().item()
+        raw_core_std = depth_small[0, 0, 24:36, 24:36].std().item()
+        untouched_corner = torch.equal(out_small[0, 0, 0:5, 0:5], depth_small[0, 0, 0:5, 0:5])
+        assert flattened_core_std < raw_core_std * 0.1, (
+            f"the box must be scaled into depth's own (smaller) resolution, not used as-is -- the region "
+            f"that actually holds the face's relief in depth-space must be the one flattened, "
+            f"core std {raw_core_std} -> {flattened_core_std}")
+        assert untouched_corner, "a region depth-side that has no relief and is far from the scaled box must stay untouched"
+
     # apply_divergence: 0.0 (the default) must not even call the detector -- verified by mocking it to
     # raise, so a real conversion with the feature off never pays for face detection at all.
     args = types.SimpleNamespace(

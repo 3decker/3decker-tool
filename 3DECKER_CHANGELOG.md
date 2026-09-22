@@ -13,7 +13,9 @@ it matters.
 
 ---
 
-## Latest Update — September 21, 2026
+## Latest Update — September 22, 2026
+
+**New: the "SBS to 3D Blu-ray MVC" tool can now fix an incompatible frame rate for you.** 3D Blu-ray only allows 23.976 or 24 frames per second, so a video at any other rate (25fps and 30fps are common) used to just get refused. There's now a "Fix frame rate automatically" checkbox (off by default) that genuinely re-times the whole movie — picture, sound (pitch kept correct, not sped-up-chipmunk voices) and subtitles together — to whichever of 23.976/24 is closer, the same trick used for classic PAL/NTSC conversions. It's off by default and stays that way unless you turn it on, since it is a real, if usually small, change to your movie's speed and length (about 4% for a 25fps source) — this tool still never changes your movie's speed without you asking first.
 
 **Fixed: updating could break 3DECKER on older graphics cards (GTX 900/700-series, GTX 10-series) with "CUDA error: no kernel image is available for execution on the device."** A recent update added support for the newest RTX 50-series cards, but the update process itself didn't know to keep using the older, compatible AI engine build for everyone else — so a working install on an older card could break the next time it updated. Updating now automatically detects your specific graphics card and picks the right build for it, the same way a brand-new install already did. If this already happened to you, just update again — it'll fix itself.
 

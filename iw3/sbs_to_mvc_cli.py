@@ -153,6 +153,58 @@ def bd_frame_rate(rate_string):
                      f"the speed of your movie).")
 
 
+_BD_FPS_CANDIDATES = (("23.976", "24000/1001", 24000 / 1001), ("24", "24/1", 24.0))
+
+
+def _nearest_bd_fps(source_fps):
+    """Whichever of 23.976/24 is numerically closer to source_fps -> (fps_text, fps_frac, fps_float)."""
+    return min(_BD_FPS_CANDIDATES, key=lambda c: abs(c[2] - source_fps))
+
+
+def _atempo_chain(tempo):
+    """ffmpeg's atempo filter only accepts 0.5-2.0 per instance; chain several stages for a
+    factor outside that range (e.g. a 60fps source re-timed down to 24fps, tempo=0.4)."""
+    stages, t = [], tempo
+    while t < 0.5 or t > 2.0:
+        stage = 0.5 if t < 0.5 else 2.0
+        stages.append(stage)
+        t /= stage
+    stages.append(t)
+    return ",".join(f"atempo={s:.6f}" for s in stages)
+
+
+def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, stop_event=None):
+    """Genuinely re-times input_path -- video, audio (pitch-preserved) and subtitles together --
+    to whichever of 23.976/24 fps is numerically closer to its real rate, so the result passes
+    bd_frame_rate(). This is a real speed change (like the classic PAL/NTSC conversion), not a
+    frame-rate relabel: relabeling alone would just duplicate/drop frames (judder) instead of
+    retiming them. Returns the percent speed change applied (negative = slower)."""
+    num, den = (source_rate_string.split("/") + ["1"])[:2]
+    source_fps = float(num) / float(den)
+    fps_text, fps_frac, target_fps = _nearest_bd_fps(source_fps)
+    tempo = target_fps / source_fps      # audio speed factor: <1 slower, >1 faster
+    stretch = 1.0 / tempo                # video/subtitle timestamp multiplier (same direction)
+
+    cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+           "-itsscale:s", f"{stretch:.6f}", "-i", input_path, "-map", "0",
+           "-vf", f"setpts={stretch:.6f}*PTS", "-filter:a", _atempo_chain(tempo),
+           "-r", fps_frac, "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+           "-c:a", "aac", "-b:a", "384k", "-c:s", "copy", out_path]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    while proc.poll() is None:
+        if stop_event is not None and stop_event.is_set():
+            proc.kill()
+            raise Cancelled()
+        try:
+            proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+    err = (proc.stderr.read() if proc.stderr else "") or ""
+    if proc.returncode != 0 or not (path.exists(out_path) and path.getsize(out_path) > 0):
+        raise RuntimeError("could not re-time the video to a 3D Blu-ray-legal frame rate:\n" + err[-600:])
+    return (tempo - 1.0) * 100.0
+
+
 def guess_layout(width, height):
     """A starting suggestion only -- the user picks the real layout."""
     if height > width:
@@ -281,9 +333,11 @@ def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av, 
 
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
-            stop_event=None, progress_cb=None, autocrop=None):
+            stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False):
     """Full job. Returns the number of frames encoded. progress_cb(stage, done, total),
-    stage in {"encode", "mux"}."""
+    stage in {"retime", "autocrop", "encode", "mux"}. fix_frame_rate: if the source isn't
+    23.976/24fps, re-time the whole movie (video+audio+subtitles) to the nearer one instead of
+    refusing -- opt-in only, since it's a real (if usually tiny) speed change."""
     frim = find_frim()
     tsmuxer = _find_tsmuxer()
     ffmpeg = _get_ffmpeg_bin()
@@ -303,9 +357,35 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     width, height, rate, duration, hdr = probe_video(input_path)
     if hdr:
         raise RuntimeError("HDR video is not supported for 3D Blu-ray here -- convert it to SDR first")
-    fps_text, fps_frac = bd_frame_rate(rate)
     if layout in ("full_sbs", "half_sbs") and (width < 2 or width % 2):
         raise ValueError("a side-by-side video needs an even width")
+
+    out_dir = path.dirname(path.abspath(output_iso))
+    os.makedirs(out_dir, exist_ok=True)
+    stem = path.splitext(path.basename(output_iso))[0]
+    work_dir = work_dir or path.join(out_dir, f"_sbs2mvc_work_{stem}")
+    created_work = not path.isdir(work_dir)
+    os.makedirs(work_dir, exist_ok=True)
+
+    retimed_path = None
+    try:
+        fps_text, fps_frac = bd_frame_rate(rate)
+    except ValueError:
+        if not fix_frame_rate:
+            if created_work:
+                os.rmdir(work_dir)
+            raise
+        if progress_cb:
+            progress_cb("retime", 0, 0)
+        retimed_path = path.join(work_dir, "retimed_input.mkv")
+        percent = retime_to_bd_fps(input_path, retimed_path, rate, ffmpeg, stop_event=stop_event)
+        print(f"[sbs2mvc] note: source frame rate is not 3D Blu-ray-legal; re-timed the whole "
+              f"movie (picture, sound and subtitles together, {percent:+.2f}% speed) to match",
+              file=sys.stderr)
+        input_path = retimed_path
+        width, height, rate, duration, hdr = probe_video(input_path)
+        fps_text, fps_frac = bd_frame_rate(rate)
+
     if duration <= 0:
         raise RuntimeError("could not read the video's length")
     seconds = min(duration, cut_seconds) if cut_seconds else duration
@@ -322,20 +402,15 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
             print(f"[sbs2mvc] auto-crop: each eye cut to x={crop[0]} y={crop[1]} {crop[2]}x{crop[3]}",
                   file=sys.stderr)
 
-    out_dir = path.dirname(path.abspath(output_iso))
-    os.makedirs(out_dir, exist_ok=True)
-    stem = path.splitext(path.basename(output_iso))[0]
-    work_dir = work_dir or path.join(out_dir, f"_sbs2mvc_work_{stem}")
-    created_work = not path.isdir(work_dir)
-    os.makedirs(work_dir, exist_ok=True)
-
     # streams ~ bitrate*length*1.5 (dependent view is smaller than the base view), then the
     # ISO is about the same again
     est_streams = bitrate_mbps * 1e6 / 8 * seconds * 1.5
     free = shutil.disk_usage(work_dir).free
     if free < est_streams * 2.2:
         if created_work:
-            os.rmdir(work_dir)
+            # rmtree, not rmdir: a re-timed intermediate (retimed_input.mkv) may already be
+            # sitting in here if fix_frame_rate ran above, so the directory isn't empty anymore.
+            shutil.rmtree(work_dir, ignore_errors=True)
         raise RuntimeError(f"not enough free disk space: need about {est_streams * 2.2 / 1e9:.0f} GB "
                            f"(temporary streams plus the ISO), only {free / 1e9:.0f} GB free")
 
@@ -449,7 +524,9 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
             if created_work:
                 shutil.rmtree(work_dir, ignore_errors=True)
             else:
-                for leftover in (base_es, dep_es, meta_path, ffmpeg_log):
+                for leftover in (base_es, dep_es, meta_path, ffmpeg_log, retimed_path):
+                    if leftover is None:
+                        continue
                     try:
                         os.remove(leftover)
                     except OSError:
@@ -469,6 +546,10 @@ def main():
                         help="remove black bars from each eye before fitting: BLACK = all sides, BLACK_TB = "
                              "top/bottom only (FLAT / FLAT_TB for flat-colour borders)")
     parser.add_argument("--no-audio-subs", action="store_true", help="video only")
+    parser.add_argument("--fix-frame-rate", action="store_true",
+                        help="if the source isn't 23.976/24fps, re-time the whole movie (picture, sound "
+                             "and subtitles together) to the nearer one instead of refusing -- this is a "
+                             "real, if usually small, speed change, so it is opt-in, never automatic")
     parser.add_argument("--cut-seconds", type=float, default=None, help="only convert the first N seconds")
     parser.add_argument("--work-dir", default=None)
     parser.add_argument("--keep-temp", action="store_true")
@@ -491,7 +572,7 @@ def main():
         frames = convert(args.input, args.output, layout=layout, bitrate_mbps=args.bitrate,
                          swap_eyes=args.swap_eyes, include_av=not args.no_audio_subs,
                          work_dir=args.work_dir, cut_seconds=args.cut_seconds, keep_temp=args.keep_temp,
-                         progress_cb=show, autocrop=args.autocrop)
+                         progress_cb=show, autocrop=args.autocrop, fix_frame_rate=args.fix_frame_rate)
     except Cancelled:
         print("\n[sbs2mvc] cancelled", file=sys.stderr)
         return 1

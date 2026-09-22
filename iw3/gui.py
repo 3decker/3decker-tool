@@ -5905,6 +5905,22 @@ class MainFrame(wx.Frame):
               "screen depth (they do not float in 3D).\n"
               "Recommended: on."))
 
+        self.chk_sbs2mvc_fix_frame_rate = wx.CheckBox(
+            self.cpn_sbs2mvc.GetPane(), label=T("Fix frame rate automatically"), name="chk_sbs2mvc_fix_frame_rate")
+        self.chk_sbs2mvc_fix_frame_rate.SetValue(False)
+        self.chk_sbs2mvc_fix_frame_rate.SetToolTip(
+            T("What it's for: 3D Blu-ray only allows 23.976 or 24 frames per second. If your video is any "
+              "other rate (25fps and 30fps are common), this box lets the tool fix that for you instead of "
+              "just refusing.\n"
+              "How: it genuinely re-times the whole movie -- picture, sound (with pitch kept correct, not "
+              "chipmunked) and subtitles together -- to whichever of 23.976/24 is closer, the same trick "
+              "used for classic PAL/NTSC conversions. It does NOT just relabel the frame rate, which would "
+              "cause stutter instead of a clean speed change.\n"
+              "Con: it is a real, if usually small, change to your movie's speed and length (about 4% for a "
+              "25fps source, for example) -- off by default so this never happens without you asking.\n"
+              "Recommended: off normally; turn on only if the log says your video's frame rate isn't "
+              "23.976/24 and Run refuses."))
+
         self.btn_sbs2mvc_run = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Run"))
         self.btn_sbs2mvc_run.SetToolTip(
             T("What it's for: starts the conversion as a separate background process (python -m "
@@ -5960,6 +5976,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_sbs2mvc_bitrate, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_sbs2mvc_bitrate, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_sbs2mvc_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_sbs2mvc_fix_frame_rate, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_sbs2mvc_run, (h := h + 1, 2), flag=wx.EXPAND)
         layout.Add(self.btn_sbs2mvc_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_sbs2mvc, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
@@ -12765,7 +12782,8 @@ class MainFrame(wx.Frame):
     def _update_sbs2mvc_progress(self, stage, done, total):
         # Called via wx.CallAfter from run_sbs2mvc's background thread.
         names = {"encode": T("Encoding 3D"), "mux": T("Building the disc"),
-                 "autocrop": T("Looking for black bars")}
+                 "autocrop": T("Looking for black bars"),
+                 "retime": T("Fixing the frame rate (re-timing picture, sound and subtitles)")}
         name = names.get(stage, stage)
         if total > 0:
             self.gauge_sbs2mvc.SetRange(int(total))
@@ -12880,6 +12898,8 @@ class MainFrame(wx.Frame):
             cmd.append("--swap-eyes")
         if not self.chk_sbs2mvc_restore_av.GetValue():
             cmd.append("--no-audio-subs")
+        if self.chk_sbs2mvc_fix_frame_rate.GetValue():
+            cmd.append("--fix-frame-rate")
         return cmd, None
 
     def on_click_btn_sbs2mvc_run(self, event):
@@ -18188,6 +18208,7 @@ def _self_test_sbs2mvc_panel():
              "half_tb_4k"]
         assert frame.txt_sbs2mvc_bitrate.GetValue() == "20"
         assert frame.chk_sbs2mvc_restore_av.GetValue() and not frame.chk_sbs2mvc_swap.GetValue()
+        assert not frame.chk_sbs2mvc_fix_frame_rate.GetValue(), "must default off -- opt-in only"
         assert frame.btn_sbs2mvc_run.IsEnabled() and not frame.btn_sbs2mvc_cancel.IsEnabled()
 
         cmd, err = frame.build_sbs2mvc_command()
@@ -18215,13 +18236,16 @@ def _self_test_sbs2mvc_panel():
             assert cmd[cmd.index("--layout") + 1] == "full_sbs"
             assert cmd[cmd.index("--bitrate") + 1] == "20.0"
             assert "--gui-progress" in cmd and "--swap-eyes" not in cmd and "--no-audio-subs" not in cmd
+            assert "--fix-frame-rate" not in cmd
 
             frame.cbo_sbs2mvc_layout.SetSelection(3)
             frame.chk_sbs2mvc_swap.SetValue(True)
             frame.chk_sbs2mvc_restore_av.SetValue(False)
+            frame.chk_sbs2mvc_fix_frame_rate.SetValue(True)
             cmd, err = frame.build_sbs2mvc_command()
             assert cmd[cmd.index("--layout") + 1] == "half_tb"
-            assert "--swap-eyes" in cmd and "--no-audio-subs" in cmd
+            assert "--swap-eyes" in cmd and "--no-audio-subs" in cmd and "--fix-frame-rate" in cmd
+            frame.chk_sbs2mvc_fix_frame_rate.SetValue(False)
 
             # a 4K input entry is passed to the converter as the plain layout
             items = [frame.cbo_sbs2mvc_layout.GetClientData(i) for i in range(frame.cbo_sbs2mvc_layout.GetCount())]
@@ -19625,6 +19649,83 @@ def _self_test_sbs2mvc_text_subtitles():
     print("_self_test_sbs2mvc_text_subtitles: PASS")
 
 
+def _self_test_sbs2mvc_fix_frame_rate():
+    """A 25fps (or any non-23.976/24) input to sbs_to_mvc_cli.convert(): by default still
+    refused (ADR-182's original 'never silently change your movie's speed' rule, untouched);
+    with fix_frame_rate=True, the whole movie is genuinely re-timed (via retime_to_bd_fps) to
+    the nearer Blu-ray-legal rate first, and everything downstream operates on that re-timed
+    file, proven by the fps/duration used past that point coming from the SECOND probe."""
+    import contextlib
+    import tempfile
+    import types
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    # _atempo_chain: any ratio outside ffmpeg's 0.5-2.0 per-instance limit is chained into
+    # several stages, each within range, that multiply back to the exact original tempo
+    for tempo in (0.96, 24 / 23.976, 0.4, 0.48, 1.9, 3.0, 0.1):
+        chain = S._atempo_chain(tempo)
+        stages = [float(s.split("=")[1]) for s in chain.split(",")]
+        assert all(0.5 <= s <= 2.0 for s in stages), (tempo, chain)
+        product = 1.0
+        for s in stages:
+            product *= s
+        assert abs(product - tempo) < 1e-6, (tempo, chain, product)
+
+    assert S._nearest_bd_fps(25.0)[0] == "24"
+    assert S._nearest_bd_fps(23.98)[0] == "23.976"
+    assert S._nearest_bd_fps(29.97)[0] == "24"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video = path.join(tmpdir, "movie.mkv")
+        open(video, "wb").close()
+        out_iso = path.join(tmpdir, "movie.iso")
+
+        def fake_retime(input_path, out_path, rate, ffmpeg_bin, stop_event=None):
+            open(out_path, "wb").write(b"x")
+            return -4.0
+
+        def enter_common(stack):
+            stack.enter_context(mock.patch.object(S, "find_frim", return_value="frim.exe"))
+            stack.enter_context(mock.patch.object(S, "_find_tsmuxer", return_value="tsmuxer.exe"))
+            stack.enter_context(mock.patch.object(S, "_get_ffmpeg_bin", return_value="ffmpeg.exe"))
+            stack.enter_context(mock.patch.object(S.shutil, "disk_usage",
+                                                   return_value=types.SimpleNamespace(free=0)))
+
+        # default: refused, no silent conversion, and retime_to_bd_fps is never even called
+        with contextlib.ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(mock.patch.object(S, "probe_video",
+                                                    return_value=(1920, 1080, "25/1", 2.0, False)))
+            m_retime = stack.enter_context(mock.patch.object(S, "retime_to_bd_fps"))
+            try:
+                S.convert(video, out_iso, fix_frame_rate=False)
+                assert False, "must refuse a non-23.976/24fps source by default"
+            except ValueError as e:
+                assert "23.976 or 24" in str(e), e
+            assert not m_retime.called
+
+        # opted in: genuinely re-timed, then the REST of convert() runs on the re-timed file --
+        # proven by reaching the (deliberately zeroed) disk-space check at all, which only
+        # happens after bd_frame_rate() succeeds on the second (post-retime) probe
+        probes = [(1920, 1080, "25/1", 2.0, False), (1920, 1080, "24/1", 2.125, False)]
+        with contextlib.ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(mock.patch.object(S, "probe_video", side_effect=probes))
+            m_retime = stack.enter_context(mock.patch.object(S, "retime_to_bd_fps", side_effect=fake_retime))
+            try:
+                S.convert(video, out_iso, fix_frame_rate=True)
+                assert False, "should have failed at the (deliberately zeroed) disk-space check"
+            except RuntimeError as e:
+                assert "free disk space" in str(e), e
+            assert m_retime.called
+            call_args = m_retime.call_args[0]
+            assert call_args[0] == video, "must re-time FROM the original input"
+            assert call_args[2] == "25/1", "must pass the source's real rate, not a guess"
+
+    print("_self_test_sbs2mvc_fix_frame_rate: PASS")
+
+
 def _self_test_standalone_tool_titles_share_accent_colour():
     """Every Standalone Tools group title uses the same accent (blue) colour as the first tools,
     in both themes -- a title left at the default black is unreadable on the dark theme. The tools
@@ -19817,6 +19918,7 @@ def _run_self_tests():
         _self_test_rife_with_preserve_dolby_vision,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
+        _self_test_sbs2mvc_fix_frame_rate,
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,

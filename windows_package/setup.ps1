@@ -77,32 +77,16 @@ try {
 Write-Step "Torch variant"
 
 if (-not $TorchVariant) {
-    # Auto-detect: RTX 50-series (Blackwell, compute capability 12.x) needs the
-    # cu130 build -- cu126-tagged PyTorch wheels don't include Blackwell kernel
-    # images and fail with "CUDA error: no kernel image is available for
-    # execution on the device" (confirmed real, see docs/ai/AI_DECISIONS.md).
-    # Every older NVIDIA generation (Turing/Ampere/Ada/Hopper) works fine on
-    # cu126, which has broader minimum-driver-version compatibility, so that
-    # stays the safe default for everyone else rather than forcing the newest
-    # CUDA toolkit (and its newer minimum driver requirement) on GPUs that
-    # don't need it. Detection needs nvidia-smi (ships with every NVIDIA
-    # driver) -- if it's missing or reports nothing, this is either a
-    # non-NVIDIA GPU (AMD/Intel) or no GPU at all, and cu126 is just an
-    # inert default in that case (use -TorchVariant rocm/xpu yourself).
-    $TorchVariant = "cu126"
-    $nvidiaSmi = Get-Command "nvidia-smi" -ErrorAction SilentlyContinue
-    if ($nvidiaSmi) {
-        try {
-            $computeCap = (& nvidia-smi --query-gpu=compute_cap --format=csv,noheader | Select-Object -First 1).Trim()
-            if ($computeCap -and ([double]$computeCap -ge 12.0)) {
-                $TorchVariant = "cu130"
-            }
-            Write-Host "  Detected NVIDIA GPU, compute capability $computeCap -> using $TorchVariant."
-        } catch {
-            Write-Host "  nvidia-smi found but its output could not be parsed -- defaulting to cu126. Pass -TorchVariant yourself if this is wrong for your GPU." -ForegroundColor Yellow
-        }
+    # Auto-detect via the shared detect_torch_variant.ps1 -- the SAME script the
+    # update.bat/update-3decker.bat/update-nagadomi.bat entry points call, so a
+    # fresh install (this script) and an existing install being updated (those)
+    # can never drift apart on which GPU generation needs which build. See that
+    # script's own header comment for the real bug this centralization fixes.
+    $TorchVariant = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "detect_torch_variant.ps1")).Trim()
+    if ($TorchVariant -eq "cu130") {
+        Write-Host "  Detected a Blackwell-class GPU (compute capability >= 12.0) -> using cu130."
     } else {
-        Write-Host "  No nvidia-smi found (no NVIDIA GPU, or drivers not installed yet) -- defaulting to cu126. If you have an AMD or Intel GPU, re-run with -TorchVariant rocm or -TorchVariant xpu instead." -ForegroundColor Yellow
+        Write-Host "  Using cu126 (default -- either an older/non-NVIDIA GPU, or none detected). If you have an AMD or Intel GPU, re-run with -TorchVariant rocm or -TorchVariant xpu instead."
     }
 } else {
     Write-Host "  Using explicitly requested -TorchVariant $TorchVariant."

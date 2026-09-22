@@ -45,10 +45,19 @@ if not exist "%NUNIF_DIR%" (
 @rem update update-installer.bat
 copy /y "%NUNIF_DIR%\windows_package\update-installer.bat" "%~dp0\update-installer.bat"
 
-echo Installing Python Packages...
+@rem Real bug fixed here (2026-09-22): a working GTX 1060 (Pascal) install broke
+@rem after an update because this step used to always pull the plain,
+@rem hardcoded requirements-torch.txt (pinned to cu130), which does not
+@rem support pre-Turing GPUs at all -- CUDA 13.0 dropped Maxwell/Pascal/Volta
+@rem support. setup.ps1 (fresh installs) already auto-detected the right
+@rem build via nvidia-smi; this step now calls the same shared detection
+@rem script so an existing install being updated can never drift from that.
+set "TORCH_VARIANT=cu126"
+for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%NUNIF_DIR%\windows_package\detect_torch_variant.ps1"') do set "TORCH_VARIANT=%%V"
+echo Installing Python Packages (torch variant: %TORCH_VARIANT%)...
 call :pip_retry --upgrade pip
 if %ERRORLEVEL% neq 0 goto :on_error
-call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-torch.txt"
+call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-torch-%TORCH_VARIANT%.txt"
 if %ERRORLEVEL% neq 0 goto :on_error
 call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements.txt"
 if %ERRORLEVEL% neq 0 goto :on_error

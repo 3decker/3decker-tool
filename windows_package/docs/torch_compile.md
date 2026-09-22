@@ -32,7 +32,8 @@ This script installs the required development files into the environment.
 
 ## GPU
 
-`triton-windows` is already installed via `requirements-torch.txt`.
+`triton-windows` is already installed as part of whichever `requirements-torch-*.txt`
+variant setup/update picked for your GPU (`cu126` or `cu130`).
 
 ## CPU
 

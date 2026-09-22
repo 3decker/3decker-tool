@@ -31,7 +31,8 @@ nunif-windows が使用している Embeddable Python には、開発用のヘ�
 
 ## GPU での使用
 
-`triton-windows`は`requirements-torch.txt`からすでに自動でインストールされています。
+`triton-windows`は、お使いのGPUに合わせてセットアップ/アップデートが選んだ
+`requirements-torch-*.txt`(`cu126`または`cu130`)からすでに自動でインストールされています。
 
 ## CPU での使用
 

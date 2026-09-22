@@ -1160,6 +1160,25 @@ class MainFrame(wx.Frame):
 
         self.grp_stereo = wx.StaticBox(self.tab_stereo, label=T("Stereo Generation"))
 
+        # ADR-216: pure visibility toggle for the ~11 fine-tuning settings this tab shows even though most
+        # conversions never need to touch them -- Show()/Hide() + Layout()/Fit(), the exact same mechanism
+        # already used and proven here for update_inpaint_options()/update_rife_interpolate()/
+        # update_waifu2x_upscale()/update_nt_auto_divergence(), never a sizer restructure. A hidden control
+        # keeps its real value and keeps taking part in parse_args()/get_cli_command() exactly as before --
+        # this only ever changes what is SHOWN, never what is saved, exported, or actually used by a
+        # conversion, so switching it off and back on again loses nothing.
+        self.chk_stereo_show_advanced = wx.CheckBox(self.grp_stereo, label=T("Show Advanced Settings"),
+                                                     name="chk_stereo_show_advanced")
+        self.chk_stereo_show_advanced.SetToolTip(
+            T("What it's for: hides the fine-tuning settings on this tab that most conversions never need "
+              "to touch, so the first thing you see is a short, focused list instead of everything at "
+              "once.\n"
+              "How it works: purely visual. Anything hidden keeps whatever value you set for it, and it's "
+              "still used exactly the same when you click Start -- ticking this box back on just shows it "
+              "again, nothing is lost or reset in between.\n"
+              "Recommended: off (the default) if you mainly use the everyday settings; on if you tune "
+              "things like Auto 3D Strength, Pop-Out Boost or Protect Faces regularly."))
+
         self.lbl_divergence = wx.StaticText(self.grp_stereo, label=T("3D Strength"))
         self.cbo_divergence = EditableComboBox(self.grp_stereo, choices=["5.0", "4.0", "3.0", "2.5", "2.0", "1.0"],
                                                name="cbo_divergence")
@@ -1245,6 +1264,7 @@ class MainFrame(wx.Frame):
               "Recommended: on only while testing a scene, off for the real conversion."))
         self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div)
         self.update_nt_auto_divergence()
+        self.chk_stereo_show_advanced.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_stereo_show_advanced)
 
         self.lbl_convergence = wx.StaticText(self.grp_stereo, label=T("Convergence Plane"))
         self.cbo_convergence_mode = wx.ComboBox(self.grp_stereo, choices=["constant", "sod_v1", "face_detect"],
@@ -2811,6 +2831,11 @@ class MainFrame(wx.Frame):
         layout.SetEmptyCellSize((0, 0))
 
         i = 0
+        layout.Add(self.chk_stereo_show_advanced, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add((0, 6), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
+
         # ADR-215: Depth Model/Resolution first -- the foundation everything else builds on
         # (see Depth Model's own tooltip), moved here from the collapsed "Inpainting
         # Settings" pane below so it's visible without a click, same as every other setting
@@ -7573,6 +7598,7 @@ class MainFrame(wx.Frame):
         self.update_convergence_mode()
         self.update_scene_segment()
         self.update_nt_auto_divergence()
+        self.update_stereo_advanced_visibility()
         self.grp_video.update_controls()
 
         self.update_divergence_warning()
@@ -8304,6 +8330,35 @@ class MainFrame(wx.Frame):
 
     def on_changed_chk_waifu2x_upscale(self, event):
         self.update_waifu2x_upscale()
+
+    def update_stereo_advanced_visibility(self):
+        # ADR-216: pure Show()/Hide() + Layout()/Fit(), same mechanism as every other conditional-visibility
+        # method in this file. Deliberately excludes Anaglyph Method / Depth Only / Resize to fit -- those
+        # already have their own correct, narrower conditional visibility (update_anaglyph_state(),
+        # update_export_option_state(), tied to Stereo Format) and must stay the only thing controlling them,
+        # or picking "Anaglyph" with this box unchecked would hide the very control that format needs.
+        advanced = (
+            self.chk_nt_auto_div, self.cbo_nt_auto_div_mode,
+            self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
+            self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay,
+            self.lbl_resolution_preset, self.cbo_resolution_preset,
+            self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
+            self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
+            self.lbl_face_protect, self.cbo_face_protect,
+            self.lbl_ipd_offset, self.sld_ipd_offset,
+            self.lbl_synthetic_view, self.cbo_synthetic_view,
+            self.chk_stereo_mode_tag,
+            self.lbl_splat_blend_temperature, self.cbo_splat_blend_temperature, self.sld_stereo_splat_blend_temperature,
+        )
+        show = self.chk_stereo_show_advanced.GetValue()
+        for w in advanced:
+            w.Show(show)
+        self.Layout()
+        self.Fit()
+        self._clamp_frame_to_screen()
+
+    def on_changed_chk_stereo_show_advanced(self, event):
+        self.update_stereo_advanced_visibility()
 
     def update_nt_auto_divergence(self):
         # Rowan's Auto 3D Strength (nt_auto3d, ADR-213). No-op harmlessly if the add-on isn't installed --

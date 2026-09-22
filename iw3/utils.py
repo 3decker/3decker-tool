@@ -32,6 +32,7 @@ from nunif.utils.autocrop import AutoCrop, AutoCropDummy
 from nunif.device import create_device, device_is_cuda, mps_is_available, xpu_is_available
 from nunif.models.data_parallel import DeviceSwitchInference
 from . import export_config
+from . import face_protect as FACEP
 from .dilation import dilate_edge, edge_dilation_is_enabled
 from .forward_warp import apply_divergence_forward_warp, SPLAT_BLEND_TEMPERATURE
 from .anaglyph import apply_anaglyph_redcyan
@@ -2253,6 +2254,9 @@ def make_output_filename(input_filename, args, video=False):
         edge_repair_strength = getattr(args, "edge_repair_strength", 0.0) or 0.0
         er_tag = f"_er{to_deciaml(edge_repair_strength, 100, 2)}" if edge_repair_strength > 0.0 else ""
 
+        face_protect_strength = getattr(args, "face_protect_strength", 0.0) or 0.0
+        fprot_tag = f"_fprot{to_deciaml(face_protect_strength, 100, 2)}" if face_protect_strength > 0.0 else ""
+
         if getattr(args, "sharpen", False):
             sharpen_strength = getattr(args, "sharpen_strength", None)
             sharpen_strength = 0.5 if sharpen_strength is None else sharpen_strength
@@ -2297,7 +2301,8 @@ def make_output_filename(input_filename, args, video=False):
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}{po}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
-                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{sharp_tag}{rife_tag}{smtag}{bitrate}")
+                    f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{fprot_tag}"
+                    f"{sharp_tag}{rife_tag}{smtag}{bitrate}")
     else:
         metadata = ""
 
@@ -2456,6 +2461,8 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append("iw3_preserve_screen_border=1")
     if getattr(args, "edge_repair_strength", 0.0):
         comment_parts.append(f"iw3_edge_repair_strength={args.edge_repair_strength}")
+    if getattr(args, "face_protect_strength", 0.0):
+        comment_parts.append(f"iw3_face_protect_strength={args.face_protect_strength}")
     if getattr(args, "sharpen", False):
         sharpen_strength = getattr(args, "sharpen_strength", None)
         if sharpen_strength is None:
@@ -2753,6 +2760,16 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
         depth = DE.apply_depth_band_pop(depth, midground_pop,
                                         threshold_low=midground_threshold_low,
                                         threshold_high=midground_threshold_high)
+
+    # ADR-214: Face Protection -- real user report, 2026-09-22: at strong Divergence/Pop-Out Boost, a
+    # close-up face's own tiny nose-to-eye depth relief gets stretched along with everything else, and
+    # reads as the nose being pulled forward / the eyes warping. Detects faces (iw3.face_protect, the
+    # same OpenCV cascade face_detect convergence mode already uses) and pulls each one's own depth
+    # toward its median BEFORE Pop-Out Boost multiplies whatever it's handed -- so the boost has a
+    # smaller relief to work with on a protected face. 0.0 (default) is a true no-op.
+    face_protect_strength = getattr(args, "face_protect_strength", 0.0) or 0.0
+    if face_protect_strength > 0.0:
+        depth = FACEP.protect_faces(depth, im, face_protect_strength)
 
     # ADR-179: Max Negative Parallax -- a hard safety cap on how far anything can pop
     # out in front of the Convergence plane, applied AFTER every other depth edit above
@@ -6011,6 +6028,13 @@ def create_parser(required_true=True):
                               "front of the screen (1.5 = 50%% more pop-out; things behind the screen are not "
                               "changed). Applied after every other depth edit (mapper, auto-convergence, "
                               "Foreground/Midground/Background Pop)."))
+    parser.add_argument("--face-protect-strength", type=float, default=0.0, choices=[Range(0.0, 1.0)],
+                        help=("ADR-214: reduces the facial-feature warping (nose pulled forward, eyes "
+                              "distorted) seen on close-up faces at strong Divergence / Pop-Out Boost. "
+                              "Detects faces (OpenCV, the same detector face_detect convergence mode "
+                              "uses) and pulls each one's own depth toward its median, before Pop-Out "
+                              "Boost sees it. 0.0 = off (default). 1.0 = each detected face fully "
+                              "flattened to one plane."))
     parser.add_argument("--update", action="store_true",
                         help="force update midas models from torch hub")
     parser.add_argument("--recursive", "-r", action="store_true",

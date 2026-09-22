@@ -1321,6 +1321,35 @@ class MainFrame(wx.Frame):
         self.sld_stereo_max_negative_parallax = _build_stereo_slider(
             self.grp_stereo, self.cbo_max_negative_parallax, 0.0, 3.0, 100)
 
+        # Face Protection (ADR-214, iw3.face_protect): real user report -- at a strong Pop-Out Boost, a
+        # close-up face's own tiny nose-to-eye relief gets stretched along with everything else, and the
+        # nose reads as pulled forward. Same on/off-by-value convention as Edge Repair just above it
+        # (0.0 = off, no separate checkbox).
+        self.lbl_face_protect = wx.StaticText(self.grp_stereo, label=T("Protect Faces"))
+        self.cbo_face_protect = EditableComboBox(self.grp_stereo, choices=["0.0", "0.3", "0.5", "0.7", "1.0"],
+                                                 name="cbo_face_protect")
+        self.cbo_face_protect.SetSelection(0)
+        self.cbo_face_protect.SetToolTip(
+            T("What it's for: reduces the facial warping (the nose looking pulled toward the audience, "
+              "the eyes distorted) that a strong 3D Strength or Pop-Out Boost can cause on a close-up "
+              "face. A face's own real depth relief -- nose tip to eye socket -- is only a few "
+              "centimetres, but once the face fills the frame that tiny relief is stretched by "
+              "whatever the rest of the picture is stretched by, and gets exaggerated the same way "
+              "everything else does.\n"
+              "How it helps: detects faces in the picture (the same detector the Convergence Plane "
+              "\"face_detect\" mode uses) and gently flattens each detected face's own depth toward the "
+              "middle of its own range, before Pop-Out Boost sees it -- so the boost has less to "
+              "exaggerate right where it shows most.\n"
+              "Pros: only touches the detected face area (feathered at the edge, no hard line); "
+              "everything else in the frame -- background, other objects, wide shots with no face -- is "
+              "completely untouched.\n"
+              "Con: at high values the face itself reads slightly flatter/rounder, trading some of its "
+              "own 3D depth for comfort; face detection can miss a face that's in profile, partly "
+              "hidden, or poorly lit, in which case that frame is simply left as it was.\n"
+              "Values: 0.0 = off (default). 1.0 = each detected face fully flattened to one plane.\n"
+              "Recommended: 0.0 unless you've specifically noticed this distortion on close-up faces; "
+              "try 0.3-0.5 first."))
+
         self.lbl_ipd_offset = wx.StaticText(self.grp_stereo, label=T("Your Own Size"))
         # SpinCtrlDouble is better, but cannot save with PersistenceManager
         self.sld_ipd_offset = NoWheelSpinCtrl(self.grp_stereo, value="0", min=-10, max=20, name="sld_ipd_offset")
@@ -2800,6 +2829,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_negative_parallax, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_max_negative_parallax, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_face_protect, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_face_protect, (i, 1), (1, 2), flag=wx.EXPAND)
 
         layout.Add(self.lbl_ipd_offset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.sld_ipd_offset, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -7787,6 +7818,7 @@ class MainFrame(wx.Frame):
             self.cbo_max_negative_parallax,
             self.cbo_nt_div_min,
             self.cbo_nt_div_max,
+            self.cbo_face_protect,
             self.cbo_resolution,
             self.cbo_stereo_width,
             self.cbo_edge_dilation,
@@ -8655,6 +8687,7 @@ class MainFrame(wx.Frame):
             divergence_max=float(self.cbo_nt_div_max.GetValue()),
             auto_divergence_stability=self.cbo_nt_auto_div_stab.GetValue().replace(" ", "-"),
             auto_divergence_overlay=self.chk_nt_auto_div_overlay.GetValue(),
+            face_protect_strength=float(self.cbo_face_protect.GetValue()),
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
             synthetic_view=self.cbo_synthetic_view.GetValue(),
             method=self.cbo_method.GetValue(),
@@ -9803,6 +9836,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_nt_auto_div_stab,
                            getattr(args, "auto_divergence_stability", "medium").replace("-", " "))
         self.chk_nt_auto_div_overlay.SetValue(bool(getattr(args, "auto_divergence_overlay", False)))
+        _apply_combo_value(self.cbo_face_protect, getattr(args, "face_protect_strength", 0.0))
         self.sld_ipd_offset.SetValue(int(round(args.ipd_offset)))
         _apply_combo_value(self.cbo_synthetic_view, args.synthetic_view)
         _apply_combo_value(self.cbo_method, args.method)
@@ -19023,6 +19057,87 @@ def _self_test_nt_auto_divergence_controls():
     print("_self_test_nt_auto_divergence_controls: PASS")
 
 
+def _self_test_face_protect():
+    """ADR-214: iw3.face_protect's own masking math (synthetic tensors, detection mocked -- real
+    detection accuracy on a photo was verified live separately, not something a fast synthetic test
+    should assert), the apply_divergence integration point, the CLI flag, and the filename/metadata
+    tags. A real bug was found and fixed here live: an earlier version padded the detected box for a
+    hair/chin margin AND reused that same padding as the blur radius, compounding into a region 60%
+    larger than the face -- the "well outside the box is completely untouched" assertion below is
+    exactly the regression test for that."""
+    import types
+    from unittest import mock
+    from iw3 import face_protect as FP
+    from iw3 import utils as U
+
+    H, W = 200, 200
+    depth = torch.zeros(1, 1, H, W)
+    depth[0, 0, 50:150, 50:150] = torch.linspace(0.3, 0.9, 100).view(1, 100).expand(100, 100)
+    im = torch.rand(1, 3, H, W)
+
+    assert FP.protect_faces(depth, im, 0.0) is depth, "strength 0.0 must be a true no-op, not just a copy"
+    with mock.patch.object(FP, "detect_face_boxes", return_value=[]):
+        assert FP.protect_faces(depth, im, 1.0) is depth, "no detected face anywhere must also be a no-op"
+
+    with mock.patch.object(FP, "detect_face_boxes", return_value=[(50, 50, 100, 100)]):
+        out = FP.protect_faces(depth, im, 1.0)
+        assert torch.equal(out[0, 0, 0:25, :], depth[0, 0, 0:25, :]), (
+            "well outside the detected box (beyond its feather) must be pixel-identical -- this is the "
+            "regression test for the double-padding bug found live")
+        center_std = out[0, 0, 95:105, 95:105].std().item()
+        assert center_std < 1e-4, f"strength 1.0 must flatten the face's own centre to ~one plane, std={center_std}"
+        half = FP.protect_faces(depth, im, 0.5)
+        half_std = half[0, 0, 100, 60:140].std().item()
+        full_std = out[0, 0, 100, 60:140].std().item()
+        raw_std = depth[0, 0, 100, 60:140].std().item()
+        assert full_std < half_std < raw_std, (raw_std, half_std, full_std)
+
+    # apply_divergence: 0.0 (the default) must not even call the detector -- verified by mocking it to
+    # raise, so a real conversion with the feature off never pays for face detection at all.
+    args = types.SimpleNamespace(
+        state={"convergence_model": None}, mapper="none", method="NULL", convergence=0.5, divergence=2.0,
+        foreground_pop=0.0, background_pop=0.0, midground_pop=0.0, max_negative_parallax=1.0,
+        face_protect_strength=0.0, synthetic_view="both",
+    )
+    with mock.patch.object(FP, "protect_faces", side_effect=AssertionError("must not be called when off")):
+        U.apply_divergence(depth.clone(), im.clone(), args, None)
+    args.face_protect_strength = 0.5
+    calls = []
+    with mock.patch.object(FP, "protect_faces", side_effect=lambda d, i, s: (calls.append(s), d)[1]):
+        U.apply_divergence(depth.clone(), im.clone(), args, None)
+    assert calls == [0.5], calls
+
+    # CLI flag + filename/metadata tags
+    parser = U.create_parser(required_true=False)
+    parsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--face-protect-strength", "0.5",
+                                "--metadata", "filename"])
+    parsed.video_extension = ".mkv"
+    assert "_fprot50" in U.make_output_filename("a.mp4", parsed, video=True)
+    assert "iw3_face_protect_strength=0.5" in U._build_iw3_comment_metadata(parsed, video=True)
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename"])
+    off.video_extension = ".mkv"
+    assert "_fprot" not in U.make_output_filename("a.mp4", off, video=True)
+    assert "face_protect_strength" not in U._build_iw3_comment_metadata(off, video=True)
+
+    # GUI: real widget round-trip
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_face_protect.SetValue("0.5")
+        gui_args = frame.parse_args(skip_set_state=True)
+        assert gui_args.face_protect_strength == 0.5
+        assert "--face-protect-strength" in frame.get_cli_command()
+        frame.apply_parsed_args_to_gui(gui_args)
+        assert frame.cbo_face_protect.GetValue() == "0.5"
+        assert "cbo_face_protect" in [c.GetName() for c in frame.get_editable_comboboxes()]
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_face_protect: PASS")
+
+
 def _self_test_rowan_model_registration():
     """Rowan's inpainting model must be registered on a fresh install AND appended to an existing
     inpaint_models.yml (without touching the user's own lines), and never added twice."""
@@ -19354,6 +19469,7 @@ def _run_self_tests():
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,
+        _self_test_face_protect,
         _self_test_nt_auto_divergence_controls,
         _self_test_post_steps_are_chained,
         _self_test_upscale_full4k_hdr_and_progress,

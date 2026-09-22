@@ -1316,6 +1316,10 @@ class MainFrame(wx.Frame):
               "more tiring to watch, stretches picture edges harder (more filled-in areas) and makes "
               "objects cut off by the screen border look wrong. If Convergence is 0, nothing is behind "
               "the screen, so the boost acts like raising 3D Strength for the whole picture.\n"
+              "Not the same as: the \"Foreground/Background/Midground Pop\" sliders in the Depth Pop "
+              "section further down -- those push only a chosen slice of the scene (e.g. just the "
+              "nearest 15%), and leave the rest completely alone. This control instead scales "
+              "everything in front of the screen together.\n"
               "Recommended: 1.0 (off). For MORE pop-out try 1.25, then 1.5, on a short clip first. Use "
               "0.7 or 0.4 (not 0.0) when a close-up shot feels uncomfortable."))
         self.sld_stereo_max_negative_parallax = _build_stereo_slider(
@@ -1454,7 +1458,7 @@ class MainFrame(wx.Frame):
 
 
         self.cpn_stereo_inpainting_depth = wx.CollapsiblePane(
-            self.grp_stereo, label=T("Inpainting && Depth Source"), name="cpn_stereo_inpainting_depth")
+            self.grp_stereo, label=T("Inpainting Settings"), name="cpn_stereo_inpainting_depth")
         self.cpn_stereo_inpainting_depth.Collapse(True)
         self.cpn_stereo_inpainting_depth.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
                                               self.on_toggled_stereo_collapsible_pane)
@@ -1562,8 +1566,8 @@ class MainFrame(wx.Frame):
               "Recommended: Default (uses the source width, best quality). Try 1920 or 1280 only if you "
               "need more speed and can accept a small quality tradeoff."))
 
-        self.lbl_depth_model = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Depth Model"))
-        self.cbo_depth_model = wx.ComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
+        self.lbl_depth_model = wx.StaticText(self.grp_stereo, label=T("Depth Model"))
+        self.cbo_depth_model = wx.ComboBox(self.grp_stereo,
                                            choices=self.get_depth_models(),
                                            name="cbo_depth_model")
         self.cbo_depth_model.SetEditable(False)
@@ -1600,8 +1604,8 @@ class MainFrame(wx.Frame):
               "Any_V3_* model for single images or when you want maximum per-frame detail on video and are "
               "willing to tune EMA/Object Stability yourself."))
 
-        self.lbl_resolution = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Depth") + " " + T("Resolution"))
-        self.cbo_resolution = EditableComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
+        self.lbl_resolution = wx.StaticText(self.grp_stereo, label=T("Depth") + " " + T("Resolution"))
+        self.cbo_resolution = EditableComboBox(self.grp_stereo,
                                                choices=["Default", "512"],
                                                name="cbo_zoed_resolution")
         self.cbo_resolution.SetSelection(0)
@@ -1611,15 +1615,15 @@ class MainFrame(wx.Frame):
               "squares the cost as you increase it. Recommended: Default for most content; try 448-512 "
               "if you have VRAM to spare and want finer depth detail."))
 
-        self.chk_limit_resolution = wx.CheckBox(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Limit to source"),
+        self.chk_limit_resolution = wx.CheckBox(self.grp_stereo, label=T("Limit to source"),
                                                 name="chk_limit_resolution")
         self.chk_limit_resolution.SetToolTip(
             T("Safety cap only: if your typed Depth Resolution is HIGHER than the source video's own "
               "resolution, this brings it back down to match the source instead of wasting time asking "
               "for detail that doesn't exist. It never raises a lower value up. Recommended: on."))
 
-        self.lbl_resolution_preset = wx.StaticText(self.cpn_stereo_inpainting_depth.GetPane(), label=T("Resolution Preset"))
-        self.cbo_resolution_preset = wx.ComboBox(self.cpn_stereo_inpainting_depth.GetPane(),
+        self.lbl_resolution_preset = wx.StaticText(self.grp_stereo, label=T("Resolution Preset"))
+        self.cbo_resolution_preset = wx.ComboBox(self.grp_stereo,
                                                  choices=RESOLUTION_PRESET_CHOICES,
                                                  name="cbo_resolution_preset")
         self.cbo_resolution_preset.SetEditable(False)
@@ -2807,6 +2811,21 @@ class MainFrame(wx.Frame):
         layout.SetEmptyCellSize((0, 0))
 
         i = 0
+        # ADR-215: Depth Model/Resolution first -- the foundation everything else builds on
+        # (see Depth Model's own tooltip), moved here from the collapsed "Inpainting
+        # Settings" pane below so it's visible without a click, same as every other setting
+        # on this first screen.
+        layout.Add(self.lbl_depth_model, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_depth_model, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_resolution, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_resolution, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_limit_resolution, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_resolution_preset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_resolution_preset, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add((0, 8), (i := i + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 6), (i := i + 1, 0))
+
         layout.Add(self.lbl_divergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_divergence, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_divergence, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -2846,12 +2865,23 @@ class MainFrame(wx.Frame):
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 6), (i := i + 1, 0))
 
-        # Guided Light pilot (ADR-097): "Inpainting & Depth Source" collapsed into its
-        # own wx.CollapsiblePane, same pattern as Pop & Divergence below -- merges what
-        # used to be two separate StaticLine-divided blocks (method-conditional inpaint
-        # fields, and Stereo Processing Width/Depth Model/Depth Resolution) into one
-        # pane, since both are about what generates/sources the depth map rather than
-        # the core conversion settings above.
+        # Guided Light pilot (ADR-097): originally "Inpainting & Depth Source", collapsed
+        # into its own wx.CollapsiblePane, same pattern as Pop & Divergence below -- merged
+        # what used to be two separate StaticLine-divided blocks (method-conditional inpaint
+        # fields, and Stereo Processing Width/Depth Model/Depth Resolution) into one pane.
+        # ADR-215: Depth Model/Depth Resolution/Resolution Preset moved back OUT, to the
+        # main always-visible area near the top (see the real map of this tab's controls
+        # done live, on request) -- Depth Model's own tooltip calls it "probably the single
+        # most important choice in the whole app", yet it only mattered for *_inpaint
+        # methods by NAME association with this pane, not by actual behavior: unlike the
+        # fields still below (which update_inpaint_options() genuinely shows/hides based on
+        # Method), Depth Model was never conditionally hidden -- it was just visually
+        # grouped with settings that ARE conditional, and defaulted to collapsed like them.
+        # Renamed to "Inpainting Settings" now that it holds only the fields that are
+        # actually inpainting-specific (plus Stereo Processing Width, which is genuinely
+        # method-conditional too, just for a different subset of methods -- row_flow_v3/
+        # row_flow_v2 -- so it stays grouped here as "extra settings some methods use"
+        # rather than joining the always-relevant fields above).
         self.pnl_stereo_inpainting_depth_dot = wx.Panel(self.grp_stereo, size=self.FromDIP((10, 10)))
         self.pnl_stereo_inpainting_depth_dot.SetBackgroundColour(wx.Colour(255, 184, 79))
         pane_header_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -2878,13 +2908,6 @@ class MainFrame(wx.Frame):
         pane_layout_inpaint.Add((0, 6), (k := k + 1, 0))
         pane_layout_inpaint.Add(self.lbl_stereo_width, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_inpaint.Add(self.cbo_stereo_width, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout_inpaint.Add(self.lbl_depth_model, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout_inpaint.Add(self.cbo_depth_model, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout_inpaint.Add(self.lbl_resolution, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout_inpaint.Add(self.cbo_resolution, (k, 1), flag=wx.EXPAND)
-        pane_layout_inpaint.Add(self.chk_limit_resolution, (k, 2), flag=wx.EXPAND)
-        pane_layout_inpaint.Add(self.lbl_resolution_preset, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout_inpaint.Add(self.cbo_resolution_preset, (k, 1), (1, 2), flag=wx.EXPAND)
         self.cpn_stereo_inpainting_depth.GetPane().SetSizer(pane_layout_inpaint)
 
         layout.Add((0, 8), (i := i + 1, 0))

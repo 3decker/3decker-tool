@@ -12,7 +12,30 @@ layered on top on the `my-customizations` branch.
   covers every individual setting in detail.
 - **What's changed recently?** See [`3DECKER_CHANGELOG.md`](3DECKER_CHANGELOG.md).
 
+## Recent Highlights
+
+- **Turn a real 3D Blu-ray disc into a normal video file (or a lossless backup
+  ISO), and go the other way too** — turn your own 3D video into a real 3D
+  Blu-ray disc image, with an opt-in fix for videos whose frame rate isn't
+  Blu-ray-legal.
+- **Auto 3D Strength, Pop-Out Limit / Boost, and Protect Faces** shape the 3D
+  effect per scene and per shot instead of one fixed setting for the whole
+  movie, with a "Show Advanced Settings" toggle keeping the everyday controls
+  uncluttered.
+- **Dolby Vision and HDR now survive RIFE smoothing and the AI upscaler**,
+  and every after-conversion step (upscale, RIFE, audio/subtitle restore)
+  chains into one final file instead of several separate ones.
+- **Restore every audio track and subtitle from your source automatically**
+  after conversion, right from a checkbox on the main screen.
+- **A real Light / Dark / System theme**, an automatically-resizing window,
+  and dozens of smaller fixes and quality-of-life improvements.
+
+See [`3DECKER_CHANGELOG.md`](3DECKER_CHANGELOG.md) for the full, plain-language
+list of everything that's changed.
+
 ![3DECKER main window](docs/screenshots/panels.png)
+![Stereo Generation tab with Advanced Settings and Depth Pop expanded, showing Auto 3D Strength, Pop-Out Limit / Boost, Protect Faces, and Pop Feather %](docs/screenshots/stereo-advanced-pop.png)
+![SBS to 3D Blu-ray MVC tool with the Fix frame rate automatically checkbox turned on](docs/screenshots/sbs2mvc-frame-rate-fix.png)
 ![3DECKER with every settings section expanded, part 1](docs/screenshots/panels-expanded-1.png)
 ![3DECKER with every settings section expanded, part 2](docs/screenshots/panels-expanded-2.png)
 ![3DECKER with every settings section expanded, part 3](docs/screenshots/panels-expanded-3.png)

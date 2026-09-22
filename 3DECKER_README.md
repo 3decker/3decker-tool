@@ -69,6 +69,15 @@ A couple of orientation notes worth knowing up front:
 - **Compare Presets** renders a short test clip with two or more presets and
   joins the results into one video, so you can directly compare different
   settings before committing to a full-length conversion.
+- **Restore Audio & Subtitles from Source**, a checkbox right on the main
+  conversion screen, fixes a real limitation of the conversion itself: it only
+  keeps the first audio track from your source and drops every subtitle
+  track. Turn this on and both get restored automatically once conversion
+  finishes, using the same source file and trim range you already set — no
+  separate tool or re-typing anything.
+- A **Theme** dropdown (top toolbar, next to Layout) switches the whole app
+  between Light, Dark, or System (follows Windows), instantly, no restart
+  needed.
 - The app can take a while on a long movie, especially with the higher-quality
   options turned on — that's normal for AI-based video processing on a single
   computer, not a sign something is wrong.
@@ -96,10 +105,40 @@ conversion process again. You'll find these under the **Standalone Tools** tab.
   own player), since that's how most people actually watch their output.
 - **Add Audio Track** — adds an extra audio track, like a different-language
   dub, to an already-converted video.
+- **Restore All Audio Tracks** — the main conversion only keeps the first
+  audio track from your source, even if it has several languages. Point this
+  tool at your converted 3D video and your original source movie and it
+  replaces that one track with every track from the source, each keeping its
+  own language and name automatically.
 - **Retroactively Tag MKV as 3D (Stereo Mode Tag)** — writes standard 3D
   metadata into a finished file so 3D-aware players and TVs (VLC, Kodi, many
   smart TVs) can automatically detect and display it in 3D, instead of you
   having to manually switch the player into 3D mode.
+- **3D Blu-ray Import** — got a real 3D Blu-ray disc (a disc image or a ripped
+  disc folder)? This turns it into a normal 3D video file you can play in
+  VLC, MPC-HC, or on a 3D TV — it finds the main movie itself, reads both
+  eyes' pictures, and keeps the disc's audio and subtitles. Pick your 3D
+  arrangement (Side-by-Side, Top-Bottom, or Frame Packed) and video format.
+  There's also a "Lossless 3D Blu-ray ISO" choice that copies the disc's own
+  3D video into a fresh ISO with zero re-encoding, for a perfect backup or to
+  play on a real 3D Blu-ray player. It can't open copy-protected discs — rip
+  those to an ISO or folder with a separate tool first.
+- **SBS to 3D Blu-ray MVC** — the reverse direction: turns one of your own 3D
+  videos (side-by-side or top-bottom) into a real 3D Blu-ray disc image you
+  can play on a 3D Blu-ray player or PowerDVD, or burn to a BD-R. 3D Blu-ray
+  only allows 1920x1080 at 23.976/24 frames per second, so a video at any
+  other rate normally gets refused — tick "Fix frame rate automatically" and
+  it will genuinely re-time the whole movie (picture, sound with pitch kept
+  correct, and subtitles together) to the nearest allowed rate instead. That
+  checkbox is off by default, since it's a real, if usually small (a few
+  percent), change to your movie's speed and length.
+- **Upscale with waifu2x** — run the AI upscaler on any video, any time, not
+  just right after a conversion. "Whole frame" does a normal enlargement;
+  "Stereo-aware 4K/8K" is built specifically for 3D video — it splits the two
+  eyes, upscales each separately so detail never blurs across the seam
+  between them, smooths flicker, and recombines at an exact target
+  resolution. Dolby Vision and HDR are kept through the upscale, not flattened
+  to an ordinary 8-bit picture.
 - **Sharpen** — already converted a video and it looks a little soft? This
   applies the same subtle, edge-aware sharpening filter the main pipeline
   offers, directly to your finished video — no need to re-run the whole
@@ -119,6 +158,37 @@ conversion process again. You'll find these under the **Standalone Tools** tab.
 Every tool above works on a *copy* — none of them ever modify your original
 files. Each has its own log box (with a Clear button) showing exactly what
 happened, so you can always confirm a step actually succeeded.
+
+---
+
+## Shaping the 3D Effect: Pop, Boost, and Protecting Faces
+
+The Stereo Generation tab has a "Show Advanced Settings" checkbox, off by
+default — the everyday controls (Depth Model, 3D Strength, Convergence Plane,
+Method) are always visible, and ticking that box brings back the fine-tuning
+settings below alongside them. Nothing is lost when a setting stays hidden;
+whatever value you last set for it keeps working when you click Start.
+
+- **Auto 3D Strength** picks the 3D Strength per scene from how close the shot
+  looks — wide shots and landscapes get less, close-ups get more — instead of
+  one fixed value for the whole movie, the way a real stereo camera behaves.
+  Off by default.
+- **Pop-Out Limit / Boost** works in both directions: below 1.0 it limits how
+  far things pop out of the screen (a safety cap), 1.0 is off, and above 1.0
+  (up to 3.0) makes things in front of the screen come out further. Very
+  strong values stretch the picture edges harder, so raise Edge Fix alongside
+  it and check for halos on close objects.
+- **Protect Faces** reduces the facial warping (a stretched nose, distorted
+  eyes) that a strong 3D Strength or Pop-Out Boost can cause on a close-up
+  face. It detects faces and gently flattens each one's own depth before
+  Pop-Out Boost sees it — everything else in the frame is untouched. Off by
+  default; try 0.3–0.5 first.
+- **Pop Feather %** softens the edge of Foreground/Midground/Background Pop
+  (the three sliders that push a chosen depth slice — nearest, farthest, or
+  in-between — toward or away from the screen). At 0 (the old behavior) that
+  slice has a hard cutoff, which can show as a faint line at its edge; raising
+  Pop Feather % blends that edge smoothly instead. One setting covers all
+  three Pop sliders at once.
 
 ---
 
@@ -180,22 +250,32 @@ can preserve that during conversion — turn on "Preserve Dolby Vision" and the
 app will extract that metadata before converting and re-inject it into the
 finished 3D file afterward.
 
-**A real, current limitation worth knowing:** Dolby Vision/HDR10+ preservation
-and RIFE frame interpolation cannot both happen within the *same* conversion
-run — RIFE creates brand-new synthetic frames that have no HDR metadata of
-their own to carry. The good news is there's now a working two-step
-alternative: convert your video with Dolby Vision preserved, run RIFE
-afterward (with its output format set to an HEVC/H.265 option, which the
-reinjection step requires), and then run the Retroactive HDR/DV Reinjection
-tool one more time, pointing it at the small manifest file RIFE writes. This
-full path has been tested end-to-end on real Dolby Vision movie footage. One
-remaining gap: this specific RIFE workflow currently carries Dolby Vision
-metadata through correctly, but not HDR10+ metadata.
+**RIFE and Preserve Dolby Vision now work together directly, in the same job.**
+This used to require a manual two-step workaround, since RIFE creates
+brand-new synthetic frames with no HDR metadata of their own. Now you can just
+tick both: the app converts, smooths with RIFE (forced to H.265, which Dolby
+Vision needs), and automatically puts the original Dolby Vision data back
+afterward, giving each new in-between frame a copy of its nearest real frame's
+data. Tested end-to-end on a real 4K Dolby Vision movie. One remaining gap:
+this path carries Dolby Vision through correctly, but not HDR10+ metadata.
 
 If you didn't turn on Dolby Vision preservation for a conversion you already
 ran, you don't have to redo it — the standalone **Retroactive HDR/DV
 Reinjection** tool (Standalone Tools tab) can add it back afterward, as long as
 you still have your original source file.
+
+**Upscaling with waifu2x keeps Dolby Vision and HDR too**, in both the
+standalone Upscale tool and the after-conversion option — it used to write an
+ordinary 8-bit picture, throwing the HDR data away and washing out the colors.
+A Dolby Vision file must be saved as .mkv.
+
+**If you turn on more than one after-conversion step** (Upscale, RIFE, Restore
+Audio & Subtitles), they now chain into a single final file instead of each
+starting over from the plain converted video: upscale runs first, then RIFE,
+then Dolby Vision is put back, then audio/subtitles are restored. The name
+stacks to show what's in it, for example `..._w2x_rife_alldub.mkv` — that last
+file is the one to keep. A step that's off or fails is simply skipped and the
+rest of the chain carries on.
 
 ---
 

@@ -7877,6 +7877,13 @@ class MainFrame(wx.Frame):
             if wrap_sizer is not None:
                 self.tab_wrap_stereo.SetMinSize(wrap_sizer.CalcMin())
         refresh_layouts(self)
+        # ADR-177 applies here too: that second refresh_layouts()'s Fit() just
+        # re-derived the frame's OS-level drag-resize floor from whatever's now in
+        # the sizer chain -- including the wrap panel's just-grown MinSize above --
+        # silently overriding _update_frame_min_size()'s deliberately small floor,
+        # the exact same bug ADR-177 fixed for tab switching, just never patched
+        # here for a pane toggle. Must re-call it every time, after every Fit().
+        self._update_frame_min_size()
         self._clamp_frame_to_screen()
         event.Skip()
 
@@ -7892,6 +7899,8 @@ class MainFrame(wx.Frame):
             if wrap_sizer is not None:
                 self.tab_wrap_depth_blend.SetMinSize(wrap_sizer.CalcMin())
         refresh_layouts(self)
+        # ADR-177 applies here too -- see on_toggled_stereo_collapsible_pane's comment.
+        self._update_frame_min_size()
         self._clamp_frame_to_screen()
         event.Skip()
 
@@ -7910,6 +7919,8 @@ class MainFrame(wx.Frame):
             if wrap_sizer is not None:
                 self.tab_wrap_video_filter.SetMinSize(wrap_sizer.CalcMin())
         refresh_layouts(self)
+        # ADR-177 applies here too -- see on_toggled_stereo_collapsible_pane's comment.
+        self._update_frame_min_size()
         self._clamp_frame_to_screen()
         event.Skip()
 
@@ -7930,6 +7941,10 @@ class MainFrame(wx.Frame):
             if wrap_sizer is not None:
                 self.tab_wrap_tools.SetMinSize(wrap_sizer.CalcMin())
         refresh_layouts(self)
+        # ADR-177 applies here too -- see on_toggled_stereo_collapsible_pane's comment.
+        # This is the handler shared by all 8+ Standalone Tools panes, so it's the
+        # single most likely place a real user hits this (many panes to expand).
+        self._update_frame_min_size()
         self._clamp_frame_to_screen()
         event.Skip()
 
@@ -12796,6 +12811,17 @@ class MainFrame(wx.Frame):
                 self.lbl_sbs2mvc_progress.SetLabel(
                     f"{name}: {int(done)}/{int(total)} {T('frames')} ({percent}%) "
                     f"[{fps:.1f} FPS, {T('elapsed')} {self._format_duration(elapsed)}, ETA {eta}]")
+            elif stage == "retime":
+                # done/total are seconds of the RE-TIMED movie's own timeline, not frames --
+                # a real user watched a plain "0%" spinner for 20+ minutes on a full-length
+                # movie re-encode with no other feedback and reasonably assumed the app had
+                # hung, so this needs the same elapsed/ETA detail the encode stage gets.
+                elapsed = time() - self.sbs2mvc_start_time
+                speed = done / (elapsed + 1e-6)
+                eta = self._format_duration((total - done) / speed) if speed > 0 and done > 0 else "?"
+                self.lbl_sbs2mvc_progress.SetLabel(
+                    f"{name}: {self._format_duration(done)} / {self._format_duration(total)} ({percent}%) "
+                    f"[{speed:.2f}x realtime, {T('elapsed')} {self._format_duration(elapsed)}, ETA {eta}]")
             else:
                 self.lbl_sbs2mvc_progress.SetLabel(f"{name}: {percent}%")
         else:
@@ -13799,6 +13825,59 @@ def _self_test_tab_switch_keeps_small_drag_resize_floor():
         app.Destroy()
 
     print("_self_test_tab_switch_keeps_small_drag_resize_floor: PASS")
+
+
+def _self_test_collapsible_pane_toggle_keeps_small_drag_resize_floor():
+    """Real user report: 'if you open any of the menus along the right hand side of
+    the window you can no longer resize the window to make it narrower.' Same root
+    cause and same fix as ADR-177 (_self_test_tab_switch_keeps_small_drag_resize_floor
+    above), just never applied to this second trigger of it: refresh_layouts(self)
+    calls Fit() on the frame, which re-derives the OS-level drag-resize floor
+    (self.GetMinSize(), what WM_GETMINMAXINFO consults) from whatever's currently in
+    the sizer chain -- including a collapsible pane's own wrap.SetMinSize(CalcMin())
+    call just above it, growing to fit newly-shown content. Without re-calling
+    _update_frame_min_size() afterward (which on_notebook_page_changed's path already
+    did, post-ADR-177), that inflated size silently becomes the new permanent floor,
+    exactly like the tab-switch case. Reproduced live before fixing: expanding just
+    the SBS to 3D Blu-ray MVC pane alone jumped frame.GetMinSize() from (298, 240) to
+    (927, 1368). Covers all four affected handlers (Stereo, Dual-Pass Depth Blend,
+    Video Filter, Standalone Tools), firing the real event handler each time."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS, \
+            "this test assumes the default Layout (Tabbed) -- if that default ever " \
+            "changes, switch_layout_mode(gui_mod.LAYOUT_MODE_TABS) first"
+
+        expected_min = frame.GetMinSize()
+
+        cases = (
+            (0, frame.cpn_stereo_pop_divergence, frame.on_toggled_stereo_collapsible_pane),
+            (1, frame.cpn_depth_blend, frame.on_toggled_depth_blend_collapsible_pane),
+            (2, frame.cpn_video_filter_scene_batch, frame.on_toggled_video_filter_collapsible_pane),
+            (6, frame.cpn_sbs2mvc, frame.on_toggled_standalone_tools_collapsible_pane),
+        )
+        for page_index, pane, handler in cases:
+            frame.nb_options.SetSelection(page_index)
+            frame.on_notebook_page_changed(wx.CommandEvent())
+            pane.Collapse(False)
+            handler(wx.CommandEvent())
+            assert frame.GetMinSize() == expected_min, (
+                f"frame's drag-resize floor changed after expanding {pane.GetName()} "
+                f"on tab {page_index} ({frame.GetMinSize()} != original {expected_min})"
+            )
+            pane.Collapse(True)
+            handler(wx.CommandEvent())
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_collapsible_pane_toggle_keeps_small_drag_resize_floor: PASS")
 
 
 def _self_test_layout_mode_live_switch():
@@ -19681,7 +19760,7 @@ def _self_test_sbs2mvc_fix_frame_rate():
         open(video, "wb").close()
         out_iso = path.join(tmpdir, "movie.iso")
 
-        def fake_retime(input_path, out_path, rate, ffmpeg_bin, stop_event=None):
+        def fake_retime(input_path, out_path, rate, ffmpeg_bin, duration=None, stop_event=None, progress_cb=None):
             open(out_path, "wb").write(b"x")
             return -4.0
 
@@ -19854,6 +19933,7 @@ def _run_self_tests():
         _self_test_layout_modes,
         _self_test_theme_preference,
         _self_test_tab_switch_keeps_small_drag_resize_floor,
+        _self_test_collapsible_pane_toggle_keeps_small_drag_resize_floor,
         _self_test_layout_mode_live_switch,
         _self_test_tabbed_scrolling,
         _self_test_stereo_sliders_sync,

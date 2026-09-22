@@ -173,24 +173,79 @@ def _atempo_chain(tempo):
     return ",".join(f"atempo={s:.6f}" for s in stages)
 
 
-def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, stop_event=None):
+def _parse_ffmpeg_out_time(s):
+    """Parses ffmpeg -progress's out_time=HH:MM:SS.ffffff field into seconds."""
+    h, m, sec = s.strip().split(":")
+    return int(h) * 3600 + int(m) * 60 + float(sec)
+
+
+def _retime_video_codec_args():
+    """hevc_nvenc (GPU) when this machine has it, same convention already used elsewhere in this
+    project (iw3.utils._hdr_upscale_codec/_sdr_upscale_codec: probe via PyAV, confirm CUDA too) and
+    the same rc/qp quality-control flags make_video_codec_option() already uses for NVENC (NVENC
+    ignores -crf; constqp+qp is the correct equivalent). Falls back to CPU libx264 -- this is a
+    temporary intermediate file re-encoded again by FRIM right afterward, so "faster" (not
+    "medium") costs no real quality (CRF/QP already fixes the quality target) while cutting real
+    wall-clock time noticeably, which matters here since this step has no natural frame-count-based
+    progress the way FRIM's own step does."""
+    try:
+        import av
+        av.codec.Codec("hevc_nvenc", "w")
+        import torch
+        if torch.cuda.is_available():
+            return ["-c:v", "hevc_nvenc", "-rc", "constqp", "-qp", "16"]
+    except Exception:
+        pass
+    return ["-c:v", "libx264", "-crf", "16", "-preset", "faster"]
+
+
+def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, duration=None,
+                      stop_event=None, progress_cb=None):
     """Genuinely re-times input_path -- video, audio (pitch-preserved) and subtitles together --
     to whichever of 23.976/24 fps is numerically closer to its real rate, so the result passes
     bd_frame_rate(). This is a real speed change (like the classic PAL/NTSC conversion), not a
     frame-rate relabel: relabeling alone would just duplicate/drop frames (judder) instead of
-    retiming them. Returns the percent speed change applied (negative = slower)."""
+    retiming them. Returns the percent speed change applied (negative = slower).
+
+    duration (the source's own length in seconds, if known) drives real progress_cb("retime",
+    done_seconds, total_seconds) updates parsed from ffmpeg's own -progress output as this runs --
+    re-encoding a whole movie's video can take a long time, and with nothing but a single
+    progress_cb("retime", 0, 0) call before starting (the original version of this), a real user
+    watching an indeterminate spinner for 20+ minutes reasonably assumed the app had hung."""
     num, den = (source_rate_string.split("/") + ["1"])[:2]
     source_fps = float(num) / float(den)
     fps_text, fps_frac, target_fps = _nearest_bd_fps(source_fps)
     tempo = target_fps / source_fps      # audio speed factor: <1 slower, >1 faster
     stretch = 1.0 / tempo                # video/subtitle timestamp multiplier (same direction)
+    total_out_seconds = duration * stretch if duration else None
 
-    cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
+    cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
            "-itsscale:s", f"{stretch:.6f}", "-i", input_path, "-map", "0",
            "-vf", f"setpts={stretch:.6f}*PTS", "-filter:a", _atempo_chain(tempo),
-           "-r", fps_frac, "-c:v", "libx264", "-crf", "16", "-preset", "medium",
+           "-r", fps_frac] + _retime_video_codec_args() + [
            "-c:a", "aac", "-b:a", "384k", "-c:s", "copy", out_path]
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    err_tail = []
+
+    def _read_stderr():
+        for line in proc.stderr:
+            err_tail.append(line)
+            del err_tail[:-20]
+
+    def _read_stdout():
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time=") and progress_cb and total_out_seconds:
+                try:
+                    done = min(_parse_ffmpeg_out_time(line.split("=", 1)[1]), total_out_seconds)
+                except ValueError:
+                    continue
+                progress_cb("retime", done, total_out_seconds)
+
+    stderr_reader = threading.Thread(target=_read_stderr, daemon=True)
+    stdout_reader = threading.Thread(target=_read_stdout, daemon=True)
+    stderr_reader.start()
+    stdout_reader.start()
     while proc.poll() is None:
         if stop_event is not None and stop_event.is_set():
             proc.kill()
@@ -199,9 +254,13 @@ def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, stop_
             proc.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
             pass
-    err = (proc.stderr.read() if proc.stderr else "") or ""
+    stderr_reader.join()
+    stdout_reader.join()
     if proc.returncode != 0 or not (path.exists(out_path) and path.getsize(out_path) > 0):
-        raise RuntimeError("could not re-time the video to a 3D Blu-ray-legal frame rate:\n" + err[-600:])
+        raise RuntimeError("could not re-time the video to a 3D Blu-ray-legal frame rate:\n"
+                           + "".join(err_tail)[-600:])
+    if progress_cb and total_out_seconds:
+        progress_cb("retime", total_out_seconds, total_out_seconds)
     return (tempo - 1.0) * 100.0
 
 
@@ -378,7 +437,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         if progress_cb:
             progress_cb("retime", 0, 0)
         retimed_path = path.join(work_dir, "retimed_input.mkv")
-        percent = retime_to_bd_fps(input_path, retimed_path, rate, ffmpeg, stop_event=stop_event)
+        percent = retime_to_bd_fps(input_path, retimed_path, rate, ffmpeg, duration=duration,
+                                   stop_event=stop_event, progress_cb=progress_cb)
         print(f"[sbs2mvc] note: source frame rate is not 3D Blu-ray-legal; re-timed the whole "
               f"movie (picture, sound and subtitles together, {percent:+.2f}% speed) to match",
               file=sys.stderr)

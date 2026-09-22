@@ -102,4 +102,16 @@ Paweł Kun / MIT License
 Other license files are included in each asset directory.
 
 ----
+nt_inpaint/nt_iw3 (3DECKER)
+From Rowan's "iw3 inpainting extras" / iw3-inpaint
+https://github.com/Rowan3D/iw3-inpaint
+Rowan / MIT License
+
+----
+nt_auto3d/nt_autostrength (3DECKER)
+From Rowan's "Auto 3D Strength" / iw3-auto3d
+https://github.com/Rowan3D/iw3-auto3d
+Rowan / MIT License
+
+----
 Other libraries used are listed in `requirements.txt`.

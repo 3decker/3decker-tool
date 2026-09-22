@@ -1175,6 +1175,77 @@ class MainFrame(wx.Frame):
         self.cbo_divergence.SetSelection(4)
         self.sld_stereo_divergence = _build_stereo_slider(self.grp_stereo, self.cbo_divergence, 1.0, 5.0, 10)
 
+        # Rowan's Auto 3D Strength (nt_auto3d/nt_autostrength, ADR-213): native controls calling into the
+        # add-on's own apply_divergence patch (--auto-divergence and siblings, already registered on
+        # create_parser() when the add-on is installed) -- Rowan's own generic GUI-injection is disabled
+        # in iw3/__init__.py because it doesn't fit this fork's stereo panel layout; see that comment.
+        self.chk_nt_auto_div = wx.CheckBox(self.grp_stereo, label=T("Auto 3D Strength"), name="chk_nt_auto_div")
+        self.chk_nt_auto_div.SetToolTip(
+            T("What it's for: chooses the 3D Strength per scene automatically, from how close the shot "
+              "looks, instead of one fixed value for the whole movie.\n"
+              "How it helps: iw3 stretches every frame's depth to fill the same range, so a landscape "
+              "gets exactly as much pop as a face filling the frame -- the opposite of a real stereo "
+              "camera. This asks an AI model (CLIP) whether a shot is a wide landscape or a close-up and "
+              "scales the strength to match: less for wide shots, more for close-ups. 3D Strength above "
+              "becomes what an ordinary (medium) shot gets, not a fixed value for every frame.\n"
+              "Pros: no more picking one strength that's wrong for either your wide shots or your "
+              "close-ups; judged by what the shot actually shows (a face filling the frame IS a "
+              "close-up), which its author measured as clearly more reliable than estimating from iw3's "
+              "own depth (0.945 vs 0.59 out of 1.0 against hand-labelled photos).\n"
+              "Con: downloads a small AI model (176 MB) the first time you use it; a small amount of "
+              "extra per-frame work (well under 1 ms/frame on a GPU); if the model can't be downloaded "
+              "it falls back to a rougher depth-only guess and says so in the log.\n"
+              "Recommended: try it on a movie with a real mix of wide and close shots; leave it off for "
+              "content that's already all one kind of shot."))
+        self.cbo_nt_auto_div_mode = wx.ComboBox(self.grp_stereo, choices=["hybrid", "cuts", "smooth"],
+                                                name="cbo_nt_auto_div_mode")
+        self.cbo_nt_auto_div_mode.SetEditable(False)
+        self.cbo_nt_auto_div_mode.SetSelection(0)
+        self.cbo_nt_auto_div_mode.SetToolTip(
+            T("What it's for: how the automatically-chosen strength behaves over time.\n"
+              "hybrid: jumps to the new value at each cut, then follows the framing slowly within the "
+              "shot.\n"
+              "cuts: decided once at each cut and held steady until the next one.\n"
+              "smooth: follows the framing slowly and continuously, never jumps, not even at cuts.\n"
+              "Recommended: hybrid for most content -- the most natural."))
+        self.lbl_nt_div_range = wx.StaticText(self.grp_stereo, label=T("Auto Range (min, max)"))
+        self.cbo_nt_div_min = EditableComboBox(self.grp_stereo, choices=["1.0", "2.0", "3.0", "4.0"],
+                                               name="cbo_nt_div_min")
+        self.cbo_nt_div_min.SetValue("2.0")
+        self.cbo_nt_div_min.SetToolTip(
+            T("What it's for: the floor of the automatic strength -- the least a very wide shot or "
+              "landscape gets. 3D Strength above is what a medium shot gets, Auto Range is how far it can "
+              "move either side of that.\n"
+              "Recommended: 2.0 as a starting point."))
+        self.cbo_nt_div_max = EditableComboBox(self.grp_stereo, choices=["8.0", "10.0", "12.0", "16.0", "20.0"],
+                                               name="cbo_nt_div_max")
+        self.cbo_nt_div_max.SetValue("16.0")
+        self.cbo_nt_div_max.SetToolTip(
+            T("What it's for: the ceiling of the automatic strength -- the most an extreme close-up "
+              "gets.\n"
+              "Recommended: 16.0 as a starting point."))
+        self.lbl_nt_auto_div_stab = wx.StaticText(self.grp_stereo, label=T("Auto Stability"))
+        self.cbo_nt_auto_div_stab = wx.ComboBox(self.grp_stereo, choices=["low", "medium", "high", "very high"],
+                                                name="cbo_nt_auto_div_stab")
+        self.cbo_nt_auto_div_stab.SetEditable(False)
+        self.cbo_nt_auto_div_stab.SetSelection(1)
+        self.cbo_nt_auto_div_stab.SetToolTip(
+            T("What it's for: how settled the automatic strength is -- how much it reacts to small "
+              "changes in framing within a shot.\n"
+              "low: follows the framing quickly, reacts to small changes.\n"
+              "medium: settles over about half a second after a cut, then ignores small changes.\n"
+              "high / very high: settles more slowly and barely moves within a shot.\n"
+              "Recommended: medium."))
+        self.chk_nt_auto_div_overlay = wx.CheckBox(self.grp_stereo, label=T("Show strength on video (debug)"),
+                                                   name="chk_nt_auto_div_overlay")
+        self.chk_nt_auto_div_overlay.SetToolTip(
+            T("What it's for: writes the 3D Strength actually used for each frame into its top-left "
+              "corner, in both eyes, so you can see what Auto 3D Strength decided.\n"
+              "Con: it's burned into the picture itself.\n"
+              "Recommended: on only while testing a scene, off for the real conversion."))
+        self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div)
+        self.update_nt_auto_divergence()
+
         self.lbl_convergence = wx.StaticText(self.grp_stereo, label=T("Convergence Plane"))
         self.cbo_convergence_mode = wx.ComboBox(self.grp_stereo, choices=["constant", "sod_v1", "face_detect"],
                                                 name="cbo_convergence_mode")
@@ -2711,6 +2782,14 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_divergence, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_divergence, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_divergence_warning, pos=(i := i + 1, 0), span=(0, 3), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_nt_auto_div, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_nt_auto_div_mode, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_nt_div_range, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_nt_div_min, (i, 1), flag=wx.EXPAND)
+        layout.Add(self.cbo_nt_div_max, (i, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_nt_auto_div_stab, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_nt_auto_div_stab, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_convergence, (i, 2), flag=wx.EXPAND)
@@ -7439,6 +7518,7 @@ class MainFrame(wx.Frame):
         self.update_temporal_stabilize()
         self.update_convergence_mode()
         self.update_scene_segment()
+        self.update_nt_auto_divergence()
         self.grp_video.update_controls()
 
         self.update_divergence_warning()
@@ -7705,6 +7785,8 @@ class MainFrame(wx.Frame):
             self.cbo_convergence,
             self.cbo_convergence_smoothing,
             self.cbo_max_negative_parallax,
+            self.cbo_nt_div_min,
+            self.cbo_nt_div_max,
             self.cbo_resolution,
             self.cbo_stereo_width,
             self.cbo_edge_dilation,
@@ -8168,6 +8250,19 @@ class MainFrame(wx.Frame):
     def on_changed_chk_waifu2x_upscale(self, event):
         self.update_waifu2x_upscale()
 
+    def update_nt_auto_divergence(self):
+        # Rowan's Auto 3D Strength (nt_auto3d, ADR-213). No-op harmlessly if the add-on isn't installed --
+        # the checkbox and its siblings still exist and still round-trip through parse_args/CLI either way,
+        # they just have no effect (--auto-divergence with no patched apply_divergence is a plain no-op).
+        on = self.chk_nt_auto_div.GetValue()
+        for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
+                  self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay):
+            c.Enable(on)
+        self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
+
+    def on_changed_chk_nt_auto_div(self, event):
+        self.update_nt_auto_divergence()
+
     def update_rife_interpolate(self):
         enabled = self.chk_rife_interpolate.GetValue()
         self.cbo_rife_model.Enable(enabled)
@@ -8550,6 +8645,16 @@ class MainFrame(wx.Frame):
             convergence_mode=self.cbo_convergence_mode.GetValue(),
             convergence_smoothing=float(self.cbo_convergence_smoothing.GetValue()),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
+            # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
+            # the add-on is actually installed (create_parser() is only patched with them when it is; the
+            # patched parser is what runs when it IS installed, so this dict entry is harmless either way
+            # and keeps a saved preset/command line round-tripping the checkbox state honestly).
+            auto_divergence=self.chk_nt_auto_div.GetValue(),
+            auto_divergence_mode=self.cbo_nt_auto_div_mode.GetValue(),
+            divergence_min=float(self.cbo_nt_div_min.GetValue()),
+            divergence_max=float(self.cbo_nt_div_max.GetValue()),
+            auto_divergence_stability=self.cbo_nt_auto_div_stab.GetValue().replace(" ", "-"),
+            auto_divergence_overlay=self.chk_nt_auto_div_overlay.GetValue(),
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
             synthetic_view=self.cbo_synthetic_view.GetValue(),
             method=self.cbo_method.GetValue(),
@@ -9689,6 +9794,15 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_mode, args.convergence_mode)
         _apply_combo_value(self.cbo_convergence_smoothing, args.convergence_smoothing)
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
+        # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- getattr defaults match create_parser()'s own
+        # patched defaults, so a command line from before the add-on was installed still restores cleanly.
+        self.chk_nt_auto_div.SetValue(bool(getattr(args, "auto_divergence", False)))
+        _apply_combo_value(self.cbo_nt_auto_div_mode, getattr(args, "auto_divergence_mode", "hybrid"))
+        _apply_combo_value(self.cbo_nt_div_min, getattr(args, "divergence_min", 2.0))
+        _apply_combo_value(self.cbo_nt_div_max, getattr(args, "divergence_max", 16.0))
+        _apply_combo_value(self.cbo_nt_auto_div_stab,
+                           getattr(args, "auto_divergence_stability", "medium").replace("-", " "))
+        self.chk_nt_auto_div_overlay.SetValue(bool(getattr(args, "auto_divergence_overlay", False)))
         self.sld_ipd_offset.SetValue(int(round(args.ipd_offset)))
         _apply_combo_value(self.cbo_synthetic_view, args.synthetic_view)
         _apply_combo_value(self.cbo_method, args.method)
@@ -18861,6 +18975,54 @@ def _self_test_stereo_tag_survives_post_steps():
     print("_self_test_stereo_tag_survives_post_steps: PASS")
 
 
+def _self_test_nt_auto_divergence_controls():
+    """ADR-213: 3DECKER's own native "Auto 3D Strength" controls (Rowan's nt_auto3d add-on's own
+    GUI-injection is disabled -- it doesn't fit this fork's stereo panel layout, see iw3/__init__.py).
+    Checking the box must enable its siblings, relabel 3D Strength, and round-trip through
+    parse_args/get_cli_command like every other real setting; unchecking must reverse all of it."""
+    import wx
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        siblings = (frame.cbo_nt_auto_div_mode, frame.lbl_nt_div_range, frame.cbo_nt_div_min,
+                   frame.cbo_nt_div_max, frame.lbl_nt_auto_div_stab, frame.cbo_nt_auto_div_stab,
+                   frame.chk_nt_auto_div_overlay)
+        assert not frame.chk_nt_auto_div.GetValue() and all(not c.IsEnabled() for c in siblings)
+        assert frame.lbl_divergence.GetLabelText() == "3D Strength"
+
+        frame.chk_nt_auto_div.SetValue(True)
+        frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
+        assert all(c.IsEnabled() for c in siblings), "checking the box must enable its siblings"
+        assert frame.lbl_divergence.GetLabelText() == "3D Strength (typical)"
+
+        frame.cbo_nt_div_min.SetValue("3.0")
+        frame.cbo_nt_div_max.SetValue("12.0")
+        frame.cbo_nt_auto_div_mode.SetValue("cuts")
+        frame.cbo_nt_auto_div_stab.SetValue("very high")
+        frame.chk_nt_auto_div_overlay.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.auto_divergence is True and args.auto_divergence_mode == "cuts"
+        assert args.divergence_min == 3.0 and args.divergence_max == 12.0
+        assert args.auto_divergence_stability == "very-high" and args.auto_divergence_overlay is True
+        assert "--auto-divergence" in frame.get_cli_command(), "must show up in Copy Command like any real setting"
+
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_nt_auto_div.GetValue() and frame.cbo_nt_div_min.GetValue() == "3.0"
+        assert frame.cbo_nt_auto_div_stab.GetValue() == "very high", "restore must undo the dash CLI uses"
+
+        frame.chk_nt_auto_div.SetValue(False)
+        frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
+        assert all(not c.IsEnabled() for c in siblings), "unchecking must disable its siblings again"
+        assert frame.lbl_divergence.GetLabelText() == "3D Strength"
+        assert "cbo_nt_div_min" in [c.GetName() for c in frame.get_editable_comboboxes()]
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_nt_auto_divergence_controls: PASS")
+
+
 def _self_test_rowan_model_registration():
     """Rowan's inpainting model must be registered on a fresh install AND appended to an existing
     inpaint_models.yml (without touching the user's own lines), and never added twice."""
@@ -19192,6 +19354,7 @@ def _run_self_tests():
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,
+        _self_test_nt_auto_divergence_controls,
         _self_test_post_steps_are_chained,
         _self_test_upscale_full4k_hdr_and_progress,
         _self_test_stereo_tag_survives_post_steps,

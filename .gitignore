@@ -52,6 +52,11 @@ tmp
 /nt_inpaint/uninstall.bat
 /nt_inpaint/**/__pycache__/
 
+# Rowan's Auto 3D Strength (nt_auto3d/nt_autostrength code and the small prompts
+# file are tracked; the 176 MB CLIP image model, downloaded on first use, is not)
+/nt_auto3d/cache/
+/nt_auto3d/**/__pycache__/
+
 /iw3/player/public/lib
 /iw3/player/public/environments
 /iw3/player/public/lut

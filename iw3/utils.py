@@ -562,6 +562,10 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
            "--output", tmp_out]
     if use_manifest:
         cmd += ["--rife-manifest", manifest]
+    else:
+        # ADR-212: the new file has exactly the source's frames even if the NAME says "_rife" (an upscale of a file
+        # RIFE already processed); the exact frame-count check inside the tool still guards it
+        cmd += ["--skip-rife-guard"]
     if trim_source and getattr(args, "start_time", None):
         cmd += ["--start-time", str(args.start_time)]
     if trim_source and getattr(args, "end_time", None):

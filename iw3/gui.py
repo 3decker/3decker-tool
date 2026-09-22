@@ -18156,6 +18156,11 @@ def _self_test_upscale_full4k_hdr_and_progress():
         cmd = calls[0]
         assert cmd[cmd.index("--source") + 1] == "src.mkv" and cmd[cmd.index("--converted") + 1] == up
         assert "--rife-manifest" not in cmd and "--start-time" not in cmd and "--end-time" not in cmd, cmd
+        assert "--skip-rife-guard" in cmd, "an upscaled RIFE file (name says _rife) must not be refused by the name guard"
+        from . import reinject_hdr_cli as _R
+        assert _R.create_parser().parse_args(["--source", "a", "--converted", "b", "--output", "c",
+                                              "--skip-rife-guard"]).skip_rife_guard is True
+        assert _R.create_parser().parse_args(["--source", "a", "--converted", "b", "--output", "c"]).skip_rife_guard is False
         assert open(up, "rb").read() == b"new-with-dv"
 
     # -- HDR detection is off for a file that cannot be read, and a plain SDR file is not HDR
@@ -18221,6 +18226,19 @@ def _self_test_upscale_full4k_hdr_and_progress():
             with contextlib.redirect_stderr(io.StringIO()):
                 assert U._apply_stereo_mode_tag(f, types.SimpleNamespace(stereo_mode_tag=True), value_override=1)
         assert "stereo-mode=1" in seen[0], seen
+    # -- ADR-212: the smoothed eye videos keep the source's frame rate (they used to fall back to 24 fps)
+    from fractions import Fraction
+    from unittest import mock as _mk
+    for codec_kwargs in ({}, {"hdr_codec": "libx265"}, {"sdr_codec": "hevc_nvenc"}):
+        seen = {}
+
+        def fake_process_video(inp, out, frame_cb, config_callback=None, **kw):
+            seen["config"] = config_callback(_mk.MagicMock(get_fps=lambda: Fraction(7001, 146)))
+
+        with _mk.patch.object(C.VU, "process_video", fake_process_video):
+            C._smooth_and_resize_eye("in.mp4", "out.mp4", 1920, 1608, 0.0, "cpu", "15", "medium", **codec_kwargs)
+        assert seen["config"].fps == Fraction(7001, 146), (codec_kwargs, seen["config"].fps)
+
     # -- ADR-210: the flicker smoothing is faster (half-size motion analysis, lighter settings) but still smooths, keeps
     #    the shape, and is a no-op when off; the two eyes share ONE rising progress line
     import torch as _torch

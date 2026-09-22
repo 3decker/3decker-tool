@@ -143,6 +143,10 @@ def create_parser():
                               "never converted, still refuses unconditionally. Off by default -- like "
                               "--frame-count-tolerance, this is an explicit opt-in for a specific, "
                               "independently-understood situation, not a normal setting.")
+    parser.add_argument("--skip-rife-guard", action="store_true",
+                        help=("skip the '_rife' file-name / comment-tag heuristic (ADR-212). For a --converted file that "
+                              "keeps the source's frame count even though its name says _rife, e.g. a waifu2x upscale "
+                              "of a file RIFE already processed. The exact frame-count check still runs."))
     parser.add_argument("--rife-manifest", type=str, default=None,
                          help="Path to the '<rife_output>.rife_manifest.json' sidecar iw3.rife_cli "
                               "writes next to its own output every time it runs (see "
@@ -942,7 +946,7 @@ def _run_strict(args):
         return 1
 
     # --- RIFE guard: fast heuristic check, run before the slow frame-count probe below ---
-    rife_reasons = _check_rife_guard(converted, ffprobe_bin)
+    rife_reasons = [] if getattr(args, "skip_rife_guard", False) else _check_rife_guard(converted, ffprobe_bin)
     if rife_reasons:
         print("ERROR: This file appears to have been processed with RIFE frame interpolation, "
               "which changes frame count -- HDR reinjection cannot work on RIFE'd output.",

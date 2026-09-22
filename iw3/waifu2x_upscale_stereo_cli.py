@@ -240,9 +240,13 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
         return stabilizer.stabilize(x)
 
     def config_callback(sw_format):
+        # ADR-212: the eye video's OWN frame rate. With fps=None the writer fell back to 24 fps, so every stereo
+        # upscale of a source that was not exactly 24 fps came out at the wrong speed (a 47.95 fps RIFE movie played at
+        # half speed). sw_format is the input's metadata (same object waifu2x.cli reads get_fps() from).
+        fps = sw_format.get_fps()
         if hdr_codec is None and sdr_codec == "hevc_nvenc":
             return VU.VideoOutputConfig(
-                fps=None,
+                fps=fps,
                 output_fps=None,
                 pix_fmt="yuv420p",
                 video_codec="hevc_nvenc",
@@ -250,7 +254,7 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
             )
         if hdr_codec is None:
             return VU.VideoOutputConfig(
-                fps=None,
+                fps=fps,
                 output_fps=None,
                 options={"preset": preset, "crf": crf},
             )
@@ -259,7 +263,7 @@ def _smooth_and_resize_eye(input_path, output_path, target_w, target_h, strength
         else:
             options = {"preset": preset, "crf": str(crf)}
         return VU.VideoOutputConfig(
-            fps=None,
+            fps=fps,
             output_fps=None,
             pix_fmt="yuv420p10le",
             video_codec=hdr_codec,

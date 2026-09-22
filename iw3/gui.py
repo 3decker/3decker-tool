@@ -9056,6 +9056,23 @@ class MainFrame(wx.Frame):
             self.cuda_context_initialized = True
 
     def on_click_btn_start(self, event):
+        # CRITICAL, DO NOT REORDER (ADR-218, 2026-09-22): ensure_cuda_context() must
+        # run BEFORE parse_args(), never after. parse_args() builds
+        # args.state["depth_model"] (instantiates the real depth model class) and
+        # touches several other widgets/settings along the way -- something in that
+        # process claims PyTorch's CUDA context before pyav/NVDEC ever gets a chance
+        # to, the exact ordering violation pyav_init_cuda_primary_context()'s own
+        # docstring warns about (same family of bug as ADR-075's Device-dropdown
+        # case, a different trigger). Confirmed with a real, reliable, reproducible
+        # isolated harness AND verified end-to-end against the real production
+        # on_click_btn_start() on a real crashing job: this ordering is what fixes a
+        # genuine, 100%-reproducible "OSError [Errno 129]" at AutoCrop/hwaccel time --
+        # independent of torch.compile, which was directly ruled out first (fails
+        # identically with Compile forced off). See ADR-218 for the full
+        # investigation and why five earlier, more targeted fixes (ADR-068 through
+        # ADR-075, ADR-123, ADR-129) did not close this specific case. Do not move
+        # ensure_cuda_context() back after parse_args() without re-reading ADR-218.
+        self.ensure_cuda_context()
         try:
             args = self.parse_args()
         except ValueError as e:
@@ -9090,7 +9107,10 @@ class MainFrame(wx.Frame):
             self.SetStatusText(f"Downloading {args.depth_model}...")
         self._set_title_progress(self._stage_prefix())
 
-        self.ensure_cuda_context()
+        # ensure_cuda_context() already ran at the top of this function, before
+        # parse_args() -- see the ADR-218 comment there. Do not add it back here;
+        # left out (it's idempotent, guarded by self.cuda_context_initialized, so a
+        # second call would be harmless, just redundant).
         startWorker(self.on_exit_worker, iw3_main, wargs=(args,))
         self.processing = True
 
@@ -10638,6 +10658,9 @@ class MainFrame(wx.Frame):
     def test_autocrop(self):
         self.txt_autocrop_test.SetValue("")
 
+        # CRITICAL, DO NOT REORDER: see ADR-218 / on_click_btn_start()'s own comment
+        # -- ensure_cuda_context() must run before parse_args(), not after.
+        self.ensure_cuda_context()
         args = self.parse_args()
         if args is None or not args.autocrop:
             return
@@ -10693,7 +10716,9 @@ class MainFrame(wx.Frame):
             self.suspend_event.set()
             self.prg_tqdm.SetValue(0)
             self.SetStatusText("...")
-            self.ensure_cuda_context()
+            # ensure_cuda_context() already ran at the top of test_autocrop(), before
+            # parse_args() -- see ADR-218. Left out here (idempotent, harmless if
+            # called twice), do not add it back.
             startWorker(_on_exit, _run)
             self.processing = True
 
@@ -10744,6 +10769,9 @@ class MainFrame(wx.Frame):
     PREVIEW_CLIP_SECONDS = 45.0
 
     def test_quick_preview(self):
+        # CRITICAL, DO NOT REORDER: see ADR-218 / on_click_btn_start()'s own comment
+        # -- ensure_cuda_context() must run before parse_args(), not after.
+        self.ensure_cuda_context()
         args = self.parse_args()
         if args is None:
             return
@@ -10789,7 +10817,9 @@ class MainFrame(wx.Frame):
         try:
             with wx.BusyCursor():
                 wx.Yield()
-                self.ensure_cuda_context()
+                # ensure_cuda_context() already ran at the top of this function,
+                # before parse_args() -- see ADR-218. Left out here (idempotent,
+                # harmless if called twice), do not add it back.
                 preview_args = iw3_main(preview_args)
                 self.depth_model = preview_args.state["depth_model"]
                 self.depth_model_type = preview_args.depth_model
@@ -11010,6 +11040,9 @@ class MainFrame(wx.Frame):
                           T("Compare Presets"), wx.OK | wx.ICON_INFORMATION)
             return
 
+        # CRITICAL, DO NOT REORDER: see ADR-218 / on_click_btn_start()'s own comment
+        # -- ensure_cuda_context() must run before parse_args(), not after.
+        self.ensure_cuda_context()
         base_args = self.parse_args(skip_set_state=True)
         if base_args is None:
             return
@@ -11127,7 +11160,9 @@ class MainFrame(wx.Frame):
         self.prg_tqdm.SetValue(0)
         self.SetStatusText(T("Rendering preset comparison..."))
 
-        self.ensure_cuda_context()
+        # ensure_cuda_context() already ran at the top of this function, before the
+        # first parse_args() call -- see ADR-218. Left out here (idempotent,
+        # harmless if called twice), do not add it back.
         startWorker(self.on_exit_compare_worker,
                    self.run_preset_comparison,
                    wargs=(args_list, selected, output_path, is_video_input))
@@ -13201,6 +13236,82 @@ def _self_test_no_eager_cuda_context():
             app.Destroy()
 
     print("_self_test_no_eager_cuda_context: PASS")
+
+
+def _self_test_ensure_cuda_context_before_parse_args():
+    """Real, reproduced bug (ADR-218, 2026-09-22): ensure_cuda_context() must run
+    BEFORE parse_args() in every handler that can start real CUDA/video work
+    (Start, AutoCrop Test, Quick Preview, Compare Presets) -- parse_args() builds
+    the real depth model instance and touches other settings along the way, and
+    doing that before pyav claims the CUDA context reliably produced a real,
+    100%-reproducible "OSError [Errno 129]" at the next hwaccel-enabled av.open()
+    call (AutoCrop, Scene Boundary Detection, ...), independent of torch.compile
+    (confirmed ruled out separately). Verified against the real, unmocked
+    production code on a real crashing job before this fix shipped; this test
+    guards the ordering going forward so a future edit can't silently reintroduce
+    it. No GPU or real movie file needed, mirroring
+    _self_test_no_eager_cuda_context's own established convention --
+    pyav_init_cuda_primary_context and parse_args are both mocked, recording the
+    order they're called in; parse_args returning None lets each handler's own
+    "invalid settings" early-return keep this test from needing to run any real
+    pipeline work, so only the ORDER is checked, not parse_args()'s own
+    behavior."""
+    import iw3.gui as gui_mod
+
+    order = []
+
+    def _fake_pyav_init():
+        order.append("pyav_init")
+
+    orig_pyav = gui_mod.pyav_init_cuda_primary_context
+    gui_mod.pyav_init_cuda_primary_context = _fake_pyav_init
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = gui_mod.MainFrame()
+
+        def _fake_parse_args(*a, **kw):
+            order.append("parse_args")
+            return None
+
+        orig_parse_args = frame.parse_args
+        frame.parse_args = _fake_parse_args
+
+        def _check(name, call):
+            order.clear()
+            frame.cuda_context_initialized = False
+            call()
+            assert order == ["pyav_init", "parse_args"], \
+                f"{name}: expected ensure_cuda_context (pyav_init) before parse_args, got {order}"
+
+        _check("on_click_btn_start",
+               lambda: frame.on_click_btn_start(wx.CommandEvent(wx.EVT_BUTTON.typeId, frame.btn_start.GetId())))
+        _check("test_autocrop", lambda: frame.test_autocrop())
+        _check("test_quick_preview", lambda: frame.test_quick_preview())
+
+        # Compare Presets returns before ever reaching parse_args() unless at
+        # least 2 presets exist -- stub that gate so its own ordering is reached.
+        orig_list_preset = frame.list_preset
+        frame.list_preset = lambda: ["a", "b"]
+        try:
+            _check("on_click_btn_compare_presets",
+                   lambda: frame.on_click_btn_compare_presets(
+                       wx.CommandEvent(wx.EVT_BUTTON.typeId, frame.btn_compare_presets.GetId())))
+        finally:
+            frame.list_preset = orig_list_preset
+
+        frame.parse_args = orig_parse_args
+    finally:
+        gui_mod.pyav_init_cuda_primary_context = orig_pyav
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_ensure_cuda_context_before_parse_args: PASS")
 
 
 def _self_test_device_dropdown_no_torch_cuda_touch():
@@ -19636,6 +19747,7 @@ def _run_self_tests():
     complete report instead of a truncated one."""
     tests = [
         _self_test_no_eager_cuda_context,
+        _self_test_ensure_cuda_context_before_parse_args,
         _self_test_compile_probe_crash_handled,
         _self_test_compile_all_cuda_device_shows_message,
         _self_test_layout_modes,

@@ -779,6 +779,44 @@ def _apply_combo_value(combo, value):
     combo.SetValue(text)
 
 
+# Common Windows crash exit codes, decoded to plain language. A subprocess killed by an
+# unhandled exception exits with this raw NTSTATUS value on Windows (subprocess.returncode
+# comes back negative -- Python's own convention for "the process didn't exit normally").
+_WINDOWS_CRASH_CODES = {
+    0xC0000005: "access violation (a memory-safety crash inside that program, not 3DECKER itself)",
+    0xC00000FD: "a stack overflow",
+    0xC0000409: "the program detected memory corruption and stopped itself",
+    0xC0000135: "a required DLL was not found",
+    0xC0000142: "the program's startup routine failed (often a driver or DLL initialization problem)",
+}
+
+
+def _describe_subprocess_failure(returncode, output):
+    """Builds an honest, specific failure message for a standalone-tool subprocess that
+    exited with an error, instead of a generic 'see the log box' -- which is actively
+    misleading when the underlying tool (ffmpeg/FRIM/tsMuxeR, run as separate .exe
+    subprocesses) crashed hard enough that nothing ever reached stderr. Real user report:
+    'it gave me an error and said to check the program for more info, however there is
+    nothing in that window' -- a negative returncode (Windows: the process was killed by an
+    unhandled exception, not an ordinary clean exit) with empty captured output is exactly
+    this case, and deserves a message that says a crash happened and what to try, not a
+    pointer to an empty box."""
+    has_output = bool(output and output.strip())
+    if returncode < 0:
+        code = returncode & 0xFFFFFFFF
+        known = _WINDOWS_CRASH_CODES.get(code)
+        what = f"crashed ({known})" if known else f"crashed (Windows exit code 0x{code:08X})"
+        detail = f"One of the underlying programs (ffmpeg, FRIM, or tsMuxeR) {what}."
+    elif not has_output:
+        detail = f"The program exited with an error (code {returncode}) but produced no diagnostic output."
+    else:
+        return T("The conversion failed or refused -- see the log box for the exact reason.")
+    return (detail + " " +
+            T("This usually means a crash in one of the underlying tools, not 3DECKER itself. Try a "
+              "short test clip, check for a Windows \"stopped working\" notification around this "
+              "time, and make sure your GPU driver is up to date."))
+
+
 # "Guided Light" pilot (ADR-097): a wx.Slider companion for each of these continuous
 # numeric Stereo Generation fields, two-way synced to the field's existing
 # EditableComboBox. The combo stays the sole thing build_processor_args()/persistence
@@ -12890,8 +12928,14 @@ class MainFrame(wx.Frame):
             self.SetStatusText(T("3D Blu-ray disc image created successfully"))
         else:
             self.SetStatusText(T("SBS to 3D Blu-ray failed -- see the log below"))
-            wx.MessageBox(T("The conversion failed or refused -- see the log box for the exact reason."),
-                          T("SBS to 3D Blu-ray MVC"), wx.OK | wx.ICON_ERROR)
+            failure_message = _describe_subprocess_failure(returncode, output)
+            generic_message = T("The conversion failed or refused -- see the log box for the exact reason.")
+            if failure_message != generic_message:
+                # empty/uninformative log: put the honest explanation IN the log box too, not
+                # just the popup -- the popup disappears, the log box is what's still on screen
+                # afterward when the user goes looking for "the exact reason".
+                self.txt_sbs2mvc_log.AppendText(f"\n[3DECKER] {failure_message}")
+            wx.MessageBox(failure_message, T("SBS to 3D Blu-ray MVC"), wx.OK | wx.ICON_ERROR)
 
     def on_click_btn_sbs2mvc_cancel(self, event):
         proc = self.sbs2mvc_proc
@@ -18372,6 +18416,67 @@ def _self_test_sbs2mvc_panel():
     print("_self_test_sbs2mvc_panel: PASS")
 
 
+def _self_test_sbs2mvc_crash_diagnosis():
+    """Real user report: a standalone-tool subprocess (ffmpeg/FRIM/tsMuxeR, run as separate
+    .exe's) can crash hard enough that nothing ever reaches stderr -- 'it gave me an error and
+    said to check the program for more info, however there is nothing in that window'. The old
+    message ('see the log box for the exact reason') is actively misleading when that box is
+    genuinely empty. _describe_subprocess_failure() must say a crash happened (decoding the
+    common Windows NTSTATUS crash codes when the returncode is negative) or that no output was
+    captured, instead of pointing at nothing -- and on_exit_sbs2mvc_worker must put that
+    explanation IN the log box too, not just a popup that disappears."""
+    import iw3.gui as gui_mod
+
+    # -- pure helper: covers the real crash-code case, the empty-output-but-clean-exit case,
+    # and confirms a normal failure WITH real stderr output is left exactly as it was before.
+    access_violation = -1073741819  # 0xC0000005 on Windows, a real crash exit code
+    msg = gui_mod._describe_subprocess_failure(access_violation, "")
+    assert "crashed" in msg and "access violation" in msg, msg
+
+    unknown_crash = -1073741676  # 0xC0000094 (integer divide by zero) -- not in the friendly-name table
+    msg = gui_mod._describe_subprocess_failure(unknown_crash, "  \n  ")
+    assert "crashed" in msg and "0x" in msg, msg
+
+    msg = gui_mod._describe_subprocess_failure(1, "")
+    assert "no diagnostic output" in msg and "code 1" in msg, msg
+
+    msg = gui_mod._describe_subprocess_failure(1, "ERROR: a real, specific reason\n")
+    assert msg == T("The conversion failed or refused -- see the log box for the exact reason."), msg
+
+    # -- wiring: on_exit_sbs2mvc_worker must show the honest message AND put it in the log
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_message_box = gui_mod.wx.MessageBox
+    message_box_calls = []
+    try:
+        frame = gui_mod.MainFrame()
+        gui_mod.wx.MessageBox = lambda *a, **kw: message_box_calls.append(a)
+
+        frame.sbs2mvc_cancelled = False
+        frame.on_exit_sbs2mvc_worker(_FakeResult((access_violation, "")))
+        assert "crashed" in message_box_calls[-1][0] and "access violation" in message_box_calls[-1][0]
+        assert "crashed" in frame.txt_sbs2mvc_log.GetValue(), \
+            "the honest explanation must be IN the log box, not just a popup that disappears"
+
+        # a real failure with real stderr output must be untouched -- no duplicate/garbled log
+        frame.on_exit_sbs2mvc_worker(_FakeResult((1, "ERROR: a real, specific reason\n")))
+        assert frame.txt_sbs2mvc_log.GetValue().strip() == "ERROR: a real, specific reason"
+    finally:
+        gui_mod.wx.MessageBox = orig_message_box
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_sbs2mvc_crash_diagnosis: PASS")
+
+
 def _self_test_confirm_dangerous_buttons():
     """Cancel, Suspend, Quick Preview, 3DECKER Preferred and Clear All each ask Yes/No
     first, with No as the default button, so an accidental click does nothing. Answering
@@ -19993,6 +20098,7 @@ def _run_self_tests():
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
+        _self_test_sbs2mvc_crash_diagnosis,
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,
         _self_test_rife_with_preserve_dolby_vision,

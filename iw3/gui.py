@@ -1401,6 +1401,22 @@ class MainFrame(wx.Frame):
               "\"drifts within a shot\" con those modes otherwise have. Leave off only if you specifically "
               "want the older, more reactive behavior, or are comparing the two."))
 
+        self.chk_convergence_overlay = wx.CheckBox(
+            self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
+        self.chk_convergence_overlay.SetValue(False)
+        self.chk_convergence_overlay.SetToolTip(
+            T("What it's for: writes the actual Convergence Plane value used for each frame into its "
+              "top-right corner, in both eyes -- same idea as Auto 3D Strength's own \"Show strength on "
+              "video (debug)\" (top-left corner, so the two can be read together without overlapping if "
+              "both are on), so you can get real, readable numbers to compare instead of guessing from how "
+              "a shot looks -- e.g. confirming Hold Steady Per Scene above is actually holding one value "
+              "per shot rather than drifting, or comparing sod_v1 against face_detect on the same footage.\n"
+              "Only does anything for sod_v1 / Face Detect -- constant never varies, so there is nothing "
+              "extra to read off the frame that the value box doesn't already tell you.\n"
+              "Con: it's burned into the picture itself.\n"
+              "Recommended: on only while testing/comparing settings on a scene, off for the real "
+              "conversion."))
+
         self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Pop-Out Limit / Boost"))
         self.cbo_max_negative_parallax = EditableComboBox(
             self.grp_stereo, choices=["1.0", "1.25", "1.5", "2.0", "2.25", "2.5", "3.0", "0.7", "0.4", "0.0"],
@@ -3013,6 +3029,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_smoothing, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_convergence_smoothing, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_scene_hold, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_negative_parallax, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_max_negative_parallax, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -8513,9 +8530,11 @@ class MainFrame(wx.Frame):
         if self.cbo_convergence_mode.GetValue() == "constant":
             self.cbo_convergence_smoothing.Disable()
             self.chk_convergence_scene_hold.Disable()
+            self.chk_convergence_overlay.Disable()
         else:
             self.cbo_convergence_smoothing.Enable()
             self.chk_convergence_scene_hold.Enable()
+            self.chk_convergence_overlay.Enable()
 
     def on_changed_cbo_convergence_mode(self, event):
         self.update_convergence_mode()
@@ -8699,7 +8718,7 @@ class MainFrame(wx.Frame):
             self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay,
             self.lbl_resolution_preset, self.cbo_resolution_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
-            self.chk_convergence_scene_hold,
+            self.chk_convergence_scene_hold, self.chk_convergence_overlay,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
             self.lbl_face_protect, self.cbo_face_protect,
             self.lbl_ipd_offset, self.sld_ipd_offset,
@@ -9112,6 +9131,7 @@ class MainFrame(wx.Frame):
             convergence_mode=self.cbo_convergence_mode.GetValue(),
             convergence_smoothing=float(self.cbo_convergence_smoothing.GetValue()),
             convergence_scene_hold=self.chk_convergence_scene_hold.GetValue(),
+            convergence_overlay=self.chk_convergence_overlay.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
             # the add-on is actually installed (create_parser() is only patched with them when it is; the
@@ -10285,6 +10305,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_mode, args.convergence_mode)
         _apply_combo_value(self.cbo_convergence_smoothing, args.convergence_smoothing)
         self.chk_convergence_scene_hold.SetValue(bool(getattr(args, "convergence_scene_hold", False)))
+        self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
         # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- getattr defaults match create_parser()'s own
         # patched defaults, so a command line from before the add-on was installed still restores cleanly.
@@ -20943,6 +20964,129 @@ def _self_test_convergence_scene_hold_gui_and_metadata():
     print("_self_test_convergence_scene_hold_gui_and_metadata: PASS")
 
 
+def _self_test_convergence_overlay():
+    """ADR-233: real user request -- a debug overlay for Convergence Plane, mirroring Auto 3D
+    Strength's own "Show strength on video (debug)". Tests iw3.frame_overlay.stamp_values()
+    directly (pure tensor math) and apply_divergence()'s wiring: only stamps when the flag is
+    on AND an auto mode actually produced a per-frame tensor (never for constant, which has
+    nothing extra to show)."""
+    import types
+    from . import frame_overlay as FO
+    from . import utils as U
+
+    # stamp_values: modifies only the requested corner, never mutates the input, repeats the
+    # last value for any extra frames, and top-left vs top-right land in different pixels.
+    frames = torch.zeros(2, 3, 64, 64)
+    original = frames.clone()
+    out = FO.stamp_values(frames, [0.25, 0.75], fmt="Conv {:.2f}", corner="top-right")
+    assert torch.equal(frames, original), "must never mutate the tensor passed in"
+    assert not torch.equal(out[0], frames[0]) and not torch.equal(out[1], frames[1])
+    assert not torch.equal(out[0], out[1]), "different values must draw different stamps"
+    # bottom-left quadrant must be untouched by a top-right stamp
+    H, W = frames.shape[-2:]
+    assert torch.equal(out[0, :, H // 2:, :W // 2], frames[0, :, H // 2:, :W // 2])
+
+    out_left = FO.stamp_values(frames, [0.5], corner="top-left")
+    out_right = FO.stamp_values(frames, [0.5], corner="top-right")
+    assert not torch.equal(out_left[0], out_right[0]), "top-left and top-right must land in different pixels"
+
+    out_repeat = FO.stamp_values(frames, [0.5], corner="top-right")  # 1 value, 2 frames
+    assert torch.equal(out_repeat[0], out_repeat[1]), "a shorter value list must repeat its last value"
+
+    assert FO.stamp_values(None, [0.5]) is None
+    assert torch.equal(FO.stamp_values(frames, []), frames), "no values -> untouched"
+
+    # apply_divergence wiring: NULL method (im.clone() passthrough) keeps this fast and
+    # isolates the overlay logic from the warp/inpaint machinery entirely.
+    im = torch.rand(1, 3, 64, 64)
+    depth = torch.full((1, 1, 64, 64), 0.5)
+
+    def make_args(convergence_model, overlay):
+        return types.SimpleNamespace(
+            state={"convergence_model": convergence_model}, mapper="none", method="NULL",
+            convergence=0.5, divergence=2.0, foreground_pop=0.0, background_pop=0.0, midground_pop=0.0,
+            max_negative_parallax=1.0, face_protect_strength=0.0, synthetic_view="both",
+            convergence_overlay=overlay,
+        )
+
+    # constant mode (convergence_model=None) -- convergence is a plain float, never stamped
+    # regardless of the flag, since there is nothing per-frame to show.
+    args_constant = make_args(None, overlay=True)
+    left, right = U.apply_divergence(depth.clone(), im.clone(), args_constant, None)
+    assert torch.equal(left, im) and torch.equal(right, im), \
+        "constant mode must never stamp, even with the flag on -- convergence never varies"
+
+    # auto mode, flag off -> untouched
+    auto_model = lambda rgb, d, reset_pts=None: torch.full((1, 1, 1, 1), 0.3)  # noqa: E731
+    args_off = make_args(auto_model, overlay=False)
+    left, right = U.apply_divergence(depth.clone(), im.clone(), args_off, None)
+    assert torch.equal(left, im) and torch.equal(right, im)
+
+    # auto mode, flag on -> stamped, both eyes
+    args_on = make_args(auto_model, overlay=True)
+    left, right = U.apply_divergence(depth.clone(), im.clone(), args_on, None)
+    assert not torch.equal(left, im), "left eye must be stamped when overlay is on with an auto mode"
+    assert not torch.equal(right, im), "right eye must be stamped too"
+
+    # CLI flag + filename/metadata tags, gated the same way convergence_scene_hold already is
+    parser = U.create_parser(required_true=False)
+    on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                            "--convergence-mode", "sod_v1", "--convergence-overlay"])
+    on.video_extension = ".mkv"
+    assert "_dbg" in U.make_output_filename("a.mp4", on, video=True)
+    assert "iw3_convergence_overlay=1" in U._build_iw3_comment_metadata(on, video=True)
+
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                             "--convergence-mode", "sod_v1"])
+    off.video_extension = ".mkv"
+    assert "_dbg" not in U.make_output_filename("a.mp4", off, video=True)
+    assert "convergence_overlay" not in U._build_iw3_comment_metadata(off, video=True)
+
+    constant_on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                     "--convergence-overlay"])
+    constant_on.video_extension = ".mkv"
+    assert "_dbg" not in U.make_output_filename("a.mp4", constant_on, video=True), \
+        "constant mode must never show the overlay tag either, even with the flag set"
+
+    print("_self_test_convergence_overlay: PASS")
+
+
+def _self_test_convergence_overlay_gui():
+    """ADR-233: the GUI checkbox mirrors chk_convergence_scene_hold's own gating exactly --
+    default off, disabled while Convergence Plane is constant, round-trips through
+    parse_args/get_cli_command/apply_parsed_args_to_gui."""
+    import wx
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.chk_convergence_overlay.GetValue() is False
+        assert not frame.chk_convergence_overlay.IsEnabled()
+
+        frame.cbo_convergence_mode.SetValue("face_detect")
+        frame.update_convergence_mode()
+        assert frame.chk_convergence_overlay.IsEnabled()
+
+        frame.chk_convergence_overlay.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_overlay is True
+        assert "--convergence-overlay" in frame.get_cli_command()
+
+        frame.chk_convergence_overlay.SetValue(False)
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_convergence_overlay.GetValue() is True
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.chk_convergence_overlay.IsEnabled()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_convergence_overlay_gui: PASS")
+
+
 def _self_test_pop_feather():
     """ADR-217: real user report (2026-09-22) -- a visible line at Midground Pop's band edge,
     even at a modest strength on the default 15/85 threshold. New shared "Pop Feather %" control
@@ -21129,6 +21273,8 @@ def _run_self_tests():
         _self_test_pop_feather,
         _self_test_convergence_scene_hold,
         _self_test_convergence_scene_hold_gui_and_metadata,
+        _self_test_convergence_overlay,
+        _self_test_convergence_overlay_gui,
     ]
     failures = []
     for test in tests:

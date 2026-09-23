@@ -50,6 +50,7 @@ from .stereo_model_factory import create_stereo_model
 from .inpaint_utils import INPAINT_MODELS
 from .convergence_estimator import ConvergenceEstimator
 from .face_convergence_estimator import FaceConvergenceEstimator
+from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
 
@@ -2164,6 +2165,8 @@ def make_output_filename(input_filename, args, video=False):
             convergence_smoothing = f"cs{to_deciaml(getattr(args, 'convergence_smoothing', 0.9), 100, 2)}"
             if getattr(args, "convergence_scene_hold", False):
                 convergence_smoothing += "_scenehold"
+            if getattr(args, "convergence_overlay", False):
+                convergence_smoothing += "_dbg"
         else:
             convergence_name = "c"
             convergence_smoothing = ""
@@ -2433,6 +2436,8 @@ def _build_iw3_comment_metadata(args, video=True):
             f"iw3_convergence_smoothing={getattr(args, 'convergence_smoothing', 0.9)}")
         if getattr(args, "convergence_scene_hold", False):
             comment_parts.append("iw3_convergence_scene_hold=1")
+        if getattr(args, "convergence_overlay", False):
+            comment_parts.append("iw3_convergence_overlay=1")
     if isinstance(args.edge_dilation, (list, tuple)):
         comment_parts.append(f"iw3_edge_dilation={'x'.join(str(v) for v in args.edge_dilation)}")
     else:
@@ -3001,6 +3006,19 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
         if sharpen_strength > 0.0:
             left_eye, right_eye = DE.apply_sharpen(
                 left_eye, right_eye, strength=sharpen_strength)
+
+    # ADR-233: real user request -- a debug overlay for Convergence Plane, mirroring
+    # Auto 3D Strength's own "Show strength on video (debug)" so the two can be
+    # directly compared as real, readable data instead of trusted blind. Only
+    # meaningful when an auto mode (sod_v1/face_detect) actually produced a per-frame
+    # convergence tensor -- "constant" never varies, so there's nothing to read off a
+    # frame that the value box doesn't already say. Drawn in the TOP-RIGHT corner,
+    # deliberately the opposite corner from Auto 3D Strength's own top-left stamp, so
+    # both can be enabled together without overlapping.
+    if getattr(args, "convergence_overlay", False) and torch.is_tensor(convergence):
+        conv_values = convergence.flatten().tolist()
+        left_eye = FO.stamp_values(left_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
+        right_eye = FO.stamp_values(right_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
 
     if not batch:
         if left_eye is not None:
@@ -6151,6 +6169,11 @@ def create_parser(required_true=True):
                               "steady for the whole scene and only readjust at cuts, instead of the default "
                               "plain per-frame EMA which can still drift within one unbroken shot. Off by "
                               "default to preserve this project's original convergence behavior."))
+    parser.add_argument("--convergence-overlay", action="store_true",
+                        help=("ADR-233: debug -- writes the Convergence Plane value actually used into the "
+                              "top-right corner of every frame (auto convergence modes only -- sod_v1/"
+                              "face_detect). Same idea as --auto-divergence-overlay, opposite corner so both "
+                              "can be on at once."))
     parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 3.0)],
                         help=("Pop-out limit (0-1) / boost (1-3), independent of the Convergence value itself. "
                               "ADR-179 limit: below 1.0 is a hard safety cap on negative parallax (how far anything "

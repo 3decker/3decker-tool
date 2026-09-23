@@ -1007,17 +1007,31 @@ def configure_video_codec(config: Any) -> None:
             config.pix_fmt = "gbrp"
 
     # Hardware acceleration specific mappings (NVENC, QSV)
+    #
+    # ADR-236: real, reproduced crash -- av.error.ArgumentError ("Invalid argument
+    # returned 22") at avcodec_open2(), confirmed live against the actual source file:
+    # neither NVENC nor QSV accept the planar "yuv420pNle" 10/12-bit formats directly,
+    # only their own semi-planar equivalents (p010le for 10-bit, p016le for 12-bit --
+    # there is no distinct 12-bit NVENC/QSV format, p016le is 16-bit and simply carries
+    # the 12-bit values). --upgrade-pix-fmt 12 (iw3/utils.py) produces "yuv420p12le",
+    # which had no entry here at all -- it reached the encoder completely unmapped and
+    # was flatly rejected. 8-bit ("yuv420p"->"nv12") and 10-bit ("yuv420p10le"->
+    # "p010le") were already handled; only the 12-bit case was missing.
     if codec in {"h264_nvenc", "hevc_nvenc"}:
         if pix_fmt == "yuv420p":
             config.pix_fmt = "nv12"
         elif pix_fmt == "yuv420p10le":
             config.pix_fmt = "p010le"
+        elif pix_fmt == "yuv420p12le":
+            config.pix_fmt = "p016le"
 
     if codec in {"h264_qsv", "hevc_qsv"}:
         if pix_fmt == "yuv420p":
             config.pix_fmt = "nv12"
         elif pix_fmt == "yuv420p10le":
             config.pix_fmt = "p010le"
+        elif pix_fmt == "yuv420p12le":
+            config.pix_fmt = "p016le"
 
 
 def _test_configure() -> None:
@@ -1087,6 +1101,19 @@ def _test_configure() -> None:
     cfg_nv = MockConfig(pix_fmt="yuv420p10le", video_codec="h264_nvenc")
     configure_video_codec(cfg_nv)
     assert cfg_nv.pix_fmt == "p010le"
+
+    # ADR-236: 12-bit (--upgrade-pix-fmt 12) previously had no NVENC/QSV mapping at
+    # all and reached the encoder as "yuv420p12le", crashing -- confirmed live against
+    # a real 4K Dolby Vision source (av.error.ArgumentError, "Invalid argument
+    # returned 22" at avcodec_open2()); p016le confirmed live as the working fix.
+    for codec in ("h264_nvenc", "hevc_nvenc"):
+        cfg_12 = MockConfig(pix_fmt="yuv420p12le", video_codec=codec)
+        configure_video_codec(cfg_12)
+        assert cfg_12.pix_fmt == "p016le", f"{codec}: expected p016le, got {cfg_12.pix_fmt}"
+    for codec in ("h264_qsv", "hevc_qsv"):
+        cfg_12 = MockConfig(pix_fmt="yuv420p12le", video_codec=codec)
+        configure_video_codec(cfg_12)
+        assert cfg_12.pix_fmt == "p016le", f"{codec}: expected p016le, got {cfg_12.pix_fmt}"
     print("OK")
     print("--- End configure tests ---")
 

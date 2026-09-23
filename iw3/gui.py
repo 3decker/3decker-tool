@@ -2228,8 +2228,20 @@ class MainFrame(wx.Frame):
         self.sld_stereo_pop_feather = _build_stereo_slider(
             self.cpn_stereo_pop_divergence.GetPane(), self.cbo_pop_feather, 0, 25, 1)
 
-        self.lbl_foreground_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Pop"))
-        self.cbo_foreground_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+        # ADR-230: real user request -- each of Foreground/Midground/Background Pop is its own
+        # wx.CollapsiblePane nested inside the "Depth Pop" pane (same pattern as Inpainting
+        # Settings/Stability & Flicker at the top level -- see the unique-pane-name comment on
+        # cpn_stereo_inpainting_depth above), so a user only using one or two of the three can
+        # hide the rest instead of scrolling past all nine rows every time.
+        self.cpn_stereo_foreground_pop = wx.CollapsiblePane(
+            self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Pop"), name="cpn_stereo_foreground_pop")
+        self.cpn_stereo_foreground_pop.Collapse(True)
+        self.cpn_stereo_foreground_pop.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                            self.on_toggled_stereo_collapsible_pane)
+        self.cpn_stereo_foreground_pop.GetPane().SetName("cpn_stereo_foreground_pop_pane")
+
+        self.lbl_foreground_pop = wx.StaticText(self.cpn_stereo_foreground_pop.GetPane(), label=T("Foreground Pop"))
+        self.cbo_foreground_pop = EditableComboBox(self.cpn_stereo_foreground_pop.GetPane(),
                                                    choices=["-1.0", "-0.5", "0.0", "0.5", "1.0"],
                                                    name="cbo_foreground_pop")
         self.cbo_foreground_pop.SetSelection(2)
@@ -2244,11 +2256,11 @@ class MainFrame(wx.Frame):
               "Recommended: 0 (off) for a restrained, professional look; 0.25-0.5 for deliberate "
               "\"poke at the audience\" moments; negative only if the foreground already feels too "
               "aggressive and you want to pull it back."))
-        self.sld_stereo_foreground_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_foreground_pop, -1.0, 1.0, 100)
+        self.sld_stereo_foreground_pop = _build_stereo_slider(self.cpn_stereo_foreground_pop.GetPane(), self.cbo_foreground_pop, -1.0, 1.0, 100)
 
         self.lbl_foreground_pop_threshold_low = wx.StaticText(
-            self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground Low Threshold %"))
-        self.cbo_foreground_pop_threshold_low = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+            self.cpn_stereo_foreground_pop.GetPane(), label=T("Foreground Low Threshold %"))
+        self.cbo_foreground_pop_threshold_low = EditableComboBox(self.cpn_stereo_foreground_pop.GetPane(),
                                                                   choices=["60", "70", "75", "85", "90"],
                                                                   name="cbo_foreground_pop_threshold_low")
         self.cbo_foreground_pop_threshold_low.SetSelection(3)
@@ -2260,11 +2272,11 @@ class MainFrame(wx.Frame):
               "features meet cleanly with no gap or overlap. Lower it if you want Foreground Pop to reach "
               "further into the midground."))
         self.sld_stereo_foreground_pop_threshold_low = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_foreground_pop_threshold_low, 50, 100, 1)
+            self.cpn_stereo_foreground_pop.GetPane(), self.cbo_foreground_pop_threshold_low, 50, 100, 1)
 
         self.lbl_foreground_pop_threshold_high = wx.StaticText(
-            self.cpn_stereo_pop_divergence.GetPane(), label=T("Foreground High Threshold %"))
-        self.cbo_foreground_pop_threshold_high = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+            self.cpn_stereo_foreground_pop.GetPane(), label=T("Foreground High Threshold %"))
+        self.cbo_foreground_pop_threshold_high = EditableComboBox(self.cpn_stereo_foreground_pop.GetPane(),
                                                                    choices=["90", "95", "100"],
                                                                    name="cbo_foreground_pop_threshold_high")
         self.cbo_foreground_pop_threshold_high.SetSelection(2)
@@ -2274,10 +2286,17 @@ class MainFrame(wx.Frame):
               "Recommended: 100% (default, the true nearest pixel) for almost all use -- lower it only if "
               "you want to exclude the very closest few pixels from the effect for some reason."))
         self.sld_stereo_foreground_pop_threshold_high = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_foreground_pop_threshold_high, 50, 100, 1)
+            self.cpn_stereo_foreground_pop.GetPane(), self.cbo_foreground_pop_threshold_high, 50, 100, 1)
 
-        self.lbl_midground_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Midground Pop"))
-        self.cbo_midground_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+        self.cpn_stereo_midground_pop = wx.CollapsiblePane(
+            self.cpn_stereo_pop_divergence.GetPane(), label=T("Midground Pop"), name="cpn_stereo_midground_pop")
+        self.cpn_stereo_midground_pop.Collapse(True)
+        self.cpn_stereo_midground_pop.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                           self.on_toggled_stereo_collapsible_pane)
+        self.cpn_stereo_midground_pop.GetPane().SetName("cpn_stereo_midground_pop_pane")
+
+        self.lbl_midground_pop = wx.StaticText(self.cpn_stereo_midground_pop.GetPane(), label=T("Midground Pop"))
+        self.cbo_midground_pop = EditableComboBox(self.cpn_stereo_midground_pop.GetPane(),
                                                    choices=["-1.0", "-0.5", "0.0", "0.5", "1.0"],
                                                    name="cbo_midground_pop")
         self.cbo_midground_pop.SetSelection(2)
@@ -2294,11 +2313,11 @@ class MainFrame(wx.Frame):
               "subjects feel flat relative to the foreground/background; negative only for a deliberately "
               "\"pulled back\" midground look."))
         self.sld_stereo_midground_pop = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_midground_pop, -1.0, 1.0, 100)
+            self.cpn_stereo_midground_pop.GetPane(), self.cbo_midground_pop, -1.0, 1.0, 100)
 
         self.lbl_midground_threshold_low = wx.StaticText(
-            self.cpn_stereo_pop_divergence.GetPane(), label=T("Midground Low Threshold %"))
-        self.cbo_midground_threshold_low = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+            self.cpn_stereo_midground_pop.GetPane(), label=T("Midground Low Threshold %"))
+        self.cbo_midground_threshold_low = EditableComboBox(self.cpn_stereo_midground_pop.GetPane(),
                                                              choices=["0", "10", "15", "25", "35"],
                                                              name="cbo_midground_threshold_low")
         self.cbo_midground_threshold_low.SetSelection(2)
@@ -2310,11 +2329,11 @@ class MainFrame(wx.Frame):
               "features meet cleanly with no gap or overlap at their defaults. Raise it if you want "
               "Midground Pop to leave more of the far scene alone."))
         self.sld_stereo_midground_threshold_low = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_midground_threshold_low, 0, 50, 1)
+            self.cpn_stereo_midground_pop.GetPane(), self.cbo_midground_threshold_low, 0, 50, 1)
 
         self.lbl_midground_threshold_high = wx.StaticText(
-            self.cpn_stereo_pop_divergence.GetPane(), label=T("Midground High Threshold %"))
-        self.cbo_midground_threshold_high = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+            self.cpn_stereo_midground_pop.GetPane(), label=T("Midground High Threshold %"))
+        self.cbo_midground_threshold_high = EditableComboBox(self.cpn_stereo_midground_pop.GetPane(),
                                                               choices=["65", "75", "85", "90", "100"],
                                                               name="cbo_midground_threshold_high")
         self.cbo_midground_threshold_high.SetSelection(2)
@@ -2326,10 +2345,17 @@ class MainFrame(wx.Frame):
               "features meet cleanly with no gap or overlap at their defaults. Lower it if you want "
               "Midground Pop to leave more of the near scene alone."))
         self.sld_stereo_midground_threshold_high = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_midground_threshold_high, 50, 100, 1)
+            self.cpn_stereo_midground_pop.GetPane(), self.cbo_midground_threshold_high, 50, 100, 1)
 
-        self.lbl_background_pop = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Pop"))
-        self.cbo_background_pop = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+        self.cpn_stereo_background_pop = wx.CollapsiblePane(
+            self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Pop"), name="cpn_stereo_background_pop")
+        self.cpn_stereo_background_pop.Collapse(True)
+        self.cpn_stereo_background_pop.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                            self.on_toggled_stereo_collapsible_pane)
+        self.cpn_stereo_background_pop.GetPane().SetName("cpn_stereo_background_pop_pane")
+
+        self.lbl_background_pop = wx.StaticText(self.cpn_stereo_background_pop.GetPane(), label=T("Background Pop"))
+        self.cbo_background_pop = EditableComboBox(self.cpn_stereo_background_pop.GetPane(),
                                                     choices=["-1.0", "-0.5", "0.0", "0.5", "1.0"],
                                                     name="cbo_background_pop")
         self.cbo_background_pop.SetSelection(2)
@@ -2345,11 +2371,11 @@ class MainFrame(wx.Frame):
               "Recommended: 0 (off) for a natural look; -0.15 to -0.25 for a modestly more immersive "
               "background on most content; positive only if the background already feels too distant "
               "and you want to pull it forward."))
-        self.sld_stereo_background_pop = _build_stereo_slider(self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop, -1.0, 1.0, 100)
+        self.sld_stereo_background_pop = _build_stereo_slider(self.cpn_stereo_background_pop.GetPane(), self.cbo_background_pop, -1.0, 1.0, 100)
 
         self.lbl_background_pop_threshold_low = wx.StaticText(
-            self.cpn_stereo_pop_divergence.GetPane(), label=T("Background Low Threshold %"))
-        self.cbo_background_pop_threshold_low = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+            self.cpn_stereo_background_pop.GetPane(), label=T("Background Low Threshold %"))
+        self.cbo_background_pop_threshold_low = EditableComboBox(self.cpn_stereo_background_pop.GetPane(),
                                                                   choices=["0", "5", "10"],
                                                                   name="cbo_background_pop_threshold_low")
         self.cbo_background_pop_threshold_low.SetSelection(0)
@@ -2359,11 +2385,11 @@ class MainFrame(wx.Frame):
               "Recommended: 0% (default, the true farthest pixel) for almost all use -- raise it only if "
               "you want to exclude the very farthest few pixels from the effect for some reason."))
         self.sld_stereo_background_pop_threshold_low = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop_threshold_low, 0, 50, 1)
+            self.cpn_stereo_background_pop.GetPane(), self.cbo_background_pop_threshold_low, 0, 50, 1)
 
         self.lbl_background_pop_threshold_high = wx.StaticText(
-            self.cpn_stereo_pop_divergence.GetPane(), label=T("Background High Threshold %"))
-        self.cbo_background_pop_threshold_high = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
+            self.cpn_stereo_background_pop.GetPane(), label=T("Background High Threshold %"))
+        self.cbo_background_pop_threshold_high = EditableComboBox(self.cpn_stereo_background_pop.GetPane(),
                                                                    choices=["10", "15", "25", "30", "40"],
                                                                    name="cbo_background_pop_threshold_high")
         self.cbo_background_pop_threshold_high.SetSelection(1)
@@ -2375,7 +2401,7 @@ class MainFrame(wx.Frame):
               "features meet cleanly with no gap or overlap. Raise it if you want Background Pop to reach "
               "further into the midground."))
         self.sld_stereo_background_pop_threshold_high = _build_stereo_slider(
-            self.cpn_stereo_pop_divergence.GetPane(), self.cbo_background_pop_threshold_high, 0, 50, 1)
+            self.cpn_stereo_background_pop.GetPane(), self.cbo_background_pop_threshold_high, 0, 50, 1)
 
         self.lbl_edge_repair = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Edge Repair"))
         self.cbo_edge_repair = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
@@ -3116,33 +3142,55 @@ class MainFrame(wx.Frame):
         pane_layout.Add(self.cbo_pop_feather, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.sld_stereo_pop_feather, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(wx.StaticLine(self.cpn_stereo_pop_divergence.GetPane()), (k := k + 1, 0), (0, 3), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_foreground_pop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_foreground_pop, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_foreground_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_foreground_pop_threshold_low, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_foreground_pop_threshold_low, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_foreground_pop_threshold_low, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_foreground_pop_threshold_high, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_foreground_pop_threshold_high, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_foreground_pop_threshold_high, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_midground_pop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_midground_pop, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_midground_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_midground_threshold_low, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_midground_threshold_low, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_midground_threshold_low, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_midground_threshold_high, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_midground_threshold_high, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_midground_threshold_high, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_background_pop, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_background_pop, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_background_pop, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_background_pop_threshold_low, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_background_pop_threshold_low, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_background_pop_threshold_low, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.lbl_background_pop_threshold_high, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        pane_layout.Add(self.cbo_background_pop_threshold_high, (k, 1), (1, 2), flag=wx.EXPAND)
-        pane_layout.Add(self.sld_stereo_background_pop_threshold_high, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
+
+        # ADR-230: each Pop type is now its own nested CollapsiblePane (see the construction
+        # site above, search cpn_stereo_foreground_pop) -- one row each in the outer pane_layout,
+        # with a small GridBagSizer of its own three rows (value, low threshold, high threshold).
+        fg_layout = wx.GridBagSizer(vgap=4, hgap=4)
+        fg_layout.SetEmptyCellSize((0, 0))
+        fk = 0
+        fg_layout.Add(self.lbl_foreground_pop, (fk, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        fg_layout.Add(self.cbo_foreground_pop, (fk, 1), (1, 2), flag=wx.EXPAND)
+        fg_layout.Add(self.sld_stereo_foreground_pop, (fk := fk + 1, 1), (1, 2), flag=wx.EXPAND)
+        fg_layout.Add(self.lbl_foreground_pop_threshold_low, (fk := fk + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        fg_layout.Add(self.cbo_foreground_pop_threshold_low, (fk, 1), (1, 2), flag=wx.EXPAND)
+        fg_layout.Add(self.sld_stereo_foreground_pop_threshold_low, (fk := fk + 1, 1), (1, 2), flag=wx.EXPAND)
+        fg_layout.Add(self.lbl_foreground_pop_threshold_high, (fk := fk + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        fg_layout.Add(self.cbo_foreground_pop_threshold_high, (fk, 1), (1, 2), flag=wx.EXPAND)
+        fg_layout.Add(self.sld_stereo_foreground_pop_threshold_high, (fk := fk + 1, 1), (1, 2), flag=wx.EXPAND)
+        self.cpn_stereo_foreground_pop.GetPane().SetSizer(fg_layout)
+        pane_layout.Add(self.cpn_stereo_foreground_pop, (k := k + 1, 0), (1, 3), flag=wx.EXPAND)
+
+        mg_layout = wx.GridBagSizer(vgap=4, hgap=4)
+        mg_layout.SetEmptyCellSize((0, 0))
+        mk = 0
+        mg_layout.Add(self.lbl_midground_pop, (mk, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        mg_layout.Add(self.cbo_midground_pop, (mk, 1), (1, 2), flag=wx.EXPAND)
+        mg_layout.Add(self.sld_stereo_midground_pop, (mk := mk + 1, 1), (1, 2), flag=wx.EXPAND)
+        mg_layout.Add(self.lbl_midground_threshold_low, (mk := mk + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        mg_layout.Add(self.cbo_midground_threshold_low, (mk, 1), (1, 2), flag=wx.EXPAND)
+        mg_layout.Add(self.sld_stereo_midground_threshold_low, (mk := mk + 1, 1), (1, 2), flag=wx.EXPAND)
+        mg_layout.Add(self.lbl_midground_threshold_high, (mk := mk + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        mg_layout.Add(self.cbo_midground_threshold_high, (mk, 1), (1, 2), flag=wx.EXPAND)
+        mg_layout.Add(self.sld_stereo_midground_threshold_high, (mk := mk + 1, 1), (1, 2), flag=wx.EXPAND)
+        self.cpn_stereo_midground_pop.GetPane().SetSizer(mg_layout)
+        pane_layout.Add(self.cpn_stereo_midground_pop, (k := k + 1, 0), (1, 3), flag=wx.EXPAND)
+
+        bg_layout = wx.GridBagSizer(vgap=4, hgap=4)
+        bg_layout.SetEmptyCellSize((0, 0))
+        bk = 0
+        bg_layout.Add(self.lbl_background_pop, (bk, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        bg_layout.Add(self.cbo_background_pop, (bk, 1), (1, 2), flag=wx.EXPAND)
+        bg_layout.Add(self.sld_stereo_background_pop, (bk := bk + 1, 1), (1, 2), flag=wx.EXPAND)
+        bg_layout.Add(self.lbl_background_pop_threshold_low, (bk := bk + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        bg_layout.Add(self.cbo_background_pop_threshold_low, (bk, 1), (1, 2), flag=wx.EXPAND)
+        bg_layout.Add(self.sld_stereo_background_pop_threshold_low, (bk := bk + 1, 1), (1, 2), flag=wx.EXPAND)
+        bg_layout.Add(self.lbl_background_pop_threshold_high, (bk := bk + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        bg_layout.Add(self.cbo_background_pop_threshold_high, (bk, 1), (1, 2), flag=wx.EXPAND)
+        bg_layout.Add(self.sld_stereo_background_pop_threshold_high, (bk := bk + 1, 1), (1, 2), flag=wx.EXPAND)
+        self.cpn_stereo_background_pop.GetPane().SetSizer(bg_layout)
+        pane_layout.Add(self.cpn_stereo_background_pop, (k := k + 1, 0), (1, 3), flag=wx.EXPAND)
+
         pane_layout.Add(self.lbl_edge_repair, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout.Add(self.cbo_edge_repair, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout.Add(self.sld_stereo_edge_repair, (k := k + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -7796,6 +7844,10 @@ class MainFrame(wx.Frame):
             # The colored indicator square deliberately keeps its own accent color,
             # not panel_bg.
             self.cpn_stereo_pop_divergence.GetPane(),
+            # ADR-230: nested one level deeper inside cpn_stereo_pop_divergence.
+            self.cpn_stereo_foreground_pop.GetPane(),
+            self.cpn_stereo_midground_pop.GetPane(),
+            self.cpn_stereo_background_pop.GetPane(),
             self.cpn_stereo_inpainting_depth.GetPane(),
             self.cpn_stereo_stability_flicker.GetPane(),
             self.cpn_video_filter_scene_batch.GetPane(),
@@ -7817,7 +7869,9 @@ class MainFrame(wx.Frame):
         # bold, these used the default weight, so section headers looked
         # inconsistent with the group titles right next to them.
         for cpn in (
-            self.cpn_stereo_pop_divergence, self.cpn_stereo_inpainting_depth,
+            self.cpn_stereo_pop_divergence,
+            self.cpn_stereo_foreground_pop, self.cpn_stereo_midground_pop, self.cpn_stereo_background_pop,
+            self.cpn_stereo_inpainting_depth,
             self.cpn_stereo_stability_flicker, self.cpn_video_filter_scene_batch,
             self.cpn_depth_blend, self.cpn_hdr_reinject, self.cpn_subsearch,
             self.cpn_submux, self.cpn_audiomux, self.cpn_stereotag,
@@ -7983,8 +8037,9 @@ class MainFrame(wx.Frame):
         construction-time default expand state every launch -- see
         on_toggled_stereo_collapsible_pane()."""
         sliders = [getattr(self, slider_attr) for _, slider_attr, *_ in STEREO_SLIDER_FIELDS]
-        pane_attrs = ("cpn_stereo_pop_divergence", "cpn_stereo_stability_flicker",
-                      "cpn_stereo_inpainting_depth", "cpn_stereo_advanced")
+        pane_attrs = ("cpn_stereo_pop_divergence",
+                      "cpn_stereo_foreground_pop", "cpn_stereo_midground_pop", "cpn_stereo_background_pop",
+                      "cpn_stereo_stability_flicker", "cpn_stereo_inpainting_depth", "cpn_stereo_advanced")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return sliders + panes
 
@@ -14522,8 +14577,26 @@ def _self_test_stereo_collapsible_sections():
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
         assert len(panes) > 0, "no collapsible panes were built -- nothing to test"
 
+        def ensure_ancestors_expanded(pane):
+            # ADR-230: Foreground/Midground/Background Pop are nested one level inside
+            # cpn_stereo_pop_divergence -- a collapsed ancestor pane hides the whole
+            # subtree, so toggling a nested pane while its parent happens to be collapsed
+            # (a real possibility here: a sibling pane processed earlier in this same
+            # loop can flip the shared ancestor's state as a side effect) would produce
+            # no visible size change, exactly like a real user who can't even see/click
+            # a nested pane's header until its parent is expanded first. Not part of the
+            # toggle under test -- just the precondition for reaching it.
+            node = pane.GetParent()
+            while node is not None:
+                if isinstance(node, wx.CollapsiblePane) and node.IsCollapsed():
+                    node.Collapse(False)
+                    frame.on_toggled_stereo_collapsible_pane(
+                        wx.CollapsiblePaneEvent(node, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, node.GetId()))
+                node = node.GetParent()
+
         def toggle_and_check(label, check_wrapper_tracks=None):
             for pane in panes:
+                ensure_ancestors_expanded(pane)
                 before_expanded = pane.IsExpanded()
                 tab_min_before = frame.tab_stereo.GetSizer().CalcMin()
                 if check_wrapper_tracks is not None:
@@ -20018,6 +20091,51 @@ def _self_test_stereo_tag_survives_post_steps():
     print("_self_test_stereo_tag_survives_post_steps: PASS")
 
 
+def _self_test_pop_panes_collapse_independently():
+    """ADR-230: real user request -- Foreground/Midground/Background Pop are each their own
+    nested wx.CollapsiblePane inside the "Depth Pop" pane, so a user only using one or two of
+    the three can hide the rest. Each must start collapsed, toggle independently of its
+    siblings, hold its own uniquely-named content pane (the exact wx.lib.agw.persist collision
+    bug already documented on cpn_stereo_inpainting_depth), be excluded from persistence like
+    every other pane, and never affect the real settings values regardless of collapsed state."""
+    import wx
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        panes = (frame.cpn_stereo_foreground_pop, frame.cpn_stereo_midground_pop, frame.cpn_stereo_background_pop)
+
+        # all three start collapsed, each is a real, independent pane with a unique pane name
+        assert all(p.IsCollapsed() for p in panes)
+        pane_names = {p.GetPane().GetName() for p in panes}
+        assert len(pane_names) == 3, f"each nested pane's content window must have a unique name: {pane_names}"
+
+        # expanding one must not touch the others
+        frame.cpn_stereo_midground_pop.Collapse(False)
+        frame.on_toggled_stereo_collapsible_pane(wx.CommandEvent())
+        assert not frame.cpn_stereo_midground_pop.IsCollapsed()
+        assert frame.cpn_stereo_foreground_pop.IsCollapsed() and frame.cpn_stereo_background_pop.IsCollapsed()
+
+        # excluded from persistence, same as every other stereo pane (get_stereo_sliders_and_panes'
+        # own docstring explains why -- Restore() never fires EVT_COLLAPSIBLEPANE_CHANGED)
+        registered = frame.get_stereo_sliders_and_panes()
+        assert all(p in registered for p in panes)
+
+        # collapsed state must never affect the real setting -- values still round-trip through
+        # parse_args/get_cli_command regardless of whether their pane happens to be shown
+        frame.cpn_stereo_foreground_pop.Collapse(True)
+        frame.on_toggled_stereo_collapsible_pane(wx.CommandEvent())
+        frame.cbo_foreground_pop.SetValue("0.5")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.foreground_pop == 0.5
+        assert "--foreground-pop" in frame.get_cli_command()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_pop_panes_collapse_independently: PASS")
+
+
 def _self_test_nt_auto_divergence_controls():
     """ADR-213: 3DECKER's own native "Auto 3D Strength" controls (Rowan's nt_auto3d add-on's own
     GUI-injection is disabled -- it doesn't fit this fork's stereo panel layout, see iw3/__init__.py).
@@ -20802,6 +20920,7 @@ def _run_self_tests():
         _self_test_face_protect,
         _self_test_nt_auto_divergence_controls,
         _self_test_auto_divergence_metadata_tags,
+        _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
         _self_test_post_conversion_vram_release,
         _self_test_upscale_full4k_hdr_and_progress,

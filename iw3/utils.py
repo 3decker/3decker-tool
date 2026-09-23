@@ -5219,8 +5219,26 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
     # cancellation without raising, so a cancelled job would otherwise still reach here.
     stop_event = args.state.get("stop_event") if getattr(args, "state", None) else None
     if not (stop_event is not None and stop_event.is_set()):
-        _run_post_conversion_steps(final_output_path, args,
-                                   dv_source=original_input_filename if dv_after_rife else None)
+        # ADR-228: waifu2x-upscale and RIFE run as genuinely separate subprocesses
+        # (see their own docstrings above) specifically so their models don't compete
+        # for GPU memory with this process's depth/stereo models -- but that intent
+        # only holds if this process actually lets go of its own VRAM first. Reusing
+        # --pause-frees-vram's own release/reload (ADR-038) here does exactly that:
+        # move depth/side/convergence models to CPU and empty the CUDA cache before
+        # spawning the subprocess, then bring them back for the next file in a batch.
+        # Real user-reported symptom this fixes: two Python processes both resident on
+        # the GPU during the RIFE step, VRAM overflowing into slow shared/system memory,
+        # turning a normally ~3 hour RIFE pass into a projected ~7 hours.
+        needs_vram_release = (getattr(args, "waifu2x_upscale", False)
+                               or getattr(args, "rife_interpolate", False))
+        if needs_vram_release:
+            _release_pause_vram(args)
+        try:
+            _run_post_conversion_steps(final_output_path, args,
+                                       dv_source=original_input_filename if dv_after_rife else None)
+        finally:
+            if needs_vram_release:
+                _reload_pause_vram(args)
 
 
 def export_images(input_path, output_dir, args, title=None):

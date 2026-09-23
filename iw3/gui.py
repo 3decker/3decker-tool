@@ -19337,6 +19337,65 @@ def _self_test_post_steps_are_chained():
     print("_self_test_post_steps_are_chained: PASS")
 
 
+def _self_test_post_conversion_vram_release():
+    """ADR-228: real user-reported bug -- waifu2x/RIFE run as separate subprocesses
+    specifically so their models don't fight iw3's own depth/stereo models for GPU
+    memory (see _run_waifu2x_upscale's docstring), but the parent process never
+    actually let go of its own VRAM first. Two Python processes both resident on the
+    GPU during RIFE overflowed VRAM into slow shared memory, turning a ~3 hour RIFE
+    pass into a projected ~7 hours. Fix: process_video() now runs the existing
+    --pause-frees-vram release/reload (ADR-038) around _run_post_conversion_steps,
+    but only when a post-step that actually loads its own GPU model is enabled."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def make_args(waifu2x_upscale=False, rife_interpolate=False, raise_in_post_steps=False):
+        depth_model = mock.Mock()
+        depth_model.get_name.return_value = "Any_V3_Metric_Large"
+        args = types.SimpleNamespace(
+            keyframe=False, start_time=None, end_time=None,
+            waifu2x_upscale=waifu2x_upscale, rife_interpolate=rife_interpolate,
+            preserve_dowi=False,
+            state={"convergence_model": None, "stop_event": None, "side_model": None},
+        )
+        return args, depth_model
+
+    def run(waifu2x_upscale, rife_interpolate, raise_in_post_steps=False):
+        calls = []
+        args, depth_model = make_args(waifu2x_upscale, rife_interpolate)
+
+        def post_steps(video_path, a, dv_source=None):
+            calls.append("post_steps")
+            if raise_in_post_steps:
+                raise RuntimeError("boom")
+            return video_path
+
+        with mock.patch.object(U, "_tonemap_hdr_to_sdr", lambda p, a: (p, None)), \
+                mock.patch.object(U, "_denoise_preprocess", lambda p, a: (p, None)), \
+                mock.patch.object(U, "_dv_after_rife_wanted", lambda a: False), \
+                mock.patch.object(U, "process_video_with_resume", lambda *a, **k: "out.mkv"), \
+                mock.patch.object(U, "_run_post_conversion_steps", post_steps), \
+                mock.patch.object(U, "_release_pause_vram", lambda a: calls.append("release")), \
+                mock.patch.object(U, "_reload_pause_vram", lambda a: calls.append("reload")):
+            try:
+                U.process_video("in.mkv", "out_dir", args, depth_model, None)
+            except RuntimeError:
+                if not raise_in_post_steps:
+                    raise
+        return calls
+
+    # either post-step that loads its own GPU model -> release before, reload after
+    assert run(waifu2x_upscale=True, rife_interpolate=False) == ["release", "post_steps", "reload"]
+    assert run(waifu2x_upscale=False, rife_interpolate=True) == ["release", "post_steps", "reload"]
+    assert run(waifu2x_upscale=True, rife_interpolate=True) == ["release", "post_steps", "reload"]
+    # neither enabled -> no pointless move-to-CPU-and-back on every file in a batch
+    assert run(waifu2x_upscale=False, rife_interpolate=False) == ["post_steps"]
+    # a post-step failure must not leave the models stranded on CPU for the next file
+    assert run(waifu2x_upscale=False, rife_interpolate=True, raise_in_post_steps=True) == ["release", "post_steps", "reload"]
+    print("_self_test_post_conversion_vram_release: PASS")
+
+
 def _self_test_rife_with_preserve_dolby_vision():
     """ADR-192: RIFE + Preserve Dolby Vision are allowed together (no start-time refusal); the conversion
     itself is run without DV injection and DV is re-attached after RIFE. The whole helper flow is exercised
@@ -20690,6 +20749,7 @@ def _run_self_tests():
         _self_test_face_protect,
         _self_test_nt_auto_divergence_controls,
         _self_test_post_steps_are_chained,
+        _self_test_post_conversion_vram_release,
         _self_test_upscale_full4k_hdr_and_progress,
         _self_test_stereo_tag_survives_post_steps,
         _self_test_inpaint_model_in_filename_and_metadata,

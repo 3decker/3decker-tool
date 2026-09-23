@@ -247,7 +247,26 @@ class VideoMetadata(MediaMetadata):
             if container.duration:
                 container_duration = float(container.duration / av.time_base)
 
-            return cls.from_stream(stream, video_path=video_path, container_duration=container_duration)
+            format_override = None
+            if stream.format is None:
+                # Real user crash: some codecs/containers don't expose pix_fmt from the
+                # container/stream header alone (stream.format is None before anything is
+                # decoded) -- AttributeError: 'NoneType' object has no attribute 'name' at
+                # the HW_DEVICES check below. A decoded VideoFrame always has its own format,
+                # so decode forward (still inside this container, closed right after this
+                # `with` block -- no side effect on the caller, which reopens the file itself
+                # for actual processing) until the first real frame and use that instead.
+                for packet in container.demux(stream):
+                    for frame in packet.decode():
+                        format_override = frame.format
+                        break
+                    if format_override is not None:
+                        break
+                if format_override is None:
+                    raise ValueError(f"Could not determine the video's pixel format: {video_path}")
+
+            return cls.from_stream(stream, video_path=video_path, container_duration=container_duration,
+                                   format_override=format_override)
 
     @classmethod
     def from_stream(
@@ -255,15 +274,21 @@ class VideoMetadata(MediaMetadata):
         stream: av.video.stream.VideoStream,
         video_path: str | None = None,
         container_duration: float | None = None,
+        format_override: av.video.format.VideoFormat | None = None,
     ) -> "VideoMetadata":
-        if stream.format.name in HW_DEVICES:
+        fmt = format_override if format_override is not None else stream.format
+        if fmt is None:
             raise ValueError(
-                f"VideoMetadata.from_stream does not support hardware streams ({stream.format.name}). "
+                f"Could not determine the video's pixel format"
+                f"{f' ({video_path})' if video_path else ''}")
+        if fmt.name in HW_DEVICES:
+            raise ValueError(
+                f"VideoMetadata.from_stream does not support hardware streams ({fmt.name}). "
                 "Please use a software stream for accurate metadata."
             )
 
         return cls(
-            format=stream.format,
+            format=fmt,
             colorspace=stream.colorspace,
             color_primaries=stream.color_primaries,
             color_trc=stream.color_trc,
@@ -271,7 +296,7 @@ class VideoMetadata(MediaMetadata):
             width=stream.width,
             height=stream.height,
             time_base=stream.time_base,
-            use_16bit=stream.format.components[0].bits > 8,
+            use_16bit=fmt.components[0].bits > 8,
             stream_frames=stream.frames,
             stream_duration=stream.duration,
             guessed_rate=stream.guessed_rate,
@@ -558,3 +583,103 @@ def pix_fmt_requires_16bit(pix_fmt: str) -> bool:
         "gbrp10le",
         "rgb48le",
     }
+
+
+def _test_none_stream_format_fallback() -> None:
+    """Real user crash (iw3-gui-crash.log): AttributeError: 'NoneType' object has no
+    attribute 'name' at `stream.format.name in HW_DEVICES` inside from_stream(), reached via
+    from_file() -> VideoMetadata.from_file(input_path) at multiple call sites (VU.hook_frame
+    and others in nunif/utils/video/processor.py). Root cause: some codecs/containers don't
+    expose pix_fmt from the container/stream header alone (PyAV's stream.format, i.e.
+    codec_context.pix_fmt, is genuinely None before anything is decoded) -- the exact codec
+    involved wasn't reproducible with common synthetic containers tried directly (mjpeg/avi,
+    mpeg2, wmv2, vp9/webm, prores, rawvideo all populate stream.format immediately), but the
+    fix (decode forward to the first real frame, which always has its own .format, when the
+    header alone doesn't have it) doesn't need the exact codec to be verified -- it's
+    exercised directly here via a stand-in stream object with format=None, built from a real
+    stream's own real attribute values so from_stream()'s FULL constructor path is exercised
+    end to end, not just the guard clause. Uses PyAV directly to encode a tiny synthetic clip
+    -- no external ffmpeg.exe subprocess dependency, this is a low-level nunif/ file, not
+    iw3-specific."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="nunif_metadata_selftest_") as tmpdir:
+        src = f"{tmpdir}/synthetic.mp4"
+        with av.open(src, mode="w") as out_container:
+            stream = out_container.add_stream("libx264", rate=24)
+            stream.width, stream.height, stream.pix_fmt = 64, 64, "yuv420p"
+            for i in range(3):
+                frame = av.VideoFrame(width=64, height=64, format="yuv420p")
+                for packet in stream.encode(frame):
+                    out_container.mux(packet)
+            for packet in stream.encode():
+                out_container.mux(packet)
+
+        # Normal (unaffected) path: stream.format is populated, from_file works exactly as
+        # it always did -- proves the fix is a no-op for the common case.
+        meta = VideoMetadata.from_file(src)
+        assert meta.format is not None
+        print("normal path (stream.format populated):", meta.format, "-- PASS")
+
+        with av.open(src, mode="r", metadata_errors="ignore") as container:
+            real_stream = container.streams.video[0]
+            real_format = real_stream.format
+
+            # from_file()'s own decode-forward loop, exercised directly against a real
+            # container: must recover the exact same format a populated stream.format
+            # would have given.
+            format_override = None
+            for packet in container.demux(real_stream):
+                for frame in packet.decode():
+                    format_override = frame.format
+                    break
+                if format_override is not None:
+                    break
+            assert format_override is not None
+            assert format_override.name == real_format.name
+            print("decode-forward fallback recovers the correct format:", format_override, "-- PASS")
+
+            class _FakeStreamNoneFormat:
+                format = None
+                colorspace = real_stream.colorspace
+                color_primaries = real_stream.color_primaries
+                color_trc = real_stream.color_trc
+                color_range = real_stream.color_range
+                width = real_stream.width
+                height = real_stream.height
+                time_base = real_stream.time_base
+                frames = real_stream.frames
+                duration = real_stream.duration
+                guessed_rate = real_stream.guessed_rate
+
+            # from_stream()'s FULL constructor path with a genuinely None stream.format,
+            # recovered via format_override -- including use_16bit=fmt.components[0].bits
+            # (a second bug caught while building this fix: that line still read
+            # stream.format directly instead of the resolved fmt, so it would have crashed
+            # the exact same way immediately after the first fix, for the real case this
+            # whole mechanism exists for).
+            meta2 = VideoMetadata.from_stream(_FakeStreamNoneFormat(), video_path=src,
+                                              format_override=format_override)
+            assert meta2.format.name == real_format.name
+            assert meta2.use_16bit == (real_format.components[0].bits > 8)
+            assert meta2.width == real_stream.width and meta2.height == real_stream.height
+            print("from_stream() with a None-format stream fully constructs correct "
+                  "metadata (including use_16bit) -- PASS")
+
+        # A stream with NO format at all (format_override=None too) must raise a clear
+        # ValueError, not the original AttributeError crash.
+        class _FakeStreamNoFormatAtAll:
+            format = None
+
+        try:
+            VideoMetadata.from_stream(_FakeStreamNoFormatAtAll(), video_path="fake.mp4")
+            assert False, "must raise ValueError, not crash with AttributeError"
+        except ValueError as e:
+            assert "pixel format" in str(e)
+            print("no format at all raises a clear ValueError, not AttributeError -- PASS")
+
+    print("_test_none_stream_format_fallback: ALL PASS")
+
+
+if __name__ == "__main__":
+    _test_none_stream_format_fallback()

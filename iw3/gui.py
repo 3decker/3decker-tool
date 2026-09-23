@@ -326,6 +326,25 @@ RESOLUTION_PRESET_VALUES = {
     "1536 (Depth Pro Native)": 1536,
 }
 
+# ADR-234: real user idea -- Low/Medium/High labeled shortcuts for the Convergence value
+# box, same "one-time quick-fill, not a live link" pattern as RESOLUTION_PRESET_* above.
+# The numbers themselves aren't new behavior: in sod_v1/face_detect mode this value already
+# picks where within the scene's own detected subject the screen plane sits (0 = the near
+# edge of the subject -- more pops out; 1 = the far edge -- more recedes); in constant mode
+# it's the same 0..1 scale directly. These are just three sensible, named starting points.
+CONVERGENCE_BIAS_PLACEHOLDER = "-- Select --"
+CONVERGENCE_BIAS_CHOICES = [
+    CONVERGENCE_BIAS_PLACEHOLDER,
+    "Low (more pop-out)",
+    "Medium (balanced)",
+    "High (more recede)",
+]
+CONVERGENCE_BIAS_VALUES = {
+    "Low (more pop-out)": 0.25,
+    "Medium (balanced)": 0.5,
+    "High (more recede)": 0.75,
+}
+
 
 class StageChangeEvent(wx.PyCommandEvent):
     def __init__(self, etype, eid, name=None):
@@ -1361,6 +1380,28 @@ class MainFrame(wx.Frame):
               "\"constant\" — for sod_v1 it acts as a relative offset within the detected subject's depth "
               "range. Recommended: 0.5 as a balanced starting point."))
         self.sld_stereo_convergence = _build_stereo_slider(self.grp_stereo, self.cbo_convergence, 0.0, 1.0, 100)
+
+        self.lbl_convergence_bias_preset = wx.StaticText(self.grp_stereo, label=T("Convergence Bias"))
+        self.cbo_convergence_bias_preset = wx.ComboBox(self.grp_stereo,
+                                                        choices=CONVERGENCE_BIAS_CHOICES,
+                                                        name="cbo_convergence_bias_preset")
+        self.cbo_convergence_bias_preset.SetEditable(False)
+        self.cbo_convergence_bias_preset.SetSelection(0)
+        self.cbo_convergence_bias_preset.SetToolTip(
+            T("What it's for: a plain-language shortcut for the Convergence value box above, for anyone "
+              "who'd rather think in words than decimals.\n"
+              "How it works: in \"constant\" mode the value box directly IS the screen position (0 = "
+              "everything pops out toward you, 1 = everything sits behind the screen). In sod_v1/"
+              "face_detect mode, the AI finds the scene's own subject and picks a spot WITHIN that "
+              "subject's own near-to-far range using this same number -- 0 = the near edge of the subject "
+              "(more of it pops out), 1 = the far edge (more of it recedes) -- applied fresh to every "
+              "scene, so one setting here consistently biases the whole movie the same direction.\n"
+              "Low (0.25): biases toward more pop-out, in either mode. Medium (0.5): balanced/centered. "
+              "High (0.75): biases toward more recede/depth.\n"
+              "Picking one just fills in the Convergence value box above with a plain number -- it's a "
+              "one-time quick-fill, not a live link, so hand-editing the value box afterward is always "
+              "safe, and picking a preset here never overwrites itself later."))
+        self.cbo_convergence_bias_preset.Bind(wx.EVT_TEXT, self.on_changed_cbo_convergence_bias_preset)
 
         self.lbl_convergence_smoothing = wx.StaticText(self.grp_stereo, label=T("Convergence Smoothing"))
         self.cbo_convergence_smoothing = EditableComboBox(
@@ -3025,6 +3066,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_convergence, (i, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_convergence, (i := i + 1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_bias_preset, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_bias_preset, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_smoothing, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_smoothing, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_convergence_smoothing, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -8628,6 +8671,15 @@ class MainFrame(wx.Frame):
         if value is not None:
             self.cbo_resolution.SetValue(str(value))
 
+    def on_changed_cbo_convergence_bias_preset(self, event):
+        # ADR-234: same one-time quick-fill pattern as on_changed_cbo_resolution_preset --
+        # writes the plain number into cbo_convergence and keeps no live link back to this
+        # dropdown, so a later hand-edit of the Convergence value box is always safe.
+        preset = self.cbo_convergence_bias_preset.GetValue()
+        value = CONVERGENCE_BIAS_VALUES.get(preset)
+        if value is not None:
+            self.cbo_convergence.SetValue(str(value))
+
     def update_depth_blend(self):
         if self.chk_depth_blend.IsChecked():
             self.cbo_depth_blend_preset.Enable()
@@ -8717,6 +8769,7 @@ class MainFrame(wx.Frame):
             self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
             self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay,
             self.lbl_resolution_preset, self.cbo_resolution_preset,
+            self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
             self.chk_convergence_scene_hold, self.chk_convergence_overlay,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
@@ -14001,6 +14054,48 @@ def _self_test_resolution_preset_quick_fill():
             app.Destroy()
 
     print("_self_test_resolution_preset_quick_fill: PASS")
+
+
+def _self_test_convergence_bias_preset_quick_fill():
+    """ADR-234: real user idea -- Low/Medium/High labeled shortcuts for the Convergence
+    value box, same one-time quick-fill pattern as Resolution Preset (ADR-140). Must fill
+    cbo_convergence with a plain number for every real entry, never the label text, and the
+    placeholder must map to nothing. Also confirms it's a true one-time fill, not a live
+    link -- hand-editing the value box afterward must not get overwritten."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.cbo_convergence_bias_preset.GetValue() == "-- Select --", \
+            "placeholder must be selected by default, no preset applied"
+
+        for preset_name, expected_value in CONVERGENCE_BIAS_VALUES.items():
+            frame.cbo_convergence.SetValue("")
+            frame.cbo_convergence_bias_preset.SetStringSelection(preset_name)
+            frame.on_changed_cbo_convergence_bias_preset(None)
+            assert frame.cbo_convergence.GetValue() == str(expected_value), \
+                f"{preset_name}: expected {expected_value}, got {frame.cbo_convergence.GetValue()!r}"
+
+        frame.cbo_convergence.SetValue("")
+        frame.cbo_convergence_bias_preset.SetStringSelection(CONVERGENCE_BIAS_PLACEHOLDER)
+        frame.on_changed_cbo_convergence_bias_preset(None)
+        assert frame.cbo_convergence.GetValue() == "", "placeholder must not fill in any value"
+
+        # not a live link: hand-editing the value box after picking a preset must stick
+        frame.cbo_convergence_bias_preset.SetStringSelection("Low (more pop-out)")
+        frame.on_changed_cbo_convergence_bias_preset(None)
+        frame.cbo_convergence.SetValue("0.4")
+        assert frame.cbo_convergence.GetValue() == "0.4", "hand-editing after a preset fill must stick"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_convergence_bias_preset_quick_fill: PASS")
 
 
 def _self_test_compile_probe_crash_handled():
@@ -21234,6 +21329,7 @@ def _run_self_tests():
         _self_test_device_dropdown_no_torch_cuda_touch,
         _self_test_label_tooltips_propagated,
         _self_test_resolution_preset_quick_fill,
+        _self_test_convergence_bias_preset_quick_fill,
         _self_test_free_vram_on_job_finish,
         _self_test_metric3d_model_selection,
         _self_test_moge3_model_selection,

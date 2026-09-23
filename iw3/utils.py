@@ -543,6 +543,12 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
             log(message)
 
     if not rife_path or not path.exists(rife_path):
+        # ADR-228 follow-up: real user report -- cancelling RIFE partway through made the
+        # Dolby Vision re-attach step (and the jump straight to Restore Audio & Subtitles)
+        # look like it silently vanished, with no explanation in the log. There is genuinely
+        # nothing to attach DV to when the previous step produced no output (cancelled or
+        # failed), so skipping is correct -- it just needs to say so.
+        say(f"[iw3] Dolby Vision re-attach skipped: no {what} file to attach it to (cancelled or failed).")
         return False
     manifest = rife_path + ".rife_manifest.json"
     try:

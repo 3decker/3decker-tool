@@ -19505,6 +19505,17 @@ def _self_test_utils_hdr_to_sdr_gpu_decode():
         args = types.SimpleNamespace(start_time="00:25:00", end_time="00:25:08", state={})
         calls = []
 
+        # ADR-228 follow-up: cancelled/failed RIFE (no output file) -> explained, not silent
+        logged = []
+        assert U._reinject_dv_after_rife("src.mkv", None, args, log=logged.append) is False
+        assert logged and "RIFE output" in logged[0] and "skipped" in logged[0], logged
+        logged.clear()
+        assert U._reinject_dv_after_rife("src.mkv", path.join(tmp, "missing.mkv"), args, log=logged.append) is False
+        assert logged and "skipped" in logged[0], logged
+        logged.clear()
+        assert U._reinject_dv_after_rife("src.mkv", None, args, log=logged.append, what="upscaled video") is False
+        assert logged and "upscaled video" in logged[0], logged
+
         def fake_run(cmd, **kw):
             calls.append(cmd)
             with open(cmd[cmd.index("--output") + 1], "wb") as f:

@@ -1336,26 +1336,21 @@ class MainFrame(wx.Frame):
               "screen surface, with everything else popping toward or receding from it) is chosen.\n"
               "constant: you set one fixed position with the value box, and it never moves for the whole "
               "video.\n"
-              "sod_v1: an AI model automatically picks a focus point per scene, based on the most "
+              "sod_v1: an AI model automatically re-picks a focus point every frame, based on the most "
               "visually important subject.\n"
               "face_detect: same idea, but automatically centers on detected faces specifically, ignoring "
               "the value box.\n"
-              "How it behaves over time (ADR-231): settles on the scene's own value over the first few "
-              "frames after a cut, then HOLDS it steady for the rest of the shot -- like a real "
-              "stereographer, not a constantly-reacting one. It only glides to a new value mid-shot if the "
-              "subject genuinely moves in depth by more than a small margin (Convergence Smoothing controls "
-              "how big that margin is and how slowly it glides); small wobbles from noise, a slight pan, or "
-              "someone shifting in place never move it at all.\n"
+              "Con of sod_v1/face_detect: every time the convergence point moves — even smoothed — your "
+              "eyes have to physically readjust their focus angle to keep the image comfortable to view. "
+              "By default, sod_v1 re-evaluates every frame and can drift even WITHIN a single unbroken shot "
+              "(someone shifts position, the camera pans slightly) -- see \"Hold Steady Per Scene\" just "
+              "below to fix that.\n"
               "When sod_v1/face_detect genuinely help: a push/pull \"reveal\" shot where the camera moves "
               "from a tight close-up to a wide shot within one continuous take — a fixed constant value "
-              "structurally can't be right for both ends of that move, but sod_v1 will glide to follow it — "
-              "or simply any content where a single fixed screen depth doesn't suit every scene.\n"
-              "Con: every time the convergence point moves — even smoothed — your eyes have to physically "
-              "readjust their focus angle, so a fixed constant value is still the most comfortable choice "
-              "when one screen depth genuinely suits the whole video.\n"
-              "Recommended: constant when one screen depth suits the whole video; sod_v1 or face_detect "
-              "when scenes vary a lot in framing/distance and you want the screen depth to adapt per scene "
-              "automatically."))
+              "structurally can't be right for both ends of that move, but sod_v1 can track it.\n"
+              "Recommended: constant for most content — steadier and closer to real stereographer practice. "
+              "Reserve sod_v1/face_detect (ideally with Hold Steady Per Scene on) for content dominated by "
+              "continuous push/pull reveal shots, or scenes that vary a lot in framing/distance."))
 
         self.cbo_convergence = EditableComboBox(self.grp_stereo, choices=["0.0", "0.25", "0.5", "1.0"],
                                                 name="cbo_convergence")
@@ -1373,17 +1368,38 @@ class MainFrame(wx.Frame):
             name="cbo_convergence_smoothing")
         self.cbo_convergence_smoothing.SetSelection(1)
         self.cbo_convergence_smoothing.SetToolTip(
-            T("Only affects sod_v1 / Face Detect convergence modes. Controls how long the automatic "
-              "convergence point takes to settle right after a cut, and -- once settled -- how big a "
-              "change is needed mid-shot before it glides to a new value, and how slowly it glides there. "
-              "Higher = settles over more frames, needs a bigger change to move at all, glides slower once "
-              "it does -- steadier, but slower to catch up to a genuinely new framing. Lower = settles "
-              "faster, reacts to smaller changes, glides faster -- more responsive but can feel busier. "
-              "0 = fastest settle, smallest deadband, quickest glide (not literally instant/unsmoothed any "
-              "more, since ADR-231 -- even at 0 it still briefly settles after a cut rather than snapping "
-              "to a single noisy detection)."))
+            T("Only affects sod_v1 / Face Detect convergence modes. Controls how quickly the automatic "
+              "convergence point reacts to change -- its exact meaning depends on Hold Steady Per Scene "
+              "below:\n"
+              "Hold Steady Per Scene OFF (default): a plain per-frame blend. Higher = smoother but slower "
+              "to react. Lower = more aggressive/dynamic, reacts faster but may jitter more. 0 = no "
+              "smoothing at all.\n"
+              "Hold Steady Per Scene ON: how long it takes to settle right after a cut, and -- once "
+              "settled -- how big a change is needed mid-shot before it glides to a new value, and how "
+              "slowly it glides there. Higher = settles over more frames, needs a bigger change to move at "
+              "all -- steadier, slower to catch up. Lower = settles faster, reacts to smaller changes."))
         self.sld_stereo_convergence_smoothing = _build_stereo_slider(
             self.grp_stereo, self.cbo_convergence_smoothing, 0.0, 0.95, 100)
+
+        self.chk_convergence_scene_hold = wx.CheckBox(
+            self.grp_stereo, label=T("Hold Steady Per Scene"), name="chk_convergence_scene_hold")
+        self.chk_convergence_scene_hold.SetValue(False)
+        self.chk_convergence_scene_hold.SetToolTip(
+            T("What it's for: makes sod_v1 / Face Detect settle on ONE value shortly after each scene cut "
+              "and HOLD it firmly for the rest of the shot -- like a real stereographer, not a "
+              "constantly-reacting one -- instead of the default, which keeps re-evaluating every single "
+              "frame and can visibly drift even WITHIN one unbroken shot (someone shifts position, the "
+              "camera pans slightly).\n"
+              "How it works: after a cut, averages the first few frames to settle on the scene's own value. "
+              "Once settled, it only glides to a new value if the subject genuinely moves in depth by more "
+              "than a small margin (set by Convergence Smoothing above) -- small wobbles from noise never "
+              "move the picture at all.\n"
+              "Con: on a shot that genuinely, continuously changes distance throughout (a long push/pull "
+              "reveal), the default (off) tracks that continuous change more closely -- Hold Steady only "
+              "glides to it in the same gradual, deadband-gated way it handles any other mid-shot change.\n"
+              "Recommended: on, for most content using sod_v1/Face Detect -- it directly fixes the "
+              "\"drifts within a shot\" con those modes otherwise have. Leave off only if you specifically "
+              "want the older, more reactive behavior, or are comparing the two."))
 
         self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Pop-Out Limit / Boost"))
         self.cbo_max_negative_parallax = EditableComboBox(
@@ -2996,6 +3012,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_convergence_smoothing, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_smoothing, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_convergence_smoothing, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_convergence_scene_hold, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_negative_parallax, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_max_negative_parallax, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -8495,8 +8512,10 @@ class MainFrame(wx.Frame):
     def update_convergence_mode(self):
         if self.cbo_convergence_mode.GetValue() == "constant":
             self.cbo_convergence_smoothing.Disable()
+            self.chk_convergence_scene_hold.Disable()
         else:
             self.cbo_convergence_smoothing.Enable()
+            self.chk_convergence_scene_hold.Enable()
 
     def on_changed_cbo_convergence_mode(self, event):
         self.update_convergence_mode()
@@ -8680,6 +8699,7 @@ class MainFrame(wx.Frame):
             self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay,
             self.lbl_resolution_preset, self.cbo_resolution_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
+            self.chk_convergence_scene_hold,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
             self.lbl_face_protect, self.cbo_face_protect,
             self.lbl_ipd_offset, self.sld_ipd_offset,
@@ -9091,6 +9111,7 @@ class MainFrame(wx.Frame):
             convergence=float(self.cbo_convergence.GetValue()),
             convergence_mode=self.cbo_convergence_mode.GetValue(),
             convergence_smoothing=float(self.cbo_convergence_smoothing.GetValue()),
+            convergence_scene_hold=self.chk_convergence_scene_hold.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
             # the add-on is actually installed (create_parser() is only patched with them when it is; the
@@ -10263,6 +10284,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence, args.convergence)
         _apply_combo_value(self.cbo_convergence_mode, args.convergence_mode)
         _apply_combo_value(self.cbo_convergence_smoothing, args.convergence_smoothing)
+        self.chk_convergence_scene_hold.SetValue(bool(getattr(args, "convergence_scene_hold", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
         # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- getattr defaults match create_parser()'s own
         # patched defaults, so a command line from before the add-on was installed still restores cleanly.
@@ -20812,25 +20834,113 @@ def _self_test_convergence_scene_hold():
     hi = SceneHoldTracker(decay=0.95)
     assert hi.settle > lo.settle and hi.drift < lo.drift and hi.deadband > lo.deadband
 
-    # both real estimator classes route through the same tracker and mark_cut() on reset_pts
+    # ADR-232: scene_hold is OPT-IN (off by default) -- both real estimator classes must
+    # preserve the ORIGINAL plain-EMA behavior when it's off, and only route through the
+    # SceneHoldTracker when explicitly turned on.
     import types
     from unittest import mock
     import iw3.convergence_estimator as CE
 
-    est = CE.ConvergenceEstimator.__new__(CE.ConvergenceEstimator)
-    est.device = torch.device("cpu")
-    est.convergence = 0.5
-    est.enable_ema = True
-    est.decay = 0.9
-    est.tracker = SceneHoldTracker(0.9)
+    def make_est(scene_hold):
+        est = CE.ConvergenceEstimator.__new__(CE.ConvergenceEstimator)
+        est.device = torch.device("cpu")
+        est.convergence = 0.5
+        est.enable_ema = True
+        est.decay = 0.9
+        est.scene_hold = scene_hold
+        est.convergence_ema = None
+        est.tracker = SceneHoldTracker(0.9)
+        est.model = types.SimpleNamespace(infer=lambda rgb, depth: (torch.ones_like(depth), depth))
+        return est
+
     depth = torch.full((3, 1, 8, 8), 0.5)
     rgb = torch.rand(3, 3, 8, 8)
-    est.model = types.SimpleNamespace(infer=lambda rgb, depth: (torch.ones_like(depth), depth))
+
+    # scene_hold=True: routes through the tracker -- no cut between frames 0/1, same held value
+    est_on = make_est(scene_hold=True)
     with mock.patch.object(CE.ConvergenceEstimator, "depth_position_from_ratio",
                            return_value=torch.tensor([0.2, 0.2, 0.9]).reshape(3, 1, 1, 1)):
-        z1 = est(rgb, depth, reset_pts=[False, False, True])
-    assert z1[0].item() == z1[1].item(), "no cut between frames 0/1 -- must hold the same value"
+        z1 = est_on(rgb, depth, reset_pts=[False, False, True])
+    assert z1[0].item() == z1[1].item(), "scene_hold=True: no cut between frames 0/1 -- must hold the same value"
+
+    # scene_hold=False (the default): the ORIGINAL plain per-frame EMA, unchanged since
+    # before ADR-231 -- two different raw readings in a row must NOT produce the same
+    # output (the whole point being fixed is opt-in, not forced on everyone).
+    est_off = make_est(scene_hold=False)
+    with mock.patch.object(CE.ConvergenceEstimator, "depth_position_from_ratio",
+                           return_value=torch.tensor([0.2, 0.6, 0.9]).reshape(3, 1, 1, 1)):
+        z2 = est_off(rgb, depth, reset_pts=[False, False, False])
+    assert z2[0].item() != z2[1].item() != z2[2].item(), \
+        f"scene_hold=False must keep the original per-frame-reacting EMA: {[v.item() for v in z2]}"
+    # verify it matches the exact original formula: decay*ema + (1-decay)*p
+    expected0 = 0.2
+    expected1 = 0.9 * expected0 + 0.1 * 0.6
+    assert abs(z2[0].item() - expected0) < 1e-5 and abs(z2[1].item() - expected1) < 1e-5, \
+        f"scene_hold=False must match the exact original EMA formula: {z2[0].item()}, {z2[1].item()} " \
+        f"vs expected {expected0}, {expected1}"
+
     print("_self_test_convergence_scene_hold: PASS")
+
+
+def _self_test_convergence_scene_hold_gui_and_metadata():
+    """ADR-232: real user request -- keep the original per-frame convergence behavior as the
+    default, add "Hold Steady Per Scene" as an explicit opt-in checkbox instead of forcing
+    ADR-231's behavior on everyone. Covers the GUI checkbox (default off, gated by Convergence
+    Plane mode, CLI round-trip) and the filename/metadata tags."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.chk_convergence_scene_hold.GetValue() is False, "must default to off"
+        assert not frame.chk_convergence_scene_hold.IsEnabled(), \
+            "must be disabled when Convergence Plane is constant (its own starting default)"
+
+        frame.cbo_convergence_mode.SetValue("sod_v1")
+        frame.update_convergence_mode()
+        assert frame.chk_convergence_scene_hold.IsEnabled(), "must enable once mode is sod_v1"
+
+        frame.chk_convergence_scene_hold.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_scene_hold is True
+        assert "--convergence-scene-hold" in frame.get_cli_command()
+
+        frame.chk_convergence_scene_hold.SetValue(False)
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_convergence_scene_hold.GetValue() is True, "restore must bring the checked state back"
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.chk_convergence_scene_hold.IsEnabled(), "must disable again back on constant"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # filename/metadata tags -- only when scene_hold is on AND the mode isn't constant
+    parser = U.create_parser(required_true=False)
+    on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                            "--convergence-mode", "sod_v1", "--convergence-scene-hold"])
+    on.video_extension = ".mkv"
+    assert "_scenehold" in U.make_output_filename("a.mp4", on, video=True)
+    assert "iw3_convergence_scene_hold=1" in U._build_iw3_comment_metadata(on, video=True)
+
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                             "--convergence-mode", "sod_v1"])
+    off.video_extension = ".mkv"
+    assert "_scenehold" not in U.make_output_filename("a.mp4", off, video=True)
+    assert "convergence_scene_hold" not in U._build_iw3_comment_metadata(off, video=True)
+
+    # even with the flag on, "constant" mode must never show it -- scene_hold has no effect there
+    constant_on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                     "--convergence-scene-hold"])
+    constant_on.video_extension = ".mkv"
+    assert "_scenehold" not in U.make_output_filename("a.mp4", constant_on, video=True)
+    assert "convergence_scene_hold" not in U._build_iw3_comment_metadata(constant_on, video=True)
+
+    print("_self_test_convergence_scene_hold_gui_and_metadata: PASS")
 
 
 def _self_test_pop_feather():
@@ -21018,6 +21128,7 @@ def _run_self_tests():
         _self_test_standalone_tool_titles_share_accent_colour,
         _self_test_pop_feather,
         _self_test_convergence_scene_hold,
+        _self_test_convergence_scene_hold_gui_and_metadata,
     ]
     failures = []
     for test in tests:

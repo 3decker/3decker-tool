@@ -2162,6 +2162,8 @@ def make_output_filename(input_filename, args, video=False):
         if args.convergence_mode != "constant":
             convergence_name = "ac"
             convergence_smoothing = f"cs{to_deciaml(getattr(args, 'convergence_smoothing', 0.9), 100, 2)}"
+            if getattr(args, "convergence_scene_hold", False):
+                convergence_smoothing += "_scenehold"
         else:
             convergence_name = "c"
             convergence_smoothing = ""
@@ -2429,6 +2431,8 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append(f"iw3_convergence_mode={args.convergence_mode}")
         comment_parts.append(
             f"iw3_convergence_smoothing={getattr(args, 'convergence_smoothing', 0.9)}")
+        if getattr(args, "convergence_scene_hold", False):
+            comment_parts.append("iw3_convergence_scene_hold=1")
     if isinstance(args.edge_dilation, (list, tuple)):
         comment_parts.append(f"iw3_edge_dilation={'x'.join(str(v) for v in args.edge_dilation)}")
     else:
@@ -6138,10 +6142,15 @@ def create_parser(required_true=True):
     parser.add_argument("--convergence-mode", type=str, choices=["constant", "sod_v1", "face_detect"], default="constant",
                         help=("auto convergence mode"))
     parser.add_argument("--convergence-smoothing", type=float, default=0.9,
-                        help=("How steady auto convergence modes (sod_v1/face_detect) hold within a scene "
-                              "(ADR-231: settle-then-hold, not a plain per-frame EMA). "
-                              "Higher = settles/glides slower, needs a bigger change to move at all. "
-                              "Lower = settles/glides faster, reacts to smaller changes."))
+                        help=("How quickly auto convergence modes (sod_v1/face_detect) react to change. "
+                              "Plain per-frame EMA decay by default; with --convergence-scene-hold, instead "
+                              "controls how long it settles after a cut and how big a change is needed to "
+                              "move at all (ADR-231/232). Higher = smoother/slower to react either way."))
+    parser.add_argument("--convergence-scene-hold", action="store_true",
+                        help=("ADR-232: auto convergence modes (sod_v1/face_detect) hold the screen depth "
+                              "steady for the whole scene and only readjust at cuts, instead of the default "
+                              "plain per-frame EMA which can still drift within one unbroken shot. Off by "
+                              "default to preserve this project's original convergence behavior."))
     parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 3.0)],
                         help=("Pop-out limit (0-1) / boost (1-3), independent of the Convergence value itself. "
                               "ADR-179 limit: below 1.0 is a hard safety cap on negative parallax (how far anything "
@@ -6902,10 +6911,13 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
     if args.convergence_mode == "sod_v1":
         convergence_model = ConvergenceEstimator(args.convergence, device_id=args.gpu[0],
                                                  decay=getattr(args, "convergence_smoothing", 0.9),
-                                                 compile=args.compile)
+                                                 compile=args.compile,
+                                                 scene_hold=getattr(args, "convergence_scene_hold", False))
     elif args.convergence_mode == "face_detect":
         try:
-            convergence_model = FaceConvergenceEstimator(decay=getattr(args, "convergence_smoothing", 0.9))
+            convergence_model = FaceConvergenceEstimator(
+                decay=getattr(args, "convergence_smoothing", 0.9),
+                scene_hold=getattr(args, "convergence_scene_hold", False))
         except Exception as e:
             raise RuntimeError(
                 f"face_detect convergence mode failed to initialize.\n"

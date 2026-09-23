@@ -19,7 +19,7 @@ class FaceConvergenceEstimator():
     Falls back to center-weighted depth when no faces are found in a frame.
     """
 
-    def __init__(self, enable_ema=False, decay=0.9):
+    def __init__(self, enable_ema=False, decay=0.9, scene_hold=False):
         if not _CV2_AVAILABLE:
             raise ImportError(
                 "OpenCV (cv2) is required for face_detect convergence mode.\n"
@@ -27,15 +27,22 @@ class FaceConvergenceEstimator():
             )
         self.enable_ema = enable_ema
         self.decay = decay
+        # ADR-232: see ConvergenceEstimator's own comment -- scene_hold=False (default)
+        # keeps the original plain-EMA behavior; True opts into ADR-231's tracker.
+        self.scene_hold = scene_hold
+        self.convergence_ema = None
         self.tracker = SceneHoldTracker(decay)
 
-    def reset(self, enable_ema=None, decay=None):
+    def reset(self, enable_ema=None, decay=None, scene_hold=None):
         if enable_ema is not None:
             self.enable_ema = enable_ema
         if decay is not None:
             self.decay = decay
+        if scene_hold is not None:
+            self.scene_hold = scene_hold
         self.tracker.set_decay(self.decay)
         self.tracker.reset()
+        self.convergence_ema = None
 
     @staticmethod
     def _center_weighted_depth(depth):
@@ -86,10 +93,19 @@ class FaceConvergenceEstimator():
                 p = self._center_weighted_depth(depth[i]).reshape(1, 1, 1).clamp(0, 1)
 
             if self.enable_ema:
-                out = self.tracker.update(p.item())
-                results.append(torch.full_like(p, out))
-                if reset_pts is not None and reset_pts[i]:
-                    self.tracker.mark_cut()
+                if self.scene_hold:
+                    out = self.tracker.update(p.item())
+                    results.append(torch.full_like(p, out))
+                    if reset_pts is not None and reset_pts[i]:
+                        self.tracker.mark_cut()
+                else:
+                    if self.convergence_ema is None:
+                        self.convergence_ema = p.clone()
+                    else:
+                        self.convergence_ema = self.decay * self.convergence_ema + (1.0 - self.decay) * p
+                    results.append(self.convergence_ema.clone())
+                    if reset_pts is not None and reset_pts[i]:
+                        self.convergence_ema = None
             else:
                 results.append(p.clone())
 

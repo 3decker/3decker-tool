@@ -10,7 +10,7 @@ SOD_URL = "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_sod_v1_
 
 
 class ConvergenceEstimator():
-    def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False):
+    def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False, scene_hold=False):
         with TorchHubDir(HUB_MODEL_DIR):
             self.model, _ = load_model(SOD_URL, device_ids=[device_id], weights_only=True)
             self.model = self.model.eval().fuse()
@@ -22,15 +22,26 @@ class ConvergenceEstimator():
         self.device = create_device(device_id)
         self.enable_ema = enable_ema
         self.decay = decay
+        # ADR-232: scene_hold=False (default) keeps the original plain-EMA behavior
+        # (this project's own long-standing default, unchanged since before ADR-231) --
+        # scene_hold=True opts into ADR-231's settle-then-hold-with-deadband tracker.
+        # Both pieces of state are kept regardless of which is active so toggling
+        # scene_hold mid-run (GUI checkbox change between runs) never carries stale
+        # state from the other mode into the next call.
+        self.scene_hold = scene_hold
+        self.convergence_ema = None
         self.tracker = SceneHoldTracker(decay)
 
-    def reset(self, enable_ema=None, decay=None):
+    def reset(self, enable_ema=None, decay=None, scene_hold=None):
         if enable_ema is not None:
             self.enable_ema = enable_ema
         if decay is not None:
             self.decay = decay
+        if scene_hold is not None:
+            self.scene_hold = scene_hold
         self.tracker.set_decay(self.decay)
         self.tracker.reset()
+        self.convergence_ema = None
 
     @staticmethod
     def depth_position_from_ratio(saliency_map, depth, pos):
@@ -73,10 +84,19 @@ class ConvergenceEstimator():
             results = []
             for i in range(z_pos.shape[0]):
                 p = z_pos[i]
-                out = self.tracker.update(p.item())
-                results.append(torch.full_like(p, out))
-                if reset_pts[i]:
-                    self.tracker.mark_cut()
+                if self.scene_hold:
+                    out = self.tracker.update(p.item())
+                    results.append(torch.full_like(p, out))
+                    if reset_pts[i]:
+                        self.tracker.mark_cut()
+                else:
+                    if self.convergence_ema is None:
+                        self.convergence_ema = p.clone()
+                    else:
+                        self.convergence_ema = self.decay * self.convergence_ema + (1. - self.decay) * p
+                    results.append(self.convergence_ema.clone())
+                    if reset_pts[i]:
+                        self.convergence_ema = None
 
             z_pos = torch.stack(results, dim=0)
 

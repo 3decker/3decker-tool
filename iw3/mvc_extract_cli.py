@@ -300,6 +300,41 @@ class Cancelled(Exception):
     pass
 
 
+def _remove_stale_temp(*paths):
+    """Deletes each path if it exists, retrying briefly on a locked-file error before
+    giving up silently. Used both to clear out a reused work_dir before a new demux
+    starts and for normal end-of-job cleanup.
+
+    Real gap this closes: a Cancelled/force-killed job (taskkill /T /F from the GUI's
+    Cancel button) never runs this module's own `finally` cleanup at all -- a killed
+    process can't run its own cleanup code -- so a large (~15-25 GB) partial demux can
+    be left behind in work_dir. Since work_dir is named only from the output filename
+    (not a timestamp or the job's settings), a later retry with the same output name
+    silently reuses that same dirty folder: either it runs low on disk space partway
+    through, or -- if a killed child process (tsMuxeR/edge264/ffmpeg) hadn't yet fully
+    released a file handle at the moment taskkill returned, a real possible race, not
+    guaranteed instant on Windows -- the new tsMuxeR demux fails outright trying to
+    overwrite a file still locked by the OS. Both look like a random, unrelated
+    failure to whatever the user happened to also change when retrying (a real user
+    report described it as seemingly tied to video codec choice, which the actual
+    demux step never even reads). The retry loop below specifically targets that
+    locked-file race window, which is normally milliseconds, not the disk-space case
+    (nothing to retry there -- the preflight check ahead of every real call site is
+    what actually guards against that)."""
+    import time as _time
+    for p in paths:
+        for attempt in range(5):
+            try:
+                os.remove(p)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                if attempt == 4:
+                    break
+                _time.sleep(0.2)
+
+
 def _stream_interleaved(stdin, base_path, base_bounds, dep_path, dep_bounds, n, stop_event, errors):
     """Writes base AU i then dependent AU i, for every i, straight into the decoder's
     stdin -- the combined ~24GB stream never exists on disk or in memory."""
@@ -441,6 +476,10 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
     dep_es = path.join(work_dir, f"{path.splitext(path.basename(ssif_path))[0]}.track_{mvc_track}.mvc")
     edge_log = path.join(work_dir, "_edge264_stderr.log")
     procs = []
+    # Clear out anything a previous, force-killed attempt at this same output path left
+    # behind before starting a new demux into the same work_dir -- see
+    # _remove_stale_temp()'s own docstring for the real bug this closes.
+    _remove_stale_temp(base_es, dep_es, edge_log)
     try:
         cut_opts = f" --cut-start={cut_start} --cut-end={cut_end}" if cut_end else f" --cut-start={cut_start}"
         ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
@@ -540,11 +579,7 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
             if p.poll() is None:
                 p.kill()
         if not keep_temp:
-            for tmp in (base_es, dep_es, meta_path, edge_log) + ((video_only,) if restore_av else ()):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+            _remove_stale_temp(base_es, dep_es, meta_path, edge_log, *((video_only,) if restore_av else ()))
 
 
 ISO_LAYOUT = "bd3d_iso"
@@ -589,6 +624,10 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
         lines.append(f"{t['codec']}, {ssif_meta}, track={t['id']}{extra}")
     os.makedirs(path.dirname(path.abspath(out_iso)), exist_ok=True)
     meta_path = path.splitext(path.abspath(out_iso))[0] + ".mux.meta"
+    # Clear out a stale meta file (and any partial .iso) a previous force-killed
+    # attempt at this exact output path left behind -- see _remove_stale_temp()'s
+    # own docstring for the real bug this closes.
+    _remove_stale_temp(meta_path, out_iso)
     # no BOM: tsMuxeR rejects a UTF-8 byte-order mark on the first line
     with open(meta_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
@@ -615,15 +654,7 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
     finally:
         if proc is not None and proc.poll() is None:
             proc.kill()
-        try:
-            os.remove(meta_path)
-        except OSError:
-            pass
-        if not ok:
-            try:
-                os.remove(out_iso)
-            except OSError:
-                pass
+        _remove_stale_temp(meta_path, *((out_iso,) if not ok else ()))
 
 
 MVC_MKV_LAYOUT = "mvc_mkv"
@@ -699,6 +730,10 @@ def mux_lossless_mvc_mkv(ssif_path, avc_track, mvc_track, out_mkv, include_av=Tr
     video_only = (path.splitext(out_mkv)[0] + ".video_only.mkv") if include_av else out_mkv
 
     procs = []
+    # Clear out anything a previous, force-killed attempt at this same output path left
+    # behind before starting a new demux into the same work_dir -- see
+    # _remove_stale_temp()'s own docstring for the real bug this closes.
+    _remove_stale_temp(base_es, dep_es, combined_es)
     try:
         cut_opts = f" --cut-start={cut_start} --cut-end={cut_end}" if cut_end else f" --cut-start={cut_start}"
         ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
@@ -762,11 +797,8 @@ def mux_lossless_mvc_mkv(ssif_path, avc_track, mvc_track, out_mkv, include_av=Tr
             if p.poll() is None:
                 p.kill()
         if not keep_temp:
-            for tmp in (base_es, dep_es, combined_es, meta_path) + ((video_only,) if include_av else ()):
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+            _remove_stale_temp(base_es, dep_es, combined_es, meta_path,
+                               *((video_only,) if include_av else ()))
 
 
 def _powershell(script):

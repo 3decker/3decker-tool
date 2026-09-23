@@ -20955,6 +20955,67 @@ def _self_test_sbs2mvc_ffprobe_track_detection():
     print("_self_test_sbs2mvc_ffprobe_track_detection: PASS")
 
 
+def _self_test_mvc_extract_remove_stale_temp():
+    """ADR-242: real gap found while investigating a user-reported tsMuxeR demux
+    failure -- a Cancelled/force-killed 3D Blu-ray Import job (taskkill /T /F from
+    the GUI's Cancel button) never runs mvc_extract_cli's own `finally` cleanup at
+    all, since a killed process can't run its own cleanup code. Its work_dir is named
+    only from the output filename, so a later retry with the same output name
+    silently reuses that same dirty folder -- the mechanism that most plausibly
+    explains a demux failure a user described as tied to video codec choice, which
+    the demux step itself never even reads (see _remove_stale_temp's own docstring).
+
+    _remove_stale_temp() is now called both before a new demux starts (clearing
+    anything a killed prior attempt left behind) and in each pipeline function's own
+    normal end-of-job cleanup (replacing a bare os.remove()/except OSError: pass with
+    a real retry, since a job's own p.kill() calls in that same finally block don't
+    wait for the OS to actually release the killed process's file handles either --
+    a real, if usually brief, race this retry specifically targets)."""
+    import time as _time
+    from unittest import mock
+    from . import mvc_extract_cli as M
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # a plain existing file is removed on the first attempt, no retry needed
+        f1 = path.join(tmp, "a.264")
+        open(f1, "wb").close()
+        with mock.patch.object(_time, "sleep") as sleep_mock:
+            M._remove_stale_temp(f1)
+        assert not path.exists(f1)
+        assert sleep_mock.call_count == 0, "a clean removal must never sleep/retry"
+
+        # a missing file is a silent no-op, not an error
+        M._remove_stale_temp(path.join(tmp, "does_not_exist.264"))
+
+        # a file that looks locked for the first few attempts is retried, not given up on
+        f2 = path.join(tmp, "b.264")
+        open(f2, "wb").close()
+        real_remove = os.remove
+        calls = []
+
+        def flaky_remove(p):
+            calls.append(p)
+            if len(calls) < 3:
+                raise PermissionError("simulated: still held by a just-killed process")
+            real_remove(p)
+
+        with mock.patch("os.remove", side_effect=flaky_remove), mock.patch.object(_time, "sleep") as sleep_mock:
+            M._remove_stale_temp(f2)
+        assert len(calls) == 3, "must retry past a transient lock, not give up on the first failure"
+        assert sleep_mock.call_count == 2, "must sleep between retries, not busy-loop"
+        assert not path.exists(f2)
+
+        # a file that NEVER releases is given up on silently after 5 attempts, never raises
+        f3 = path.join(tmp, "c.264")
+        open(f3, "wb").close()
+        with mock.patch("os.remove", side_effect=PermissionError("simulated: permanently locked")), \
+                mock.patch.object(_time, "sleep"):
+            M._remove_stale_temp(f3)  # must not raise
+        assert path.exists(f3), "a permanently-locked file is left in place, not silently lost track of"
+
+    print("_self_test_mvc_extract_remove_stale_temp: PASS")
+
+
 def _self_test_sbs2mvc_fix_frame_rate():
     """A 25fps (or any non-23.976/24) input to sbs_to_mvc_cli.convert(): by default still
     refused (ADR-182's original 'never silently change your movie's speed' rule, untouched);
@@ -21789,6 +21850,7 @@ def _run_self_tests():
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_ffprobe_track_detection,
+        _self_test_mvc_extract_remove_stale_temp,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_convert_hdr_to_sdr,
         _self_test_dolby_vision_step_progress,

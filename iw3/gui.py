@@ -5959,6 +5959,25 @@ class MainFrame(wx.Frame):
               "Recommended: off normally; turn on only if the log says your video's frame rate isn't "
               "23.976/24 and Run refuses."))
 
+        self.chk_sbs2mvc_convert_hdr_to_sdr = wx.CheckBox(
+            self.cpn_sbs2mvc.GetPane(), label=T("Convert HDR to SDR automatically"),
+            name="chk_sbs2mvc_convert_hdr_to_sdr")
+        self.chk_sbs2mvc_convert_hdr_to_sdr.SetValue(False)
+        self.chk_sbs2mvc_convert_hdr_to_sdr.SetToolTip(
+            T("What it's for: 3D Blu-ray cannot carry HDR or Dolby Vision at all -- there is no HDR10/HDR10+ "
+              "extension to the classic 3D Blu-ray (MVC) format, and Dolby Vision's own 3D-capable profile "
+              "is a completely different, modern format that today only the Apple Vision Pro can play (no "
+              "3D Blu-ray player, PowerDVD, or TV supports it). If your video is HDR, this box lets the tool "
+              "convert it to SDR for you instead of just refusing.\n"
+              "How: it tone-maps the whole picture down to standard range using the same filter this "
+              "project's own main pipeline uses (a Hable tonemap), producing plain 8-bit SDR video -- the "
+              "only bit depth 3D Blu-ray allows.\n"
+              "Con: this is a real, one-way loss of the HDR grade (brighter highlights, wider colour range) "
+              "-- off by default so this never happens without you asking. Want to keep more of that range "
+              "for something other than a 3D Blu-ray disc? Use the standalone \"Convert HDR/DV to SDR\" tool "
+              "instead, which offers 10-bit output.\n"
+              "Recommended: off normally; turn on only if the log says your video is HDR and Run refuses."))
+
         self.btn_sbs2mvc_run = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Run"))
         self.btn_sbs2mvc_run.SetToolTip(
             T("What it's for: starts the conversion as a separate background process (python -m "
@@ -6015,6 +6034,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_sbs2mvc_bitrate, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_sbs2mvc_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_sbs2mvc_fix_frame_rate, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_sbs2mvc_convert_hdr_to_sdr, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_sbs2mvc_run, (h := h + 1, 2), flag=wx.EXPAND)
         layout.Add(self.btn_sbs2mvc_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_sbs2mvc, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
@@ -6031,6 +6051,124 @@ class MainFrame(wx.Frame):
 
         sizer_sbs2mvc = wx.StaticBoxSizer(self.grp_sbs2mvc, wx.VERTICAL)
         sizer_sbs2mvc.Add(pane_header_row_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
+
+        # --- standalone tool: Convert HDR/DV to SDR (ADR-222/223 follow-up) ---
+        # Runs iw3.hdr_to_sdr_cli as its own subprocess (same "separate subprocess, never
+        # sharing state with the main app" convention as every other standalone tool in this
+        # column). Shares its core (tonemap_hdr_to_sdr) with the SBS to 3D Blu-ray MVC tool's
+        # own opt-in "Convert HDR to SDR automatically" checkbox above, which is hard-locked to
+        # 8-bit (3D Blu-ray's own limit) -- this general-purpose standalone tool has no such
+        # constraint, so 10-bit output (keeps more of the original range) is offered and is the
+        # default.
+        self.grp_hdr_to_sdr = wx.StaticBox(
+            self.tab_tools, label=T("Convert HDR/DV to SDR (Standalone Tool)"))
+
+        self.cpn_hdr_to_sdr = wx.CollapsiblePane(
+            self.grp_hdr_to_sdr, label=T("Settings"), name="cpn_hdr_to_sdr")
+        self.cpn_hdr_to_sdr.Collapse(True)
+        self.cpn_hdr_to_sdr.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                 self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_hdr_to_sdr.GetPane().SetName("cpn_hdr_to_sdr_pane")
+
+        self.lbl_hdr_to_sdr_input = wx.StaticText(self.cpn_hdr_to_sdr.GetPane(), label=T("HDR Video"))
+        self.txt_hdr_to_sdr_input = wx.TextCtrl(self.cpn_hdr_to_sdr.GetPane(), name="txt_hdr_to_sdr_input")
+        self.txt_hdr_to_sdr_input.SetToolTip(
+            T("What it's for: any HDR video (HDR10, HDR10+, Dolby Vision, or HLG) you want a plain SDR "
+              "copy of -- for example, before feeding it into the SBS to 3D Blu-ray MVC tool above, or "
+              "any other tool/player that doesn't handle HDR.\n"
+              "Con: if the file isn't actually tagged HDR, this tool refuses rather than needlessly "
+              "re-encoding a perfectly good file. Read-only: your file is never modified.\n"
+              "Recommended: a real HDR-graded source, not an SDR file relabeled as HDR."))
+        self.btn_hdr_to_sdr_input = wx.Button(self.cpn_hdr_to_sdr.GetPane(), label=T("..."))
+
+        self.lbl_hdr_to_sdr_output = wx.StaticText(self.cpn_hdr_to_sdr.GetPane(), label=T("Output File"))
+        self.txt_hdr_to_sdr_output = wx.TextCtrl(self.cpn_hdr_to_sdr.GetPane(), name="txt_hdr_to_sdr_output")
+        self.txt_hdr_to_sdr_output.SetToolTip(
+            T("Where to write the new SDR copy. Auto-filled with '<video name>_sdr.mkv' next to the "
+              "input once you pick one.\n"
+              "How it's safe: this tool never overwrites the input video, only ever writes here."))
+        self.btn_hdr_to_sdr_output = wx.Button(self.cpn_hdr_to_sdr.GetPane(), label=T("..."))
+
+        self.lbl_hdr_to_sdr_bit_depth = wx.StaticText(self.cpn_hdr_to_sdr.GetPane(), label=T("Bit Depth"))
+        self.cbo_hdr_to_sdr_bit_depth = wx.ComboBox(self.cpn_hdr_to_sdr.GetPane(), name="cbo_hdr_to_sdr_bit_depth")
+        self.cbo_hdr_to_sdr_bit_depth.SetEditable(False)
+        self.cbo_hdr_to_sdr_bit_depth.Append(T("10-bit (keeps more of the original range)"), 10)
+        self.cbo_hdr_to_sdr_bit_depth.Append(T("8-bit (smaller, more universally compatible)"), 8)
+        self.cbo_hdr_to_sdr_bit_depth.SetSelection(0)
+        self.cbo_hdr_to_sdr_bit_depth.SetToolTip(
+            T("What it's for: the output video's bit depth (how many shades each colour channel can "
+              "have) after tone-mapping down from HDR.\n"
+              "10-bit: keeps noticeably more of the original tonal detail even after the HDR range is "
+              "compressed down to SDR -- fewer visible banding artefacts in skies/gradients. Needs a "
+              "player/tool that supports 10-bit (nearly all modern ones do).\n"
+              "8-bit: smaller file, works absolutely everywhere -- this is also the only bit depth 3D "
+              "Blu-ray allows, but you don't need to pick it here for that specifically -- the SBS to "
+              "3D Blu-ray MVC tool's own \"Convert HDR to SDR automatically\" checkbox already handles "
+              "that conversion (always at 8-bit) for you.\n"
+              "Recommended: 10-bit (default) unless you have a specific reason to need 8-bit."))
+
+        self.btn_hdr_to_sdr_run = wx.Button(self.cpn_hdr_to_sdr.GetPane(), label=T("Run"))
+        self.btn_hdr_to_sdr_run.SetToolTip(
+            T("What it's for: starts the conversion as a separate background process (python -m "
+              "iw3.hdr_to_sdr_cli) -- your input file is never modified.\n"
+              "Con: this is a real, one-way change to the picture (the HDR grade is genuinely gone "
+              "afterward, tone-mapped down to a normal range) -- not just a metadata strip. Re-encoding "
+              "the whole video takes time proportional to its length.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded."))
+        self.btn_hdr_to_sdr_cancel = wx.Button(self.cpn_hdr_to_sdr.GetPane(), label=T("Cancel"))
+        self.btn_hdr_to_sdr_cancel.Disable()
+        self.btn_hdr_to_sdr_cancel.SetToolTip(
+            T("Stops the running conversion and removes the partial output file."))
+
+        self.gauge_hdr_to_sdr = wx.Gauge(self.cpn_hdr_to_sdr.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_hdr_to_sdr.SetToolTip(
+            T("Real progress of the current conversion, read live from the background process."))
+        self.lbl_hdr_to_sdr_progress = wx.StaticText(self.cpn_hdr_to_sdr.GetPane(), label="")
+
+        self.txt_hdr_to_sdr_log = wx.TextCtrl(self.cpn_hdr_to_sdr.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
+                                              size=self.FromDIP((-1, 60)), name="txt_hdr_to_sdr_log")
+        self.txt_hdr_to_sdr_log.SetToolTip(
+            T("Shows this tool's own messages when the job ends."))
+        self.btn_hdr_to_sdr_clear = wx.Button(self.cpn_hdr_to_sdr.GetPane(), label=T("Clear"))
+        self.btn_hdr_to_sdr_clear.SetToolTip(
+            T("Empties the log box above. Disabled while a job is running."))
+
+        self.btn_hdr_to_sdr_input.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_input)
+        self.btn_hdr_to_sdr_output.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_output)
+        self.btn_hdr_to_sdr_run.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_run)
+        self.btn_hdr_to_sdr_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_cancel)
+        self.btn_hdr_to_sdr_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_hdr_to_sdr_log.Clear())
+        self.hdr_to_sdr_proc = None
+        self.hdr_to_sdr_cancelled = False
+        self.hdr_to_sdr_start_time = 0.0
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_hdr_to_sdr_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_hdr_to_sdr_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_hdr_to_sdr_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_hdr_to_sdr_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_hdr_to_sdr_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_hdr_to_sdr_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_hdr_to_sdr_bit_depth, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_hdr_to_sdr_bit_depth, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_hdr_to_sdr_run, (h := h + 1, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_hdr_to_sdr_cancel, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_hdr_to_sdr, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_hdr_to_sdr_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_hdr_to_sdr_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_hdr_to_sdr_clear, (h := h + 1, 3), flag=wx.EXPAND)
+        self.cpn_hdr_to_sdr.GetPane().SetSizer(layout)
+
+        self.pnl_hdr_to_sdr_dot = wx.Panel(self.grp_hdr_to_sdr, size=self.FromDIP((10, 10)))
+        self.pnl_hdr_to_sdr_dot.SetBackgroundColour(wx.Colour(255, 187, 51))
+        pane_header_row_hdr_to_sdr = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_hdr_to_sdr.Add(self.pnl_hdr_to_sdr_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_hdr_to_sdr.Add(self.cpn_hdr_to_sdr, 1, wx.EXPAND)
+
+        sizer_hdr_to_sdr = wx.StaticBoxSizer(self.grp_hdr_to_sdr, wx.VERTICAL)
+        sizer_hdr_to_sdr.Add(pane_header_row_hdr_to_sdr, 0, wx.ALL | wx.EXPAND, 4)
 
         # --- standalone tool: Upscale with waifu2x ---
         # Runs the SAME two commands the "Upscale with waifu2x after conversion" option runs
@@ -6331,6 +6469,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_bluray, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_hdr_to_sdr, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_upscale, 0, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
@@ -7884,7 +8023,7 @@ class MainFrame(wx.Frame):
         only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
                       "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
-                      "cpn_bluray", "cpn_sbs2mvc", "cpn_upscale")
+                      "cpn_bluray", "cpn_sbs2mvc", "cpn_hdr_to_sdr", "cpn_upscale")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -9678,7 +9817,7 @@ class MainFrame(wx.Frame):
     # A tool missing from this list keeps the default black title, unreadable on the dark theme.
     _STANDALONE_TOOL_GROUP_NAMES = (
         "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone",
-        "grp_bluray", "grp_sbs2mvc", "grp_upscale",
+        "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_upscale",
     )
 
     _CLEAR_ALL_STANDALONE_TEXT_FIELDS = (
@@ -9698,6 +9837,7 @@ class MainFrame(wx.Frame):
         "txt_rife_standalone_dv_source", "txt_rife_standalone_dv_start", "txt_rife_standalone_dv_end",
         "txt_bluray_disc", "txt_bluray_output", "txt_bluray_log",
         "txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log",
+        "txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output", "txt_hdr_to_sdr_log",
         "txt_upscale_input", "txt_upscale_output", "txt_upscale_log",
     )
     # The one field in that list whose real default isn't blank -- confirmed
@@ -12836,7 +12976,8 @@ class MainFrame(wx.Frame):
         # Called via wx.CallAfter from run_sbs2mvc's background thread.
         names = {"encode": T("Encoding 3D"), "mux": T("Building the disc"),
                  "autocrop": T("Looking for black bars"),
-                 "retime": T("Fixing the frame rate (re-timing picture, sound and subtitles)")}
+                 "retime": T("Fixing the frame rate (re-timing picture, sound and subtitles)"),
+                 "tonemap": T("Converting HDR to SDR")}
         name = names.get(stage, stage)
         if total > 0:
             self.gauge_sbs2mvc.SetRange(int(total))
@@ -12849,11 +12990,11 @@ class MainFrame(wx.Frame):
                 self.lbl_sbs2mvc_progress.SetLabel(
                     f"{name}: {int(done)}/{int(total)} {T('frames')} ({percent}%) "
                     f"[{fps:.1f} FPS, {T('elapsed')} {self._format_duration(elapsed)}, ETA {eta}]")
-            elif stage == "retime":
-                # done/total are seconds of the RE-TIMED movie's own timeline, not frames --
-                # a real user watched a plain "0%" spinner for 20+ minutes on a full-length
-                # movie re-encode with no other feedback and reasonably assumed the app had
-                # hung, so this needs the same elapsed/ETA detail the encode stage gets.
+            elif stage in ("retime", "tonemap"):
+                # done/total are seconds of the movie's own timeline, not frames -- a real user
+                # watched a plain "0%" spinner for 20+ minutes on a full-length movie re-encode
+                # with no other feedback and reasonably assumed the app had hung, so this needs
+                # the same elapsed/ETA detail the encode stage gets.
                 elapsed = time() - self.sbs2mvc_start_time
                 speed = done / (elapsed + 1e-6)
                 eta = self._format_duration((total - done) / speed) if speed > 0 and done > 0 else "?"
@@ -12970,6 +13111,8 @@ class MainFrame(wx.Frame):
             cmd.append("--no-audio-subs")
         if self.chk_sbs2mvc_fix_frame_rate.GetValue():
             cmd.append("--fix-frame-rate")
+        if self.chk_sbs2mvc_convert_hdr_to_sdr.GetValue():
+            cmd.append("--convert-hdr-to-sdr")
         return cmd, None
 
     def on_click_btn_sbs2mvc_run(self, event):
@@ -12988,6 +13131,150 @@ class MainFrame(wx.Frame):
         self.btn_sbs2mvc_cancel.Enable()
         self.SetStatusText(T("Converting to 3D Blu-ray..."))
         startWorker(self.on_exit_sbs2mvc_worker, self.run_sbs2mvc, wargs=(cmd,))
+
+    # --- Convert HDR/DV to SDR (standalone tool) ---
+
+    def on_click_btn_hdr_to_sdr_input(self, event):
+        with wx.FileDialog(self, message=T("Select HDR Video"), wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_hdr_to_sdr_input.GetValue():
+                dlg.SetPath(self.txt_hdr_to_sdr_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                input_path = dlg.GetPath()
+                self.txt_hdr_to_sdr_input.SetValue(input_path)
+                if not self.txt_hdr_to_sdr_output.GetValue():
+                    base = path.splitext(input_path)[0]
+                    self.txt_hdr_to_sdr_output.SetValue(f"{base}_sdr.mkv")
+
+    def on_click_btn_hdr_to_sdr_output(self, event):
+        with wx.FileDialog(self, message=T("Save SDR Output As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_hdr_to_sdr_output.GetValue():
+                dlg.SetPath(self.txt_hdr_to_sdr_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_hdr_to_sdr_output.SetValue(dlg.GetPath())
+
+    def _update_hdr_to_sdr_progress(self, stage, done, total):
+        # Called via wx.CallAfter from run_hdr_to_sdr's background thread.
+        name = T("Converting HDR to SDR") if stage == "tonemap" else stage
+        if total > 0:
+            self.gauge_hdr_to_sdr.SetRange(int(total))
+            self.gauge_hdr_to_sdr.SetValue(int(min(done, total)))
+            percent = min(100, int(done / total * 100))
+            elapsed = time() - self.hdr_to_sdr_start_time
+            speed = done / (elapsed + 1e-6)
+            eta = self._format_duration((total - done) / speed) if speed > 0 and done > 0 else "?"
+            self.lbl_hdr_to_sdr_progress.SetLabel(
+                f"{name}: {self._format_duration(done)} / {self._format_duration(total)} ({percent}%) "
+                f"[{speed:.2f}x realtime, {T('elapsed')} {self._format_duration(elapsed)}, ETA {eta}]")
+        else:
+            self.gauge_hdr_to_sdr.Pulse()
+            self.lbl_hdr_to_sdr_progress.SetLabel(f"{name}...")
+
+    def run_hdr_to_sdr(self, cmd):
+        self.hdr_to_sdr_proc = proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+        for line in proc.stdout:
+            parts = line.strip().split(" ")
+            if len(parts) == 4 and parts[0] == "IW3_MVC_PROGRESS":
+                try:
+                    wx.CallAfter(self._update_hdr_to_sdr_progress, parts[1], float(parts[2]), float(parts[3]))
+                except ValueError:
+                    continue
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
+
+    def _cleanup_after_hdr_to_sdr_cancel(self):
+        output_path = self.txt_hdr_to_sdr_output.GetValue().strip()
+        try:
+            if path.exists(output_path) and path.getmtime(output_path) >= self.hdr_to_sdr_start_time - 1:
+                os.remove(output_path)
+        except OSError:
+            pass
+
+    def on_exit_hdr_to_sdr_worker(self, result):
+        self.btn_hdr_to_sdr_run.Enable()
+        self.btn_hdr_to_sdr_clear.Enable()
+        self.btn_hdr_to_sdr_cancel.Disable()
+        self.hdr_to_sdr_proc = None
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_hdr_to_sdr_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        self.txt_hdr_to_sdr_log.SetValue(output.replace("\r", "\n"))
+        self.txt_hdr_to_sdr_log.ShowPosition(self.txt_hdr_to_sdr_log.GetLastPosition())
+        if self.hdr_to_sdr_cancelled:
+            self._cleanup_after_hdr_to_sdr_cancel()
+            self.lbl_hdr_to_sdr_progress.SetLabel(T("Cancelled"))
+            self.SetStatusText(T("HDR to SDR conversion cancelled"))
+        elif returncode == 0:
+            self.gauge_hdr_to_sdr.SetValue(self.gauge_hdr_to_sdr.GetRange())
+            self.lbl_hdr_to_sdr_progress.SetLabel(
+                f"{T('Done')} [{T('elapsed')} {self._format_duration(time() - self.hdr_to_sdr_start_time)}]")
+            self.SetStatusText(T("HDR to SDR conversion successful"))
+        else:
+            self.SetStatusText(T("HDR to SDR conversion failed -- see the log below"))
+            failure_message = _describe_subprocess_failure(returncode, output)
+            generic_message = T("The conversion failed or refused -- see the log box for the exact reason.")
+            if failure_message != generic_message:
+                self.txt_hdr_to_sdr_log.AppendText(f"\n[3DECKER] {failure_message}")
+            wx.MessageBox(failure_message, T("Convert HDR/DV to SDR"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_hdr_to_sdr_cancel(self, event):
+        proc = self.hdr_to_sdr_proc
+        if proc is not None and proc.poll() is None:
+            self.hdr_to_sdr_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_hdr_to_sdr_cancel.Disable()
+
+    def build_hdr_to_sdr_command(self):
+        """Returns (cmd, None) or (None, error_message); no process is started."""
+        input_path = self.txt_hdr_to_sdr_input.GetValue().strip()
+        output_path = self.txt_hdr_to_sdr_output.GetValue().strip()
+        if not input_path or not path.exists(input_path):
+            return None, T("Select a valid HDR video file first.")
+        if not output_path:
+            return None, T("Set an Output File path first.")
+        if path.abspath(output_path) == path.abspath(input_path):
+            return None, T("Output must be different from the input video.")
+        bit_depth = self.cbo_hdr_to_sdr_bit_depth.GetClientData(self.cbo_hdr_to_sdr_bit_depth.GetSelection())
+        cmd = [sys.executable, "-m", "iw3.hdr_to_sdr_cli", "--input", input_path, "--output", output_path,
+               "--bit-depth", str(bit_depth), "--gui-progress"]
+        return cmd, None
+
+    def on_click_btn_hdr_to_sdr_run(self, event):
+        cmd, error = self.build_hdr_to_sdr_command()
+        if error:
+            wx.MessageBox(error, T("Convert HDR/DV to SDR"), wx.OK | wx.ICON_WARNING)
+            return
+        self.txt_hdr_to_sdr_log.SetValue(T("Running...\n"))
+        self.gauge_hdr_to_sdr.SetRange(1)
+        self.gauge_hdr_to_sdr.SetValue(0)
+        self.lbl_hdr_to_sdr_progress.SetLabel("")
+        self.hdr_to_sdr_cancelled = False
+        self.hdr_to_sdr_start_time = time()
+        self.btn_hdr_to_sdr_run.Disable()
+        self.btn_hdr_to_sdr_clear.Disable()
+        self.btn_hdr_to_sdr_cancel.Enable()
+        self.SetStatusText(T("Converting HDR to SDR..."))
+        startWorker(self.on_exit_hdr_to_sdr_worker, self.run_hdr_to_sdr, wargs=(cmd,))
 
     # --- Upscale with waifu2x (standalone tool) ---
 
@@ -14352,9 +14639,9 @@ def _self_test_video_filter_collapsible_section():
 
 
 def _self_test_standalone_tools_collapsible_sections():
-    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 11
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 12
     Guided Light panes added to Standalone Tools (ADR-101, one per tool; ADR-169
-    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th; ADR-182 UPDATE 6 adds SBS to 3D Blu-ray MVC as the 10th; the Upscale with waifu2x tool is the 11th) --
+    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th; ADR-182 UPDATE 6 adds SBS to 3D Blu-ray MVC as the 10th; the Upscale with waifu2x tool is the 11th; the Convert HDR/DV to SDR tool (built alongside ADR-222) is the 12th) --
     tab_tools/tab_wrap_tools/on_toggled_standalone_tools_collapsible_pane in place of
     the Stereo Generation equivalents. Also checks each pane has a real, unique
     name (the exact bug class this pattern already broke once with 2+ panes sharing
@@ -14372,9 +14659,9 @@ def _self_test_standalone_tools_collapsible_sections():
         frame = gui_mod.MainFrame()
         panes = frame.get_standalone_tools_sliders_and_panes()
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
-        assert len(panes) == 11, f"expected 11 Standalone Tools panes, found {len(panes)}"
+        assert len(panes) == 12, f"expected 12 Standalone Tools panes, found {len(panes)}"
         names = [p.GetName() for p in panes]
-        assert len(set(names)) == 11, f"pane names are not all unique: {names}"
+        assert len(set(names)) == 12, f"pane names are not all unique: {names}"
         for p in panes:
             assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
 
@@ -18332,6 +18619,7 @@ def _self_test_sbs2mvc_panel():
         assert frame.txt_sbs2mvc_bitrate.GetValue() == "20"
         assert frame.chk_sbs2mvc_restore_av.GetValue() and not frame.chk_sbs2mvc_swap.GetValue()
         assert not frame.chk_sbs2mvc_fix_frame_rate.GetValue(), "must default off -- opt-in only"
+        assert not frame.chk_sbs2mvc_convert_hdr_to_sdr.GetValue(), "must default off -- opt-in only"
         assert frame.btn_sbs2mvc_run.IsEnabled() and not frame.btn_sbs2mvc_cancel.IsEnabled()
 
         cmd, err = frame.build_sbs2mvc_command()
@@ -18359,16 +18647,19 @@ def _self_test_sbs2mvc_panel():
             assert cmd[cmd.index("--layout") + 1] == "full_sbs"
             assert cmd[cmd.index("--bitrate") + 1] == "20.0"
             assert "--gui-progress" in cmd and "--swap-eyes" not in cmd and "--no-audio-subs" not in cmd
-            assert "--fix-frame-rate" not in cmd
+            assert "--fix-frame-rate" not in cmd and "--convert-hdr-to-sdr" not in cmd
 
             frame.cbo_sbs2mvc_layout.SetSelection(3)
             frame.chk_sbs2mvc_swap.SetValue(True)
             frame.chk_sbs2mvc_restore_av.SetValue(False)
             frame.chk_sbs2mvc_fix_frame_rate.SetValue(True)
+            frame.chk_sbs2mvc_convert_hdr_to_sdr.SetValue(True)
             cmd, err = frame.build_sbs2mvc_command()
             assert cmd[cmd.index("--layout") + 1] == "half_tb"
             assert "--swap-eyes" in cmd and "--no-audio-subs" in cmd and "--fix-frame-rate" in cmd
+            assert "--convert-hdr-to-sdr" in cmd
             frame.chk_sbs2mvc_fix_frame_rate.SetValue(False)
+            frame.chk_sbs2mvc_convert_hdr_to_sdr.SetValue(False)
 
             # a 4K input entry is passed to the converter as the plain layout
             items = [frame.cbo_sbs2mvc_layout.GetClientData(i) for i in range(frame.cbo_sbs2mvc_layout.GetCount())]
@@ -18414,6 +18705,103 @@ def _self_test_sbs2mvc_panel():
         app.Destroy()
 
     print("_self_test_sbs2mvc_panel: PASS")
+
+
+def _self_test_hdr_to_sdr_panel():
+    """Convert HDR/DV to SDR standalone tool (built alongside ADR-222's SBS2MVC opt-in HDR
+    checkbox, per explicit user request -- 'could you also build an hdr/dv to sdr oiption under
+    standalone like the one we already have?'): widgets and defaults, command building and
+    validation, Run/Cancel/Clear lockstep, cancel cleanup. No encoder is used: startWorker is
+    monkeypatched, matching _self_test_sbs2mvc_panel's own pattern exactly."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.cpn_hdr_to_sdr.GetPane().GetName() == "cpn_hdr_to_sdr_pane"
+        assert frame.cpn_hdr_to_sdr in frame.get_standalone_tools_sliders_and_panes()
+        for name in ("txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output", "txt_hdr_to_sdr_log"):
+            assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        # 10-bit is the default -- this general-purpose tool has no 3D Blu-ray bit-depth
+        # constraint, unlike the SBS2MVC checkbox's own always-8-bit tonemap_hdr_to_sdr_for_bd.
+        assert frame.cbo_hdr_to_sdr_bit_depth.GetClientData(
+            frame.cbo_hdr_to_sdr_bit_depth.GetSelection()) == 10
+        assert frame.btn_hdr_to_sdr_run.IsEnabled() and not frame.btn_hdr_to_sdr_cancel.IsEnabled()
+
+        cmd, err = frame.build_hdr_to_sdr_command()
+        assert cmd is None and err, "empty input must be refused"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = path.join(tmpdir, "movie_hdr.mkv")
+            open(video, "wb").close()
+            frame.txt_hdr_to_sdr_input.SetValue(video)
+            cmd, err = frame.build_hdr_to_sdr_command()
+            assert cmd is None and err, "empty output must be refused"
+            out = path.join(tmpdir, "movie_sdr.mkv")
+            frame.txt_hdr_to_sdr_output.SetValue(video)
+            cmd, err = frame.build_hdr_to_sdr_command()
+            assert cmd is None and err, "output colliding with input must be refused"
+            frame.txt_hdr_to_sdr_output.SetValue(out)
+
+            cmd, err = frame.build_hdr_to_sdr_command()
+            assert err is None
+            assert cmd[1:3] == ["-m", "iw3.hdr_to_sdr_cli"], cmd
+            assert cmd[cmd.index("--input") + 1] == video and cmd[cmd.index("--output") + 1] == out
+            assert cmd[cmd.index("--bit-depth") + 1] == "10"
+            assert "--gui-progress" in cmd
+
+            # bit depth choice reaches the command
+            items = [frame.cbo_hdr_to_sdr_bit_depth.GetClientData(i)
+                     for i in range(frame.cbo_hdr_to_sdr_bit_depth.GetCount())]
+            frame.cbo_hdr_to_sdr_bit_depth.SetSelection(items.index(8))
+            cmd, err = frame.build_hdr_to_sdr_command()
+            assert cmd[cmd.index("--bit-depth") + 1] == "8", cmd
+            frame.cbo_hdr_to_sdr_bit_depth.SetSelection(items.index(10))
+
+            gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
+            frame.on_click_btn_hdr_to_sdr_run(None)
+            assert not frame.btn_hdr_to_sdr_run.IsEnabled() and not frame.btn_hdr_to_sdr_clear.IsEnabled()
+            assert frame.btn_hdr_to_sdr_cancel.IsEnabled()
+            frame.on_exit_hdr_to_sdr_worker(_FakeResult((0, "[hdr-to-sdr] done")))
+            assert frame.btn_hdr_to_sdr_run.IsEnabled() and frame.btn_hdr_to_sdr_clear.IsEnabled()
+            assert not frame.btn_hdr_to_sdr_cancel.IsEnabled()
+            assert "done" in frame.txt_hdr_to_sdr_log.GetValue()
+
+            # cancel cleanup: removes a partial output written during this run, never the input
+            open(out, "wb").close()
+            frame.hdr_to_sdr_start_time = time() - 5
+            frame.hdr_to_sdr_cancelled = True
+            frame.on_exit_hdr_to_sdr_worker(_FakeResult((1, "")))
+            assert not path.exists(out), "cancel must remove the partial output file"
+            assert path.exists(video), "the input video must never be touched"
+
+            # a real crash (empty output, negative returncode) must reach both the popup and log,
+            # via the same _describe_subprocess_failure honest-diagnosis path ADR-222 built
+            frame.hdr_to_sdr_cancelled = False
+            message_box_calls = []
+            orig_message_box = gui_mod.wx.MessageBox
+            gui_mod.wx.MessageBox = lambda *a, **kw: message_box_calls.append(a)
+            try:
+                frame.on_exit_hdr_to_sdr_worker(_FakeResult((-1073741819, "")))
+                assert "crashed" in message_box_calls[-1][0] and "access violation" in message_box_calls[-1][0]
+                assert "crashed" in frame.txt_hdr_to_sdr_log.GetValue()
+            finally:
+                gui_mod.wx.MessageBox = orig_message_box
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_hdr_to_sdr_panel: PASS")
 
 
 def _self_test_sbs2mvc_crash_diagnosis():
@@ -19910,6 +20298,100 @@ def _self_test_sbs2mvc_fix_frame_rate():
     print("_self_test_sbs2mvc_fix_frame_rate: PASS")
 
 
+def _self_test_sbs2mvc_convert_hdr_to_sdr():
+    """An HDR source to sbs_to_mvc_cli.convert(): by default still refused (3D Blu-ray/MVC
+    cannot carry HDR or Dolby Vision at all -- there is no combination of that format with
+    HDR10/HDR10+, and Dolby Vision's own 3D-capable profile, Profile 20/MV-HEVC, is a totally
+    different modern codec that today only the Apple Vision Pro can play); with
+    convert_hdr_to_sdr=True, the source is tone-mapped to SDR first (via
+    tonemap_hdr_to_sdr_for_bd), and everything downstream operates on that SDR file, proven by
+    reaching a deliberately induced downstream failure that only happens once hdr=False. Also
+    covers the real combination of BOTH opt-in fixes at once (HDR AND an off-rate source),
+    proven by both tonemap_hdr_to_sdr_for_bd and retime_to_bd_fps being called, in that order,
+    with retime operating on the ALREADY-tonemapped file."""
+    import contextlib
+    import tempfile
+    import types
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video = path.join(tmpdir, "movie.mkv")
+        open(video, "wb").close()
+        out_iso = path.join(tmpdir, "movie.iso")
+
+        def fake_tonemap(input_path, out_path, ffmpeg_bin, duration=None, stop_event=None, progress_cb=None):
+            open(out_path, "wb").write(b"x")
+
+        def fake_retime(input_path, out_path, rate, ffmpeg_bin, duration=None, stop_event=None, progress_cb=None):
+            open(out_path, "wb").write(b"x")
+            return -4.0
+
+        def enter_common(stack):
+            stack.enter_context(mock.patch.object(S, "find_frim", return_value="frim.exe"))
+            stack.enter_context(mock.patch.object(S, "_find_tsmuxer", return_value="tsmuxer.exe"))
+            stack.enter_context(mock.patch.object(S, "_get_ffmpeg_bin", return_value="ffmpeg.exe"))
+            stack.enter_context(mock.patch.object(S.shutil, "disk_usage",
+                                                   return_value=types.SimpleNamespace(free=0)))
+
+        # default: refused, no silent conversion, and tonemap_hdr_to_sdr_for_bd is never called
+        with contextlib.ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(mock.patch.object(S, "probe_video",
+                                                    return_value=(1920, 1080, "24/1", 2.0, True)))
+            m_tonemap = stack.enter_context(mock.patch.object(S, "tonemap_hdr_to_sdr_for_bd"))
+            try:
+                S.convert(video, out_iso, convert_hdr_to_sdr=False)
+                assert False, "must refuse an HDR source by default"
+            except RuntimeError as e:
+                assert "HDR" in str(e), e
+            assert not m_tonemap.called
+
+        # opted in: genuinely tone-mapped, then the REST of convert() runs on the SDR file --
+        # proven by reaching the (deliberately zeroed) disk-space check at all, which only
+        # happens once hdr=False on the second (post-tonemap) probe
+        probes = [(1920, 1080, "24/1", 2.0, True), (1920, 1080, "24/1", 2.0, False)]
+        with contextlib.ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(mock.patch.object(S, "probe_video", side_effect=probes))
+            m_tonemap = stack.enter_context(
+                mock.patch.object(S, "tonemap_hdr_to_sdr_for_bd", side_effect=fake_tonemap))
+            try:
+                S.convert(video, out_iso, convert_hdr_to_sdr=True)
+                assert False, "should have failed at the (deliberately zeroed) disk-space check"
+            except RuntimeError as e:
+                assert "free disk space" in str(e), e
+            assert m_tonemap.called
+            call_args = m_tonemap.call_args[0]
+            assert call_args[0] == video, "must tone-map FROM the original input"
+
+        # both opt-in fixes together: HDR AND off-rate -- tonemap runs first, retime runs on
+        # the already-tonemapped file (not the original), in that order. Three probes: the
+        # initial one (HDR, 25fps), the post-tonemap one (SDR, still 25fps -- tonemap doesn't
+        # touch frame rate), and the post-retime one (SDR, 24fps).
+        probes = [(1920, 1080, "25/1", 2.0, True), (1920, 1080, "25/1", 2.0, False),
+                  (1920, 1080, "24/1", 2.125, False)]
+        with contextlib.ExitStack() as stack:
+            enter_common(stack)
+            stack.enter_context(mock.patch.object(S, "probe_video", side_effect=probes))
+            m_tonemap = stack.enter_context(
+                mock.patch.object(S, "tonemap_hdr_to_sdr_for_bd", side_effect=fake_tonemap))
+            m_retime = stack.enter_context(mock.patch.object(S, "retime_to_bd_fps", side_effect=fake_retime))
+            try:
+                S.convert(video, out_iso, convert_hdr_to_sdr=True, fix_frame_rate=True)
+                assert False, "should have failed at the (deliberately zeroed) disk-space check"
+            except RuntimeError as e:
+                assert "free disk space" in str(e), e
+            assert m_tonemap.called and m_retime.called
+            tonemap_input = m_tonemap.call_args[0][0]
+            retime_input = m_retime.call_args[0][0]
+            assert tonemap_input == video, "tonemap must run on the ORIGINAL input"
+            assert path.basename(retime_input) == "tonemapped_sdr.mkv", \
+                f"retime must run on the ALREADY-tonemapped file, not the original: {retime_input}"
+
+    print("_self_test_sbs2mvc_convert_hdr_to_sdr: PASS")
+
+
 def _self_test_standalone_tool_titles_share_accent_colour():
     """Every Standalone Tools group title uses the same accent (blue) colour as the first tools,
     in both themes -- a title left at the default black is unreadable on the dark theme. The tools
@@ -20098,6 +20580,7 @@ def _run_self_tests():
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
+        _self_test_hdr_to_sdr_panel,
         _self_test_sbs2mvc_crash_diagnosis,
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,
@@ -20105,6 +20588,7 @@ def _run_self_tests():
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_fix_frame_rate,
+        _self_test_sbs2mvc_convert_hdr_to_sdr,
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,

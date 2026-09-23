@@ -1572,8 +1572,17 @@ def _tonemap_hdr_to_sdr(input_filename, args):
     try:
         subprocess.run(
             [ffmpeg_bin, "-y", *trim_args, "-i", str(input_filename),
+             # dither=error_diffusion on the final zscale call (not the trailing format= filter,
+             # which has no dither option of its own -- zscale negotiates output format with it
+             # and applies dithering during that conversion) avoids visible banding in
+             # skies/gradients from the otherwise-undithered bit-depth-reducing truncation;
+             # sidedata=delete strips leftover per-frame HDR side-data (mastering
+             # display/content-light-level, Dolby Vision RPU) that tonemapping the pixels alone
+             # doesn't remove -- confirmed against community-documented working ffmpeg
+             # HDR-to-SDR pipelines, same fix applied to iw3.sbs_to_mvc_cli's own tonemap chain.
              "-vf", "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
-                    "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p10le",
+                    "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,"
+                    "format=yuv420p10le,sidedata=delete",
              "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "12",
              "-c:a", "copy", tmp_sdr],
             check=True, capture_output=True,

@@ -179,15 +179,15 @@ def _parse_ffmpeg_out_time(s):
     return int(h) * 3600 + int(m) * 60 + float(sec)
 
 
-def _retime_video_codec_args():
+def _intermediate_video_codec_args():
     """hevc_nvenc (GPU) when this machine has it, same convention already used elsewhere in this
     project (iw3.utils._hdr_upscale_codec/_sdr_upscale_codec: probe via PyAV, confirm CUDA too) and
     the same rc/qp quality-control flags make_video_codec_option() already uses for NVENC (NVENC
-    ignores -crf; constqp+qp is the correct equivalent). Falls back to CPU libx264 -- this is a
-    temporary intermediate file re-encoded again by FRIM right afterward, so "faster" (not
+    ignores -crf; constqp+qp is the correct equivalent). Falls back to CPU libx264 -- these are
+    temporary intermediate files re-encoded again by FRIM right afterward, so "faster" (not
     "medium") costs no real quality (CRF/QP already fixes the quality target) while cutting real
-    wall-clock time noticeably, which matters here since this step has no natural frame-count-based
-    progress the way FRIM's own step does."""
+    wall-clock time noticeably, which matters since neither of these pre-processing steps has a
+    natural frame-count-based progress the way FRIM's own step does."""
     try:
         import av
         av.codec.Codec("hevc_nvenc", "w")
@@ -199,31 +199,16 @@ def _retime_video_codec_args():
     return ["-c:v", "libx264", "-crf", "16", "-preset", "faster"]
 
 
-def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, duration=None,
-                      stop_event=None, progress_cb=None):
-    """Genuinely re-times input_path -- video, audio (pitch-preserved) and subtitles together --
-    to whichever of 23.976/24 fps is numerically closer to its real rate, so the result passes
-    bd_frame_rate(). This is a real speed change (like the classic PAL/NTSC conversion), not a
-    frame-rate relabel: relabeling alone would just duplicate/drop frames (judder) instead of
-    retiming them. Returns the percent speed change applied (negative = slower).
-
-    duration (the source's own length in seconds, if known) drives real progress_cb("retime",
-    done_seconds, total_seconds) updates parsed from ffmpeg's own -progress output as this runs --
-    re-encoding a whole movie's video can take a long time, and with nothing but a single
-    progress_cb("retime", 0, 0) call before starting (the original version of this), a real user
-    watching an indeterminate spinner for 20+ minutes reasonably assumed the app had hung."""
-    num, den = (source_rate_string.split("/") + ["1"])[:2]
-    source_fps = float(num) / float(den)
-    fps_text, fps_frac, target_fps = _nearest_bd_fps(source_fps)
-    tempo = target_fps / source_fps      # audio speed factor: <1 slower, >1 faster
-    stretch = 1.0 / tempo                # video/subtitle timestamp multiplier (same direction)
-    total_out_seconds = duration * stretch if duration else None
-
-    cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
-           "-itsscale:s", f"{stretch:.6f}", "-i", input_path, "-map", "0",
-           "-vf", f"setpts={stretch:.6f}*PTS", "-filter:a", _atempo_chain(tempo),
-           "-r", fps_frac] + _retime_video_codec_args() + [
-           "-c:a", "aac", "-b:a", "384k", "-c:s", "copy", out_path]
+def _run_ffmpeg_stage(cmd, out_path, stage, total_out_seconds, stop_event, progress_cb, error_prefix):
+    """Runs an ffmpeg command that already includes -progress pipe:1 (the caller builds `cmd`),
+    streaming real progress_cb(stage, done_seconds, total_seconds) updates parsed from its
+    out_time= lines as it runs -- shared by every long-running pre-processing pass this module
+    needs (retime_to_bd_fps, tonemap_hdr_to_sdr_for_bd) instead of duplicating the same
+    subprocess/thread/cancel plumbing in each one. Real user report that drove this: the original
+    version of retime_to_bd_fps() called progress_cb once before starting and nothing again until
+    it finished or failed, so a user watching an indeterminate spinner for 20+ minutes on a real
+    movie reasonably assumed the app had hung. Raises Cancelled() on stop_event, or
+    RuntimeError(error_prefix + ffmpeg's own stderr tail) on failure."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     err_tail = []
 
@@ -240,7 +225,7 @@ def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, durat
                     done = min(_parse_ffmpeg_out_time(line.split("=", 1)[1]), total_out_seconds)
                 except ValueError:
                     continue
-                progress_cb("retime", done, total_out_seconds)
+                progress_cb(stage, done, total_out_seconds)
 
     stderr_reader = threading.Thread(target=_read_stderr, daemon=True)
     stdout_reader = threading.Thread(target=_read_stdout, daemon=True)
@@ -257,11 +242,88 @@ def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, durat
     stderr_reader.join()
     stdout_reader.join()
     if proc.returncode != 0 or not (path.exists(out_path) and path.getsize(out_path) > 0):
-        raise RuntimeError("could not re-time the video to a 3D Blu-ray-legal frame rate:\n"
-                           + "".join(err_tail)[-600:])
+        raise RuntimeError(error_prefix + "".join(err_tail)[-600:])
     if progress_cb and total_out_seconds:
-        progress_cb("retime", total_out_seconds, total_out_seconds)
+        progress_cb(stage, total_out_seconds, total_out_seconds)
+
+
+def retime_to_bd_fps(input_path, out_path, source_rate_string, ffmpeg_bin, duration=None,
+                      stop_event=None, progress_cb=None):
+    """Genuinely re-times input_path -- video, audio (pitch-preserved) and subtitles together --
+    to whichever of 23.976/24 fps is numerically closer to its real rate, so the result passes
+    bd_frame_rate(). This is a real speed change (like the classic PAL/NTSC conversion), not a
+    frame-rate relabel: relabeling alone would just duplicate/drop frames (judder) instead of
+    retiming them. Returns the percent speed change applied (negative = slower)."""
+    num, den = (source_rate_string.split("/") + ["1"])[:2]
+    source_fps = float(num) / float(den)
+    fps_text, fps_frac, target_fps = _nearest_bd_fps(source_fps)
+    tempo = target_fps / source_fps      # audio speed factor: <1 slower, >1 faster
+    stretch = 1.0 / tempo                # video/subtitle timestamp multiplier (same direction)
+    total_out_seconds = duration * stretch if duration else None
+
+    cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+           "-itsscale:s", f"{stretch:.6f}", "-i", input_path, "-map", "0",
+           "-vf", f"setpts={stretch:.6f}*PTS", "-filter:a", _atempo_chain(tempo),
+           "-r", fps_frac] + _intermediate_video_codec_args() + [
+           "-c:a", "aac", "-b:a", "384k", "-c:s", "copy", out_path]
+    _run_ffmpeg_stage(cmd, out_path, "retime", total_out_seconds, stop_event, progress_cb,
+                      "could not re-time the video to a 3D Blu-ray-legal frame rate:\n")
     return (tempo - 1.0) * 100.0
+
+
+# Same zscale+tonemap filter chain as iw3.utils._tonemap_hdr_to_sdr (proven, already used by
+# iw3's own main pipeline) -- linearize the PQ/HLG curve, tonemap (Hable operator) into BT.709,
+# then re-apply the BT.709 transfer curve for a normal SDR signal. That function's own output
+# stays 10-bit (its consumer, iw3's depth pipeline, has no reason to throw bit depth away).
+#
+# Two real fixes on top of that base chain (confirmed against community-documented working
+# ffmpeg HDR-to-SDR pipelines, not guessed): (1) `dither=error_diffusion` on the final zscale
+# call -- without it, the actual bit-depth-reducing step (still 16+ bits of internal precision
+# down to 8, or even 10) is a bare truncation with no noise-shaping, which is what produces
+# visible banding in skies/gradients/dark scenes, exactly the real complaint this was built to
+# fix. zscale negotiates its own output format with the adjacent `format=` filter that follows
+# it, so `dither=` on zscale actually governs that conversion -- the trailing `format=` filter
+# is still required (zscale has no format option of its own), just no longer undithered.
+# (2) `sidedata=delete` at the very end strips leftover per-frame HDR side-data (mastering
+# display / content-light-level metadata, Dolby Vision RPU) that tonemapping the PIXELS alone
+# does not remove -- without it, a player or tool that reads frame side-data rather than just
+# the stream-level color_transfer tag this module's own probe_video() checks could still treat
+# the output as HDR and apply its own (now-double) tonemap, washing the picture out.
+def _hdr_to_sdr_filter(bit_depth):
+    fmt = "yuv420p10le" if bit_depth == 10 else "yuv420p"
+    return (f"zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+            f"tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,"
+            f"format={fmt},sidedata=delete")
+
+
+def tonemap_hdr_to_sdr(input_path, out_path, ffmpeg_bin, codec_args, bit_depth=8, audio_args=None,
+                       duration=None, stop_event=None, progress_cb=None, stage="tonemap"):
+    """General HDR (PQ/HLG -- HDR10, HDR10+, or Dolby Vision's base layer) to SDR conversion,
+    parameterized by the caller's own choice of output codec/quality (codec_args) and bit depth
+    (8 or 10 -- 10-bit SDR is a real, legitimate choice for general use, it just isn't a legal
+    3D Blu-ray input; see tonemap_hdr_to_sdr_for_bd for that specific, hard-capped-at-8-bit
+    case). This is a real, one-way change to the picture (the HDR grade is genuinely gone
+    afterward, tone-mapped down to a normal range), not just a metadata strip."""
+    cmd = ([ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+            "-i", input_path, "-map", "0", "-vf", _hdr_to_sdr_filter(bit_depth)] + codec_args +
+           (audio_args or ["-c:a", "copy"]) + ["-c:s", "copy", out_path])
+    _run_ffmpeg_stage(cmd, out_path, stage, duration, stop_event, progress_cb,
+                      "could not convert the HDR video to SDR:\n")
+
+
+def tonemap_hdr_to_sdr_for_bd(input_path, out_path, ffmpeg_bin, duration=None,
+                               stop_event=None, progress_cb=None):
+    """Converts an HDR (PQ/HLG, e.g. HDR10 or Dolby Vision) source to plain 8-bit SDR, since
+    3D Blu-ray (MVC) cannot carry HDR or Dolby Vision at all -- there is no combination of the
+    classic MVC/H.264 3D Blu-ray format with HDR10/HDR10+, and Dolby Vision's own 3D-capable
+    profile (Profile 20, MV-HEVC) is a completely different, modern codec that today only the
+    Apple Vision Pro can play -- no 3D Blu-ray player, PowerDVD, or TV supports it, and no
+    physical Blu-ray disc has ever shipped with it. 8-bit specifically because BD-ROM (including
+    3D/MVC) is hard-capped at 8-bit H.264 High Profile -- there is no 10-bit extension to that
+    format, unlike UHD Blu-ray (which supports neither MVC nor 3D at all)."""
+    tonemap_hdr_to_sdr(input_path, out_path, ffmpeg_bin, _intermediate_video_codec_args(), bit_depth=8,
+                       audio_args=["-c:a", "copy"], duration=duration, stop_event=stop_event,
+                       progress_cb=progress_cb, stage="tonemap")
 
 
 def guess_layout(width, height):
@@ -392,11 +454,15 @@ def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av, 
 
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
-            stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False):
+            stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False,
+            convert_hdr_to_sdr=False):
     """Full job. Returns the number of frames encoded. progress_cb(stage, done, total),
-    stage in {"retime", "autocrop", "encode", "mux"}. fix_frame_rate: if the source isn't
-    23.976/24fps, re-time the whole movie (video+audio+subtitles) to the nearer one instead of
-    refusing -- opt-in only, since it's a real (if usually tiny) speed change."""
+    stage in {"tonemap", "retime", "autocrop", "encode", "mux"}. fix_frame_rate: if the source
+    isn't 23.976/24fps, re-time the whole movie (video+audio+subtitles) to the nearer one instead
+    of refusing -- opt-in only, since it's a real (if usually tiny) speed change.
+    convert_hdr_to_sdr: if the source is HDR (HDR10/Dolby Vision/HLG), tone-map it to plain SDR
+    instead of refusing -- opt-in only, since the HDR grade is genuinely gone afterward (3D
+    Blu-ray/MVC cannot carry HDR at all, so there is no way to keep it either way)."""
     frim = find_frim()
     tsmuxer = _find_tsmuxer()
     ffmpeg = _get_ffmpeg_bin()
@@ -414,7 +480,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
 
     width, height, rate, duration, hdr = probe_video(input_path)
-    if hdr:
+    if hdr and not convert_hdr_to_sdr:
         raise RuntimeError("HDR video is not supported for 3D Blu-ray here -- convert it to SDR first")
     if layout in ("full_sbs", "half_sbs") and (width < 2 or width % 2):
         raise ValueError("a side-by-side video needs an even width")
@@ -426,13 +492,28 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     created_work = not path.isdir(work_dir)
     os.makedirs(work_dir, exist_ok=True)
 
+    tonemapped_path = None
+    if hdr:
+        if progress_cb:
+            progress_cb("tonemap", 0, 0)
+        tonemapped_path = path.join(work_dir, "tonemapped_sdr.mkv")
+        tonemap_hdr_to_sdr_for_bd(input_path, tonemapped_path, ffmpeg, duration=duration,
+                                  stop_event=stop_event, progress_cb=progress_cb)
+        print("[sbs2mvc] note: source is HDR (HDR10/Dolby Vision/HLG); converted to SDR before "
+              "continuing -- 3D Blu-ray cannot carry HDR at all, so the HDR grade is genuinely "
+              "gone in this file", file=sys.stderr)
+        input_path = tonemapped_path
+        width, height, rate, duration, hdr = probe_video(input_path)
+
     retimed_path = None
     try:
         fps_text, fps_frac = bd_frame_rate(rate)
     except ValueError:
         if not fix_frame_rate:
             if created_work:
-                os.rmdir(work_dir)
+                # rmtree, not rmdir: tonemapped_sdr.mkv may already be sitting in here if
+                # convert_hdr_to_sdr ran above, so the directory isn't necessarily empty.
+                shutil.rmtree(work_dir, ignore_errors=True)
             raise
         if progress_cb:
             progress_cb("retime", 0, 0)
@@ -584,7 +665,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
             if created_work:
                 shutil.rmtree(work_dir, ignore_errors=True)
             else:
-                for leftover in (base_es, dep_es, meta_path, ffmpeg_log, retimed_path):
+                for leftover in (base_es, dep_es, meta_path, ffmpeg_log, retimed_path, tonemapped_path):
                     if leftover is None:
                         continue
                     try:
@@ -610,6 +691,10 @@ def main():
                         help="if the source isn't 23.976/24fps, re-time the whole movie (picture, sound "
                              "and subtitles together) to the nearer one instead of refusing -- this is a "
                              "real, if usually small, speed change, so it is opt-in, never automatic")
+    parser.add_argument("--convert-hdr-to-sdr", action="store_true",
+                        help="if the source is HDR (HDR10/Dolby Vision/HLG), tone-map it to plain SDR "
+                             "instead of refusing -- 3D Blu-ray cannot carry HDR at all, so this is a real, "
+                             "one-way loss of the HDR grade, so it is opt-in, never automatic")
     parser.add_argument("--cut-seconds", type=float, default=None, help="only convert the first N seconds")
     parser.add_argument("--work-dir", default=None)
     parser.add_argument("--keep-temp", action="store_true")
@@ -632,7 +717,8 @@ def main():
         frames = convert(args.input, args.output, layout=layout, bitrate_mbps=args.bitrate,
                          swap_eyes=args.swap_eyes, include_av=not args.no_audio_subs,
                          work_dir=args.work_dir, cut_seconds=args.cut_seconds, keep_temp=args.keep_temp,
-                         progress_cb=show, autocrop=args.autocrop, fix_frame_rate=args.fix_frame_rate)
+                         progress_cb=show, autocrop=args.autocrop, fix_frame_rate=args.fix_frame_rate,
+                         convert_hdr_to_sdr=args.convert_hdr_to_sdr)
     except Cancelled:
         print("\n[sbs2mvc] cancelled", file=sys.stderr)
         return 1

@@ -1135,6 +1135,50 @@ issue.
 before, test `--depth-aa` off next (cheapest remaining candidate). If that doesn't
 help, test `forward_inpaint` as the method. Change one variable at a time.
 
+### Hocus Pocus — user-designated "best of today" (2026-09-23): Auto 3D Strength (cuts) + constant Convergence
+
+User's own words: "i am liking this one so far because gives some boost pop out."
+First real test combining the new Auto 3D Strength `cuts` mode (a per-scene
+3D Strength decided from shot framing, held steady until the next cut) with a plain
+fixed Convergence value, rather than one of the auto-convergence modes. Filename
+(tags decoded — `--metadata filename`, no post-steps: no RIFE/waifu2x/Restore A&S
+this run):
+
+```
+Any_V3_Metric_Large, res 648, mlbw_l2_inpaint
+3D Strength (typical) 2.8, Auto 3D Strength ON: mode=cuts, range 2.8-5.5, stability=low, debug overlay ON
+Convergence: constant, 0.2
+Edge Fix 1/1 (lower than the established 3/2 baseline)
+Foreground Scale 1.0
+Midground Pop -0.20, threshold 0%-65% (established baseline trial was -0.25, 0%-85%)
+Pop Feather 0.10 (baseline: 0.15)
+Pop-Out Boost 1.25
+Protect Faces: OFF (baseline: 0.5)
+Edge Repair: OFF (baseline: 0.3)
+IPD 0, EMA decay 0.99 / buffer 650, Depth Refine 1.25
+Inpaint model light_inpaint_v1, Preserve Screen Border on
+Sharpen 1.0, Stereo Mode Tag on, CRF 15, Half SBS
+```
+
+**Two things worth knowing before calling this "the" new baseline:**
+1. **The debug overlay was ON** (`dbg` in the filename) — the "3D X.X" strength
+   number is burned into the top-left corner of every frame in this test file. Fine
+   for evaluating the *effect*, but turn "Show strength on video (debug)" off before
+   any run meant to be watched for real.
+2. **Auto Stability was `low`**, not the default `medium` — settles faster and reacts
+   to smaller framing changes than the default would. Some of the "boost" feel here
+   may be partly attributable to `low` stability reacting more eagerly per scene, not
+   only the `cuts` mode itself or the min/max range — worth a follow-up test at
+   `medium` stability, all else equal, to isolate which is doing the work.
+
+Several other settings also moved from the established baseline in the same run
+(Edge Fix 1/1 vs 3/2, Face Protect off vs 0.5, Edge Repair off vs 0.3, Midground Pop
+threshold 0-65% vs 0-85%) — so this result is not a clean single-variable test of
+Auto 3D Strength alone; several things changed at once. Worth isolating Auto 3D
+Strength on its own (cuts, medium stability, everything else at the established
+baseline) as the next real test if the goal is to know specifically how much of the
+"boost pop-out" feel comes from Auto 3D Strength itself.
+
 ---
 
 ## 7. Troubleshooting: Smearing & Bleeding

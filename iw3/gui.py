@@ -5758,9 +5758,11 @@ class MainFrame(wx.Frame):
               "the source once you pick one.\n"
               "Con: the job also needs a temporary folder (created next to this file and deleted when "
               "done) holding about 75% of the movie's size on the disc -- roughly 25 GB for a full "
-              "feature (the Lossless ISO layout needs no temporary folder, just room for the ISO itself). "
-              "Choose a drive with that much free space; the tool refuses to start if there "
-              "isn't enough."))
+              "feature (the Lossless ISO layout needs no temporary folder, just room for the ISO itself; "
+              "the Lossless MVC .mkv layout needs MORE than the re-encoded layouts, roughly 150% of the "
+              "movie's size, since it briefly keeps both the two separately demuxed streams and the "
+              "combined stream built from them). Choose a drive with that much free space; the tool "
+              "refuses to start if there isn't enough."))
         self.btn_bluray_output = wx.Button(self.cpn_bluray.GetPane(), label=T("..."))
 
         self.lbl_bluray_layout = wx.StaticText(self.cpn_bluray.GetPane(), label=T("3D Layout"))
@@ -5778,6 +5780,8 @@ class MainFrame(wx.Frame):
         self.cbo_bluray_layout.Append(T("Frame Packed (auto-detected by TVs, H.264 only)"), "frame_packed")
         self.cbo_bluray_layout.Append(
             T("Lossless 3D Blu-ray ISO (no re-encode, for 3D Blu-ray players / PowerDVD)"), "bd3d_iso")
+        self.cbo_bluray_layout.Append(
+            T("Lossless MVC .mkv (no re-encode, for MakeMKV/CloneBD-style 3D libraries)"), "mvc_mkv")
         self.cbo_bluray_layout.SetSelection(0)
         self.cbo_bluray_layout.SetToolTip(
             T("What it's for: how the left-eye and right-eye pictures are arranged in the output video.\n"
@@ -5806,11 +5810,22 @@ class MainFrame(wx.Frame):
               "layouts for those. About 25-34 GB for a full movie (much bigger than the other options). "
               "Subtitle depth: whether disc subtitles keep their 3D depth in a 3D player has not been "
               "verified.\n"
+              "Lossless MVC .mkv: NOT a video file iw3 or a normal player can watch either -- the disc's own "
+              "two-view 3D video (no re-encode, zero quality loss) written as a plain .mkv holding the real "
+              "MVC stream, plus every audio and subtitle track, with no disc structure around it. This is "
+              "what a library built around MakeMKV/CloneBD-style '3D MVC' rips expects -- a real MVC-aware "
+              "player's own decoder (e.g. Kodi with MVC-capable hardware decode) reconstructs both eyes from "
+              "this one file at playback time. Codec and Quality do not apply and are greyed out.\n"
+              "Con: needs real MVC support in your player -- VLC, MPC-HC and most TVs cannot play this "
+              "format at all (not even flat/2D) -- use one of the other layouts for those. About 20-30 GB "
+              "for a full movie. Not confirmed end-to-end in a real MVC-capable player as of this build; if "
+              "it doesn't play for you, the Lossless ISO or a flat layout above are the proven options.\n"
               "Con: Full 4K layouts make very wide/tall frames (Full Side-by-Side 4K is 7680x2160), which "
               "many players, TVs and hardware decoders cannot handle -- prefer a Half 4K layout if it "
               "doesn't play. 4K files are also much bigger and slower to encode.\n"
               "Recommended: Full Side-by-Side for everyday watching; the Lossless ISO for archiving or a "
-              "3D Blu-ray player."))
+              "3D Blu-ray player; Lossless MVC .mkv only if your own library/player is already built around "
+              "real MVC files."))
 
         self.lbl_bluray_autocrop = wx.StaticText(self.cpn_bluray.GetPane(), label=T("Auto-crop"))
         self.cbo_bluray_autocrop = wx.ComboBox(self.cpn_bluray.GetPane(), name="cbo_bluray_autocrop")
@@ -12962,6 +12977,11 @@ class MainFrame(wx.Frame):
     def _bluray_is_iso_layout(self):
         return self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection()) == "bd3d_iso"
 
+    def _bluray_is_lossless_layout(self):
+        # bd3d_iso AND mvc_mkv both copy the disc's own video untouched -- no re-encode,
+        # so Codec/Quality/Auto-crop don't apply to either one (see on_changed_bluray_layout).
+        return self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection()) in ("bd3d_iso", "mvc_mkv")
+
     def _bluray_output_ext(self):
         return ".iso" if self._bluray_is_iso_layout() else ".mkv"
 
@@ -12998,12 +13018,14 @@ class MainFrame(wx.Frame):
                 self.txt_bluray_output.SetValue(dlg.GetPath())
 
     def on_changed_bluray_layout(self, event):
-        # The lossless ISO has no re-encode: Codec/Quality don't apply, and the output
-        # is an .iso instead of an .mkv (swap the extension of an already-filled path).
+        # Both lossless layouts (bd3d_iso, mvc_mkv) have no re-encode: Codec/Quality/
+        # Auto-crop don't apply to either. Only bd3d_iso changes the output extension
+        # to .iso -- mvc_mkv is still a plain .mkv, just like the re-encoded layouts.
         is_iso = self._bluray_is_iso_layout()
-        self.cbo_bluray_codec.Enable(not is_iso)
-        self.txt_bluray_quality.Enable(not is_iso)
-        self.cbo_bluray_autocrop.Enable(not is_iso)
+        is_lossless = self._bluray_is_lossless_layout()
+        self.cbo_bluray_codec.Enable(not is_lossless)
+        self.txt_bluray_quality.Enable(not is_lossless)
+        self.cbo_bluray_autocrop.Enable(not is_lossless)
         current = self.txt_bluray_output.GetValue().strip()
         old_ext, new_ext = (".mkv", ".iso") if is_iso else (".iso", ".mkv")
         if current.lower().endswith(old_ext):
@@ -13019,13 +13041,17 @@ class MainFrame(wx.Frame):
     def _update_bluray_progress(self, stage, done, total):
         # Called via wx.CallAfter from run_bluray's background thread -- never touch
         # these widgets from that thread.
+        layout = self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection())
+        mux_label = {"bd3d_iso": T("Copying to 3D Blu-ray ISO"),
+                    "mvc_mkv": T("Writing the MVC .mkv")}.get(layout, T("Muxing"))
         names = {"mount": T("Opening the disc"), "demux": T("Reading the disc"),
                  "scan": T("Preparing frames"), "encode": T("Converting"),
                  "autocrop": T("Looking for black bars"),
-                 "mux": T("Copying to 3D Blu-ray ISO"),
+                 "interleave": T("Rebuilding the real 3D video stream"),
+                 "mux": mux_label,
                  "restore": T("Adding audio and subtitles")}
         name = names.get(stage, stage)
-        if total > 0 and stage in ("demux", "encode", "mux"):
+        if total > 0 and stage in ("demux", "encode", "mux", "interleave"):
             self.gauge_bluray.SetRange(int(total))
             self.gauge_bluray.SetValue(int(min(done, total)))
             percent = min(100, int(done / total * 100))
@@ -13132,17 +13158,18 @@ class MainFrame(wx.Frame):
         wanted_ext = self._bluray_output_ext()
         if path.splitext(output_path)[1].lower() != wanted_ext:
             return None, T("Output File must end in %s.") % wanted_ext
-        if not self._bluray_is_iso_layout() and not validate_number(
+        if not self._bluray_is_lossless_layout() and not validate_number(
                 self.txt_bluray_quality.GetValue(), 0, 51, allow_empty=False):
             return None, T("Quality must be a number between 0 and 51 (18 recommended).")
         layout = self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection())
         codec = self.cbo_bluray_codec.GetClientData(self.cbo_bluray_codec.GetSelection())
+        is_lossless = self._bluray_is_lossless_layout()
         cmd = [sys.executable, "-m", "iw3.mvc_extract_cli", "--disc", disc, "--output", output_path,
                "--layout", layout, "--video-codec", codec,
-               "--quality", str(int(float(self.txt_bluray_quality.GetValue() or "18") if not self._bluray_is_iso_layout() else 18)),
+               "--quality", str(int(float(self.txt_bluray_quality.GetValue() or "18") if not is_lossless else 18)),
                "--gui-progress"]
         autocrop = self.cbo_bluray_autocrop.GetClientData(self.cbo_bluray_autocrop.GetSelection())
-        if autocrop and layout != "bd3d_iso":
+        if autocrop and not is_lossless:
             cmd += ["--autocrop", autocrop]
         if not self.chk_bluray_restore_av.GetValue():
             cmd.append("--no-audio-subs")
@@ -18862,7 +18889,7 @@ def _self_test_bluray_import_panel():
                 [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())].index(value))
         assert [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())] == \
             ["full_sbs", "half_sbs", "full_tb", "half_tb", "full_sbs_4k", "half_sbs_4k", "full_tb_4k",
-             "half_tb_4k", "frame_packed", "bd3d_iso"]
+             "half_tb_4k", "frame_packed", "bd3d_iso", "mvc_mkv"]
         assert layout_of() == "full_sbs" and codec_of() == "hevc_nvenc"
         assert frame.txt_bluray_quality.GetValue() == "18"
         assert frame.chk_bluray_restore_av.GetValue() is True
@@ -18952,6 +18979,27 @@ def _self_test_bluray_import_panel():
             frame.on_changed_bluray_layout(None)
             assert frame.cbo_bluray_codec.IsEnabled() and frame.txt_bluray_quality.IsEnabled()
             assert frame.txt_bluray_output.GetValue().endswith(".mkv")
+
+            # Lossless MVC .mkv (ADR-241): codec/quality/auto-crop disabled like the ISO
+            # layout, but the output extension stays .mkv (no swap, unlike bd3d_iso) and
+            # an .iso output is refused just like every other .mkv-producing layout.
+            pick("mvc_mkv")
+            frame.cbo_bluray_autocrop.SetSelection(1)
+            frame.on_changed_bluray_layout(None)
+            assert not frame.cbo_bluray_codec.IsEnabled() and not frame.txt_bluray_quality.IsEnabled()
+            assert not frame.cbo_bluray_autocrop.IsEnabled()
+            assert frame.txt_bluray_output.GetValue().endswith(".mkv"), \
+                "mvc_mkv must stay a .mkv output, unlike bd3d_iso"
+            cmd, err = frame.build_bluray_command()
+            assert err is None and cmd[cmd.index("--layout") + 1] == "mvc_mkv", (cmd, err)
+            assert "--autocrop" not in cmd, "auto-crop must never reach the command for a lossless layout"
+            frame.txt_bluray_output.SetValue(iso_out)
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err, "an .iso output must be refused in Lossless MVC .mkv mode"
+            frame.txt_bluray_output.SetValue(out)
+            frame.cbo_bluray_autocrop.SetSelection(0)
+            pick("full_sbs")
+            frame.on_changed_bluray_layout(None)
 
             # Run/Cancel/Clear lockstep, driven through the real handlers
             pick("full_sbs")

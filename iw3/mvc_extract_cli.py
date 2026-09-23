@@ -41,7 +41,7 @@ import sys
 import threading
 from os import path
 
-from .utils import _find_tsmuxer, _find_edge264_mvc, _get_ffmpeg_bin
+from .utils import _find_tsmuxer, _find_edge264_mvc, _get_ffmpeg_bin, _find_mkvmerge
 
 
 def _find_video_track(mpls_or_m2ts_path, tsmuxer_bin):
@@ -626,6 +626,149 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
                 pass
 
 
+MVC_MKV_LAYOUT = "mvc_mkv"
+
+
+def mux_lossless_mvc_mkv(ssif_path, avc_track, mvc_track, out_mkv, include_av=True, cut_start="0s",
+                         cut_end=None, work_dir=None, keep_temp=False, stop_event=None, progress_cb=None):
+    """Lossless copy, matching what MakeMKV/CloneBD produce from a real 3D Blu-ray:
+    the disc's own base+dependent MVC video, re-interleaved into ONE real combined
+    MVC elementary stream (the exact same reconstruction extract_and_decode() builds
+    before decoding it -- see interleave_mvc()'s docstring for why tsMuxeR alone
+    can't produce this form), muxed directly into a plain .mkv with NO decode and NO
+    re-encode. A real MVC-aware player's own H.264 decoder (not this tool) does the
+    actual stereo reconstruction at playback time -- exactly like a disc ripped with
+    MakeMKV/CloneBD's own "MVC" option, for a library that (unlike this project's own
+    default SBS/TB outputs) plays real MVC files directly.
+
+    Real user request: someone already using this tool's Lossless 3D Blu-ray ISO
+    layout was separately re-ripping that ISO with MakeMKV/CloneBD themselves just to
+    get an MVC .mkv for their library, then having to manually re-mux it with a
+    source file's audio because the ISO (before ADR-239) had none. This layout does
+    that whole job directly, in one step, video AND audio/subtitles together.
+
+    NOT verified end to end against a real disc in a real MVC-capable player this
+    session (no 3D Blu-ray source was available to test with). What IS confirmed
+    directly: mkvmerge accepts a plain H.264 elementary stream as an ordinary file
+    argument (not stdin -- tested directly, mkvmerge has no stdin support at all,
+    contrary to the first assumption) and produces a working container from it, using
+    the exact `--default-duration <TID>:<fps>` idiom already proven elsewhere in this
+    codebase (see nunif/utils/video/processor.py's _remux_injected_hevc, which mixes
+    a raw elementary stream with pre-existing audio the same way). What is NOT
+    confirmed: whether mkvmerge also carries the MVC extension NAL units (subset SPS
+    type 15, coded slice extension type 20) through untouched rather than stripping
+    or choking on them, since only a real disc's genuine MVC bitstream contains them
+    -- flagged here and to the user; needs a real disc and a real MVC-capable player
+    (e.g. Kodi with MVC-aware hardware decode) to fully confirm.
+
+    progress_cb(stage, done, total), stage in {"demux", "interleave", "mux",
+    "restore"}; stop_event (threading.Event) cancels cleanly."""
+    tsmuxer_bin = _find_tsmuxer()
+    mkvmerge_bin = _find_mkvmerge()
+    if tsmuxer_bin is None:
+        raise RuntimeError("tsMuxeR not found -- run `python -m iw3.install_mvc_tools`")
+    if mkvmerge_bin is None:
+        raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
+    if path.splitext(out_mkv)[1].lower() != ".mkv":
+        raise ValueError("the lossless MVC output must be saved as an .mkv file")
+
+    from .sbs_to_mvc_cli import probe_video
+    stem = path.splitext(path.basename(ssif_path))[0]
+    # the disc's normal 2D-compatible clip sits one folder above SSIF/ (see
+    # _restore_disc_av's own docstring) -- unlike the raw demuxed elementary streams,
+    # it has real container-level timing this tool can trust for the combined
+    # stream's frame rate (a 3D Blu-ray's dependent view always shares the base
+    # view's frame rate, so probing either clip gives the same real answer).
+    m2ts = path.join(path.dirname(path.dirname(path.abspath(ssif_path))), stem + ".m2ts")
+    if not path.exists(m2ts):
+        raise RuntimeError(f"{m2ts} not found -- can't determine the disc's real frame rate")
+    _, _, rate, _, _ = probe_video(m2ts)
+    try:
+        num, den = rate.split("/")
+        fps_str = f"{int(num) / int(den):.6f}fps"
+    except (ValueError, ZeroDivisionError):
+        fps_str = f"{rate}fps"
+
+    stem_out = path.splitext(path.basename(out_mkv))[0]
+    work_dir = work_dir or path.join(path.dirname(path.abspath(out_mkv)), f"_mvc_work_{stem_out}")
+    os.makedirs(work_dir, exist_ok=True)
+    meta_path = path.join(work_dir, "_mvc_extract.meta")
+    base_es = path.join(work_dir, f"{stem}.track_{avc_track}.264")
+    dep_es = path.join(work_dir, f"{stem}.track_{mvc_track}.mvc")
+    combined_es = path.join(work_dir, f"{stem}.combined_mvc.264")
+    video_only = (path.splitext(out_mkv)[0] + ".video_only.mkv") if include_av else out_mkv
+
+    procs = []
+    try:
+        cut_opts = f" --cut-start={cut_start} --cut-end={cut_end}" if cut_end else f" --cut-start={cut_start}"
+        ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            f.write(f"MUXOPT --demux{cut_opts}\n")
+            f.write(f"V_MPEG4/ISO/AVC, {ssif_meta}, track={avc_track}\n")
+            f.write(f"V_MPEG4/ISO/MVC, {ssif_meta}, track={mvc_track}\n")
+
+        if progress_cb:
+            progress_cb("demux", 0, 1)
+        demux = subprocess.Popen([tsmuxer_bin, meta_path, work_dir],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        procs.append(demux)
+        out_lines = []
+        for line in demux.stdout:
+            out_lines.append(line)
+            m = re.search(r"(\d+(?:\.\d+)?)%", line)
+            if m and progress_cb:
+                progress_cb("demux", float(m.group(1)), 100)
+            if stop_event is not None and stop_event.is_set():
+                demux.kill()
+                raise Cancelled()
+        demux.wait()
+        if demux.returncode != 0:
+            raise RuntimeError(f"tsMuxeR demux failed: {''.join(out_lines)[-2000:]}")
+
+        if progress_cb:
+            progress_cb("interleave", 0, 1)
+        base_n, dep_n, n = interleave_mvc(base_es, dep_es, combined_es)
+        if base_n != dep_n:
+            print(f"[mvc-extract] WARNING: base AUs={base_n} != dependent AUs={dep_n}; using the first {n}",
+                 file=sys.stderr)
+        if progress_cb:
+            progress_cb("interleave", 1, 1)
+        if stop_event is not None and stop_event.is_set():
+            raise Cancelled()
+
+        if progress_cb:
+            progress_cb("mux", 0, 1)
+        mux = subprocess.Popen([mkvmerge_bin, "-o", video_only, "--default-duration", f"0:{fps_str}", combined_es],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        procs.append(mux)
+        mux_lines = []
+        for line in mux.stdout:
+            mux_lines.append(line)
+            m = re.search(r"Progress:\s*(\d+)%", line)
+            if m and progress_cb:
+                progress_cb("mux", float(m.group(1)), 100)
+            if stop_event is not None and stop_event.is_set():
+                mux.kill()
+                raise Cancelled()
+        mux.wait()
+        if mux.returncode != 0:
+            raise RuntimeError(f"mkvmerge failed: {''.join(mux_lines)[-2000:]}")
+
+        if include_av:
+            _restore_disc_av(ssif_path, video_only, out_mkv, cut_start, cut_end, progress_cb)
+        return n
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        if not keep_temp:
+            for tmp in (base_es, dep_es, combined_es, meta_path) + ((video_only,) if include_av else ()):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+
 def _powershell(script):
     result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                             capture_output=True, text=True, timeout=120)
@@ -716,6 +859,23 @@ def import_disc(source, output_path, work_dir=None, progress_cb=None, cut_end=No
             return mux_bd3d_iso(ssif, output_path, include_av=kwargs.get("restore_av", True),
                                 stop_event=kwargs.get("stop_event"), progress_cb=progress_cb,
                                 cut_end=cut_end)
+        if kwargs.get("layout") == MVC_MKV_LAYOUT:
+            # lossless copy: the two demuxed streams (~0.75x the .ssif) plus the
+            # combined interleaved stream built from them (the same data again,
+            # ~0.75x) both exist on disk at once before the video-only .mkv is
+            # written -- unlike the flat-SBS path below, nothing here is streamed
+            # straight into a decoder, so this needs real room for both.
+            work_created = not path.isdir(work_dir)
+            os.makedirs(work_dir, exist_ok=True)
+            need = int(path.getsize(ssif) * 1.5)
+            free = shutil.disk_usage(work_dir).free
+            if free < need * 1.05:
+                raise RuntimeError(f"not enough free disk space in {work_dir}: need about "
+                                   f"{need / 1e9:.0f} GB for temporary files, only {free / 1e9:.0f} GB free")
+            return mux_lossless_mvc_mkv(ssif, avc_track, mvc_track, output_path,
+                                        include_av=kwargs.get("restore_av", True), cut_end=cut_end,
+                                        work_dir=work_dir, keep_temp=kwargs.get("keep_temp", False),
+                                        stop_event=kwargs.get("stop_event"), progress_cb=progress_cb)
         work_created = not path.isdir(work_dir)
         os.makedirs(work_dir, exist_ok=True)
         # the two demuxed streams together are roughly 3/4 of the .ssif
@@ -759,9 +919,13 @@ def main():
     parser.add_argument("--video-codec", type=str, default="hevc_nvenc", choices=CODECS)
     parser.add_argument("--quality", "--crf", type=int, default=18, dest="quality",
                          help="CRF (x264/x265) or constant-quality level (NVENC); lower = better/larger")
-    parser.add_argument("--layout", type=str, default="full_sbs", choices=LAYOUTS + (ISO_LAYOUT,),
+    parser.add_argument("--layout", type=str, default="full_sbs", choices=LAYOUTS + (ISO_LAYOUT, MVC_MKV_LAYOUT),
                          help="bd3d_iso = lossless copy into a 3D Blu-ray .iso (no re-encode; --output must end in "
                               ".iso; codec/quality ignored) | "
+                              "mvc_mkv = lossless copy into a plain .mkv holding the real combined MVC video "
+                              "stream, no disc structure, no re-encode (--output must end in .mkv; codec/quality "
+                              "ignored) -- for a library that plays real MVC files directly (e.g. via MakeMKV/"
+                              "CloneBD-style rips), instead of this tool's own SBS/TB layouts | "
                               "full_sbs 3840x1080 | half_sbs 1920x1080 | full_tb 1920x2160 | half_tb 1920x1080 | "
                               "*_4k = the same four with each eye enlarged to 4K (full_sbs_4k 7680x2160, "
                               "half_sbs_4k 3840x2160, full_tb_4k 3840x4320, half_tb_4k 3840x2160) | "
@@ -769,7 +933,7 @@ def main():
     parser.add_argument("--autocrop", type=str.upper, default=None, choices=AUTOCROP_MODES,
                          help="remove black bars: BLACK = all sides, BLACK_TB = top/bottom only (FLAT / FLAT_TB do "
                               "the same for flat-colour borders). Both eyes get the same crop. Not used by "
-                              "--layout bd3d_iso (that copies the disc untouched).")
+                              "--layout bd3d_iso or --layout mvc_mkv (both copy the disc's video untouched).")
     parser.add_argument("--no-audio-subs", action="store_true",
                          help="skip restoring the disc's audio and subtitle tracks (video only)")
     parser.add_argument("--keep-temp", action="store_true", help="keep the demuxed elementary streams")
@@ -788,8 +952,8 @@ def main():
 
     common = dict(video_codec=args.video_codec, quality=args.quality, layout=args.layout,
                   restore_av=not args.no_audio_subs, keep_temp=args.keep_temp, progress_cb=show)
-    if args.autocrop and args.layout == ISO_LAYOUT:
-        print("[mvc-extract] note: --autocrop is ignored for the lossless ISO (nothing is re-encoded)",
+    if args.autocrop and args.layout in (ISO_LAYOUT, MVC_MKV_LAYOUT):
+        print("[mvc-extract] note: --autocrop is ignored for this lossless layout (nothing is re-encoded)",
               file=sys.stderr)
     elif args.autocrop:
         common["autocrop"] = args.autocrop
@@ -807,8 +971,8 @@ def main():
                     parser.error(f"no MVC track found via {detect_from} -- not real 3D content, "
                                  f"or the wrong file")
                 print(f"[mvc-extract] auto-detected tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
-            if args.layout == ISO_LAYOUT:
-                parser.error("--layout bd3d_iso works with --disc, not manual --ssif mode")
+            if args.layout in (ISO_LAYOUT, MVC_MKV_LAYOUT):
+                parser.error(f"--layout {args.layout} works with --disc, not manual --ssif mode")
             frames = extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end,
                                         args.work_dir, args.output, **common)
     except Cancelled:

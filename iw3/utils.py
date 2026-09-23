@@ -3,6 +3,7 @@ import traceback
 import os
 import csv
 import subprocess
+import collections
 from os import path
 from datetime import datetime
 import warnings
@@ -2842,6 +2843,26 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
         convergence = args.convergence
         depth = get_mapper(args.mapper)(depth)
 
+    # ADR-237: real user-found bug -- the inpaint methods below (forward_inpaint/
+    # mlbw_l2_inpaint/monobw_inpaint) buffer frames internally and only return a
+    # finished batch some calls later (see side_model.infer()/.flush() below), so the
+    # NUMBER of frames apply_divergence() actually returns this call very often does
+    # NOT match this call's own INPUT batch size -- using `convergence` (sized to the
+    # input) directly to label the OUTPUT frames was reading the wrong value onto the
+    # wrong frame once buffering kicked in. Same structural problem Auto 3D Strength's
+    # own debug overlay (nt_auto3d) already had to solve with a pending-frame queue --
+    # mirrored here: push this call's own per-input-frame values now, pop exactly as
+    # many as actually come back out, whenever that ends up being.
+    # Only meaningful for auto modes (sod_v1/face_detect), which is exactly when
+    # `convergence` is a per-frame tensor -- "constant" never varies, so there is
+    # nothing to read off a frame that the value box doesn't already say (and the GUI
+    # checkbox is disabled on "constant" for the same reason; this guards the raw CLI
+    # too, for anyone who sets the flag directly).
+    convergence_overlay_active = getattr(args, "convergence_overlay", False) and torch.is_tensor(convergence)
+    if convergence_overlay_active:
+        pending = args.state.setdefault("_convergence_overlay_pending", collections.deque())
+        pending.extend(convergence.flatten().tolist())
+
     # Depth pop effects -- all three (Foreground/Midground/Background Pop) are
     # fully symmetric: one shared primitive (DE.apply_depth_band_pop), called
     # here directly for each zone with its own signed strength (-1.0 to 1.0:
@@ -3007,16 +3028,20 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
             left_eye, right_eye = DE.apply_sharpen(
                 left_eye, right_eye, strength=sharpen_strength)
 
-    # ADR-233: real user request -- a debug overlay for Convergence Plane, mirroring
+    # ADR-233/237: real user request -- a debug overlay for Convergence Plane, mirroring
     # Auto 3D Strength's own "Show strength on video (debug)" so the two can be
     # directly compared as real, readable data instead of trusted blind. Only
     # meaningful when an auto mode (sod_v1/face_detect) actually produced a per-frame
     # convergence tensor -- "constant" never varies, so there's nothing to read off a
     # frame that the value box doesn't already say. Drawn in the TOP-RIGHT corner,
     # deliberately the opposite corner from Auto 3D Strength's own top-left stamp, so
-    # both can be enabled together without overlapping.
-    if getattr(args, "convergence_overlay", False) and torch.is_tensor(convergence):
-        conv_values = convergence.flatten().tolist()
+    # both can be enabled together without overlapping. Pops exactly as many values as
+    # frames actually came back this call (see the pending queue pushed above) --
+    # NOT `convergence` directly, which is sized to the input, not the output.
+    if convergence_overlay_active and left_eye is not None:
+        n_out = 1 if left_eye.ndim == 3 else left_eye.shape[0]
+        pending = args.state["_convergence_overlay_pending"]
+        conv_values = [pending.popleft() if pending else 0.0 for _ in range(n_out)]
         left_eye = FO.stamp_values(left_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
         right_eye = FO.stamp_values(right_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
 

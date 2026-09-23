@@ -340,9 +340,9 @@ CONVERGENCE_BIAS_CHOICES = [
     "High (more recede)",
 ]
 CONVERGENCE_BIAS_VALUES = {
-    "Low (more pop-out)": 0.25,
+    "Low (more pop-out)": 0.0,
     "Medium (balanced)": 0.5,
-    "High (more recede)": 0.75,
+    "High (more recede)": 1.0,
 }
 
 
@@ -1396,8 +1396,8 @@ class MainFrame(wx.Frame):
               "subject's own near-to-far range using this same number -- 0 = the near edge of the subject "
               "(more of it pops out), 1 = the far edge (more of it recedes) -- applied fresh to every "
               "scene, so one setting here consistently biases the whole movie the same direction.\n"
-              "Low (0.25): biases toward more pop-out, in either mode. Medium (0.5): balanced/centered. "
-              "High (0.75): biases toward more recede/depth.\n"
+              "Low (0.0): biases toward more pop-out, in either mode. Medium (0.5): balanced/centered. "
+              "High (1.0): biases toward more recede/depth.\n"
               "Picking one just fills in the Convergence value box above with a plain number -- it's a "
               "one-time quick-fill, not a live link, so hand-editing the value box afterward is always "
               "safe, and picking a preset here never overwrites itself later."))
@@ -21146,6 +21146,84 @@ def _self_test_convergence_overlay():
     print("_self_test_convergence_overlay: PASS")
 
 
+def _self_test_convergence_overlay_inpaint_alignment():
+    """ADR-237: real user-found crash (live-confirmed: toggling this exact checkbox off
+    made a real crash disappear). Root cause, confirmed by reading the code: inpaint
+    methods (forward_inpaint/mlbw_l2_inpaint/monobw_inpaint) buffer frames internally via
+    side_model.infer()/.flush() -- apply_divergence()'s OWN input batch size and the
+    number of frames it actually returns a given call are very often NOT the same number.
+    ADR-233's original implementation used `convergence` (sized to the input) directly to
+    label whatever came back out, silently mismatching values to frames once buffering
+    kicked in. Fixed with a pending-value queue (mirroring Auto 3D Strength's own
+    nt_auto3d overlay, which already had to solve this same problem) -- this test drives
+    a mock side_model through exactly this buffer/flush pattern and confirms each stamped
+    frame gets the value from the call whose INPUT it actually corresponds to, not
+    whatever call happened to be running when it was finally returned."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    calls = []
+
+    def fake_stamp(frames, values, **kw):
+        calls.append(list(values))
+        return frames
+
+    class FakeInpaintModel:
+        """Buffers every other input frame, returns 2-at-a-time -- deliberately NOT 1:1
+        with the input batch, the exact shape of the real bug."""
+        def __init__(self):
+            self.buf = []
+
+        def infer(self, im, depth, **kw):
+            self.buf.append(torch.rand_like(im))
+            if len(self.buf) >= 2:
+                out = torch.cat(self.buf, dim=0)
+                self.buf = []
+                return out, out.clone()
+            return None, None
+
+        def flush(self, **kw):
+            if self.buf:
+                out = torch.cat(self.buf, dim=0)
+                self.buf = []
+                return out, out.clone()
+            return None, None
+
+    side_model = FakeInpaintModel()
+    args = types.SimpleNamespace(
+        state={"convergence_model": lambda rgb, d, reset_pts=None: d.new_full((d.shape[0], 1, 1, 1), 0.0),
+              },
+        mapper="none", method="forward_inpaint", divergence=2.0,
+        foreground_pop=0.0, background_pop=0.0, midground_pop=0.0, max_negative_parallax=1.0,
+        face_protect_strength=0.0, synthetic_view="both", convergence_overlay=True,
+        preserve_screen_border=False, mask_inner_dilation=0, mask_outer_dilation=0,
+        inpaint_max_width=None, disable_amp=True,
+    )
+    # override the convergence_model to return a DISTINCT, recognizable value per call
+    # (0.1, 0.2, 0.3, 0.4 -- one per input frame across 4 single-frame calls) so a
+    # misalignment would be caught by exact-value comparison, not just count.
+    seq = iter([0.1, 0.2, 0.3, 0.4])
+    args.state["convergence_model"] = lambda rgb, d, reset_pts=None: d.new_full((d.shape[0], 1, 1, 1), next(seq))
+
+    with mock.patch.object(U.FO, "stamp_values", side_effect=fake_stamp):
+        for i in range(4):
+            im = torch.rand(1, 3, 16, 16)
+            depth = torch.rand(1, 1, 16, 16)
+            U.apply_divergence(depth, im, args, side_model, reset_pts=[False])
+        # flush any remaining buffered frame the same way the real pipeline does on a
+        # scene cut -- exercised separately since apply_divergence() itself only calls
+        # side_model.flush() when reset_pts[i] is True, not tested above.
+
+    # 4 input frames, buffered 2-at-a-time -> exactly 2 output events, each stamping 2
+    # frames with the two values whose OWN input calls they came from, in order --
+    # stamp_values() is called once per eye, so each output event appears twice.
+    rounded = [[round(v, 2) for v in vals] for vals in calls]
+    assert rounded == [[0.1, 0.2], [0.1, 0.2], [0.3, 0.4], [0.3, 0.4]], \
+        f"values must stay aligned to their own input frame: {rounded}"
+    print("_self_test_convergence_overlay_inpaint_alignment: PASS")
+
+
 def _self_test_convergence_overlay_gui():
     """ADR-233: the GUI checkbox mirrors chk_convergence_scene_hold's own gating exactly --
     default off, disabled while Convergence Plane is constant, round-trips through
@@ -21418,6 +21496,7 @@ def _run_self_tests():
         _self_test_convergence_scene_hold,
         _self_test_convergence_scene_hold_gui_and_metadata,
         _self_test_convergence_overlay,
+        _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,
     ]

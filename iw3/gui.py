@@ -21146,6 +21146,69 @@ def _self_test_convergence_overlay():
     print("_self_test_convergence_overlay: PASS")
 
 
+def _self_test_make_output_filename_length_cap():
+    """Real, 100%-reproducible user crash (ADR investigation, 2026-09-23): with enough
+    settings active at once, make_output_filename()'s tag string grows past Windows'
+    path limits (a real failing case measured 256 chars for the filename alone, 269
+    for the full path -- both over NTFS's 255-char per-component limit and the
+    classic 260-char MAX_PATH). The resulting CreateFile call failed with
+    STATUS_OBJECT_NAME_INVALID; FFmpeg/PyAV surfaced that several layers up as an
+    unrelated-looking "av.error.ArgumentError: Invalid argument returned 22" at the
+    encoder-open step, which is what made this so hard to trace back to its real
+    cause -- confirmed via a live Process Monitor capture of the real crash."""
+    from . import utils as U
+    parser = U.create_parser(required_true=False)
+
+    # A real-shaped combination of settings that, all together, produced the exact
+    # over-limit filename measured on the real crash.
+    long_argv = [
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename",
+        "--depth-model", "Any_V3_Metric_Large", "--resolution", "648",
+        "--method", "mlbw_l2_inpaint", "--inpaint-model", "light_inpaint_v1",
+        "--divergence", "2.8", "--auto-divergence", "--auto-divergence-mode", "cuts",
+        "--divergence-min", "2.8", "--divergence-max", "5.5", "--auto-divergence-overlay",
+        "--convergence-mode", "sod_v1", "--convergence-scene-hold", "--convergence-overlay",
+        "--edge-dilation", "1", "1", "--foreground-scale", "1.0",
+        "--midground-pop", "-0.2", "--midground-threshold-low", "0.0", "--midground-threshold-high", "0.65",
+        "--pop-feather", "0.1", "--max-negative-parallax", "1.25",
+        "--ema-normalize", "--ema-decay", "0.99", "--ema-buffer", "650",
+        "--depth-refine", "--depth-refine-strength", "1.25",
+        "--preserve-screen-border", "--sharpen", "--sharpen-strength", "1.0",
+        "--stereo-mode-tag", "--crf", "15", "--half-sbs",
+    ]
+    args = parser.parse_args(long_argv)
+    args.video_extension = ".mkv"
+
+    long_input = "Hocus Pocus 1993 UHD BluRay 2160p DV.mkv"
+    name = U.make_output_filename(long_input, args, video=True)
+    assert len(name) <= 220, f"filename must stay well under OS path limits, got {len(name)} chars: {name}"
+    assert name.startswith("Hocus Pocus 1993 UHD BluRay 2160p DV"), \
+        f"truncation must never eat into the original input basename: {name}"
+    assert name.endswith("_LR.mkv"), f"truncation must never eat the packing suffix/extension: {name}"
+
+    # A short, ordinary settings combination must come out completely unaffected --
+    # the cap only ever engages once a real name would exceed it.
+    short_args = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename"])
+    short_args.video_extension = ".mkv"
+    short_name = U.make_output_filename("a.mp4", short_args, video=True)
+    assert len(short_name) < 100, f"an ordinary short case must never be touched by the cap: {short_name}"
+
+    # Two different long combinations that would truncate to the same prefix must
+    # never silently collide into the same output filename and overwrite each other.
+    args_a = _with_ext(parser.parse_args(long_argv + ["--pop-feather", "0.11"]))
+    args_b = _with_ext(parser.parse_args(long_argv + ["--pop-feather", "0.12"]))
+    name_a = U.make_output_filename(long_input, args_a, video=True)
+    name_b = U.make_output_filename(long_input, args_b, video=True)
+    assert name_a != name_b, "two distinct over-limit settings combos must never collide onto the same filename"
+
+    print("_self_test_make_output_filename_length_cap: PASS")
+
+
+def _with_ext(args):
+    args.video_extension = ".mkv"
+    return args
+
+
 def _self_test_convergence_overlay_inpaint_alignment():
     """ADR-237: real user-found crash (live-confirmed: toggling this exact checkbox off
     made a real crash disappear). Root cause, confirmed by reading the code: inpaint
@@ -21496,6 +21559,7 @@ def _run_self_tests():
         _self_test_convergence_scene_hold,
         _self_test_convergence_scene_hold_gui_and_metadata,
         _self_test_convergence_overlay,
+        _self_test_make_output_filename_length_cap,
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,

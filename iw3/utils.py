@@ -2,6 +2,7 @@ import sys
 import traceback
 import os
 import csv
+import hashlib
 import subprocess
 import collections
 from os import path
@@ -2399,7 +2400,31 @@ def make_output_filename(input_filename, args, video=False):
     else:
         metadata = ""
 
-    return basename + metadata + auto_detect_suffix + (args.video_extension if video else get_image_ext(args.format))
+    extension = args.video_extension if video else get_image_ext(args.format)
+
+    # ADR crash investigation (2026-09-23): a real, 100%-reproducible user crash
+    # traced to this filename growing past Windows' path limits (256-char filename,
+    # 269-char full path measured on a real failing case -- NTFS's 255-char
+    # per-component limit and the classic 260-char MAX_PATH are both exceeded) when
+    # enough settings are active at once, each appending its own tag below. The
+    # resulting CreateFile call fails with STATUS_OBJECT_NAME_INVALID; FFmpeg/PyAV
+    # surface that several layers up as a cryptic, unrelated-looking
+    # "av.error.ArgumentError: Invalid argument returned 22" at the encoder-open
+    # step, which is what made this so hard to trace back to its real cause.
+    # Only `metadata` (the unbounded, settings-driven part) is truncated -- the
+    # original input basename, the packing-format suffix, and the extension always
+    # stay intact. A short hash of the full untruncated metadata is appended so two
+    # different settings combinations that happen to truncate to the same prefix
+    # can never silently collide and overwrite each other's output.
+    MAX_FILENAME_LEN = 200  # conservative vs the 255/260 OS limits, room for a real output directory
+    full_name = basename + metadata + auto_detect_suffix + extension
+    if len(full_name) > MAX_FILENAME_LEN and metadata:
+        meta_hash = hashlib.sha1(metadata.encode("utf-8")).hexdigest()[:8]
+        fixed_len = len(basename) + len(auto_detect_suffix) + len(extension) + len(meta_hash) + 1
+        budget = max(0, MAX_FILENAME_LEN - fixed_len)
+        metadata = metadata[:budget] + "_" + meta_hash
+
+    return basename + metadata + auto_detect_suffix + extension
 
 
 def _build_iw3_comment_metadata(args, video=True):

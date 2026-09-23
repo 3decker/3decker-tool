@@ -253,41 +253,8 @@ def process_video(
 def set_output_size_and_flash(container, stream, frame, unmux_packets):
     stream.width = frame.width
     stream.height = frame.height
-    import av.logging
-    _prev_log_level = av.logging.get_level()
-    try:
-        av.logging.set_level(av.logging.VERBOSE)
-        with av.logging.Capture(local=False) as logs:
-            for enc_packet in unmux_packets:
-                container.mux(enc_packet)
-    except Exception as e:
-        cc = getattr(stream, "codec_context", None)
-        diag = [
-            "===== IW3 DIAGNOSTIC (temporary, ADR crash investigation) =====",
-            f"stream.width={stream.width} stream.height={stream.height} "
-            f"stream.pix_fmt={getattr(stream, 'pix_fmt', None)}",
-        ]
-        if cc is not None:
-            diag.append(
-                f"codec_context: name={getattr(cc, 'name', None)} "
-                f"codec_tag={getattr(cc, 'codec_tag', None)} "
-                f"pix_fmt={getattr(cc, 'pix_fmt', None)} "
-                f"width={getattr(cc, 'width', None)} height={getattr(cc, 'height', None)} "
-                f"bit_rate={getattr(cc, 'bit_rate', None)} "
-                f"profile={getattr(cc, 'profile', None)} "
-                f"gop_size={getattr(cc, 'gop_size', None)} "
-                f"max_b_frames={getattr(cc, 'max_b_frames', None)} "
-                f"options={getattr(cc, 'options', None)} "
-                f"hw_device_ctx={getattr(cc, 'hw_device_ctx', None)} "
-                f"hw_frames_ctx={getattr(cc, 'hw_frames_ctx', None)}"
-            )
-        diag.append(f"captured libav log lines ({len(logs)}):")
-        for log_line in logs:
-            diag.append(f"  [{log_line[0]}][{log_line[1]}] {log_line[2]!r}")
-        diag.append("===== END IW3 DIAGNOSTIC =====")
-        raise RuntimeError("\n".join(diag)) from e
-    finally:
-        av.logging.set_level(_prev_log_level)
+    for enc_packet in unmux_packets:
+        container.mux(enc_packet)
     unmux_packets.clear()
 
 

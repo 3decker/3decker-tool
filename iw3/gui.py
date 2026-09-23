@@ -21182,6 +21182,54 @@ def _self_test_convergence_overlay_gui():
     print("_self_test_convergence_overlay_gui: PASS")
 
 
+def _self_test_postprocess_image_always_even():
+    """ADR-235: real crash fix -- a live user hit av.error.ArgumentError ("Invalid
+    argument returned 22") at start_encoding() on the very first frame. Root cause,
+    confirmed by reading the actual crash traceback: postprocess_image()'s final
+    even-dimension rounding only ran inside the "Output Size Limit actually triggered a
+    resize" branch, so a naturally-odd dimension that never exceeded that limit (from
+    AutoCrop, IPD Offset padding, or just an odd source resolution) reached the encoder
+    unrounded. postprocess_image() is the single function shared by every image AND
+    video frame path (a dozen call sites), so this one fix covers all of them."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def make_args(max_output_width=None, max_output_height=None, keep_aspect_ratio=False):
+        return types.SimpleNamespace(
+            ipd_offset=0, rgbd=False, half_rgbd=False, pad=None, pad_mode=None,
+            vr180=False, half_sbs=False, half_tb=False, anaglyph=None, tb=False, cross_eyed=False,
+            max_output_width=max_output_width, max_output_height=max_output_height,
+            keep_aspect_ratio=keep_aspect_ratio,
+        )
+
+    # Odd height, well under any limit (no limit set at all) -- must still come out even.
+    # Full SBS width always doubles two equal-width eyes, so it's even regardless; height
+    # is passed straight through untouched otherwise, which is the real bug's exact shape.
+    left = torch.rand(3, 101, 100)
+    right = torch.rand(3, 101, 100)
+    sbs = U.postprocess_image(left, right, make_args())
+    assert sbs.shape[1] % 2 == 0 and sbs.shape[2] % 2 == 0, \
+        f"output must always be even, got {tuple(sbs.shape)}"
+    assert sbs.shape[1:] == (100, 200), f"expected (100, 200), got {tuple(sbs.shape[1:])}"
+
+    # Already even and under any limit -- must NOT trigger a resize at all (no wasted work).
+    left = torch.rand(3, 100, 100)
+    right = torch.rand(3, 100, 100)
+    with mock.patch.object(U.TF, "resize", side_effect=AssertionError("must not resize when already even")):
+        sbs = U.postprocess_image(left, right, make_args())
+    assert sbs.shape[1:] == (100, 200)
+
+    # Existing behavior preserved: Output Size Limit actually triggering a resize still
+    # rounds to even, same as before this fix.
+    left = torch.rand(3, 300, 100)
+    right = torch.rand(3, 300, 100)
+    sbs = U.postprocess_image(left, right, make_args(max_output_height=201))
+    assert sbs.shape[1] == 200, f"expected max_output_height 201 rounded down to even 200, got {sbs.shape[1]}"
+
+    print("_self_test_postprocess_image_always_even: PASS")
+
+
 def _self_test_pop_feather():
     """ADR-217: real user report (2026-09-22) -- a visible line at Midground Pop's band edge,
     even at a modest strength on the default 15/85 threshold. New shared "Pop Feather %" control
@@ -21371,6 +21419,7 @@ def _run_self_tests():
         _self_test_convergence_scene_hold_gui_and_metadata,
         _self_test_convergence_overlay,
         _self_test_convergence_overlay_gui,
+        _self_test_postprocess_image_always_even,
     ]
     failures = []
     for test in tests:

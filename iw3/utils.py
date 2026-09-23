@@ -3116,9 +3116,17 @@ def postprocess_image(left_eye, right_eye, args):
         if args.keep_aspect_ratio:
             new_h = int(args.max_output_width / new_w * new_h)
         new_w = args.max_output_width
+    # ADR-235: real crash fix -- most video encoders require even width/height. This
+    # rounding used to run ONLY inside the "a resize was actually triggered" branch
+    # below, so a naturally-odd dimension that never exceeded Output Size Limit (e.g.
+    # from AutoCrop, IPD Offset padding, or an odd source resolution) sailed through
+    # uncorrected all the way to the encoder -- confirmed as the real cause of a live
+    # user crash, av.error.ArgumentError: "Invalid argument returned 22" at
+    # start_encoding() on the very first frame. Now unconditional, so it's enforced
+    # regardless of whether Output Size Limit itself did anything this frame.
+    new_h -= new_h % 2
+    new_w -= new_w % 2
     if new_w != w or new_h != h:
-        new_h -= new_h % 2
-        new_w -= new_w % 2
         sbs = TF.resize(sbs, (new_h, new_w),
                         interpolation=InterpolationMode.BICUBIC, antialias=True)
         sbs = torch.clamp(sbs, 0, 1)

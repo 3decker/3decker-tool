@@ -179,24 +179,52 @@ def _parse_ffmpeg_out_time(s):
     return int(h) * 3600 + int(m) * 60 + float(sec)
 
 
-def _intermediate_video_codec_args():
-    """hevc_nvenc (GPU) when this machine has it, same convention already used elsewhere in this
-    project (iw3.utils._hdr_upscale_codec/_sdr_upscale_codec: probe via PyAV, confirm CUDA too) and
-    the same rc/qp quality-control flags make_video_codec_option() already uses for NVENC (NVENC
-    ignores -crf; constqp+qp is the correct equivalent). Falls back to CPU libx264 -- these are
-    temporary intermediate files re-encoded again by FRIM right afterward, so "faster" (not
-    "medium") costs no real quality (CRF/QP already fixes the quality target) while cutting real
-    wall-clock time noticeably, which matters since neither of these pre-processing steps has a
-    natural frame-count-based progress the way FRIM's own step does."""
+def _cuda_available():
+    """True when this machine has a working CUDA GPU with NVENC, same probe used throughout this
+    project (iw3.utils._hdr_upscale_codec/_sdr_upscale_codec): PyAV actually exposes the hevc_nvenc
+    encoder AND torch confirms a real CUDA device. Shared by every GPU-preferred choice in this
+    module (encode codec selection, and -hwaccel cuda decode) rather than probing three times."""
     try:
         import av
         av.codec.Codec("hevc_nvenc", "w")
         import torch
-        if torch.cuda.is_available():
-            return ["-c:v", "hevc_nvenc", "-rc", "constqp", "-qp", "16"]
+        return torch.cuda.is_available()
     except Exception:
-        pass
+        return False
+
+
+def _intermediate_video_codec_args():
+    """hevc_nvenc (GPU) when this machine has it, same convention already used elsewhere in this
+    project and the same rc/qp quality-control flags make_video_codec_option() already uses for
+    NVENC (NVENC ignores -crf; constqp+qp is the correct equivalent). Falls back to CPU libx264 --
+    these are temporary intermediate files re-encoded again by FRIM right afterward, so "faster"
+    (not "medium") costs no real quality (CRF/QP already fixes the quality target) while cutting
+    real wall-clock time noticeably, which matters since neither of these pre-processing steps has
+    a natural frame-count-based progress the way FRIM's own step does."""
+    if _cuda_available():
+        return ["-c:v", "hevc_nvenc", "-rc", "constqp", "-qp", "16"]
     return ["-c:v", "libx264", "-crf", "16", "-preset", "faster"]
+
+
+def _probe_high_bit_depth(input_path, ffprobe_bin):
+    """True if the first video stream is more than 8 bits per component (10/12-bit). Needed to
+    pick the correct -hwdownload target format for a GPU-decoded HDR source: NVDEC decodes a
+    10/12-bit source onto a p010-family hardware surface and an 8-bit source onto an nv12 one, and
+    hwdownload flatly rejects a mismatched target -- confirmed live: 'Invalid output format nv12
+    for hwframe download' when nv12 was requested against a real 10-bit-decoded surface, and the
+    same rejection in reverse (p010le against an 8-bit surface). Returns False (safe/conservative)
+    on any probe failure, matching probe_video()'s own hdr detection convention."""
+    out = subprocess.run(
+        [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=pix_fmt", "-of", "json", input_path],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        return False
+    try:
+        pix_fmt = json.loads(out.stdout)["streams"][0].get("pix_fmt", "") or ""
+    except (KeyError, IndexError, ValueError):
+        return False
+    return any(tag in pix_fmt for tag in ("10le", "10be", "12le", "12be", "p010", "p012"))
 
 
 def _run_ffmpeg_stage(cmd, out_path, stage, total_out_seconds, stop_event, progress_cb, error_prefix):
@@ -303,11 +331,41 @@ def tonemap_hdr_to_sdr(input_path, out_path, ffmpeg_bin, codec_args, bit_depth=8
     (8 or 10 -- 10-bit SDR is a real, legitimate choice for general use, it just isn't a legal
     3D Blu-ray input; see tonemap_hdr_to_sdr_for_bd for that specific, hard-capped-at-8-bit
     case). This is a real, one-way change to the picture (the HDR grade is genuinely gone
-    afterward, tone-mapped down to a normal range), not just a metadata strip."""
-    cmd = ([ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
-            "-i", input_path, "-map", "0", "-vf", _hdr_to_sdr_filter(bit_depth)] + codec_args +
-           (audio_args or ["-c:a", "copy"]) + ["-c:s", "copy", out_path])
-    _run_ffmpeg_stage(cmd, out_path, stage, duration, stop_event, progress_cb,
+    afterward, tone-mapped down to a normal range), not just a metadata strip.
+
+    Real user finding: with only the OUTPUT encoder GPU-accelerated (codec_args), decoding a 4K
+    HDR source is CPU-only and visibly CPU-heavy -- confirmed live via nvidia-smi dmon showing
+    0% decoder engine activity throughout a real run. Decodes on the GPU too (-hwaccel cuda) when
+    available, which requires downloading the CUDA-resident frame to a specific software pixel
+    format before zscale (a CPU filter) can touch it -- and that format must exactly match the
+    decoded surface's real bit depth (nv12 for 8-bit, p010le for 10/12-bit) or ffmpeg refuses
+    outright ('Invalid output format ... for hwframe download'), confirmed live both ways. Falls
+    back to plain software decode (the previously-working, always-safe path) if the GPU-decode
+    attempt fails for any reason -- a wrong bit-depth guess, an unusual profile NVDEC can't
+    decode, no GPU at all -- so this can only ever make a working conversion faster, never turn
+    one that used to work into one that fails."""
+    filter_chain = _hdr_to_sdr_filter(bit_depth)
+    sw_cmd = ([ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+               "-i", input_path, "-map", "0", "-vf", filter_chain] + codec_args +
+              (audio_args or ["-c:a", "copy"]) + ["-c:s", "copy", out_path])
+
+    if _cuda_available():
+        ffprobe = _ffprobe_bin()
+        dl_format = "p010le" if ffprobe and _probe_high_bit_depth(input_path, ffprobe) else "nv12"
+        hw_cmd = ([ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+                   "-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-i", input_path, "-map", "0",
+                   "-vf", f"hwdownload,format={dl_format}," + filter_chain] + codec_args +
+                  (audio_args or ["-c:a", "copy"]) + ["-c:s", "copy", out_path])
+        try:
+            _run_ffmpeg_stage(hw_cmd, out_path, stage, duration, stop_event, progress_cb,
+                              "could not convert the HDR video to SDR:\n")
+            return
+        except Cancelled:
+            raise
+        except RuntimeError:
+            pass  # fall through to the software-decode path below
+
+    _run_ffmpeg_stage(sw_cmd, out_path, stage, duration, stop_event, progress_cb,
                       "could not convert the HDR video to SDR:\n")
 
 

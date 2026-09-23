@@ -19357,6 +19357,88 @@ def _self_test_rife_with_preserve_dolby_vision():
     import inspect
     assert "cannot be used together" not in inspect.getsource(MainFrame.on_click_btn_start)
 
+
+def _self_test_utils_hdr_to_sdr_gpu_decode():
+    """Real user finding: the Video Filter tab's own Convert HDR to SDR option
+    (iw3.utils._tonemap_hdr_to_sdr, the main conversion pipeline's -- distinct from the newer
+    SBS2MVC checkbox and standalone tool, iw3.sbs_to_mvc_cli.tonemap_hdr_to_sdr, which already
+    got this fix) had the same gap ADR-225 found and fixed there: no GPU-accelerated decode, and
+    unlike that other path, this one never even preferred GPU for ENCODE either -- always
+    hardcoded to CPU libx265. Both are now GPU-preferred (hevc_nvenc decode+encode) with the
+    same real, tested fallback to the original, always-working software (libx265) command if the
+    GPU attempt fails for any reason. Mocked -- no real ffmpeg/GPU touched here (already verified
+    live and directly against real HDR10/HLG test clips, both bit depths, while building this)."""
+    import types
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = path.join(tmpdir, "movie_hdr.mkv")
+        open(src, "wb").close()
+        args = types.SimpleNamespace(hdr_to_sdr=True, preserve_dowi=False, start_time=None, end_time=None)
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            # sw_cmd always ends in the tmp_sdr output path; hw_cmd does too -- create it so
+            # the caller sees a real produced file, matching a real successful ffmpeg run.
+            out_path = cmd[-1]
+            with open(out_path, "wb") as f:
+                f.write(b"fake-sdr-output")
+            return types.SimpleNamespace(returncode=0)
+
+        # GPU available: the hw_cmd (hwaccel cuda + hevc_nvenc) must be tried, and only that one
+        with mock.patch.object(U, "_detect_pq_or_hlg", return_value=True), \
+             mock.patch.object(U, "_hdr_upscale_codec", return_value="hevc_nvenc"), \
+             mock.patch.object(U, "_hdr_to_sdr_high_bit_depth", return_value=True), \
+             mock.patch.object(U.subprocess, "run", side_effect=fake_run) as m_run:
+            result_path, tmp_file = U._tonemap_hdr_to_sdr(src, args)
+            assert tmp_file is not None and path.exists(tmp_file)
+            assert m_run.call_count == 1, "GPU attempt succeeded -- software fallback must not run too"
+            called_cmd = m_run.call_args[0][0]
+            assert "-hwaccel" in called_cmd and "cuda" in called_cmd
+            assert "hwdownload,format=p010le" in called_cmd[called_cmd.index("-vf") + 1]
+            assert "hevc_nvenc" in called_cmd
+            os.remove(tmp_file)
+
+        # GPU available but the hw attempt fails (e.g. a real driver/profile issue) -- must fall
+        # back to the original, always-working software command, not raise/fail the whole thing
+        def fake_run_hw_fails(cmd, **kw):
+            calls.append(cmd)
+            if "hevc_nvenc" in cmd:
+                raise U.subprocess.CalledProcessError(1, cmd, output=b"", stderr=b"nvenc error")
+            out_path = cmd[-1]
+            with open(out_path, "wb") as f:
+                f.write(b"fake-sdr-output-sw")
+            return types.SimpleNamespace(returncode=0)
+
+        with mock.patch.object(U, "_detect_pq_or_hlg", return_value=True), \
+             mock.patch.object(U, "_hdr_upscale_codec", return_value="hevc_nvenc"), \
+             mock.patch.object(U, "_hdr_to_sdr_high_bit_depth", return_value=True), \
+             mock.patch.object(U.subprocess, "run", side_effect=fake_run_hw_fails) as m_run:
+            result_path, tmp_file = U._tonemap_hdr_to_sdr(src, args)
+            assert tmp_file is not None and path.exists(tmp_file), \
+                "must fall back to software and still succeed, not fail the whole operation"
+            assert m_run.call_count == 2, "must have tried hw first, then sw as fallback"
+            assert "hevc_nvenc" in m_run.call_args_list[0][0][0]
+            assert "libx265" in m_run.call_args_list[1][0][0]
+            os.remove(tmp_file)
+
+        # No GPU available at all -- must go straight to software, never attempt hw
+        with mock.patch.object(U, "_detect_pq_or_hlg", return_value=True), \
+             mock.patch.object(U, "_hdr_upscale_codec", return_value="libx265"), \
+             mock.patch.object(U.subprocess, "run", side_effect=fake_run) as m_run:
+            result_path, tmp_file = U._tonemap_hdr_to_sdr(src, args)
+            assert tmp_file is not None and path.exists(tmp_file)
+            assert m_run.call_count == 1
+            assert "libx265" in m_run.call_args[0][0]
+            assert "-hwaccel" not in m_run.call_args[0][0]
+            os.remove(tmp_file)
+
+    print("_self_test_utils_hdr_to_sdr_gpu_decode: PASS")
+
     with tempfile.TemporaryDirectory() as tmp:
         rife = path.join(tmp, "movie_LR_rife.mkv")
         with open(rife, "wb") as f:
@@ -20597,6 +20679,7 @@ def _run_self_tests():
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,
         _self_test_rife_with_preserve_dolby_vision,
+        _self_test_utils_hdr_to_sdr_gpu_decode,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_fix_frame_rate,

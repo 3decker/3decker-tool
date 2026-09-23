@@ -1530,6 +1530,26 @@ def _detect_pq_or_hlg(input_path, ffprobe_bin):
     return False
 
 
+def _hdr_to_sdr_high_bit_depth(input_path, ffprobe_bin):
+    """True if the first video stream is more than 8 bits per component (10/12-bit). Needed to
+    pick the correct -hwdownload target format for a GPU-decoded HDR source: NVDEC decodes a
+    10/12-bit source onto a p010-family hardware surface and an 8-bit source onto an nv12 one,
+    and hwdownload flatly rejects a mismatched target (confirmed live while building the same
+    fix for iw3.sbs_to_mvc_cli.tonemap_hdr_to_sdr: 'Invalid output format nv12 for hwframe
+    download' against a real 10-bit-decoded surface, and the same rejection in reverse). Returns
+    False (safe/conservative) on any probe failure."""
+    import json as _json
+    try:
+        proc = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=pix_fmt", "-of", "json", str(input_path)],
+            capture_output=True, text=True, timeout=60)
+        pix_fmt = _json.loads(proc.stdout)["streams"][0].get("pix_fmt", "") or ""
+    except Exception:
+        return False
+    return any(tag in pix_fmt for tag in ("10le", "10be", "12le", "12be", "p010", "p012"))
+
+
 def _tonemap_hdr_to_sdr(input_filename, args):
     """Pre-converts a PQ/HLG HDR source to a clean SDR 10-bit intermediate file using
     ffmpeg's zscale+tonemap filters. This can't be done inside iw3's own (PyAV-based)
@@ -1569,24 +1589,52 @@ def _tonemap_hdr_to_sdr(input_filename, args):
 
     print("[hdr-to-sdr] converting HDR source to SDR (10-bit retained) before processing "
           "-- this adds one extra encoding pass.", file=sys.stderr)
+    # dither=error_diffusion on the final zscale call (not the trailing format= filter, which
+    # has no dither option of its own -- zscale negotiates output format with it and applies
+    # dithering during that conversion) avoids visible banding in skies/gradients from the
+    # otherwise-undithered bit-depth-reducing truncation; sidedata=delete strips leftover
+    # per-frame HDR side-data (mastering display/content-light-level, Dolby Vision RPU) that
+    # tonemapping the pixels alone doesn't remove -- confirmed against community-documented
+    # working ffmpeg HDR-to-SDR pipelines, same fix applied to iw3.sbs_to_mvc_cli's own
+    # tonemap chain.
+    tonemap_filter = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+                       "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,"
+                       "format=yuv420p10le,sidedata=delete")
+    sw_cmd = [ffmpeg_bin, "-y", *trim_args, "-i", str(input_filename),
+              "-vf", tonemap_filter, "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "12",
+              "-c:a", "copy", tmp_sdr]
+
+    # Real user finding (iw3.sbs_to_mvc_cli.tonemap_hdr_to_sdr, same underlying gap): with only
+    # the OUTPUT encoder GPU-accelerated, decoding a 4K HDR source stays entirely on the CPU,
+    # confirmed live via nvidia-smi showing 0% decoder engine activity throughout a real run.
+    # Decodes on the GPU too when available (-hwaccel cuda), with the same real, live-confirmed
+    # constraint: the CUDA-decoded frame must be downloaded to a software pixel format
+    # (hwdownload,format=<fmt>) that exactly matches the decoded surface's real bit depth
+    # (nv12 for 8-bit, p010le for 10/12-bit) before zscale (a CPU filter) can touch it, or
+    # ffmpeg refuses outright. This function's HDR sources are effectively always 10-bit in
+    # practice, but detected properly rather than assumed. Falls back to the previously-working
+    # plain software command (sw_cmd, untouched) if the GPU attempt fails for any reason -- can
+    # only make a working conversion faster, never turn one that used to work into one that
+    # fails.
+    hw_cmd = None
+    if _hdr_upscale_codec() == "hevc_nvenc":
+        ffprobe_bin = _find_ffprobe()
+        dl_format = "p010le"
+        if ffprobe_bin and not _hdr_to_sdr_high_bit_depth(input_filename, ffprobe_bin):
+            dl_format = "nv12"
+        hw_cmd = [ffmpeg_bin, "-y", *trim_args, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                  "-i", str(input_filename), "-vf", f"hwdownload,format={dl_format}," + tonemap_filter,
+                  "-c:v", "hevc_nvenc", "-rc", "constqp", "-qp", "12", "-pix_fmt", "yuv420p10le",
+                  "-c:a", "copy", tmp_sdr]
+
     try:
-        subprocess.run(
-            [ffmpeg_bin, "-y", *trim_args, "-i", str(input_filename),
-             # dither=error_diffusion on the final zscale call (not the trailing format= filter,
-             # which has no dither option of its own -- zscale negotiates output format with it
-             # and applies dithering during that conversion) avoids visible banding in
-             # skies/gradients from the otherwise-undithered bit-depth-reducing truncation;
-             # sidedata=delete strips leftover per-frame HDR side-data (mastering
-             # display/content-light-level, Dolby Vision RPU) that tonemapping the pixels alone
-             # doesn't remove -- confirmed against community-documented working ffmpeg
-             # HDR-to-SDR pipelines, same fix applied to iw3.sbs_to_mvc_cli's own tonemap chain.
-             "-vf", "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
-                    "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,"
-                    "format=yuv420p10le,sidedata=delete",
-             "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "12",
-             "-c:a", "copy", tmp_sdr],
-            check=True, capture_output=True,
-        )
+        if hw_cmd is not None:
+            try:
+                subprocess.run(hw_cmd, check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                subprocess.run(sw_cmd, check=True, capture_output=True)
+        else:
+            subprocess.run(sw_cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         print(f"[hdr-to-sdr] conversion failed, processing the original HDR source instead: "
               f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)

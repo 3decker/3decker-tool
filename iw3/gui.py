@@ -5982,6 +5982,12 @@ class MainFrame(wx.Frame):
         self.btn_sbs2mvc_run.SetToolTip(
             T("What it's for: starts the conversion as a separate background process (python -m "
               "iw3.sbs_to_mvc_cli) -- your input file is never modified.\n"
+              "Speed note: the Fixing the frame rate / Converting HDR to SDR steps (if either runs) use your "
+              "graphics card when available. The actual 3D disc encoding step (\"Encoding 3D\") does not -- it "
+              "always runs on the CPU, in software. This isn't something this app can change: the free MVC "
+              "encoder this tool relies on (FRIM) does have a hardware mode, but it doesn't work on current "
+              "graphics cards, and there is no other free MVC encoder available. Expect that step specifically "
+              "to be the slowest and most CPU-heavy part of the whole job.\n"
               "Not verified on real hardware: the disc image reads back correctly through this app and its "
               "structure is a normal 3D Blu-ray, but playback on a real 3D Blu-ray player or PowerDVD is "
               "still to be confirmed -- try a short clip first.\n"
@@ -12974,7 +12980,13 @@ class MainFrame(wx.Frame):
 
     def _update_sbs2mvc_progress(self, stage, done, total):
         # Called via wx.CallAfter from run_sbs2mvc's background thread.
-        names = {"encode": T("Encoding 3D"), "mux": T("Building the disc"),
+        # "Encoding 3D" is labelled CPU/software right here, not just in the Run button's
+        # tooltip -- real user question live, mid-job: "is using the gpu or cpu?" The retime/
+        # tonemap stages above it DO use the GPU when available (see their own progress
+        # labels), which made this stage's own always-CPU behavior a reasonable thing to
+        # wonder about rather than assume. FRIM (the only free MVC/3D-Blu-ray encoder this
+        # tool has) has no working hardware mode on current graphics cards.
+        names = {"encode": T("Encoding 3D (CPU/software)"), "mux": T("Building the disc"),
                  "autocrop": T("Looking for black bars"),
                  "retime": T("Fixing the frame rate (re-timing picture, sound and subtitles)"),
                  "tonemap": T("Converting HDR to SDR")}

@@ -6138,9 +6138,10 @@ def create_parser(required_true=True):
     parser.add_argument("--convergence-mode", type=str, choices=["constant", "sod_v1", "face_detect"], default="constant",
                         help=("auto convergence mode"))
     parser.add_argument("--convergence-smoothing", type=float, default=0.9,
-                        help=("EMA decay for auto convergence modes (sod_v1/face_detect). "
-                              "Higher = smoother but slower to react. Lower = more aggressive/dynamic. "
-                              "0 = no smoothing"))
+                        help=("How steady auto convergence modes (sod_v1/face_detect) hold within a scene "
+                              "(ADR-231: settle-then-hold, not a plain per-frame EMA). "
+                              "Higher = settles/glides slower, needs a bigger change to move at all. "
+                              "Lower = settles/glides faster, reacts to smaller changes."))
     parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 3.0)],
                         help=("Pop-out limit (0-1) / boost (1-3), independent of the Convergence value itself. "
                               "ADR-179 limit: below 1.0 is a hard safety cap on negative parallax (how far anything "

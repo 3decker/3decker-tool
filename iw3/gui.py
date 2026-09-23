@@ -1336,23 +1336,26 @@ class MainFrame(wx.Frame):
               "screen surface, with everything else popping toward or receding from it) is chosen.\n"
               "constant: you set one fixed position with the value box, and it never moves for the whole "
               "video.\n"
-              "sod_v1: an AI model automatically re-picks a focus point every frame, based on the most "
+              "sod_v1: an AI model automatically picks a focus point per scene, based on the most "
               "visually important subject.\n"
               "face_detect: same idea, but automatically centers on detected faces specifically, ignoring "
               "the value box.\n"
-              "Con of sod_v1/face_detect: every time the convergence point moves — even smoothed — your "
-              "eyes have to physically readjust their focus angle to keep the image comfortable to view. "
-              "Because sod_v1 re-evaluates every frame, it can drift even WITHIN a single unbroken shot "
-              "(someone shifts position, the camera pans slightly), which is closer to \"constantly "
-              "reacting\" than how a real stereographer works — they hold convergence steady within a shot "
-              "and only step it to a new value at cuts. Real testing on this project found constant "
-              "produced steadier, more comfortable results on most typical film content for exactly this "
-              "reason.\n"
+              "How it behaves over time (ADR-231): settles on the scene's own value over the first few "
+              "frames after a cut, then HOLDS it steady for the rest of the shot -- like a real "
+              "stereographer, not a constantly-reacting one. It only glides to a new value mid-shot if the "
+              "subject genuinely moves in depth by more than a small margin (Convergence Smoothing controls "
+              "how big that margin is and how slowly it glides); small wobbles from noise, a slight pan, or "
+              "someone shifting in place never move it at all.\n"
               "When sod_v1/face_detect genuinely help: a push/pull \"reveal\" shot where the camera moves "
               "from a tight close-up to a wide shot within one continuous take — a fixed constant value "
-              "structurally can't be right for both ends of that move, but sod_v1 can track it.\n"
-              "Recommended: constant for most content — steadier and closer to real stereographer practice. "
-              "Reserve sod_v1/face_detect for content dominated by continuous push/pull reveal shots."))
+              "structurally can't be right for both ends of that move, but sod_v1 will glide to follow it — "
+              "or simply any content where a single fixed screen depth doesn't suit every scene.\n"
+              "Con: every time the convergence point moves — even smoothed — your eyes have to physically "
+              "readjust their focus angle, so a fixed constant value is still the most comfortable choice "
+              "when one screen depth genuinely suits the whole video.\n"
+              "Recommended: constant when one screen depth suits the whole video; sod_v1 or face_detect "
+              "when scenes vary a lot in framing/distance and you want the screen depth to adapt per scene "
+              "automatically."))
 
         self.cbo_convergence = EditableComboBox(self.grp_stereo, choices=["0.0", "0.25", "0.5", "1.0"],
                                                 name="cbo_convergence")
@@ -1370,9 +1373,15 @@ class MainFrame(wx.Frame):
             name="cbo_convergence_smoothing")
         self.cbo_convergence_smoothing.SetSelection(1)
         self.cbo_convergence_smoothing.SetToolTip(
-            T("Only affects sod_v1 / Face Detect convergence modes. Controls how quickly the automatic "
-              "convergence point reacts to scene changes. Higher = smoother but slower to react. Lower = "
-              "more aggressive/dynamic, reacts faster but may jitter more. 0 = no smoothing at all."))
+            T("Only affects sod_v1 / Face Detect convergence modes. Controls how long the automatic "
+              "convergence point takes to settle right after a cut, and -- once settled -- how big a "
+              "change is needed mid-shot before it glides to a new value, and how slowly it glides there. "
+              "Higher = settles over more frames, needs a bigger change to move at all, glides slower once "
+              "it does -- steadier, but slower to catch up to a genuinely new framing. Lower = settles "
+              "faster, reacts to smaller changes, glides faster -- more responsive but can feel busier. "
+              "0 = fastest settle, smallest deadband, quickest glide (not literally instant/unsmoothed any "
+              "more, since ADR-231 -- even at 0 it still briefly settles after a cut rather than snapping "
+              "to a single noisy detection)."))
         self.sld_stereo_convergence_smoothing = _build_stereo_slider(
             self.grp_stereo, self.cbo_convergence_smoothing, 0.0, 0.95, 100)
 
@@ -14194,13 +14203,21 @@ def _self_test_tab_switch_keeps_small_drag_resize_floor():
     content that tab has) is currently active."""
     import iw3.gui as gui_mod
 
+    # ADR-231 follow-up: this test's own comment already anticipated needing this --
+    # it read the REAL on-disk iw3-gui-layout.cfg via the unmocked _load_layout_mode,
+    # so a live GUI session saved as Single Page (e.g. left open from manual testing
+    # elsewhere in this same session) made a fresh MainFrame() default to Single Page
+    # here too, failing this test through no fault of the actual Tabbed-mode behavior
+    # under test. Force Tabbed the same way _self_test_layout_modes/
+    # _self_test_stereo_collapsible_sections already do, instead of assuming it.
+    orig_load = gui_mod._load_layout_mode
+    gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+
     app = wx.App()
     frame = None
     try:
         frame = gui_mod.MainFrame()
-        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS, \
-            "this test assumes the default Layout (Tabbed) -- if that default ever " \
-            "changes, switch_layout_mode(gui_mod.LAYOUT_MODE_TABS) first"
+        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS
 
         expected_min = frame.GetMinSize()
 
@@ -14217,6 +14234,7 @@ def _self_test_tab_switch_keeps_small_drag_resize_floor():
                 f"this is the exact regression ADR-177 fixed"
             )
     finally:
+        gui_mod._load_layout_mode = orig_load
         if frame is not None:
             frame.Destroy()
             wx.SafeYield()
@@ -14242,13 +14260,17 @@ def _self_test_collapsible_pane_toggle_keeps_small_drag_resize_floor():
     Video Filter, Standalone Tools), firing the real event handler each time."""
     import iw3.gui as gui_mod
 
+    # ADR-231 follow-up: same fix as _self_test_tab_switch_keeps_small_drag_resize_floor
+    # just above -- force Tabbed instead of trusting whatever a live GUI session left
+    # persisted in the real iw3-gui-layout.cfg.
+    orig_load = gui_mod._load_layout_mode
+    gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+
     app = wx.App()
     frame = None
     try:
         frame = gui_mod.MainFrame()
-        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS, \
-            "this test assumes the default Layout (Tabbed) -- if that default ever " \
-            "changes, switch_layout_mode(gui_mod.LAYOUT_MODE_TABS) first"
+        assert frame.layout_mode == gui_mod.LAYOUT_MODE_TABS
 
         expected_min = frame.GetMinSize()
 
@@ -14270,6 +14292,7 @@ def _self_test_collapsible_pane_toggle_keeps_small_drag_resize_floor():
             pane.Collapse(True)
             handler(wx.CommandEvent())
     finally:
+        gui_mod._load_layout_mode = orig_load
         if frame is not None:
             frame.Destroy()
             wx.SafeYield()
@@ -20746,6 +20769,70 @@ def _self_test_standalone_tool_titles_share_accent_colour():
     print("_self_test_standalone_tool_titles_share_accent_colour: PASS")
 
 
+def _self_test_convergence_scene_hold():
+    """ADR-231: real user request -- auto convergence (sod_v1/face_detect) must hold steady
+    within a scene and only readjust at cuts, like a real stereographer, instead of the old
+    plain-EMA behavior that could visibly drift even within one unbroken shot. Tests the shared
+    SceneHoldTracker directly (pure Python, no GPU/model needed) and both estimator classes'
+    wiring to it."""
+    from iw3.convergence_tracker import SceneHoldTracker
+
+    # small, steady noise around one value must never move the held output at all
+    t = SceneHoldTracker(decay=0.9)
+    import random
+    random.seed(0)
+    base = 0.5
+    out = None
+    for _ in range(60):
+        out = t.update(base + random.uniform(-0.005, 0.005))
+    settled = out
+    for _ in range(30):
+        out = t.update(base + random.uniform(-0.005, 0.005))
+    assert out == settled, f"small in-shot noise must not move the held value: {settled} -> {out}"
+
+    # a genuinely new, sustained value mid-shot must eventually be followed (not stuck forever) --
+    # a lower-decay tracker for this check, so the real convergence math stays fast and deterministic
+    t_follow = SceneHoldTracker(decay=0.3)
+    for _ in range(60):
+        t_follow.update(base)
+    for _ in range(150):
+        out = t_follow.update(0.9)
+    assert abs(out - 0.9) < 0.05, f"a real, sustained change mid-shot must still be followed: {out}"
+
+    # a cut must snap to the new scene immediately, not glide
+    t2 = SceneHoldTracker(decay=0.9)
+    for _ in range(20):
+        t2.update(0.2)
+    t2.mark_cut()
+    out = t2.update(0.8)
+    assert abs(out - 0.8) < 1e-6, f"a cut must snap straight to the new scene's first reading: {out}"
+
+    # higher decay must mean a longer settle, slower drift, and a wider deadband -- monotonic
+    lo = SceneHoldTracker(decay=0.0)
+    hi = SceneHoldTracker(decay=0.95)
+    assert hi.settle > lo.settle and hi.drift < lo.drift and hi.deadband > lo.deadband
+
+    # both real estimator classes route through the same tracker and mark_cut() on reset_pts
+    import types
+    from unittest import mock
+    import iw3.convergence_estimator as CE
+
+    est = CE.ConvergenceEstimator.__new__(CE.ConvergenceEstimator)
+    est.device = torch.device("cpu")
+    est.convergence = 0.5
+    est.enable_ema = True
+    est.decay = 0.9
+    est.tracker = SceneHoldTracker(0.9)
+    depth = torch.full((3, 1, 8, 8), 0.5)
+    rgb = torch.rand(3, 3, 8, 8)
+    est.model = types.SimpleNamespace(infer=lambda rgb, depth: (torch.ones_like(depth), depth))
+    with mock.patch.object(CE.ConvergenceEstimator, "depth_position_from_ratio",
+                           return_value=torch.tensor([0.2, 0.2, 0.9]).reshape(3, 1, 1, 1)):
+        z1 = est(rgb, depth, reset_pts=[False, False, True])
+    assert z1[0].item() == z1[1].item(), "no cut between frames 0/1 -- must hold the same value"
+    print("_self_test_convergence_scene_hold: PASS")
+
+
 def _self_test_pop_feather():
     """ADR-217: real user report (2026-09-22) -- a visible line at Midground Pop's band edge,
     even at a modest strength on the default 15/85 threshold. New shared "Pop Feather %" control
@@ -20930,6 +21017,7 @@ def _run_self_tests():
         _self_test_rife_progress_reaches_job_bar,
         _self_test_standalone_tool_titles_share_accent_colour,
         _self_test_pop_feather,
+        _self_test_convergence_scene_hold,
     ]
     failures = []
     for test in tests:

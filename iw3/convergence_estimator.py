@@ -3,6 +3,7 @@ from nunif.utils.ui import TorchHubDir
 from nunif.models import load_model
 from nunif.device import create_device, autocast
 from .hub_dir import HUB_MODEL_DIR
+from .convergence_tracker import SceneHoldTracker
 
 
 SOD_URL = "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_sod_v1_20260125.pth"
@@ -21,14 +22,15 @@ class ConvergenceEstimator():
         self.device = create_device(device_id)
         self.enable_ema = enable_ema
         self.decay = decay
-        self.convergence_ema = None
+        self.tracker = SceneHoldTracker(decay)
 
     def reset(self, enable_ema=None, decay=None):
         if enable_ema is not None:
             self.enable_ema = enable_ema
         if decay is not None:
             self.decay = decay
-        self.convergence_ema = None
+        self.tracker.set_decay(self.decay)
+        self.tracker.reset()
 
     @staticmethod
     def depth_position_from_ratio(saliency_map, depth, pos):
@@ -71,13 +73,10 @@ class ConvergenceEstimator():
             results = []
             for i in range(z_pos.shape[0]):
                 p = z_pos[i]
-                if self.convergence_ema is None:
-                    self.convergence_ema = p.clone()
-                else:
-                    self.convergence_ema = self.decay * self.convergence_ema + (1. - self.decay) * p
-                results.append(self.convergence_ema.clone())
+                out = self.tracker.update(p.item())
+                results.append(torch.full_like(p, out))
                 if reset_pts[i]:
-                    self.reset()
+                    self.tracker.mark_cut()
 
             z_pos = torch.stack(results, dim=0)
 

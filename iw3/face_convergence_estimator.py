@@ -1,5 +1,7 @@
 import torch
 
+from .convergence_tracker import SceneHoldTracker
+
 try:
     import cv2
     _cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -25,14 +27,15 @@ class FaceConvergenceEstimator():
             )
         self.enable_ema = enable_ema
         self.decay = decay
-        self.convergence_ema = None
+        self.tracker = SceneHoldTracker(decay)
 
     def reset(self, enable_ema=None, decay=None):
         if enable_ema is not None:
             self.enable_ema = enable_ema
         if decay is not None:
             self.decay = decay
-        self.convergence_ema = None
+        self.tracker.set_decay(self.decay)
+        self.tracker.reset()
 
     @staticmethod
     def _center_weighted_depth(depth):
@@ -83,13 +86,10 @@ class FaceConvergenceEstimator():
                 p = self._center_weighted_depth(depth[i]).reshape(1, 1, 1).clamp(0, 1)
 
             if self.enable_ema:
-                if self.convergence_ema is None:
-                    self.convergence_ema = p.clone()
-                else:
-                    self.convergence_ema = self.decay * self.convergence_ema + (1.0 - self.decay) * p
-                results.append(self.convergence_ema.clone())
+                out = self.tracker.update(p.item())
+                results.append(torch.full_like(p, out))
                 if reset_pts is not None and reset_pts[i]:
-                    self.reset()
+                    self.tracker.mark_cut()
             else:
                 results.append(p.clone())
 

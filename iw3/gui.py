@@ -7028,6 +7028,13 @@ class MainFrame(wx.Frame):
         self.Bind(EVT_IW3_STAGE, self.on_stage_change)
         self.Bind(wx.EVT_TIMER, self.on_stage_pulse_timer, self.stage_pulse_timer)
         self.Bind(wx.EVT_CLOSE, self.on_close)
+        # ADR-240: see _on_idle_remember_scroll_positions()'s own docstring for why this
+        # exists -- a collapsible pane's own native Collapse()/Expand() resets its
+        # ScrolledPanel ancestor's scroll position synchronously, before our own
+        # on_toggled_*_collapsible_pane() handler ever runs, so that handler can't read
+        # the real pre-toggle position from the (already-reset) live widget itself.
+        self._scroller_view_memory = {}
+        self.Bind(wx.EVT_IDLE, self._on_idle_remember_scroll_positions)
 
         editable_comboboxes = self.get_editable_comboboxes()
 
@@ -8174,6 +8181,32 @@ class MainFrame(wx.Frame):
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
+    def _on_idle_remember_scroll_positions(self, event):
+        """ADR-240: real user report -- expanding a Standalone Tools pane while
+        scrolled right (a window narrower than the tab's full natural width, i.e.
+        "not maximized") snapped the horizontal scroll back to the left edge, losing
+        the user's place. Confirmed live: the culprit is NOT refresh_layouts()'s Fit()
+        (the first suspect) -- it's wx.CollapsiblePane.Collapse()/Expand() itself,
+        which resets its ScrolledPanel ancestor's scroll position synchronously as a
+        native side effect, before the EVT_COLLAPSIBLEPANE_CHANGED event this file's
+        own on_toggled_*_collapsible_pane() handlers respond to is even dispatched --
+        by the time any of our own code runs, the live scroll position already reads
+        (0, 0) no matter where the user actually was. There is no wx event that fires
+        BEFORE a CollapsiblePane toggles, so the real position can't be read at
+        toggle time at all -- it has to already be remembered from before.
+
+        This idle handler continuously mirrors every scrollable options panel's
+        current GetViewStart() into self._scroller_view_memory, cheaply, on every
+        otherwise-idle moment -- which reliably includes the moment just before a
+        real click, so the memory always holds the last genuine position, immune to
+        the pane's own reset. on_toggled_*_collapsible_pane() reads the pre-toggle
+        position from here instead of from the (already-reset) live widget."""
+        for scroller in (self.pnl_single, self.tab_wrap_stereo, self.tab_wrap_depth_blend,
+                          self.tab_wrap_video_filter, self.tab_wrap_video_dec, self.tab_wrap_video_enc,
+                          self.tab_wrap_processor, self.tab_wrap_tools):
+            self._scroller_view_memory[scroller] = scroller.GetViewStart()
+        event.Skip()
+
     def on_toggled_stereo_collapsible_pane(self, event):
         """Guided Light pilot (ADR-097): a collapsible pane toggling changes
         grp_stereo's real content height, which the ScrolledPanel wrapper (Tabbed
@@ -8192,7 +8225,18 @@ class MainFrame(wx.Frame):
         invalidates every descendant's best-size cache as a side effect -- a toggled
         CollapsiblePane has no equivalent implicit invalidation, so it must be done
         explicitly, first (confirmed live: the opposite order left Single Page mode's
-        pnl_single MinSize completely unchanged after a real toggle)."""
+        pnl_single MinSize completely unchanged after a real toggle).
+
+        ADR-240: on a screen too small to fit the tab's full natural width (so the
+        ScrolledPanel is genuinely scrolled horizontally, not just able to grow into
+        free space), toggling a pane snaps that ScrolledPanel's scroll position back
+        to (0, 0) -- the pane's own native Collapse()/Expand() call does this
+        synchronously, before this handler even runs (see
+        _on_idle_remember_scroll_positions()'s docstring for the full story and why
+        the position has to be read from there, not from the live widget). Restore it
+        at the end of the whole sequence below."""
+        scroller = self.pnl_single if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE else self.tab_wrap_stereo
+        view_start = self._scroller_view_memory.get(scroller, scroller.GetViewStart())
         refresh_layouts(self)
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
             self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
@@ -8209,12 +8253,21 @@ class MainFrame(wx.Frame):
         # here for a pane toggle. Must re-call it every time, after every Fit().
         self._update_frame_min_size()
         self._clamp_frame_to_screen()
+        # wx.CallAfter rather than a direct call: _clamp_frame_to_screen()'s SetSize()
+        # can still leave its own scroll-adjustment pending on the ScrolledPanel;
+        # CallAfter defers this restore until the event queue has actually settled,
+        # so it always lands after anything else still pending, not before it.
+        wx.CallAfter(scroller.Scroll, *view_start)
         event.Skip()
 
     def on_toggled_depth_blend_collapsible_pane(self, event):
         """Same fix as on_toggled_stereo_collapsible_pane(), for the one Guided Light
         pane added to Dual-Pass Depth Blend (ADR-102) -- tab_depth_blend/
-        tab_wrap_depth_blend in place of tab_stereo/tab_wrap_stereo."""
+        tab_wrap_depth_blend in place of tab_stereo/tab_wrap_stereo. Also carries
+        ADR-240's scroll-position save/restore -- see on_toggled_stereo_collapsible_pane's
+        docstring."""
+        scroller = self.pnl_single if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE else self.tab_wrap_depth_blend
+        view_start = self._scroller_view_memory.get(scroller, scroller.GetViewStart())
         refresh_layouts(self)
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
             self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
@@ -8226,6 +8279,7 @@ class MainFrame(wx.Frame):
         # ADR-177 applies here too -- see on_toggled_stereo_collapsible_pane's comment.
         self._update_frame_min_size()
         self._clamp_frame_to_screen()
+        wx.CallAfter(scroller.Scroll, *view_start)  # see on_toggled_stereo_collapsible_pane's comment
         event.Skip()
 
     def on_toggled_video_filter_collapsible_pane(self, event):
@@ -8234,7 +8288,11 @@ class MainFrame(wx.Frame):
         in place of tab_stereo/tab_wrap_stereo. Kept as a separate, near-identical
         method rather than a parameterized shared one, matching this file's existing
         convention of explicit per-field/per-tab handlers over abstracted-for-reuse
-        ones (see e.g. the many individual on_selected_index_changed_cbo_* handlers)."""
+        ones (see e.g. the many individual on_selected_index_changed_cbo_* handlers).
+        Also carries ADR-240's scroll-position save/restore -- see
+        on_toggled_stereo_collapsible_pane's docstring."""
+        scroller = self.pnl_single if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE else self.tab_wrap_video_filter
+        view_start = self._scroller_view_memory.get(scroller, scroller.GetViewStart())
         refresh_layouts(self)
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
             self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
@@ -8246,6 +8304,7 @@ class MainFrame(wx.Frame):
         # ADR-177 applies here too -- see on_toggled_stereo_collapsible_pane's comment.
         self._update_frame_min_size()
         self._clamp_frame_to_screen()
+        wx.CallAfter(scroller.Scroll, *view_start)  # see on_toggled_stereo_collapsible_pane's comment
         event.Skip()
 
     def on_toggled_standalone_tools_collapsible_pane(self, event):
@@ -8256,7 +8315,15 @@ class MainFrame(wx.Frame):
         Interpolation) -- tab_tools/tab_wrap_tools in place of tab_stereo/
         tab_wrap_stereo. One shared handler for all 8 (unlike the one-per-tab
         convention elsewhere in this file) since they all live on the same tab and
-        need the exact same tab_tools/tab_wrap_tools targets."""
+        need the exact same tab_tools/tab_wrap_tools targets.
+
+        Also carries ADR-240's scroll-position save/restore -- see
+        on_toggled_stereo_collapsible_pane's docstring. This tab has the most panes
+        of any (8), so a real user expanding one after scrolling right to find it is
+        the single most likely place this bug was actually hit -- the "side tools
+        panel" a user reported losing their horizontal scroll position on."""
+        scroller = self.pnl_single if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE else self.tab_wrap_tools
+        view_start = self._scroller_view_memory.get(scroller, scroller.GetViewStart())
         refresh_layouts(self)
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
             self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
@@ -8270,6 +8337,7 @@ class MainFrame(wx.Frame):
         # single most likely place a real user hits this (many panes to expand).
         self._update_frame_min_size()
         self._clamp_frame_to_screen()
+        wx.CallAfter(scroller.Scroll, *view_start)  # see on_toggled_stereo_collapsible_pane's comment
         event.Skip()
 
     def get_editable_comboboxes(self):
@@ -14590,6 +14658,88 @@ def _self_test_tabbed_scrolling():
         app.Destroy()
 
     print("_self_test_tabbed_scrolling: PASS")
+
+
+def _self_test_collapsible_pane_toggle_preserves_scroll():
+    """ADR-240: real user report -- expanding a Standalone Tools pane while scrolled
+    right (on a window narrower than the tab's full natural width, i.e. "not
+    maximized") snapped the horizontal scroll back to the left edge, losing the
+    user's place. Root cause, confirmed live by tracing GetViewStart() through every
+    step of the handler by hand: it's NOT refresh_layouts()'s Fit() (the first
+    suspect) -- wx.CollapsiblePane.Collapse()/Expand() itself resets its ScrolledPanel
+    ancestor's scroll position synchronously, before EVT_COLLAPSIBLEPANE_CHANGED is
+    even dispatched, so on_toggled_*_collapsible_pane() can never read the real
+    pre-toggle position from the live widget -- by the time it runs, that's already
+    (0, 0) regardless of where the user was. Since no wx event fires before a
+    CollapsiblePane toggles, _on_idle_remember_scroll_positions() continuously mirrors
+    every scroller's position into self._scroller_view_memory on every idle tick
+    instead, and the toggle handlers read the pre-toggle position from there.
+
+    Simulates a monitor smaller than the Standalone Tools tab's natural width (500px
+    client area for a ~690px-wide tab with Sharpen expanded) so the frame genuinely
+    can't just grow past the deficit -- an unclamped test on a real dev monitor would
+    let Fit() regrow the frame to its full natural width and remove the horizontal
+    scroll condition entirely before the bug ever had a chance to show, which is
+    exactly how the first version of this test (manual, ad hoc) looked like a
+    non-issue until a fake small wx.Display.GetClientArea() was added. Also pumps a
+    few idle cycles after scrolling (matching the real gap between a user's last
+    scroll and their next click) so self._scroller_view_memory is actually populated
+    before the toggle -- omitting this would test a scenario that can't happen for a
+    real user (the memory always has SOME idle time to populate before any click)."""
+    import iw3.gui as gui_mod
+    from unittest import mock
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    small_area = wx.Rect(0, 0, 500, 700)
+    with mock.patch.object(wx.Display, "GetClientArea", return_value=small_area):
+        try:
+            gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+            frame = gui_mod.MainFrame()
+            frame.Show()
+            idx = next(i for i in range(frame.nb_options.GetPageCount())
+                       if frame.nb_options.GetPage(i) is frame.tab_wrap_tools)
+            frame.nb_options.SetSelection(idx)
+            wx.SafeYield()
+
+            wrap = frame.tab_wrap_tools
+            natural_w = wrap.GetSizer().CalcMin()[0]
+            frame.SetSize((max(300, natural_w // 2), 700))
+            frame.Layout()
+            wx.SafeYield()
+
+            ppu_x, ppu_y = wrap.GetScrollPixelsPerUnit()
+            vsize, csize = wrap.GetVirtualSize(), wrap.GetClientSize()
+            assert vsize[0] > csize[0], \
+                "test setup failed to create a genuine horizontal scroll deficit"
+            target_units = max(1, (vsize[0] - csize[0]) // max(ppu_x, 1) // 2)
+            wrap.Scroll(target_units, 0)
+            for _ in range(5):
+                wx.SafeYield()
+            before = wrap.GetViewStart()
+            assert before[0] == target_units, "test setup failed to actually scroll right"
+            assert frame._scroller_view_memory.get(wrap) == before, \
+                "idle handler failed to remember the pre-toggle scroll position"
+
+            pane = frame.cpn_sharpen
+            pane.Collapse(not pane.IsCollapsed())
+            event = wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId())
+            frame.on_toggled_standalone_tools_collapsible_pane(event)
+            for _ in range(5):
+                wx.SafeYield()
+
+            after = wrap.GetViewStart()
+            assert after[0] == before[0], \
+                f"pane toggle reset horizontal scroll ({before} -> {after}) -- ADR-240 regression"
+        finally:
+            gui_mod._load_layout_mode = orig_load
+            if frame is not None:
+                frame.Destroy()
+                wx.SafeYield()
+            app.Destroy()
+
+    print("_self_test_collapsible_pane_toggle_preserves_scroll: PASS")
 
 
 def _self_test_stereo_sliders_sync():
@@ -21523,6 +21673,7 @@ def _run_self_tests():
         _self_test_collapsible_pane_toggle_keeps_small_drag_resize_floor,
         _self_test_layout_mode_live_switch,
         _self_test_tabbed_scrolling,
+        _self_test_collapsible_pane_toggle_preserves_scroll,
         _self_test_stereo_sliders_sync,
         _self_test_depth_blend_and_processor_sliders_sync,
         _self_test_stereo_collapsible_sections,

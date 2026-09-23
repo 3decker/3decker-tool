@@ -20652,20 +20652,28 @@ def _self_test_sbs2mvc_text_subtitles():
     """Text subtitles (SRT/ASS/...) used to be silently dropped from the 3D Blu-ray ISO (a tester saw an ISO with
     audio but no subtitles). They are now extracted to .srt and handed to tsMuxeR as rendered Blu-ray subtitles,
     with a font that has the language's letters; PGS goes in as-is; unsupported formats are skipped with a note; at
-    most 32 subtitle streams. tsMuxeR/ffmpeg are faked: nothing real runs."""
+    most 32 subtitle streams. tsMuxeR/ffmpeg are faked: nothing real runs.
+
+    ADR-239 update: track detection moved from tsMuxeR's own (narrow, .ssif-oriented) track listing
+    to ffprobe (_ffprobe_list_tracks) -- see that function's docstring for the real bug this fixed
+    (a source's audio track going undetected entirely for a codec tsMuxeR doesn't recognize outside
+    a raw Blu-ray stream). Blu-ray-legal audio (A_AC3 etc.) and PGS subtitles are now also extracted
+    to their own temp file via ffmpeg, matching how S_TEXT already worked, instead of referencing the
+    source file's track number directly in tsMuxeR's own meta file -- so both detection and
+    extraction always agree on the same per-type stream index."""
     import tempfile
     import types
     from unittest import mock
     from . import sbs_to_mvc_cli as S
 
     tracks = [
-        {"id": 1, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
-        {"id": 2, "codec": "A_AC3", "lang": "eng"},
-        {"id": 3, "codec": "S_TEXT/UTF8", "lang": "eng"},
-        {"id": 4, "codec": "S_HDMV/PGS", "lang": "fre"},
-        {"id": 5, "codec": "S_TEXT/UTF8", "lang": "chi"},
-        {"id": 6, "codec": "S_TEXT/UTF8", "lang": "kor"},
-        {"id": 7, "codec": "S_VOBSUB", "lang": "ger"},
+        {"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
+        {"id": 0, "codec": "A_AC3", "lang": "eng"},
+        {"id": 0, "codec": "S_TEXT", "lang": "eng"},
+        {"id": 1, "codec": "S_HDMV/PGS", "lang": "fre"},
+        {"id": 2, "codec": "S_TEXT", "lang": "chi"},
+        {"id": 3, "codec": "S_TEXT", "lang": "kor"},
+        {"id": 4, "codec": "S_OTHER", "lang": "ger"},
     ]
     calls = []
 
@@ -20676,34 +20684,77 @@ def _self_test_sbs2mvc_text_subtitles():
             f.write("1\n00:00:01,000 --> 00:00:02,000\nx\n")
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(S, "list_tracks", return_value=tracks), \
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(S, "_ffprobe_list_tracks", return_value=tracks), \
             mock.patch.object(S.subprocess, "run", fake_run):
-        lines, notes = S._plan_audio_subs("movie.mkv", "tsMuxeR", tmp, "ffmpeg", True, fps_text="23.976")
-        assert lines[0].startswith("A_AC3, ") and "track=2" in lines[0]
+        lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True, fps_text="23.976")
+        assert lines[0].startswith("A_AC3, ") and lines[0].endswith("audio_0.ac3, lang=eng"), lines[0]
         text_lines = [line for line in lines if line.startswith("S_TEXT/UTF8")]
         assert len(text_lines) == 3, lines
         assert 'font-name="Arial"' in text_lines[0] and "lang=eng" in text_lines[0]
         assert 'font-name="Microsoft YaHei"' in text_lines[1] and "lang=chi" in text_lines[1]
         assert 'font-name="Malgun Gothic"' in text_lines[2] and "lang=kor" in text_lines[2]
         assert all("video-width=1920" in x and "video-height=1080" in x and "fps=23.976" in x for x in text_lines)
-        assert any(line.startswith("S_HDMV/PGS, ") and "track=4" in line for line in lines), lines
-        # ffmpeg is asked for the right subtitle by its position among ALL subtitle streams (eng=0, chi=2, kor=3)
+        assert any(line.startswith("S_HDMV/PGS, ") and line.endswith("subtitle_1.sup, lang=fre")
+                   for line in lines), lines
+        # both audio and every subtitle stream are extracted by their own position among streams of
+        # that same type (audio: AC3=0; subtitles: eng=0, fre(PGS)=1, chi=2, kor=3) -- detection
+        # (_ffprobe_list_tracks) and extraction (ffmpeg's own -map) always agree on this numbering.
         maps = [c[c.index("-map") + 1] for c in calls]
-        assert maps == ["0:s:0", "0:s:2", "0:s:3"], maps
-        assert any("VOBSUB" in n.upper() and "skipped" in n for n in notes), notes
+        assert maps == ["0:a:0", "0:s:0", "0:s:1", "0:s:2", "0:s:3"], maps
+        assert any("S_OTHER" in n.upper() and "skipped" in n for n in notes), notes
 
         # the 32-stream Blu-ray limit
-        many = [{"id": 1, "codec": "V_MPEG4/ISO/AVC", "lang": ""}] + \
-               [{"id": 10 + i, "codec": "S_TEXT/UTF8", "lang": "eng"} for i in range(40)]
-        with mock.patch.object(S, "list_tracks", return_value=many):
-            lines, notes = S._plan_audio_subs("movie.mkv", "tsMuxeR", tmp, "ffmpeg", True)
+        many = [{"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""}] + \
+               [{"id": i, "codec": "S_TEXT", "lang": "eng"} for i in range(40)]
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=many):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True)
         assert len([line for line in lines if line.startswith("S_TEXT")]) == 32
         assert sum("at most 32" in n for n in notes) == 8, notes
 
         # Video-only mode adds nothing
-        assert S._plan_audio_subs("movie.mkv", "tsMuxeR", tmp, "ffmpeg", False) == ([], [])
+        assert S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", False) == ([], [])
 
     print("_self_test_sbs2mvc_text_subtitles: PASS")
+
+
+def _self_test_sbs2mvc_ffprobe_track_detection():
+    """ADR-239: real user report -- a source SBS file confirmed to have an audio track came out of
+    'SBS to 3D Blu-ray MVC' with none. Root cause: track detection asked tsMuxeR itself to list
+    tracks in the source file, but tsMuxeR's own track detection for a general MKV/MP4 container
+    (as opposed to a raw .ssif Blu-ray stream, its real intended input) doesn't recognize every
+    codec ffmpeg does -- a codec it doesn't see there is silently treated as "no track at all".
+    _ffprobe_list_tracks() replaces that with ffprobe, which (being the same library ffmpeg itself
+    uses) identifies any codec ffmpeg supports. This test fakes ffprobe's own JSON output directly
+    (nothing real runs) and confirms a plain AAC audio track -- exactly the kind of everyday codec
+    tsMuxeR's own listing could miss outside a real Blu-ray stream -- is correctly detected and
+    routed to AC-3 conversion (AAC is not itself Blu-ray-legal)."""
+    import json
+    import types
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    ffprobe_json = json.dumps({"streams": [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac", "tags": {"language": "eng"}},
+        {"index": 2, "codec_type": "audio", "codec_name": "ac3", "tags": {"language": "jpn"}},
+        {"index": 3, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle", "tags": {"language": "und"}},
+    ]})
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "ffprobe":
+            return types.SimpleNamespace(returncode=0, stdout=ffprobe_json, stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with mock.patch.object(S, "_ffprobe_bin", return_value="ffprobe"), \
+            mock.patch.object(S.subprocess, "run", fake_run):
+        tracks = S._ffprobe_list_tracks("movie.mkv", "ffmpeg")
+        assert [t["codec"] for t in tracks] == ["A_OTHER", "A_AC3", "S_HDMV/PGS"], tracks
+        assert tracks[0]["lang"] == "eng" and tracks[1]["lang"] == "jpn"
+        assert tracks[2]["lang"] == "", "the placeholder language 'und' must read as no language, not a real one"
+        # AAC (A_OTHER, not Blu-ray-legal) must be routed to AC-3 conversion, not dropped
+        assert tracks[0]["id"] == 0 and tracks[1]["id"] == 1, "per-type index: both are the 1st/2nd audio stream"
+
+    print("_self_test_sbs2mvc_ffprobe_track_detection: PASS")
 
 
 def _self_test_sbs2mvc_fix_frame_rate():
@@ -21538,6 +21589,7 @@ def _run_self_tests():
         _self_test_utils_hdr_to_sdr_gpu_decode,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
+        _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_convert_hdr_to_sdr,
         _self_test_dolby_vision_step_progress,

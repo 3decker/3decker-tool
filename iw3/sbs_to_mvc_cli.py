@@ -29,12 +29,20 @@ import threading
 import urllib.request
 from os import path
 
-from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop, list_tracks
+from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop
 from .utils import _find_tsmuxer, _get_ffmpeg_bin
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
 _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
-_BD_AUDIO = {"A_AC3", "A_EAC3", "A_DTS", "A_TRUEHD", "A_LPCM", "A_MLP"}
+# LPCM/MLP deliberately excluded from this "extract as-is" set (unlike AC-3/E-AC-3/DTS/TrueHD,
+# whose extension-based bare-elementary-stream extraction via `ffmpeg -c:a copy` is well-proven):
+# both need a specific container/header ffmpeg's plain stream copy to a bare file isn't guaranteed
+# to produce correctly, and this project has no real source to verify that against. A source using
+# either falls through to the AC-3 conversion path below instead -- same as any other codec that
+# isn't directly Blu-ray-legal -- which is always correct, just not bit-for-bit lossless for those
+# two specific, uncommon cases.
+_BD_AUDIO = {"A_AC3", "A_EAC3", "A_DTS", "A_TRUEHD"}
+_BD_AUDIO_EXT = {"A_AC3": "ac3", "A_EAC3": "eac3", "A_DTS": "dts", "A_TRUEHD": "thd"}
 FRIM_URL = "https://drive.google.com/uc?export=download&id=1lumXLd74U-E2k195bzfETbHgFcHcT4sH"
 FRIM_SHA256 = "76689784495D53B34889F0EA67C9DB6B9750925DB9D1147F8FD9159E111C0778"
 # Extra places to fetch the same file from if the author's link stops working. Empty on purpose:
@@ -450,7 +458,60 @@ def _text_sub_meta(srt_path, lang, fps_text, width, height):
             f"video-width={width}, video-height={height}, fps={fps_text}{lang_part}")
 
 
-def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av, fps_text="23.976",
+_FFPROBE_AUDIO_CODEC_MAP = {
+    "ac3": "A_AC3", "eac3": "A_EAC3", "dts": "A_DTS", "truehd": "A_TRUEHD", "mlp": "A_MLP",
+}
+
+
+def _ffprobe_list_tracks(input_path, ffmpeg_bin):
+    """Every audio/subtitle track ffprobe sees in a general video file (MKV/MP4/...), in the
+    same {id, codec, lang} shape mvc_extract_cli.list_tracks() returns for a raw .ssif Blu-ray
+    stream -- `codec` translated to that module's tsMuxeR-style tags (A_AC3, S_HDMV/PGS, ...)
+    so callers can treat both sources identically.
+
+    NOT a reuse of mvc_extract_cli.list_tracks() on purpose: that function asks tsMuxeR itself
+    to list tracks, which is correct for its own use (a raw .ssif Blu-ray stream, always one of
+    a handful of Blu-ray-legal codecs tsMuxeR fully understands) -- but tsMuxeR's own track
+    detection for an arbitrary MKV/MP4 container is much narrower, and can silently see zero
+    audio tracks for a codec it doesn't recognize there (e.g. plain AAC), even though the file
+    genuinely has one. Real user report: a source SBS file confirmed to have audio came out of
+    this tool with none. ffprobe (already used elsewhere in this module for probe_video) reliably
+    identifies every codec ffmpeg itself supports, since it's the same underlying library."""
+    ffprobe = _ffprobe_bin()
+    if ffprobe is None:
+        raise RuntimeError("ffprobe not found")
+    out = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "stream=index,codec_type,codec_name:stream_tags=language",
+         "-of", "json", input_path],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError(f"could not read {input_path}: {out.stderr.strip()[-300:]}")
+    info = json.loads(out.stdout)
+    tracks = []
+    audio_i = subtitle_i = 0
+    for s in info.get("streams", []):
+        codec_type = s.get("codec_type")
+        codec_name = (s.get("codec_name") or "").lower()
+        lang = (s.get("tags", {}) or {}).get("language", "")
+        lang = "" if lang in ("und", "") else lang
+        if codec_type == "audio":
+            codec = _FFPROBE_AUDIO_CODEC_MAP.get(codec_name) or (
+                "A_LPCM" if codec_name.startswith("pcm_") else "A_OTHER")
+            tracks.append({"id": audio_i, "codec": codec, "lang": lang})
+            audio_i += 1
+        elif codec_type == "subtitle":
+            if codec_name in ("hdmv_pgs_subtitle", "pgssub"):
+                codec = "S_HDMV/PGS"
+            elif codec_name in ("subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"):
+                codec = "S_TEXT"
+            else:
+                codec = "S_OTHER"
+            tracks.append({"id": subtitle_i, "codec": codec, "lang": lang})
+            subtitle_i += 1
+    return tracks
+
+
+def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.976",
                      width=1920, height=1080):
     """Returns (meta_lines, notes). Compatible audio goes in as-is, anything else is
     converted to AC-3 (a Blu-ray-legal format) first; PGS subtitles go in as-is; text subtitles
@@ -459,16 +520,29 @@ def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av, 
     lines, notes = [], []
     if not include_av:
         return lines, notes
-    src = path.abspath(input_path).replace(chr(92), "/")
     audio_index = 0
     subtitle_index = 0          # position among ALL subtitle streams, same order ffmpeg's 0:s:N uses
     subtitle_count = 0
-    for t in list_tracks(input_path, tsmuxer_bin):
+    for t in _ffprobe_list_tracks(input_path, ffmpeg_bin):
         codec = t["codec"]
         lang = f", lang={t['lang']}" if t["lang"] else ""
         if codec.startswith("A_"):
             if codec in _BD_AUDIO:
-                lines.append(f"{codec}, {src}, track={t['id']}{lang}")
+                # Extracted via ffmpeg (lossless stream copy, not a re-encode) rather than
+                # referencing the source file's track by number directly in tsMuxeR's own meta
+                # file: tsMuxeR's `track=N` numbering for a general MKV/MP4 container is not
+                # guaranteed to match the per-type stream index ffprobe (and ffmpeg's own `0:a:N`
+                # map specifier) use, which _ffprobe_list_tracks() above relies on for detection.
+                # Keeping both ends on the same ffprobe/ffmpeg indexing avoids ever muxing the
+                # wrong track (or none at all) because the two tools numbered them differently.
+                out = path.join(work_dir, f"audio_{audio_index}.{_BD_AUDIO_EXT[codec]}")
+                r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                                    f"0:a:{audio_index}", "-vn", "-c:a", "copy", out],
+                                   capture_output=True, text=True)
+                if r.returncode == 0 and path.exists(out):
+                    lines.append(f"{codec}, {out.replace(chr(92), '/')}{lang}")
+                else:
+                    notes.append(f"audio track {audio_index + 1} ({codec}) skipped: could not extract it")
             else:
                 out = path.join(work_dir, f"audio_{audio_index}.ac3")
                 converted = False
@@ -491,8 +565,18 @@ def _plan_audio_subs(input_path, tsmuxer_bin, work_dir, ffmpeg_bin, include_av, 
             if subtitle_count >= _MAX_BD_SUBTITLES:
                 notes.append(f"{label} skipped: a Blu-ray holds at most {_MAX_BD_SUBTITLES} subtitle tracks")
             elif codec == "S_HDMV/PGS":
-                lines.append(f"{codec}, {src}, track={t['id']}{lang}")
-                subtitle_count += 1
+                # Same reasoning as the compatible-audio case above: extract by ffmpeg's own
+                # `0:s:N` index (matching how _ffprobe_list_tracks() detected it) instead of
+                # trusting tsMuxeR to find track N itself in a general container.
+                out = path.join(work_dir, f"subtitle_{subtitle_index}.sup")
+                r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                                    f"0:s:{subtitle_index}", "-c:s", "copy", out],
+                                   capture_output=True, text=True)
+                if r.returncode == 0 and path.exists(out) and path.getsize(out) > 0:
+                    lines.append(f"{codec}, {out.replace(chr(92), '/')}{lang}")
+                    subtitle_count += 1
+                else:
+                    notes.append(f"{label} skipped: could not extract it")
             elif codec.startswith("S_TEXT"):
                 out = path.join(work_dir, f"subtitle_{subtitle_index}.srt")
                 r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
@@ -679,7 +763,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 
         av_lines, notes = ([], [])
         if include_av:
-            av_lines, notes = _plan_audio_subs(input_path, tsmuxer, work_dir, ffmpeg, True, fps_text=fps_text)
+            av_lines, notes = _plan_audio_subs(input_path, work_dir, ffmpeg, True, fps_text=fps_text)
         for n in notes:
             print(f"[sbs2mvc] note: {n}", file=sys.stderr)
 

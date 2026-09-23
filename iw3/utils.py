@@ -2363,8 +2363,28 @@ def make_output_filename(input_filename, args, video=False):
         else:
             smtag = ""
 
+        # Auto 3D Strength (nt_auto3d add-on, ADR-213) -- args.divergence alone would silently
+        # read as a fixed value even though the real per-scene divergence roams between
+        # divergence_min/max; name the range/mode/stability so a renamed file still shows what
+        # actually produced it. getattr() throughout, matching every other optional/add-on field
+        # in this function -- utils.py has no hard dependency on nt_auto3d being installed.
+        if getattr(args, "auto_divergence", False):
+            auto_div_mode = getattr(args, "auto_divergence_mode", "hybrid")
+            auto_div_min = getattr(args, "divergence_min", 2.0)
+            auto_div_max = getattr(args, "divergence_max", 16.0)
+            auto_div_stab = getattr(args, "auto_divergence_stability", "medium")
+            auto3d_tag = (f"_auto3d{auto_div_mode}{to_deciaml(auto_div_min, 10, 2)}"
+                          f"-{to_deciaml(auto_div_max, 10, 2)}")
+            if auto_div_stab != "medium":
+                auto3d_tag += auto_div_stab.replace("-", "")
+            if getattr(args, "auto_divergence_overlay", False):
+                auto3d_tag += "dbg"
+        else:
+            auto3d_tag = ""
+
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
-                    f"d{to_deciaml(args.divergence, 10, 2)}_{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
+                    f"d{to_deciaml(args.divergence, 10, 2)}{auto3d_tag}_"
+                    f"{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}{pf}{po}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
@@ -2395,6 +2415,15 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append("iw3_depth_aa=1")
     comment_parts.append(f"iw3_method={args.method}")
     comment_parts.append(f"iw3_divergence={args.divergence}")
+    if getattr(args, "auto_divergence", False):
+        comment_parts.append("iw3_auto_divergence=1")
+        comment_parts.append(f"iw3_auto_divergence_mode={getattr(args, 'auto_divergence_mode', 'hybrid')}")
+        comment_parts.append(f"iw3_divergence_min={getattr(args, 'divergence_min', 2.0)}")
+        comment_parts.append(f"iw3_divergence_max={getattr(args, 'divergence_max', 16.0)}")
+        comment_parts.append(
+            f"iw3_auto_divergence_stability={getattr(args, 'auto_divergence_stability', 'medium')}")
+        if getattr(args, "auto_divergence_overlay", False):
+            comment_parts.append("iw3_auto_divergence_overlay=1")
     comment_parts.append(f"iw3_convergence={args.convergence}")
     if args.convergence_mode != "constant":
         comment_parts.append(f"iw3_convergence_mode={args.convergence_mode}")

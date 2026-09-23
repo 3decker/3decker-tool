@@ -20066,6 +20066,48 @@ def _self_test_nt_auto_divergence_controls():
     print("_self_test_nt_auto_divergence_controls: PASS")
 
 
+def _self_test_auto_divergence_metadata_tags():
+    """Real user request: Auto 3D Strength's own settings (mode/range/stability/overlay) must be
+    recorded in the output filename and embedded comment metadata like every other real setting --
+    args.divergence alone would otherwise read as a fixed value even though the actual per-scene
+    strength roams across divergence_min/max."""
+    from . import utils as U
+    parser = U.create_parser(required_true=False)
+    parsed = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename",
+        "--auto-divergence", "--auto-divergence-mode", "cuts",
+        "--divergence-min", "3.0", "--divergence-max", "12.0",
+        "--auto-divergence-stability", "very-high", "--auto-divergence-overlay",
+    ])
+    parsed.video_extension = ".mkv"
+    name = U.make_output_filename("a.mp4", parsed, video=True)
+    assert "_auto3dcuts30-120veryhighdbg_" in name, name
+    comment = U._build_iw3_comment_metadata(parsed, video=True)
+    assert "iw3_auto_divergence=1" in comment
+    assert "iw3_auto_divergence_mode=cuts" in comment
+    assert "iw3_divergence_min=3.0" in comment and "iw3_divergence_max=12.0" in comment
+    assert "iw3_auto_divergence_stability=very-high" in comment
+    assert "iw3_auto_divergence_overlay=1" in comment
+
+    # default mode/stability, overlay off -> no dbg suffix, no stability suffix, no overlay line
+    default_range = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename", "--auto-divergence",
+        "--divergence-min", "2.8", "--divergence-max", "5.5",
+    ])
+    default_range.video_extension = ".mkv"
+    name2 = U.make_output_filename("a.mp4", default_range, video=True)
+    assert "_auto3dhybrid28-55_" in name2, name2
+    comment2 = U._build_iw3_comment_metadata(default_range, video=True)
+    assert "iw3_auto_divergence_overlay" not in comment2
+
+    # off entirely -> no trace in either
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename"])
+    off.video_extension = ".mkv"
+    assert "_auto3d" not in U.make_output_filename("a.mp4", off, video=True)
+    assert "auto_divergence" not in U._build_iw3_comment_metadata(off, video=True)
+    print("_self_test_auto_divergence_metadata_tags: PASS")
+
+
 def _self_test_face_protect():
     """ADR-214: iw3.face_protect's own masking math (synthetic tensors, detection mocked -- real
     detection accuracy on a photo was verified live separately, not something a fast synthetic test
@@ -20759,6 +20801,7 @@ def _run_self_tests():
         _self_test_rowan_model_registration,
         _self_test_face_protect,
         _self_test_nt_auto_divergence_controls,
+        _self_test_auto_divergence_metadata_tags,
         _self_test_post_steps_are_chained,
         _self_test_post_conversion_vram_release,
         _self_test_upscale_full4k_hdr_and_progress,

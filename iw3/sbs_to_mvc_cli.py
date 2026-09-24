@@ -29,8 +29,8 @@ import threading
 import urllib.request
 from os import path
 
-from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop
-from .utils import _find_tsmuxer, _get_ffmpeg_bin
+from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc
+from .utils import _find_tsmuxer, _get_ffmpeg_bin, _find_mkvmerge
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
 _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
@@ -599,6 +599,51 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
     return lines, notes
 
 
+def _extract_all_av_for_mkv(input_path, work_dir, ffmpeg_bin):
+    """For the direct-to-.mkv output (ADR-245): extracts EVERY audio and subtitle track
+    as its own small Matroska file (.mka for audio, .mks for subtitles) via ffmpeg
+    stream copy, then returns their paths for mkvmerge to pull in alongside the video.
+
+    Deliberately NOT _plan_audio_subs() above: that function's whole design (convert
+    anything not Blu-ray-legal to AC-3, drop anything but PGS/text subtitles) exists
+    because a real 3D Blu-ray disc can only hold specific codecs -- a plain .mkv has no
+    such restriction at all, so filtering or converting anything here would be a real,
+    unforced loss of quality for no reason. Extracting into a small Matroska container
+    (rather than each codec's own bare elementary stream) also sidesteps ADR-243
+    entirely: mkvmerge already knows how to read its own container's tracks regardless
+    of which codec is inside, so there is no bare-stream-format guessing per codec, and
+    no risk of a specific codec (TrueHD, PGS, whatever) needing special-case handling
+    here the way the Blu-ray path needed for TrueHD."""
+    tracks = _ffprobe_list_tracks(input_path, ffmpeg_bin)
+    extracted = []
+    audio_index = subtitle_index = 0
+    for t in tracks:
+        codec = t["codec"]
+        if codec.startswith("A_"):
+            out = path.join(work_dir, f"audio_{audio_index}.mka")
+            r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                                f"0:a:{audio_index}", "-vn", "-c:a", "copy", out],
+                               capture_output=True, text=True)
+            if r.returncode == 0 and path.exists(out):
+                extracted.append(out)
+            else:
+                print(f"[sbs2mvc] note: audio track {audio_index + 1} ({codec}) skipped: could not extract it",
+                     file=sys.stderr)
+            audio_index += 1
+        elif codec.startswith("S_"):
+            out = path.join(work_dir, f"subtitle_{subtitle_index}.mks")
+            r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                                f"0:s:{subtitle_index}", "-c:s", "copy", out],
+                               capture_output=True, text=True)
+            if r.returncode == 0 and path.exists(out):
+                extracted.append(out)
+            else:
+                print(f"[sbs2mvc] note: subtitle track {subtitle_index + 1} ({codec}) skipped: could not extract it",
+                     file=sys.stderr)
+            subtitle_index += 1
+    return extracted
+
+
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
             stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False,
@@ -609,20 +654,28 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     of refusing -- opt-in only, since it's a real (if usually tiny) speed change.
     convert_hdr_to_sdr: if the source is HDR (HDR10/Dolby Vision/HLG), tone-map it to plain SDR
     instead of refusing -- opt-in only, since the HDR grade is genuinely gone afterward (3D
-    Blu-ray/MVC cannot carry HDR at all, so there is no way to keep it either way)."""
+    Blu-ray/MVC cannot carry HDR at all, so there is no way to keep it either way).
+
+    output_iso ending in .mkv (ADR-245) skips the Blu-ray disc structure entirely: the same
+    real MVC video FRIMEncode produces either way is instead packaged directly into a plain
+    .mkv (interleave_mvc() + mkvmerge, the same technique ADR-241 already proved for
+    mvc_extract_cli.py) -- for a source that started as an ordinary 2D movie (AI-converted to
+    SBS by this project's own main tool) and needs to end as one real MKV-MVC file, with no
+    separate MakeMKV/CloneBD re-rip step and no intermediate disc image ever created."""
     frim = find_frim()
     tsmuxer = _find_tsmuxer()
     ffmpeg = _get_ffmpeg_bin()
+    is_mkv_output = path.splitext(output_iso)[1].lower() == ".mkv"
     if frim is None:
         raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
-    if tsmuxer is None:
+    if tsmuxer is None and not is_mkv_output:
         raise RuntimeError("tsMuxeR not found -- run `python -m iw3.install_mvc_tools`")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg not found")
     if not path.exists(input_path):
         raise RuntimeError(f"input file not found: {input_path}")
-    if path.splitext(output_iso)[1].lower() != ".iso":
-        raise ValueError("the output must be an .iso file")
+    if not is_mkv_output and path.splitext(output_iso)[1].lower() != ".iso":
+        raise ValueError("the output must be an .iso or .mkv file")
     if not 2 <= bitrate_mbps <= 40:
         raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
 
@@ -705,6 +758,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     base_es, dep_es = path.join(work_dir, "base.264"), path.join(work_dir, "dep.264")
     meta_path = path.join(work_dir, "mux.meta")
     ffmpeg_log = path.join(work_dir, "ffmpeg.log")
+    combined_es = path.join(work_dir, "combined_mvc.264")  # only written when is_mkv_output
+    av_files = []  # only populated when is_mkv_output and include_av
     procs, ok = [], False
     try:
         vf = eye_filter(layout, width, height, crop)
@@ -778,6 +833,47 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
                 + (f"\nffmpeg (likely just a downstream symptom of FRIM's pipe closing, not "
                    f"ffmpeg's own problem): {ff_msg}" if ff_msg.strip() else ""))
 
+        if is_mkv_output:
+            # ADR-245: direct-to-.mkv -- the same real MVC video, packaged without ever
+            # building a disc structure. interleave_mvc() is the exact same function
+            # mvc_extract_cli.py uses to reconstruct a real MVC bitstream from a
+            # separately-demuxed base+dependent pair; FRIMEncode's own "-o:mvc base dep
+            # -viewoutput" output is that same separated shape, so it applies unchanged.
+            if progress_cb:
+                progress_cb("mux", 0, 1)
+            interleave_mvc(base_es, dep_es, combined_es)
+            if stop_event is not None and stop_event.is_set():
+                raise Cancelled()
+
+            av_files = []
+            if include_av:
+                av_files = _extract_all_av_for_mkv(input_path, work_dir, ffmpeg)
+
+            mkvmerge_bin = _find_mkvmerge()
+            if mkvmerge_bin is None:
+                raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
+            if progress_cb:
+                progress_cb("mux", 0, 100)
+            mux_cmd = [mkvmerge_bin, "-o", output_iso, "--default-duration", f"0:{fps_frac}fps",
+                      combined_es] + av_files
+            mux = subprocess.Popen(mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            procs.append(mux)
+            mux_tail = []
+            for line in mux.stdout:
+                mux_tail.append(line.rstrip())
+                del mux_tail[:-12]
+                m = re.search(r"Progress:\s*(\d+)%", line)
+                if m and progress_cb:
+                    progress_cb("mux", float(m.group(1)), 100)
+                if stop_event is not None and stop_event.is_set():
+                    mux.kill()
+                    raise Cancelled()
+            mux.wait()
+            if mux.returncode != 0:
+                raise RuntimeError("mkvmerge failed:\n" + "\n".join(mux_tail))
+            ok = True
+            return total_frames
+
         av_lines, notes = ([], [])
         if include_av:
             av_lines, notes = _plan_audio_subs(input_path, work_dir, ffmpeg, True, fps_text=fps_text)
@@ -824,7 +920,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
             if created_work:
                 shutil.rmtree(work_dir, ignore_errors=True)
             else:
-                for leftover in (base_es, dep_es, meta_path, ffmpeg_log, retimed_path, tonemapped_path):
+                for leftover in (base_es, dep_es, meta_path, ffmpeg_log, retimed_path, tonemapped_path,
+                                 combined_es, *av_files):
                     if leftover is None:
                         continue
                     try:
@@ -836,7 +933,10 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", "-i", required=True, help="the 3D video (side-by-side or top-bottom)")
-    parser.add_argument("--output", "-o", required=True, help="the 3D Blu-ray .iso to write")
+    parser.add_argument("--output", "-o", required=True,
+                        help="the 3D Blu-ray .iso to write, or (ADR-245) a plain .mkv holding the real MVC "
+                             "video directly (no disc structure, no re-encode) -- for a library built around "
+                             "real MVC files rather than a disc image")
     parser.add_argument("--layout", choices=LAYOUTS, default=None,
                         help="how the eyes are stored in the input (default: guessed from its size)")
     parser.add_argument("--bitrate", type=float, default=20.0,

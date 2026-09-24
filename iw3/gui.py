@@ -6003,14 +6003,21 @@ class MainFrame(wx.Frame):
               "Recommended: the direct iw3 output (Full or Half Side-by-Side)."))
         self.btn_sbs2mvc_input = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("..."))
 
-        self.lbl_sbs2mvc_output = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Output ISO"))
+        self.lbl_sbs2mvc_output = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Output File"))
         self.txt_sbs2mvc_output = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), name="txt_sbs2mvc_output")
         self.txt_sbs2mvc_output.SetToolTip(
-            T("Where to write the 3D Blu-ray disc image (.iso). Auto-filled with '<video name>_MVC.iso' "
-              "next to the input once you pick one.\n"
+            T("Where to write the result. The file extension you type picks the mode:\n"
+              "'.iso' writes a real 3D Blu-ray disc image (with menus/chapters), playable on a 3D Blu-ray "
+              "player or PowerDVD, or burnable to a BD-R.\n"
+              "'.mkv' (ADR-245) writes the same real MVC video directly into a plain .mkv file instead -- "
+              "no disc structure, for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
+              "rips) rather than a disc image -- one step from a 2D movie converted by this program all "
+              "the way to a real MVC file, no separate re-ripping tool needed. Not yet confirmed end-to-end "
+              "in a real MVC-capable player.\n"
+              "Auto-filled with '<video name>_MVC.iso' next to the input once you pick a source.\n"
               "Con: the job also needs a temporary folder (created next to this file, deleted when done) "
-              "and then the ISO itself -- together roughly 3x the finished ISO's size. The tool refuses "
-              "to start if there isn't enough free space."))
+              "-- roughly 3x the finished file's size for the .iso mode, a bit less for .mkv. The tool "
+              "refuses to start if there isn't enough free space."))
         self.btn_sbs2mvc_output = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("..."))
 
         self.lbl_sbs2mvc_layout = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Input Layout"))
@@ -13241,7 +13248,9 @@ class MainFrame(wx.Frame):
         # labels), which made this stage's own always-CPU behavior a reasonable thing to
         # wonder about rather than assume. FRIM (the only free MVC/3D-Blu-ray encoder this
         # tool has) has no working hardware mode on current graphics cards.
-        names = {"encode": T("Encoding 3D (CPU/software)"), "mux": T("Building the disc"),
+        is_mkv_out = path.splitext(self.txt_sbs2mvc_output.GetValue().strip())[1].lower() == ".mkv"
+        mux_label = T("Writing the MVC .mkv") if is_mkv_out else T("Building the disc")
+        names = {"encode": T("Encoding 3D (CPU/software)"), "mux": mux_label,
                  "autocrop": T("Looking for black bars"),
                  "retime": T("Fixing the frame rate (re-timing picture, sound and subtitles)"),
                  "tonemap": T("Converting HDR to SDR")}
@@ -13360,8 +13369,8 @@ class MainFrame(wx.Frame):
             return None, T("Select a valid 3D video file first.")
         if not output_path:
             return None, T("Set an Output ISO path first.")
-        if path.splitext(output_path)[1].lower() != ".iso":
-            return None, T("Output ISO must end in .iso.")
+        if path.splitext(output_path)[1].lower() not in (".iso", ".mkv"):
+            return None, T("Output must end in .iso or .mkv.")
         if path.abspath(output_path) == path.abspath(input_path):
             return None, T("Output must be different from the input video.")
         if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, 40, allow_empty=False):
@@ -19074,9 +19083,9 @@ def _self_test_sbs2mvc_panel():
             frame.txt_sbs2mvc_input.SetValue(video)
             cmd, err = frame.build_sbs2mvc_command()
             assert cmd is None and err, "empty output must be refused"
-            frame.txt_sbs2mvc_output.SetValue(path.join(tmpdir, "movie.mkv"))
+            frame.txt_sbs2mvc_output.SetValue(path.join(tmpdir, "movie.mp4"))
             cmd, err = frame.build_sbs2mvc_command()
-            assert cmd is None and err, "non-.iso output must be refused"
+            assert cmd is None and err, "an extension that's neither .iso nor .mkv must be refused"
             out = path.join(tmpdir, "movie_MVC.iso")
             frame.txt_sbs2mvc_output.SetValue(out)
             frame.txt_sbs2mvc_bitrate.SetValue("99")
@@ -19092,6 +19101,14 @@ def _self_test_sbs2mvc_panel():
             assert cmd[cmd.index("--bitrate") + 1] == "20.0"
             assert "--gui-progress" in cmd and "--swap-eyes" not in cmd and "--no-audio-subs" not in cmd
             assert "--fix-frame-rate" not in cmd and "--convert-hdr-to-sdr" not in cmd
+
+            # ADR-245: .mkv output (direct MVC .mkv, no disc structure) is now accepted too --
+            # picked purely by the extension typed in Output File, no separate dropdown.
+            out_mkv = path.join(tmpdir, "movie_MVC.mkv")
+            frame.txt_sbs2mvc_output.SetValue(out_mkv)
+            cmd, err = frame.build_sbs2mvc_command()
+            assert err is None and cmd[cmd.index("--output") + 1] == out_mkv, (cmd, err)
+            frame.txt_sbs2mvc_output.SetValue(out)
 
             frame.cbo_sbs2mvc_layout.SetSelection(3)
             frame.chk_sbs2mvc_swap.SetValue(True)
@@ -21061,6 +21078,53 @@ def _self_test_mvc_extract_remove_stale_temp():
     print("_self_test_mvc_extract_remove_stale_temp: PASS")
 
 
+def _self_test_sbs2mvc_extract_all_av_for_mkv():
+    """ADR-245: the direct-to-.mkv output for "SBS to 3D Blu-ray MVC" has no Blu-ray-legal-
+    codec restriction at all (unlike the .iso path, which needed ADR-243's TrueHD fix
+    specifically because of this) -- _extract_all_av_for_mkv() must pull out EVERY audio
+    and subtitle track as-is, including ones the .iso path would convert (TrueHD) or drop
+    entirely (a bitmap format like VobSub, which a real Blu-ray can't hold but a plain .mkv
+    can). Each track becomes its own small Matroska file (.mka audio / .mks subtitle) --
+    mkvmerge reads a Matroska container's own tracks regardless of the codec inside, so
+    there is no per-codec bare-elementary-stream extension guessing here at all, sidestepping
+    the whole class of bug ADR-243 had to fix for the .iso path."""
+    import types
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    tracks = [
+        {"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
+        {"id": 0, "codec": "A_TRUEHD", "lang": "eng"},
+        {"id": 1, "codec": "A_AC3", "lang": "jpn"},
+        {"id": 0, "codec": "S_HDMV/PGS", "lang": "eng"},
+        {"id": 1, "codec": "S_VOBSUB", "lang": "fre"},  # a .iso path would drop this entirely
+    ]
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = cmd[-1]
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("fake data")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(S, "_ffprobe_list_tracks", return_value=tracks), \
+            mock.patch.object(S.subprocess, "run", fake_run):
+        extracted = S._extract_all_av_for_mkv("movie.mkv", tmp, "ffmpeg")
+
+    assert len(extracted) == 4, extracted  # both audio + both subtitles, nothing dropped or converted
+    assert extracted[0].endswith("audio_0.mka") and extracted[1].endswith("audio_1.mka")
+    assert extracted[2].endswith("subtitle_0.mks") and extracted[3].endswith("subtitle_1.mks")
+    # every extraction is a stream copy (-c:a copy / -c:s copy), never a re-encode/conversion --
+    # TrueHD (which the .iso path must convert to AC-3, see ADR-243) is copied as-is here, and
+    # the VobSub track (which the .iso path drops entirely, no Blu-ray can hold it) is kept too.
+    assert all("copy" in c for c in calls), calls
+    maps = [c[c.index("-map") + 1] for c in calls]
+    assert maps == ["0:a:0", "0:a:1", "0:s:0", "0:s:1"], maps
+
+    print("_self_test_sbs2mvc_extract_all_av_for_mkv: PASS")
+
+
 def _self_test_sbs2mvc_fix_frame_rate():
     """A 25fps (or any non-23.976/24) input to sbs_to_mvc_cli.convert(): by default still
     refused (ADR-182's original 'never silently change your movie's speed' rule, untouched);
@@ -21897,6 +21961,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_truehd_falls_through_to_ac3,
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
+        _self_test_sbs2mvc_extract_all_av_for_mkv,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_convert_hdr_to_sdr,
         _self_test_dolby_vision_step_progress,

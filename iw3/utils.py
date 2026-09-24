@@ -375,6 +375,51 @@ def _run_stderr_progress(cmd, cwd, args, desc, forward=False):
 
 _AVRESTORE_LABELS = {"trim": "reading the audio & subtitles from the source", "mux": "writing them into the video"}
 
+_MVC_STAGE_LABELS = {
+    "tonemap": "converting HDR to SDR first", "retime": "fixing the frame rate",
+    "autocrop": "looking for black bars", "encode": "encoding the real 3D (MVC) video",
+    "mux": "writing the final file",
+}
+
+
+def _run_mvc_with_progress(cmd, cwd, args):
+    """iw3.sbs_to_mvc_cli with live progress from its "IW3_MVC_PROGRESS <stage> <done> <total>" lines --
+    same shape and same _StageBar-per-stage approach as _run_av_restore_with_progress just above, since
+    sbs_to_mvc_cli.py's --gui-progress output uses the identical 4-token convention."""
+    if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
+        return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
+    err = []
+    drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
+    drain.start()
+    bar, stage = None, None
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            parts = raw.decode(errors="replace").split()
+            if len(parts) != 4 or parts[0] != "IW3_MVC_PROGRESS":
+                continue
+            try:
+                name, cur, tot = parts[1], float(parts[2]), float(parts[3])
+            except ValueError:
+                continue
+            if tot <= 0:
+                continue
+            if name != stage:
+                if bar is not None:
+                    bar.close(complete=True)
+                stage = name
+                bar = _StageBar(args, "Converting to MVC: " + _MVC_STAGE_LABELS.get(name, name), 1000, "pct")
+            bar.set(int(min(1.0, cur / tot) * 1000))
+    finally:
+        proc.wait()
+        drain.join(timeout=5)
+        if bar is not None:
+            bar.close(complete=proc.returncode == 0)
+    result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err))
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
+    return result
+
 
 def _run_av_restore_with_progress(cmd, cwd, args):
     """iw3.av_restore_cli with live progress from its "IW3_AVRESTORE_PROGRESS <stage> <cur> <total>" lines
@@ -877,7 +922,12 @@ def _run_post_conversion_steps(video_path, args, dv_source=None):
         current = rife_output_path
     # Restore audio/subtitles onto the file the user will actually keep (the last one in the chain).
     restored = _run_audio_subtitle_restore(current, args)
-    return restored or current
+    if restored:
+        current = restored
+    # ADR-246: MVC conversion is a side effect (its own separate file), not a chain link -- it
+    # never changes `current`/the file this function returns as "the one to keep".
+    _run_mvc_conversion(current, args)
+    return current
 
 
 def _run_audio_subtitle_restore(output_path, args):
@@ -941,6 +991,74 @@ def _run_audio_subtitle_restore(output_path, args):
     # the restore remuxes into a new file, so re-apply the StereoMode tag (no-op unless --stereo-mode-tag)
     _apply_stereo_mode_tag(restored_path, args)
     return restored_path
+
+
+def _run_mvc_conversion(output_path, args):
+    """Optionally invokes iw3.sbs_to_mvc_cli (ADR-246) as a subprocess against this
+    job's own just-finished output -- turning a plain 2D movie into a real MVC file
+    (the same format an actual 3D Blu-ray disc uses) in one job, no separate manual
+    standalone-tool step, real user request ("the holy grail is to take a 2D movie
+    and just convert it to MKV-MVC directly"). Runs LAST in the chain (after Restore
+    Audio & Subtitles, if also on), since MVC muxing wants the fully assembled file
+    with every track already restored, not the bare converted video.
+
+    Only proceeds when the finished output is a packed two-eye layout sbs_to_mvc_cli
+    actually understands (Full/Half SBS, Full/Half TB) -- the GUI itself prevents
+    this mismatch by forcing Stereo Format to Full SBS whenever this checkbox is
+    checked (Half SBS/TB would throw away half the detail before MVC even starts),
+    but a raw CLI invocation combining --convert-to-mvc with an incompatible format
+    (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug Depth) is still possible, so this
+    is checked directly here rather than assumed.
+
+    Written to its own separate '<name>_MVC.iso'/'<name>_MVC.mkv' file -- the plain
+    converted output is never modified or replaced, same convention as every other
+    post-step here. Returns True on success, False (having already logged why) on
+    failure or refusal -- this is a side-effect step, not part of the file-to-keep
+    chain (mirrors _reinject_dv_after_rife, not _run_rife_interpolation/
+    _run_audio_subtitle_restore, since an MVC file is a genuinely different kind of
+    artifact -- a disc image or a repackaged MVC container -- not an improved
+    replacement for the plain video, so the chain still returns the plain file)."""
+    if not getattr(args, "convert_to_mvc", False):
+        return False
+    if getattr(args, "half_sbs", False):
+        layout = "half_sbs"
+    elif getattr(args, "tb", False):
+        layout = "full_tb"
+    elif getattr(args, "half_tb", False):
+        layout = "half_tb"
+    elif not any(getattr(args, f, False) for f in
+                ("vr180", "cross_eyed", "rgbd", "half_rgbd", "anaglyph", "export", "export_disparity",
+                 "debug_depth")):
+        layout = "full_sbs"
+    else:
+        layout = None
+    if layout is None:
+        print("[iw3] Convert to MVC skipped: the chosen Stereo Format isn't one MVC conversion understands "
+             "(needs Full/Half SBS or Full/Half TB)", file=sys.stderr)
+        return False
+
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+    base, _ = path.splitext(str(output_path))
+    ext = ".mkv" if getattr(args, "mvc_output_type", "iso") == "mkv" else ".iso"
+    mvc_path = f"{base}_MVC{ext}"
+    cmd = [sys.executable, "-m", "iw3.sbs_to_mvc_cli",
+          "-i", str(output_path), "-o", mvc_path, "--layout", layout,
+          "--bitrate", str(getattr(args, "mvc_bitrate", 20.0) or 20.0),
+          "--gui-progress"]
+
+    _notify_stage(args, STAGE_CONVERT_MVC)
+    print(f"[iw3] Converting to 3D Blu-ray MVC ({ext})...", file=sys.stderr)
+    try:
+        _run_mvc_with_progress(cmd, nunif_dir, args)
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace").strip()
+        print(f"[iw3] MVC conversion failed: {msg[:600]}", file=sys.stderr)
+        return False
+    if not path.exists(mvc_path):
+        print("[iw3] MVC conversion exited 0 but produced no output file", file=sys.stderr)
+        return False
+    print(f"[iw3] MVC conversion done: {mvc_path}", file=sys.stderr)
+    return True
 
 
 def _extract_dovi_rpu(input_path, rpu_path, ffmpeg_bin, dovi_bin, tmp_hevc):
@@ -2657,6 +2775,7 @@ STAGE_WAIFU2X_UPSCALE = "Upscaling with waifu2x"
 STAGE_RIFE_INTERPOLATE = "RIFE Frame Interpolation"
 STAGE_HDR_REINJECT = "HDR/Dolby Vision Reinjection"
 STAGE_RESTORE_AV = "Restoring Audio & Subtitles"
+STAGE_CONVERT_MVC = "Converting to 3D Blu-ray MVC"
 
 
 def _notify_stage(args, name):
@@ -6488,6 +6607,23 @@ def create_parser(required_true=True):
                               "the original conversion output is never modified. A source missing one "
                               "track type (e.g. no subtitles) is not an error -- whatever it has gets "
                               "restored."))
+    parser.add_argument("--convert-to-mvc", action="store_true",
+                        help=("ADR-246: after conversion (and Restore Audio & Subtitles, if also on) "
+                              "finishes, additionally run this job's finished output through 'SBS to 3D "
+                              "Blu-ray MVC' (iw3.sbs_to_mvc_cli) automatically -- real MVC video, the same "
+                              "format an actual 3D Blu-ray disc uses, from a plain 2D source in one job with "
+                              "no separate manual step. Written to its own separate "
+                              "'<name>_MVC.iso'/'<name>_MVC.mkv' file -- the plain converted output is never "
+                              "modified or replaced. Forces Stereo Format to Full SBS if anything else was "
+                              "selected (Half SBS/TB throws away half the detail before MVC even starts; "
+                              "MVC needs a real full-resolution frame). See --mvc-output-type/--mvc-bitrate."))
+    parser.add_argument("--mvc-output-type", type=str, default="iso", choices=["iso", "mkv"],
+                        help=("only with --convert-to-mvc: 'iso' (default) writes a real 3D Blu-ray disc "
+                              "image; 'mkv' writes the same real MVC video directly into a plain .mkv "
+                              "instead, no disc structure (ADR-245)."))
+    parser.add_argument("--mvc-bitrate", type=float, default=20.0,
+                        help="only with --convert-to-mvc: target Mbps per view (default 20; 3D Blu-ray "
+                             "allows about 40 combined) -- same meaning as sbs_to_mvc_cli's own --bitrate.")
     parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
                         choices=["auto", "4k", "8k", "fsbs4k", "ftb4k"],
                         help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "

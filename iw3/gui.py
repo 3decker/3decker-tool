@@ -26,6 +26,7 @@ from .utils import (
     STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
     STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
     STAGE_RESTORE_AV,
+    STAGE_CONVERT_MVC,
 )
 from . import update_check
 from . import subtitle_search_cli
@@ -4043,6 +4044,58 @@ class MainFrame(wx.Frame):
               "still exists separately for audio-only restoration on a file you've already "
               "converted."))
 
+        # ADR-246: real user request -- "the holy grail is to take a 2D movie and just convert it
+        # to MKV-MVC directly". Runs the standalone "SBS to 3D Blu-ray MVC" tool automatically on
+        # this job's own finished output (after Restore Audio & Subtitles, if also on, so MVC gets
+        # the fully-assembled file) -- one job, no separate manual step, mirroring how Restore Audio
+        # & Subtitles itself already works.
+        self.chk_convert_to_mvc = wx.CheckBox(
+            self.grp_postprocess,
+            label=T("Convert to 3D Blu-ray MVC after conversion"),
+            name="chk_convert_to_mvc")
+        self.chk_convert_to_mvc.SetValue(False)
+        self.chk_convert_to_mvc.SetToolTip(
+            T("What it's for: turns this job's finished output into a real MVC file (the same video "
+              "format an actual 3D Blu-ray disc uses) automatically -- a plain 2D movie in, one real "
+              "MVC file out, with no separate manual step through the standalone 'SBS to 3D Blu-ray "
+              "MVC' tool.\n"
+              "How it's safe: written to its own separate '<name>_MVC.iso'/'<name>_MVC.mkv' file -- "
+              "the plain converted output is always left untouched either way.\n"
+              "Con: MVC encoding is real extra processing time after the main conversion already "
+              "finished -- it re-encodes the video through a separate program (FRIMEncode), CPU-only, "
+              "not a quick remux like Restore Audio & Subtitles.\n"
+              "Forces Stereo Format (above) to Full SBS if anything else is selected: MVC needs a "
+              "real full-resolution frame -- Half SBS/TB would throw away half the detail before MVC "
+              "conversion even starts, and other formats (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug "
+              "Depth) aren't something MVC conversion understands at all.\n"
+              "Not yet confirmed end-to-end in a real MVC-capable player -- see the Output Type choice "
+              "below for the same caveat on both its options."))
+        self.chk_convert_to_mvc.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_convert_to_mvc)
+
+        self.lbl_mvc_output_type = wx.StaticText(self.grp_postprocess, label=T("MVC Output Type"))
+        self.cbo_mvc_output_type = wx.ComboBox(self.grp_postprocess, name="cbo_mvc_output_type")
+        self.cbo_mvc_output_type.SetEditable(False)
+        self.cbo_mvc_output_type.Append(T("3D Blu-ray ISO"), "iso")
+        self.cbo_mvc_output_type.Append(T("Plain MKV (direct MVC, no disc)"), "mkv")
+        self.cbo_mvc_output_type.SetSelection(0)
+        self.cbo_mvc_output_type.SetToolTip(
+            T("3D Blu-ray ISO: a real disc image with menus/chapters, playable on a 3D Blu-ray player "
+              "or PowerDVD, or burnable to a BD-R. The proven, more widely tested option.\n"
+              "Plain MKV: the same real MVC video written directly into a plain .mkv instead, no disc "
+              "structure -- for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
+              "rips) rather than a disc image (ADR-245). Brand new, not yet confirmed end-to-end in a "
+              "real MVC-capable player -- if it doesn't play right, the ISO option is the proven "
+              "fallback.\n"
+              "Neither plays in VLC, MPC-HC or most everyday players/TVs -- real MVC needs a "
+              "3D-Blu-ray-capable player or TV regardless of which of these two you pick."))
+        self.txt_mvc_bitrate = EditableComboBox(self.grp_postprocess, choices=["10", "20", "30", "40"],
+                                                name="txt_mvc_bitrate")
+        self.txt_mvc_bitrate.SetValue("20")
+        self.txt_mvc_bitrate.SetToolTip(
+            T("Target Mbps per eye for the MVC encode. 20 (default) is a solid, widely-used middle "
+              "ground; 3D Blu-ray allows up to about 40 combined (both eyes together). Higher = better "
+              "quality and a bigger file, same tradeoff as any other video bitrate setting."))
+
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
         j = -1
@@ -4066,6 +4119,14 @@ class MainFrame(wx.Frame):
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 4), (j := j + 1, 0))
         layout.Add(self.chk_restore_audio_subtitles, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+
+        layout.Add((0, 6), (j := j + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 4), (j := j + 1, 0))
+        layout.Add(self.chk_convert_to_mvc, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_mvc_output_type, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.cbo_mvc_output_type, (j, 1), flag=wx.EXPAND)
+        layout.Add(self.txt_mvc_bitrate, (j, 2), flag=wx.EXPAND)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -8905,6 +8966,19 @@ class MainFrame(wx.Frame):
     def on_changed_cbo_rife_mode(self, event):
         self.update_rife_interpolate()
 
+    def on_changed_chk_convert_to_mvc(self, event):
+        # ADR-246, per explicit user confirmation: checking this box forces Stereo
+        # Format to Full SBS if anything else is selected -- MVC conversion needs a
+        # real full-resolution SBS/TB frame (Half SBS/TB would throw away half the
+        # detail before MVC even starts), and formats it can't use at all (VR90/
+        # Cross Eyed/RGB-D/Anaglyph/Export/Debug Depth) would just fail downstream
+        # in _run_mvc_conversion() otherwise. A silent, one-time correction, same
+        # spirit as "Frame Packed forces libx264" in the 3D Blu-ray Import panel.
+        if self.chk_convert_to_mvc.GetValue() and self.cbo_stereo_format.GetValue() != "Full SBS":
+            self.cbo_stereo_format.SetStringSelection("Full SBS")
+            self.on_selected_index_changed_cbo_stereo_format(None)
+        event.Skip()
+
     def update_temporal_stabilize(self):
         if self.chk_temporal_stabilize.IsChecked():
             self.cbo_temporal_stabilize_strength.Enable()
@@ -9353,6 +9427,9 @@ class MainFrame(wx.Frame):
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
+            convert_to_mvc=self.chk_convert_to_mvc.GetValue(),
+            mvc_output_type=self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection()),
+            mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
 
@@ -9485,6 +9562,8 @@ class MainFrame(wx.Frame):
             stages.append(STAGE_HDR_REINJECT)
         if getattr(args, "restore_audio_subtitles", False):
             stages.append(STAGE_RESTORE_AV)
+        if getattr(args, "convert_to_mvc", False):
+            stages.append(STAGE_CONVERT_MVC)
         return stages
 
     @staticmethod
@@ -10617,6 +10696,15 @@ class MainFrame(wx.Frame):
             _apply_combo_value(self.cbo_rife_mode, f"{args.rife_multiplier}x")
 
         self.chk_restore_audio_subtitles.SetValue(bool(getattr(args, "restore_audio_subtitles", False)))
+        self.chk_convert_to_mvc.SetValue(bool(getattr(args, "convert_to_mvc", False)))
+        mvc_output_type_value = getattr(args, "mvc_output_type", None) or "iso"
+        for i in range(self.cbo_mvc_output_type.GetCount()):
+            if self.cbo_mvc_output_type.GetClientData(i) == mvc_output_type_value:
+                self.cbo_mvc_output_type.SetSelection(i)
+                break
+        else:
+            self.cbo_mvc_output_type.SetSelection(0)
+        self.txt_mvc_bitrate.SetValue(str(getattr(args, "mvc_bitrate", None) or 20.0))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
         self.chk_scene_detect_cache.SetValue(not args.disable_scene_cache)
@@ -18699,6 +18787,91 @@ def _self_test_restore_audio_subtitles_checkbox():
     print("_self_test_restore_audio_subtitles_checkbox: PASS")
 
 
+def _self_test_convert_to_mvc_checkbox():
+    """ADR-246: real user request -- "the holy grail is to take a 2D movie and just
+    convert it to MKV-MVC directly". New main-pipeline "Convert to 3D Blu-ray MVC
+    after conversion" checkbox, mirroring _self_test_restore_audio_subtitles_checkbox's
+    own coverage shape for the new option: exists/parented/default off, tooltip has
+    real content, args/stage-list/get_cli_command() round-trip in both directions,
+    output-type combo (iso/mkv) round-trips correctly, and -- the one behavior this
+    option adds beyond a plain checkbox -- checking it while Half SBS/TB (or another
+    MVC-incompatible format) is selected force-switches Stereo Format to Full SBS,
+    confirmed via the real on_changed_chk_convert_to_mvc handler, not just
+    _run_mvc_conversion()'s own separate, defensive re-check for raw CLI use."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.chk_convert_to_mvc.GetParent() is frame.grp_postprocess
+        assert frame.chk_convert_to_mvc.GetValue() is False
+        assert frame.cbo_mvc_output_type.GetClientData(frame.cbo_mvc_output_type.GetSelection()) == "iso"
+        assert frame.txt_mvc_bitrate.GetValue() == "20"
+
+        tip = frame.chk_convert_to_mvc.GetToolTip().GetTip()
+        assert "MVC" in tip, tip
+        assert "Full SBS" in tip, tip
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        frame.chk_convert_to_mvc.SetValue(False)
+        args_off = frame.parse_args(skip_set_state=True)
+        assert args_off.convert_to_mvc is False
+        stages_off = frame._compute_job_stages(args_off)
+        assert STAGE_CONVERT_MVC not in stages_off, stages_off
+
+        frame.chk_convert_to_mvc.SetValue(True)
+        args_on = frame.parse_args(skip_set_state=True)
+        assert args_on.convert_to_mvc is True
+        assert args_on.mvc_output_type == "iso"
+        assert args_on.mvc_bitrate == 20.0
+        stages_on = frame._compute_job_stages(args_on)
+        assert STAGE_CONVERT_MVC in stages_on, stages_on
+
+        command_on = frame.get_cli_command()
+        assert "--convert-to-mvc" in command_on, command_on
+        frame.chk_convert_to_mvc.SetValue(False)
+        command_off = frame.get_cli_command()
+        assert "--convert-to-mvc" not in command_off, command_off
+        frame.chk_convert_to_mvc.SetValue(True)
+
+        # output-type combo round-trips to --mvc-output-type
+        items = [frame.cbo_mvc_output_type.GetClientData(i) for i in range(frame.cbo_mvc_output_type.GetCount())]
+        frame.cbo_mvc_output_type.SetSelection(items.index("mkv"))
+        args_mkv = frame.parse_args(skip_set_state=True)
+        assert args_mkv.mvc_output_type == "mkv"
+        command_mkv = frame.get_cli_command()
+        assert "--mvc-output-type mkv" in command_mkv, command_mkv
+        frame.cbo_mvc_output_type.SetSelection(items.index("iso"))
+
+        # the one real side effect: checking this box while an incompatible format is
+        # selected force-switches Stereo Format to Full SBS
+        frame.chk_convert_to_mvc.SetValue(False)
+        frame.cbo_stereo_format.SetStringSelection("Half SBS")
+        assert frame.cbo_stereo_format.GetValue() == "Half SBS"
+        frame.chk_convert_to_mvc.SetValue(True)
+        frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
+        assert frame.cbo_stereo_format.GetValue() == "Full SBS", \
+            "checking Convert to MVC must force Stereo Format to Full SBS"
+
+        # already Full SBS: no-op, nothing to switch
+        frame.chk_convert_to_mvc.SetValue(False)
+        frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
+        frame.chk_convert_to_mvc.SetValue(True)
+        frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
+        assert frame.cbo_stereo_format.GetValue() == "Full SBS"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_convert_to_mvc_checkbox: PASS")
+
+
 def _self_test_max_negative_parallax_field():
     """ADR-179: Max Negative Parallax (GUI label "Max Pop-Out Limit"), a safety cap
     on pop-out that's independent from the Convergence Plane slider -- Convergence
@@ -19784,6 +19957,63 @@ def _self_test_post_steps_are_chained():
     calls, _ = run("m_w2x.mkv", "m_w2x_rife.mkv", None)
     assert not any(c[0] == "dv" for c in calls), calls
     print("_self_test_post_steps_are_chained: PASS")
+
+
+def _self_test_mvc_conversion_step():
+    """ADR-246: U._run_mvc_conversion()'s own layout-detection and command-building
+    logic, independent of the GUI checkbox (this exact defensive re-check matters
+    for raw CLI use, where --convert-to-mvc could be combined with an incompatible
+    format the GUI's own auto-switch never had a chance to correct)."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    # off by default: no subprocess call at all
+    with mock.patch.object(U.subprocess, "Popen") as popen:
+        assert U._run_mvc_conversion("m.mkv", types.SimpleNamespace(convert_to_mvc=False)) is False
+        popen.assert_not_called()
+
+    def base_args(**extra):
+        defaults = dict(convert_to_mvc=True, mvc_output_type="iso", mvc_bitrate=20.0,
+                        half_sbs=False, tb=False, half_tb=False, vr180=False, cross_eyed=False,
+                        rgbd=False, half_rgbd=False, anaglyph=None, export=False,
+                        export_disparity=False, debug_depth=False, state={})
+        defaults.update(extra)
+        return types.SimpleNamespace(**defaults)
+
+    # layout detection: each real stereo-format flag maps to the matching --layout value
+    for kwargs, expected_layout in (
+            ({}, "full_sbs"), ({"half_sbs": True}, "half_sbs"),
+            ({"tb": True}, "full_tb"), ({"half_tb": True}, "half_tb")):
+        args = base_args(**kwargs)
+        with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+                mock.patch("os.path.exists", return_value=True):
+            assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+        cmd = run_mvc.call_args[0][0]
+        assert cmd[cmd.index("--layout") + 1] == expected_layout, (kwargs, cmd)
+        assert cmd[cmd.index("-o") + 1] == "C:/out/movie_MVC.iso", cmd
+        assert cmd[cmd.index("--bitrate") + 1] == "20.0", cmd
+
+    # a format MVC conversion can't use at all is refused cleanly, no subprocess attempt
+    for incompatible in ("vr180", "cross_eyed", "rgbd", "half_rgbd", "export", "export_disparity", "debug_depth"):
+        args = base_args(**{incompatible: True})
+        with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc:
+            assert U._run_mvc_conversion("movie.mkv", args) is False
+        run_mvc.assert_not_called()
+
+    # mvc_output_type="mkv" reaches the output path's extension
+    args = base_args(mvc_output_type="mkv")
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    cmd = run_mvc.call_args[0][0]
+    assert cmd[cmd.index("-o") + 1] == "C:/out/movie_MVC.mkv", cmd
+
+    # the original file is never modified/replaced -- this is a side effect, not a chain link
+    args = base_args()
+    with mock.patch.object(U, "_run_mvc_with_progress"), mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True  # return value is True/False, not a path
+
+    print("_self_test_mvc_conversion_step: PASS")
 
 
 def _self_test_post_conversion_vram_release():
@@ -21946,6 +22176,7 @@ def _run_self_tests():
         _self_test_mlbw_l2_cycle_method,
         _self_test_da3_giant_variants_gated,
         _self_test_restore_audio_subtitles_checkbox,
+        _self_test_convert_to_mvc_checkbox,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,
@@ -21972,6 +22203,7 @@ def _run_self_tests():
         _self_test_auto_divergence_metadata_tags,
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
+        _self_test_mvc_conversion_step,
         _self_test_post_conversion_vram_release,
         _self_test_upscale_full4k_hdr_and_progress,
         _self_test_stereo_tag_survives_post_steps,

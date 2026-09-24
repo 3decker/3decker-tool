@@ -29,6 +29,19 @@ import threading
 import urllib.request
 from os import path
 
+# ADR-253: real user report -- a visible console window kept flashing open/closed
+# throughout the whole "Convert to MVC" step (this pipeline runs MANY short-lived
+# subprocess calls in a row: per-track audio/subtitle extraction, tonemap, retime,
+# autocrop, the FRIM encode itself, interleave, mux -- each one flashed its own
+# window). iw3/gui.py imports this exact patch at its own top for this exact
+# reason, but that only covers subprocess calls made from the GUI's own process --
+# this module runs as a genuinely separate `python -m iw3.sbs_to_mvc_cli` process
+# (see utils.py's _run_mvc_conversion()/the standalone tool's own build_sbs2mvc_command()),
+# which never imported it, so every subprocess call made from THIS process was
+# unaffected. Must be imported before any subprocess.Popen/run call in this file
+# (or in mvc_extract_cli, imported just below) actually executes.
+import nunif.gui.subprocess_patch  # noqa
+
 from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc
 from .utils import _find_tsmuxer, _get_ffmpeg_bin, _find_mkvmerge
 

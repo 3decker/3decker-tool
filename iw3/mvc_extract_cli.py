@@ -41,6 +41,14 @@ import sys
 import threading
 from os import path
 
+# ADR-253: same fix as sbs_to_mvc_cli.py -- this module also runs as its own
+# separate `python -m iw3.mvc_extract_cli` process (the "3D Blu-ray Import"
+# standalone tool) and makes several of its own subprocess calls (tsMuxeR demux,
+# edge264-mvc decode piped into ffmpeg, mkvmerge mux) that would each flash their
+# own console window without this patch, which only iw3/gui.py's own process
+# imported before now.
+import nunif.gui.subprocess_patch  # noqa
+
 from .utils import _find_tsmuxer, _find_edge264_mvc, _get_ffmpeg_bin, _find_mkvmerge
 
 

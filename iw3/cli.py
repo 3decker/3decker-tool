@@ -1,5 +1,5 @@
 import torch
-from .utils import create_parser, set_state_args, iw3_main
+from .utils import create_parser, set_state_args, run_iw3_main_with_job_log
 from . import models # noqa
 from nunif.logger import logger
 from nunif.device import device_is_cuda
@@ -10,7 +10,7 @@ def main():
     parser = create_parser()
     args = parser.parse_args()
     set_state_args(args)
-    iw3_main(args)
+    run_iw3_main_with_job_log(args)
 
     if device_is_cuda(args.state["device"]):
         max_vram_mb = int(torch.cuda.max_memory_allocated(args.state["device"]) / (1024 * 1024))

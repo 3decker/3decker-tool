@@ -20,7 +20,7 @@ import wx.lib.stattext as stattext
 import wx.lib.scrolledpanel as scrolledpanel
 import torch
 from .utils import (
-    create_parser, set_state_args, iw3_main,
+    create_parser, set_state_args, iw3_main, run_iw3_main_with_job_log,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
     _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram,
     STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
@@ -4137,6 +4137,28 @@ class MainFrame(wx.Frame):
               "too -- off (default) only makes sense for an already-SDR source, where it does nothing "
               "either way."))
 
+        # ADR-256: real user request -- "have it write a log file for each job into the
+        # output folder so you can always see what happened with each job... maybe even
+        # make it optional and that option could be saved with your presets." All three
+        # asks, delivered directly: opt-in checkbox, saved to the output folder, and (since
+        # it's wired through build_command()/apply_parsed_args_to_gui() the same as every
+        # other checkbox here) automatically included whenever a preset is saved.
+        self.chk_write_job_log = wx.CheckBox(
+            self.grp_postprocess, label=T("Write a Log File for This Job"),
+            name="chk_write_job_log")
+        self.chk_write_job_log.SetValue(False)
+        self.chk_write_job_log.SetToolTip(
+            T("What it's for: saves everything this job prints -- every stage, warning, and note "
+              "from the main conversion and every post-processing step below (Upscale, RIFE, "
+              "Restore Audio & Subtitles, Convert to MVC, ...) -- into a real text file next to the "
+              "output, named '<output name>_log.txt'. Lets you check what actually happened with a "
+              "specific job later, even after this window's own on-screen output has moved on to a "
+              "different job, or the app has been closed and reopened entirely.\n"
+              "Con: one small extra text file per job -- never affects the converted video/audio "
+              "itself in any way.\n"
+              "Recommended: on if you convert enough movies that you'd otherwise lose track of which "
+              "settings/warnings applied to which file."))
+
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
         j = -1
@@ -4172,6 +4194,11 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_mvc_bitrate, (j, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convert_to_mvc_hdr_to_sdr, (j := j + 1, 0), (0, 3),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+
+        layout.Add((0, 6), (j := j + 1, 0))
+        layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
+        layout.Add((0, 4), (j := j + 1, 0))
+        layout.Add(self.chk_write_job_log, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -9408,6 +9435,7 @@ class MainFrame(wx.Frame):
             mvc_output_type=self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection()),
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
             mvc_convert_hdr_to_sdr=self.chk_convert_to_mvc_hdr_to_sdr.GetValue(),
+            write_job_log=self.chk_write_job_log.GetValue(),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
 
@@ -9631,7 +9659,7 @@ class MainFrame(wx.Frame):
         # parse_args() -- see the ADR-218 comment there. Do not add it back here;
         # left out (it's idempotent, guarded by self.cuda_context_initialized, so a
         # second call would be harmless, just redundant).
-        startWorker(self.on_exit_worker, iw3_main, wargs=(args,))
+        startWorker(self.on_exit_worker, run_iw3_main_with_job_log, wargs=(args,))
         self.processing = True
 
     def on_exit_worker(self, result):
@@ -10715,6 +10743,7 @@ class MainFrame(wx.Frame):
             self.cbo_mvc_output_type.SetSelection(0)
         self.txt_mvc_bitrate.SetValue(str(getattr(args, "mvc_bitrate", None) or 20.0))
         self.chk_convert_to_mvc_hdr_to_sdr.SetValue(bool(getattr(args, "mvc_convert_hdr_to_sdr", False)))
+        self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
         self.chk_scene_detect_cache.SetValue(not args.disable_scene_cache)
@@ -20918,6 +20947,47 @@ def _self_test_stereo_tag_survives_post_steps():
     print("_self_test_stereo_tag_survives_post_steps: PASS")
 
 
+def _self_test_write_job_log_checkbox():
+    """ADR-256: real user request -- "have it write a log file for each job into
+    the output folder... maybe even make it optional and that option could be
+    saved with your presets." Confirms the new checkbox exists/parented/defaults
+    off, and get_cli_command() round-trips --write-job-log correctly in both
+    directions -- the same round trip presets themselves rely on, so "saved with
+    your presets" is automatic, not a separate thing to build."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.chk_write_job_log.GetParent() is frame.grp_postprocess
+        assert frame.chk_write_job_log.GetValue() is False
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        args_off = frame.parse_args(skip_set_state=True)
+        assert args_off.write_job_log is False
+
+        frame.chk_write_job_log.SetValue(True)
+        args_on = frame.parse_args(skip_set_state=True)
+        assert args_on.write_job_log is True
+
+        command_on = frame.get_cli_command()
+        assert "--write-job-log" in command_on, command_on
+        frame.chk_write_job_log.SetValue(False)
+        command_off = frame.get_cli_command()
+        assert "--write-job-log" not in command_off, command_off
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_write_job_log_checkbox: PASS")
+
+
 def _self_test_audio_subtitle_restore_dual_eye_flag():
     """ADR-254: real user request -- restore subtitles already positioned for real 3D
     instead of a flat copy. Confirms _run_audio_subtitle_restore()'s own built command
@@ -20957,6 +21027,77 @@ def _self_test_audio_subtitle_restore_dual_eye_flag():
             assert "--dual-eye-subtitles" in captured["cmd"], captured["cmd"]
 
     print("_self_test_audio_subtitle_restore_dual_eye_flag: PASS")
+
+
+def _self_test_run_iw3_main_with_job_log():
+    """ADR-256: real user request -- a persistent per-job log file, opt-in, saved
+    next to the output. Not mocked at the file-I/O level -- a real temp directory
+    and a real opened/written/closed log file -- only iw3_main() itself is faked
+    (a real one needs a GPU and real video, well outside what this test needs to
+    prove). Confirms: off (default) calls the fake iw3_main directly with no log
+    file created at all -- today's behavior, completely unchanged; on, a real log
+    file appears at the expected '<output>_log.txt' path containing both the fake
+    job's own print() output (proving the tee actually captures it) and the
+    start/finished markers, and sys.stdout/sys.stderr are correctly restored to
+    their real originals afterward (not left pointing at a closed file)."""
+    import tempfile
+    import types
+    from unittest.mock import patch
+    from . import utils as U
+
+    def fake_iw3_main(args):
+        print("fake stage: depth+stereo", file=sys.stderr)
+        print("fake stage: done", file=sys.stdout)
+        return args
+
+    with tempfile.TemporaryDirectory() as d:
+        output_path = os.path.join(d, "movie_3d.mkv")
+        args = types.SimpleNamespace(input="source.mkv", output=output_path, write_job_log=False)
+
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+        with patch.object(U, "iw3_main", fake_iw3_main):
+            result = U.run_iw3_main_with_job_log(args)
+        assert result is args
+        assert sys.stdout is orig_stdout and sys.stderr is orig_stderr
+        assert not os.path.exists(os.path.join(d, "movie_3d_log.txt")), \
+            "off (default) must not create a log file at all"
+
+        args.write_job_log = True
+        with patch.object(U, "iw3_main", fake_iw3_main):
+            result = U.run_iw3_main_with_job_log(args)
+        assert result is args
+        assert sys.stdout is orig_stdout and sys.stderr is orig_stderr, \
+            "sys.stdout/sys.stderr must be restored to their real originals, even on success"
+
+        log_path = os.path.join(d, "movie_3d_log.txt")
+        assert os.path.exists(log_path), log_path
+        with open(log_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "fake stage: depth+stereo" in content, content
+        assert "fake stage: done" in content, content
+        assert "job started" in content and "job finished" in content, content
+        assert "source.mkv" in content and output_path in content, content
+
+        # A real failure inside the job must still restore sys.stdout/sys.stderr
+        # (never leave them pointing at a now-closed log file) and still record the
+        # failure in the log rather than just losing it, then propagate the error.
+        def failing_iw3_main(a):
+            print("about to fail", file=sys.stderr)
+            raise RuntimeError("boom")
+
+        with patch.object(U, "iw3_main", failing_iw3_main):
+            try:
+                U.run_iw3_main_with_job_log(args)
+                assert False, "must re-raise the real exception, not swallow it"
+            except RuntimeError as e:
+                assert str(e) == "boom"
+        assert sys.stdout is orig_stdout and sys.stderr is orig_stderr, \
+            "sys.stdout/sys.stderr must be restored even when the job raises"
+        with open(log_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "about to fail" in content and "FAILED" in content, content
+
+    print("_self_test_run_iw3_main_with_job_log: PASS")
 
 
 def _self_test_pop_panes_collapse_independently():
@@ -22502,6 +22643,8 @@ def _run_self_tests():
         _self_test_nt_auto_divergence_controls,
         _self_test_auto_divergence_metadata_tags,
         _self_test_audio_subtitle_restore_dual_eye_flag,
+        _self_test_write_job_log_checkbox,
+        _self_test_run_iw3_main_with_job_log,
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
         _self_test_mvc_conversion_step,

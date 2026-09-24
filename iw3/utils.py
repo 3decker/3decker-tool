@@ -6651,6 +6651,16 @@ def create_parser(required_true=True):
                               "subtitle landing on the seam between the two eyes. No effect on a "
                               "non-split Stereo Format, or on a picture-based (PGS/VobSub) subtitle "
                               "track -- both are restored unchanged either way. Off by default."))
+    parser.add_argument("--write-job-log", action="store_true",
+                        help=("ADR-256: real user request -- saves everything this job prints (every "
+                              "stage, warning, and note from the main conversion and every post-"
+                              "processing step) into a real text file next to the output, named "
+                              "'<output name>_log.txt' -- so what happened stays visible after the "
+                              "fact, even once the GUI's own on-screen output has moved on or the app "
+                              "has been closed and reopened. For a directory/batch --input, one "
+                              "combined 'iw3_batch_log_<timestamp>.txt' is written into the output "
+                              "directory for the whole run instead (the real per-file name isn't known "
+                              "until each file is actually processed). Off by default."))
     parser.add_argument("--convert-to-mvc", action="store_true",
                         help=("ADR-246: after conversion (and Restore Audio & Subtitles, if also on) "
                               "finishes, additionally run this job's finished output through 'SBS to 3D "
@@ -7531,6 +7541,100 @@ def iw3_main(args):
         raise ValueError("Unrecognized file type")
 
     return args
+
+
+class _TeeStream:
+    """ADR-256: writes to two streams at once -- whatever sys.stdout/sys.stderr
+    currently are (a real console under raw CLI use, os.devnull under the real GUI
+    per nunif/pythonw_fix.py) AND a real job log file, so turning this feature on
+    never changes any existing print()-based behavior anywhere in the pipeline,
+    it only adds a second destination."""
+    def __init__(self, original, log_file):
+        self._original = original
+        self._log_file = log_file
+
+    def write(self, data):
+        try:
+            self._original.write(data)
+        except Exception:
+            pass
+        try:
+            self._log_file.write(data)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self._original.flush()
+        except Exception:
+            pass
+        try:
+            self._log_file.flush()
+        except Exception:
+            pass
+
+
+def _job_log_path(args):
+    """ADR-256: real user request -- a persistent per-job log file saved next to the
+    output, so what happened during a run stays visible even after the GUI's own
+    shared Standalone Tools output box (ADR-250) has moved on to something else, or
+    the app has been closed and reopened entirely.
+
+    Single-file input (the common case, --input is one video/image): named after
+    the real, already-known output file -- "<name>_log.txt" next to it.
+
+    Directory/batch input: the real per-file output name isn't decided until each
+    file's own processing runs (make_output_filename()), so a true per-movie log
+    for batch mode would need hooking deep inside process_images()/process_videos()
+    -- a bigger, separate change. One combined log for the whole batch run, written
+    into the output directory itself, is the scoped-down version here."""
+    output = str(args.output)
+    if path.isdir(str(args.input)):
+        out_dir = output if path.isdir(output) else (path.dirname(output) or ".")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return path.join(out_dir, f"iw3_batch_log_{stamp}.txt")
+    base, _ = path.splitext(output)
+    return f"{base}_log.txt"
+
+
+def run_iw3_main_with_job_log(args):
+    """ADR-256: runs iw3_main(args), optionally teeing every print() it (or any
+    post-processing subprocess step it relays output from) makes into a real log
+    file next to the output -- opt-in (--write-job-log), off by default. Wraps the
+    CALL SITE rather than iw3_main()'s own body specifically to avoid re-indenting
+    that already-large, already-tested function; the log still captures everything
+    meaningful, since every real status/warning/note anywhere in this pipeline
+    already goes through a plain print(..., file=sys.stderr) (or stdout) call, not
+    some separate, harder-to-intercept channel."""
+    if not getattr(args, "write_job_log", False):
+        return iw3_main(args)
+
+    log_path = _job_log_path(args)
+    try:
+        os.makedirs(path.dirname(log_path) or ".", exist_ok=True)
+        log_file = open(log_path, "a", encoding="utf-8")
+    except Exception as e:
+        print(f"[iw3] Could not open job log file ({log_path}): {e} -- continuing without it",
+             file=sys.stderr)
+        return iw3_main(args)
+
+    log_file.write(f"\n---- iw3 job started {datetime.now().isoformat(timespec='seconds')} ----\n")
+    log_file.write(f"Input: {args.input}\nOutput: {args.output}\n\n")
+    log_file.flush()
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = _TeeStream(orig_stdout, log_file)
+    sys.stderr = _TeeStream(orig_stderr, log_file)
+    try:
+        result = iw3_main(args)
+        log_file.write(f"\n---- iw3 job finished {datetime.now().isoformat(timespec='seconds')} ----\n")
+        return result
+    except BaseException as e:
+        log_file.write(f"\n---- iw3 job FAILED: {e!r} ----\n")
+        raise
+    finally:
+        sys.stdout, sys.stderr = orig_stdout, orig_stderr
+        log_file.close()
+        print(f"[iw3] Job log written: {log_path}", file=sys.stderr)
 
 
 def find_param(args, depth_model, side_model):

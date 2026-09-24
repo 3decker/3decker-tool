@@ -764,7 +764,19 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
                                        and path.exists(dep_es) and path.getsize(dep_es) > 0):
             with open(ffmpeg_log, "rb") as f:
                 ff_msg = f.read()[-600:].decode(errors="replace")
-            raise RuntimeError("the MVC encode failed:\n" + "\n".join(tail[-8:]) + ("\nffmpeg: " + ff_msg if ff_msg.strip() else ""))
+            # ADR-244: real user report -- FRIMEncode can die (e.g. before printing a single
+            # line) leaving `tail` empty; the error then showed only ffmpeg's own downstream
+            # symptom (a "Broken pipe" once FRIM's stdin closed, not ffmpeg's own real
+            # problem) with no hint FRIM was the actual thing that failed, or how. FRIM's own
+            # exit code is real diagnostic signal even with zero output from it (e.g. a large
+            # negative/hex code on Windows usually means a native crash, not a clean refusal)
+            # -- always shown now, and ffmpeg's own message is now clearly labeled as a
+            # downstream symptom of FRIM's pipe closing, not necessarily ffmpeg's own bug.
+            frim_msg = "\n".join(tail[-8:]) if tail else "(FRIMEncode produced no output at all before exiting)"
+            raise RuntimeError(
+                f"the MVC encode failed (FRIMEncode exit code {fr.returncode}):\n{frim_msg}"
+                + (f"\nffmpeg (likely just a downstream symptom of FRIM's pipe closing, not "
+                   f"ffmpeg's own problem): {ff_msg}" if ff_msg.strip() else ""))
 
         av_lines, notes = ([], [])
         if include_av:

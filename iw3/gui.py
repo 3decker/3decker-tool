@@ -9701,6 +9701,19 @@ class MainFrame(wx.Frame):
             else:
                 self.SetStatusText(T("Cancelled"))
 
+            # ADR-248: "Convert to MVC" runs iw3.sbs_to_mvc_cli as its own subprocess and it
+            # already tracks exactly what happened to every audio/subtitle track (converted,
+            # skipped and why) -- but this whole job runs under the real GUI, where
+            # pythonw_fix.py reopens this process's own sys.stderr onto os.devnull, so those
+            # notes previously had nowhere to go once the job succeeded (a real user report:
+            # subtitles silently missing, no error shown anywhere). _run_mvc_conversion (in
+            # utils.py) now stashes them on args.state instead -- shown here, once, right when
+            # the job that actually produced them finishes.
+            mvc_notes = args.state.get("mvc_notes")
+            if mvc_notes:
+                wx.MessageBox("\n".join(f"- {n}" for n in mvc_notes),
+                              T("3D Blu-ray MVC: audio/subtitle notes"), wx.OK | wx.ICON_INFORMATION)
+
             if self.chk_pause_frees_vram.GetValue():
                 # ADR-141: real user report -- VRAM stayed pinned at the same usage
                 # after a job finished, with no way to release it short of closing
@@ -14143,6 +14156,85 @@ def _self_test_label_tooltips_propagated():
             app.Destroy()
 
     print("_self_test_label_tooltips_propagated: PASS")
+
+
+def _self_test_mvc_notes_shown_after_job():
+    """ADR-248: real user report -- "Convert to MVC" finished, audio came through,
+    subtitles silently didn't, and there was no way to even see why ("where would
+    the errors be for this type of conversion? There is no little window with
+    messages in it"). Root cause: U._run_mvc_conversion's own subprocess already
+    generates real per-track notes (converted/skipped/why), but under the real GUI
+    this process's own sys.stderr is devnull'd (pythonw_fix.py), so printing more
+    was never going to help -- on_exit_worker now shows whatever U._run_mvc_conversion
+    stashed on args.state["mvc_notes"] in a message box instead. Confirms both: the
+    box appears with the right text when notes exist, and nothing pops up (today's
+    behavior) when the job never touched MVC conversion at all."""
+    import types
+    from unittest import mock
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        class FakeModel:
+            def loaded(self):
+                return True
+
+            def move_to(self, device):
+                pass
+
+            def disable_ema(self):
+                pass
+
+        class FakeResult:
+            def __init__(self, value):
+                self._value = value
+
+            def get(self):
+                return self._value
+
+        def make_fake_args(state_extra):
+            state = {"depth_model": FakeModel(), "side_model": None, "convergence_model": None}
+            state.update(state_extra)
+            return types.SimpleNamespace(
+                state=state, depth_model="Any_V3_Mono_01", gpu=[0], resolution=None, limit_resolution=False)
+
+        frame.chk_pause_frees_vram.SetValue(False)
+
+        # (a) no MVC step ran this job (no "mvc_notes" key at all) -- no popup, matches
+        # every job today that never touches Convert to MVC.
+        frame.stop_event = threading.Event()
+        frame.job_start_time = time()
+        with mock.patch.object(wx, "MessageBox") as msgbox:
+            frame.on_exit_worker(FakeResult(make_fake_args({})))
+        msgbox.assert_not_called()
+
+        # (b) MVC step ran and produced real notes -- shown, in order, in one box.
+        notes = ["subtitle track 2 (unknown language, S_OTHER) skipped: this subtitle format "
+                "cannot be put on a Blu-ray", "audio track 1 (A_DTS) skipped: could not extract it"]
+        frame.stop_event = threading.Event()
+        frame.job_start_time = time()
+        with mock.patch.object(wx, "MessageBox") as msgbox:
+            frame.on_exit_worker(FakeResult(make_fake_args({"mvc_notes": notes})))
+        msgbox.assert_called_once()
+        shown_text = msgbox.call_args[0][0]
+        assert notes[0] in shown_text and notes[1] in shown_text, shown_text
+
+        # (c) MVC step ran cleanly, no notes at all (empty list) -- no popup either.
+        frame.stop_event = threading.Event()
+        frame.job_start_time = time()
+        with mock.patch.object(wx, "MessageBox") as msgbox:
+            frame.on_exit_worker(FakeResult(make_fake_args({"mvc_notes": []})))
+        msgbox.assert_not_called()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mvc_notes_shown_after_job: PASS")
 
 
 def _self_test_free_vram_on_job_finish():
@@ -20021,6 +20113,29 @@ def _self_test_mvc_conversion_step():
     with mock.patch.object(U, "_run_mvc_with_progress"), mock.patch("os.path.exists", return_value=True):
         assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True  # return value is True/False, not a path
 
+    # ADR-248: sbs_to_mvc_cli.py's own "[sbs2mvc] note: ..." stderr lines (which track
+    # exactly what happened to every audio/subtitle track) must land on args.state
+    # ["mvc_notes"] -- that's the only way gui.py's on_exit_worker can ever show them,
+    # since this whole process's own sys.stderr is devnull'd under the real GUI.
+    args = base_args()
+    fake_stderr = (b"[sbs2mvc] note: subtitle track 1 (English, S_OTHER) skipped: this "
+                  b"subtitle format cannot be put on a Blu-ray\nsome unrelated ffmpeg line\n")
+    fake_result = subprocess.CompletedProcess([], 0, b"", fake_stderr)
+    with mock.patch.object(U, "_run_mvc_with_progress", return_value=fake_result), \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert args.state["mvc_notes"] == [
+        "subtitle track 1 (English, S_OTHER) skipped: this subtitle format cannot be put on a Blu-ray"
+    ], args.state
+
+    # a failed MVC conversion also leaves a real, readable reason on args.state, not just
+    # a print() into the same devnull sys.stderr this whole fix exists to work around.
+    args = base_args()
+    err = subprocess.CalledProcessError(1, [], b"", b"FRIMEncode exit code 1: boom")
+    with mock.patch.object(U, "_run_mvc_with_progress", side_effect=err):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is False
+    assert len(args.state["mvc_notes"]) == 1 and "boom" in args.state["mvc_notes"][0], args.state
+
     print("_self_test_mvc_conversion_step: PASS")
 
 
@@ -22212,6 +22327,7 @@ def _run_self_tests():
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
         _self_test_mvc_conversion_step,
+        _self_test_mvc_notes_shown_after_job,
         _self_test_post_conversion_vram_release,
         _self_test_upscale_full4k_hdr_and_progress,
         _self_test_stereo_tag_survives_post_steps,

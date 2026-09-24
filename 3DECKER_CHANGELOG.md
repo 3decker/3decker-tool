@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 23, 2026
+## Latest Update — September 24, 2026
+
+**Fixed: "Convert to MVC" could finish with no error shown at all, even when a subtitle track quietly didn't make it into the final file.** Reported by a user: the conversion completed, audio came through fine, subtitles didn't, and there was no way to find out why — "no errors at all... there is no little window with messages in it." The step doing the real MVC work was actually keeping track of exactly what happened to every audio/subtitle track the whole time (converted, included as-is, or skipped and why) — that information just had nowhere to go once the job finished successfully, so it was being thrown away instead of shown. It now pops up in a message box right when the job finishes, listing the real reason for anything worth mentioning about your audio/subtitle tracks — so if a subtitle format genuinely can't be included, you'll see exactly why instead of just noticing it's missing afterward.
+
+## Update — September 23, 2026
 
 **Improved: "Convert to 3D Blu-ray MVC" now works with Half Side-by-Side and both Top-Bottom layouts too, not just Full Side-by-Side.** Follow-up on the option from earlier tonight — it originally always switched your Stereo Format to Full Side-by-Side the moment you turned MVC conversion on, since that gives the best possible quality. Turns out that was more restrictive than it needed to be: Half SBS, Full Top-Bottom, and Half Top-Bottom all genuinely work fine for MVC conversion too — you'll just get a lower-resolution result from the Half options, the same tradeoff as using them anywhere else in this program. It now only steps in and switches your Stereo Format automatically if you have something MVC genuinely can't use at all (like VR90 or Anaglyph) selected — your SBS/Top-Bottom choice is always respected now. (Separately: real 3D Blu-ray discs don't use "Frame Packing" at all — that's a different, simpler 3D delivery method mainly used for things like older 3D game consoles, not how an actual disc stores its video — so there's nothing to add there; it wouldn't apply either way.)
 

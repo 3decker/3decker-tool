@@ -1049,12 +1049,32 @@ def _run_mvc_conversion(output_path, args):
 
     _notify_stage(args, STAGE_CONVERT_MVC)
     print(f"[iw3] Converting to 3D Blu-ray MVC ({ext})...", file=sys.stderr)
+    # ADR-248: real user report -- MVC conversion finished, audio came through, subtitles
+    # silently didn't, and "no errors at all... where would they even be for this type of
+    # conversion?" was a completely fair question. sbs_to_mvc_cli.py already tracks exactly
+    # what happened to every audio/subtitle track (converted, skipped and why) via its own
+    # "[sbs2mvc] note: ..." stderr lines -- but under the real GUI (pythonw.exe), this whole
+    # process's own sys.stderr is reopened onto os.devnull (nunif/pythonw_fix.py, see the
+    # ADR-072 Amendment note in gui.py's on_exit_worker), so printing more here was never
+    # going to help; the standalone SBS-to-MVC tool panel shows this because it captures its
+    # own child subprocess's pipe directly, not because anything reaches this process's
+    # stderr. That subprocess pipe IS already being captured correctly by
+    # _run_mvc_with_progress below -- it was just being thrown away on success. Stashed on
+    # args.state instead, for gui.py's on_exit_worker to actually show once the job ends.
+    mvc_notes = []
     try:
-        _run_mvc_with_progress(cmd, nunif_dir, args)
+        result = _run_mvc_with_progress(cmd, nunif_dir, args)
+        for line in result.stderr.decode(errors="replace").splitlines():
+            if line.startswith("[sbs2mvc] note:"):
+                mvc_notes.append(line[len("[sbs2mvc] note:"):].strip())
     except subprocess.CalledProcessError as e:
         msg = e.stderr.decode(errors="replace").strip()
         print(f"[iw3] MVC conversion failed: {msg[:600]}", file=sys.stderr)
+        if getattr(args, "state", None) is not None:
+            args.state.setdefault("mvc_notes", []).append(f"MVC conversion failed: {msg[:600]}")
         return False
+    if getattr(args, "state", None) is not None and mvc_notes:
+        args.state.setdefault("mvc_notes", []).extend(mvc_notes)
     if not path.exists(mvc_path):
         print("[iw3] MVC conversion exited 0 but produced no output file", file=sys.stderr)
         return False

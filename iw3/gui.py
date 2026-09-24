@@ -4137,6 +4137,30 @@ class MainFrame(wx.Frame):
               "too -- off (default) only makes sense for an already-SDR source, where it does nothing "
               "either way."))
 
+        # ADR-257: real user report -- SyLC 3D Player (and likely other simple 3D-ISO
+        # players) has no way to crop/zoom out black bars during playback, so the fix has
+        # to happen when the MVC file itself is built -- same "Auto-crop" option the
+        # standalone SBS-to-MVC tool already offers, mirrored here for the one-click path.
+        self.lbl_mvc_autocrop = wx.StaticText(self.grp_postprocess, label=T("Auto-crop (MVC)"))
+        self.cbo_mvc_autocrop = wx.ComboBox(self.grp_postprocess, name="cbo_mvc_autocrop")
+        self.cbo_mvc_autocrop.SetEditable(False)
+        self.cbo_mvc_autocrop.Append(T("Off"), "")
+        self.cbo_mvc_autocrop.Append(T("Remove black bars (all sides)"), "BLACK")
+        self.cbo_mvc_autocrop.Append(T("Remove black bars (top and bottom only)"), "BLACK_TB")
+        self.cbo_mvc_autocrop.SetSelection(0)
+        self.cbo_mvc_autocrop.SetToolTip(
+            T("What it's for: only with 'Convert to 3D Blu-ray MVC' above. Removes black bars from "
+              "the video before it's encoded into the MVC file, so a 3D-capable player with no "
+              "crop/zoom option of its own (e.g. SyLC 3D Player) still shows a full, bar-free "
+              "picture -- there's nothing left to fill in.\n"
+              "Values: 'all sides' crops any bar on any edge; 'top and bottom only' is the safer "
+              "choice for a genuinely widescreen movie in a taller frame, where the real picture "
+              "extends fully left-right and only the top/bottom are bars.\n"
+              "Con: only affects the separate _MVC file this step produces -- your regular "
+              "converted output above is never touched.\n"
+              "Recommended: on for a movie with real black bars, matching whichever side(s) they're "
+              "actually on -- off (default) leaves the video exactly as the source has it."))
+
         # ADR-256: real user request -- "have it write a log file for each job into the
         # output folder so you can always see what happened with each job... maybe even
         # make it optional and that option could be saved with your presets." All three
@@ -4194,6 +4218,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_mvc_bitrate, (j, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convert_to_mvc_hdr_to_sdr, (j := j + 1, 0), (0, 3),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.lbl_mvc_autocrop, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.cbo_mvc_autocrop, (j, 1), (0, 2), flag=wx.EXPAND)
 
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -9435,6 +9461,7 @@ class MainFrame(wx.Frame):
             mvc_output_type=self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection()),
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
             mvc_convert_hdr_to_sdr=self.chk_convert_to_mvc_hdr_to_sdr.GetValue(),
+            mvc_autocrop=self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection()) or None,
             write_job_log=self.chk_write_job_log.GetValue(),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
@@ -10743,6 +10770,13 @@ class MainFrame(wx.Frame):
             self.cbo_mvc_output_type.SetSelection(0)
         self.txt_mvc_bitrate.SetValue(str(getattr(args, "mvc_bitrate", None) or 20.0))
         self.chk_convert_to_mvc_hdr_to_sdr.SetValue(bool(getattr(args, "mvc_convert_hdr_to_sdr", False)))
+        mvc_autocrop_value = getattr(args, "mvc_autocrop", None) or ""
+        for i in range(self.cbo_mvc_autocrop.GetCount()):
+            if self.cbo_mvc_autocrop.GetClientData(i) == mvc_autocrop_value:
+                self.cbo_mvc_autocrop.SetSelection(i)
+                break
+        else:
+            self.cbo_mvc_autocrop.SetSelection(0)
         self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
@@ -19002,6 +19036,9 @@ def _self_test_convert_to_mvc_checkbox():
         # SBS-to-MVC tool already offers. Off by default -- must not silently strip a
         # regular SDR source's grade, or apply to a job that never touches HDR at all.
         assert frame.chk_convert_to_mvc_hdr_to_sdr.GetValue() is False
+        # ADR-257: real user report -- a player with no crop/zoom of its own (SyLC 3D
+        # Player) needs bars removed at encode time instead. Off ("") by default.
+        assert frame.cbo_mvc_autocrop.GetClientData(frame.cbo_mvc_autocrop.GetSelection()) == ""
 
         tip = frame.chk_convert_to_mvc.GetToolTip().GetTip()
         assert "MVC" in tip, tip
@@ -19027,6 +19064,18 @@ def _self_test_convert_to_mvc_checkbox():
         args_hdr = frame.parse_args(skip_set_state=True)
         assert args_hdr.mvc_convert_hdr_to_sdr is True
         frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
+
+        items = [frame.cbo_mvc_autocrop.GetClientData(i) for i in range(frame.cbo_mvc_autocrop.GetCount())]
+        frame.cbo_mvc_autocrop.SetSelection(items.index("BLACK"))
+        args_autocrop = frame.parse_args(skip_set_state=True)
+        assert args_autocrop.mvc_autocrop == "BLACK", args_autocrop.mvc_autocrop
+        frame.cbo_mvc_autocrop.SetSelection(items.index("BLACK_TB"))
+        args_autocrop_tb = frame.parse_args(skip_set_state=True)
+        assert args_autocrop_tb.mvc_autocrop == "BLACK_TB", args_autocrop_tb.mvc_autocrop
+        frame.cbo_mvc_autocrop.SetSelection(items.index(""))
+        args_autocrop_off = frame.parse_args(skip_set_state=True)
+        assert args_autocrop_off.mvc_autocrop is None, args_autocrop_off.mvc_autocrop
+
         stages_on = frame._compute_job_stages(args_on)
         assert STAGE_CONVERT_MVC in stages_on, stages_on
 
@@ -20187,7 +20236,7 @@ def _self_test_mvc_conversion_step():
 
     def base_args(**extra):
         defaults = dict(convert_to_mvc=True, mvc_output_type="iso", mvc_bitrate=20.0,
-                        mvc_convert_hdr_to_sdr=False,
+                        mvc_convert_hdr_to_sdr=False, mvc_autocrop=None,
                         half_sbs=False, tb=False, half_tb=False, vr180=False, cross_eyed=False,
                         rgbd=False, half_rgbd=False, anaglyph=None, export=False,
                         export_disparity=False, debug_depth=False, state={})
@@ -20220,6 +20269,21 @@ def _self_test_mvc_conversion_step():
             mock.patch("os.path.exists", return_value=True):
         assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
     assert "--convert-hdr-to-sdr" in run_mvc.call_args[0][0]
+
+    # ADR-257: --autocrop only reaches the subprocess when the new combo picked a real
+    # mode -- must not silently crop a job that never asked for it.
+    args = base_args()
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert "--autocrop" not in run_mvc.call_args[0][0]
+
+    args = base_args(mvc_autocrop="BLACK_TB")
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    cmd = run_mvc.call_args[0][0]
+    assert cmd[cmd.index("--autocrop") + 1] == "BLACK_TB", cmd
 
     # a format MVC conversion can't use at all is refused cleanly, no subprocess attempt
     for incompatible in ("vr180", "cross_eyed", "rgbd", "half_rgbd", "export", "export_disparity", "debug_depth"):

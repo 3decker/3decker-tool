@@ -1059,6 +1059,13 @@ def _run_mvc_conversion(output_path, args):
     # already offers via its own "Convert HDR/DV to SDR" checkbox.
     if getattr(args, "mvc_convert_hdr_to_sdr", False):
         cmd.append("--convert-hdr-to-sdr")
+    # ADR-257: real user report -- SyLC 3D Player (and likely other simple 3D-ISO
+    # players) has no way to crop/zoom out black bars during playback -- the fix has
+    # to happen when the MVC file is built, same option the standalone SBS-to-MVC
+    # tool already offers via its own "Auto-crop" dropdown.
+    mvc_autocrop = getattr(args, "mvc_autocrop", None)
+    if mvc_autocrop:
+        cmd += ["--autocrop", mvc_autocrop]
 
     _notify_stage(args, STAGE_CONVERT_MVC)
     print(f"[iw3] Converting to 3D Blu-ray MVC ({ext})...", file=sys.stderr)
@@ -6685,6 +6692,14 @@ def create_parser(required_true=True):
                               "3D Blu-ray here'. Same meaning and same tradeoff as sbs_to_mvc_cli's own "
                               "--convert-hdr-to-sdr (opt-in since the HDR grade is genuinely gone afterward): "
                               "off by default, tone-maps to plain SDR before the MVC encode when on."))
+    parser.add_argument("--mvc-autocrop", type=str.upper, default=None, choices=("BLACK", "BLACK_TB"),
+                        help=("ADR-257: only with --convert-to-mvc. Removes black bars from the video "
+                              "before it's encoded into the MVC file, so a 3D-capable player that has no "
+                              "crop/zoom option of its own (real user report: SyLC 3D Player) still shows a "
+                              "full, bar-free picture -- there's nothing left to fill in. BLACK removes bars "
+                              "on all sides, BLACK_TB only top/bottom. Same meaning as sbs_to_mvc_cli's own "
+                              "--autocrop (already available in the standalone 'SBS to 3D Blu-ray MVC' tool); "
+                              "unset (default) leaves the video's own bars exactly as the source has them."))
     parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
                         choices=["auto", "4k", "8k", "fsbs4k", "ftb4k"],
                         help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "

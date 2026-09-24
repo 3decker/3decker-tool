@@ -21164,6 +21164,127 @@ def _self_test_run_iw3_main_with_job_log():
     print("_self_test_run_iw3_main_with_job_log: PASS")
 
 
+def _self_test_find_disc_ssif_diagnostics():
+    """ADR-258: real user report -- a real, existing BDMV/STREAM/SSIF folder (confirmed
+    directly by the user) still hit "no Blu-ray 3D content found" when pointed at a
+    ripped folder, even though the same disc worked fine as a mounted .iso. Not
+    reproducible without that real folder, so the fix here is diagnostic, not a blind
+    path-logic change: confirms find_disc_ssif() still finds a real SSIF folder
+    correctly (disc-root form and BDMV-folder-passed-directly form, both real
+    filesystem structures, not mocked), and that a genuine miss now reports exactly
+    which candidate locations were checked and why each one didn't match, instead of
+    a bare refusal with no detail."""
+    import tempfile
+    from . import mvc_extract_cli as M
+
+    with tempfile.TemporaryDirectory(prefix="iw3_ssif_selftest_") as tmpdir:
+        disc_root = path.join(tmpdir, "disc")
+        ssif_dir = path.join(disc_root, "BDMV", "STREAM", "SSIF")
+        os.makedirs(ssif_dir)
+        small = path.join(ssif_dir, "00001.ssif")
+        big = path.join(ssif_dir, "00002.ssif")
+        with open(small, "wb") as f:
+            f.write(b"0" * 100)
+        with open(big, "wb") as f:
+            f.write(b"0" * 200)
+
+        # disc root passed directly -- picks the LARGEST .ssif (the real main movie,
+        # not a menu/extra), matching the function's own documented behavior.
+        assert M.find_disc_ssif(disc_root) == big
+
+        # the BDMV folder passed directly (candidate 2) must also work.
+        assert M.find_disc_ssif(path.join(disc_root, "BDMV")) == big
+
+        # a genuine miss: no BDMV anywhere near this folder at all.
+        empty_dir = path.join(tmpdir, "not_a_disc")
+        os.makedirs(empty_dir)
+        try:
+            M.find_disc_ssif(empty_dir)
+            assert False, "must raise when no BDMV/STREAM/SSIF exists anywhere"
+        except RuntimeError as e:
+            msg = str(e)
+            assert "Checked these locations" in msg, msg
+            # all 3 real candidate paths this specific input actually produces.
+            assert path.join(empty_dir, "BDMV") in msg, msg
+            assert empty_dir in msg, msg
+
+        # BDMV exists but its own STREAM/SSIF is missing entirely (a 2D-only disc,
+        # or the wrong folder level) -- must name that specific reason, not a generic one.
+        no_stream_root = path.join(tmpdir, "disc2")
+        os.makedirs(path.join(no_stream_root, "BDMV"))
+        try:
+            M.find_disc_ssif(no_stream_root)
+            assert False, "must raise when BDMV exists but has no STREAM/SSIF"
+        except RuntimeError as e:
+            assert "no STREAM/SSIF folder inside it" in str(e), str(e)
+
+    print("_self_test_find_disc_ssif_diagnostics: PASS")
+
+
+def _self_test_mux_bd3d_iso_audio_diagnostics():
+    """ADR-258: real user report -- a real disc's Lossless 3D Blu-ray ISO came out
+    with video but no audio track, despite the source clearly having one. Root cause
+    not reproducible without the real disc (flagged, not guessed at); this covers the
+    diagnostic fix that IS safe to make without it -- every track tsMuxeR itself
+    reports is now printed, and a real, specific warning fires when zero audio tracks
+    are found despite include_av=True, instead of a silent, unexplained empty result."""
+    import io
+    import contextlib
+    from unittest import mock
+    from . import mvc_extract_cli as M
+
+    def fake_popen(cmd, **kw):
+        class _P:
+            stdout = iter([])
+            returncode = 0
+
+            def wait(self):
+                pass
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+        return _P()
+
+    # (a) a real audio track present -- listed, no warning.
+    tracks_with_audio = [
+        {"id": 1, "codec": "V_MPEG4/ISO/MVC", "lang": ""},
+        {"id": 2, "codec": "A_TRUEHD", "lang": "eng"},
+        {"id": 3, "codec": "S_HDMV/PGS", "lang": "eng"},
+    ]
+    err = io.StringIO()
+    with mock.patch.object(M, "list_tracks", return_value=tracks_with_audio), \
+            mock.patch.object(M.subprocess, "Popen", fake_popen), \
+            mock.patch("os.makedirs"), mock.patch.object(M, "_remove_stale_temp"), \
+            mock.patch("builtins.open", mock.mock_open()), \
+            contextlib.redirect_stderr(err):
+        M.mux_bd3d_iso("disc.ssif", "out.iso")
+    out = err.getvalue()
+    assert "tsMuxeR detected 3 track(s)" in out, out
+    assert "A_TRUEHD" in out and "lang=eng" in out, out
+    assert "WARNING: tsMuxeR reported ZERO audio tracks" not in out, out
+
+    # (b) the exact real-world symptom -- video found, but zero audio tracks reported
+    # despite include_av=True -- must warn clearly, not stay silent.
+    tracks_no_audio = [
+        {"id": 1, "codec": "V_MPEG4/ISO/MVC", "lang": ""},
+        {"id": 3, "codec": "S_HDMV/PGS", "lang": "eng"},
+    ]
+    err = io.StringIO()
+    with mock.patch.object(M, "list_tracks", return_value=tracks_no_audio), \
+            mock.patch.object(M.subprocess, "Popen", fake_popen), \
+            mock.patch("os.makedirs"), mock.patch.object(M, "_remove_stale_temp"), \
+            mock.patch("builtins.open", mock.mock_open()), \
+            contextlib.redirect_stderr(err):
+        M.mux_bd3d_iso("disc.ssif", "out.iso", include_av=True)
+    out = err.getvalue()
+    assert "WARNING: tsMuxeR reported ZERO audio tracks" in out, out
+
+    print("_self_test_mux_bd3d_iso_audio_diagnostics: PASS")
+
+
 def _self_test_pop_panes_collapse_independently():
     """ADR-230: real user request -- Foreground/Midground/Background Pop are each their own
     nested wx.CollapsiblePane inside the "Depth Pop" pane, so a user only using one or two of
@@ -22709,6 +22830,8 @@ def _run_self_tests():
         _self_test_audio_subtitle_restore_dual_eye_flag,
         _self_test_write_job_log_checkbox,
         _self_test_run_iw3_main_with_job_log,
+        _self_test_find_disc_ssif_diagnostics,
+        _self_test_mux_bd3d_iso_audio_diagnostics,
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
         _self_test_mvc_conversion_step,

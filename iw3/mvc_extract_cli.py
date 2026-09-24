@@ -624,6 +624,30 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
     if not any(t["codec"] == "V_MPEG4/ISO/MVC" for t in tracks):
         raise RuntimeError("no 3D (MVC) video track found in this disc's main movie")
     wanted = [t for t in tracks if t["codec"].startswith("V_") or (include_av and t["codec"][:2] in ("A_", "S_"))]
+    # ADR-258: real user report -- a real disc's ISO came out with its video intact but
+    # no audio track at all, despite include_av=True and the source clearly having one
+    # (confirmed by the reporting user: the ISO's own file size was consistent with the
+    # audio genuinely being there). Unlike extract_and_decode()/mux_lossless_mvc_mkv()
+    # (both confirmed working correctly by that same user, including a real TrueHD+Atmos
+    # source), which find audio/subtitle tracks via av_restore_cli.py's own ffmpeg/PyAV-
+    # based detection against the disc's plain .m2ts clip, this function is the only one
+    # of the three that still trusts tsMuxeR's OWN track-detection (list_tracks(), which
+    # just parses tsMuxeR's plain console listing) -- the exact same class of "tsMuxeR's
+    # own codec detection is narrower than ffmpeg's" issue ADR-239 already found and
+    # fixed in a sibling function (sbs_to_mvc_cli.py's _ffprobe_list_tracks()). Not
+    # reproducible here without the actual failing disc, so not blindly "fixed" by
+    # guessing -- instead, every track tsMuxeR itself reports is now printed so this
+    # is immediately visible (not silent) the next time it happens, and there's real
+    # diagnostic data to work from instead of an empty result with no explanation.
+    print(f"[mvc-extract] tsMuxeR detected {len(tracks)} track(s) on this disc:", file=sys.stderr)
+    for t in tracks:
+        print(f"[mvc-extract]   track {t['id']}: {t['codec']}" + (f" (lang={t['lang']})" if t["lang"] else ""),
+             file=sys.stderr)
+    if include_av and not any(t["codec"].startswith("A_") for t in tracks):
+        print("[mvc-extract] WARNING: tsMuxeR reported ZERO audio tracks on this disc -- if you know "
+             "this disc has audio, this is very likely the same kind of narrow codec detection ADR-239 "
+             "found in a different tool, not a genuinely audio-less disc. Please report this with the "
+             "track list printed just above.", file=sys.stderr)
     ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
     cut = f" --cut-start=0s --cut-end={cut_end}" if cut_end else ""
     lines = [f"MUXOPT --blu-ray --auto-chapters=10{cut}"]
@@ -846,15 +870,33 @@ def find_disc_ssif(root):
     folder, or a folder containing BDMV."""
     root = path.abspath(root)
     candidates = [path.join(root, "BDMV"), root, path.dirname(root)]
+    tried = []
     for bdmv in candidates:
         ssif_dir = path.join(bdmv, "STREAM", "SSIF")
-        if path.basename(bdmv).upper() == "BDMV" and path.isdir(ssif_dir):
+        is_bdmv = path.basename(bdmv).upper() == "BDMV"
+        # ADR-258: real user report -- a real, existing BDMV/STREAM/SSIF folder (confirmed
+        # by the user directly) still hit this refusal when pointed at a ripped folder
+        # (Xreveal), even though the exact same disc worked fine as a mounted .iso. Not
+        # reproducible here without that real folder to test against, so not blindly
+        # "fixed" by guessing which of the 3 candidate path shapes should have matched --
+        # instead, every candidate actually tried (and exactly why each one didn't match)
+        # is now reported, so a folder-level mismatch (the likely real cause -- e.g.
+        # pointing at the disc's own parent folder, or a nested wrapper folder a ripping
+        # tool added) is immediately visible instead of a dead-end refusal with no detail.
+        if not is_bdmv:
+            tried.append(f"{bdmv} (not named BDMV)")
+        elif not path.isdir(ssif_dir):
+            tried.append(f"{bdmv} (named BDMV, but no STREAM/SSIF folder inside it)")
+        else:
             files = [path.join(ssif_dir, f) for f in os.listdir(ssif_dir) if f.lower().endswith(".ssif")]
             if files:
                 return max(files, key=path.getsize)
             raise RuntimeError("this disc has no 3D video (its BDMV/STREAM/SSIF folder is empty)")
-    raise RuntimeError("no Blu-ray 3D content found -- expected a BDMV/STREAM/SSIF folder "
-                       "(is this a 2D-only disc?)")
+    raise RuntimeError(
+        "no Blu-ray 3D content found -- expected a BDMV/STREAM/SSIF folder (is this a 2D-only disc?)\n"
+        "Checked these locations based on the path given:\n" + "\n".join(f"  - {t}" for t in tried) +
+        "\nIf you know a real BDMV/STREAM/SSIF folder exists, point this tool directly at the folder "
+        "that CONTAINS the BDMV folder (the disc's own root), or at the BDMV folder itself.")
 
 
 def import_disc(source, output_path, work_dir=None, progress_cb=None, cut_end=None, **kwargs):

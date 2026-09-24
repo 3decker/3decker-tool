@@ -975,6 +975,13 @@ def _run_audio_subtitle_restore(output_path, args):
         cmd += ["--source-start-time", str(start_time)]
     if end_time:
         cmd += ["--source-end-time", str(end_time)]
+    # ADR-254: real user request -- restore subtitles already positioned for real 3D
+    # instead of a flat copy. --format is deliberately omitted (left at av_restore_cli's
+    # own "auto" default) -- output_path's filename already carries the real Stereo
+    # Format tag make_output_filename() itself wrote, the same tag iw3.subtitle_mux_cli's
+    # own --format auto already relies on elsewhere.
+    if getattr(args, "restore_dual_eye_subtitles", False):
+        cmd += ["--dual-eye-subtitles"]
 
     _notify_stage(args, STAGE_RESTORE_AV)
     print("[iw3] Restoring audio/subtitle tracks from source...", file=sys.stderr)
@@ -6634,6 +6641,16 @@ def create_parser(required_true=True):
                               "the original conversion output is never modified. A source missing one "
                               "track type (e.g. no subtitles) is not an error -- whatever it has gets "
                               "restored."))
+    parser.add_argument("--restore-dual-eye-subtitles", action="store_true",
+                        help=("ADR-254: only with --restore-audio-subtitles. Positions every restored "
+                              "TEXT subtitle track (SRT/ASS/SSA/...) for real 3D instead of a flat copy -- "
+                              "same idea as iw3.subtitle_mux_cli's own --dual-eye-subtitles (ADR-053): "
+                              "each cue is duplicated into two positioned copies, one centered in each "
+                              "eye-half, so it displays with real depth on a split-eye Stereo Format "
+                              "(Half/Full SBS, Half/Full TB, Cross-Eyed) instead of a plain centered "
+                              "subtitle landing on the seam between the two eyes. No effect on a "
+                              "non-split Stereo Format, or on a picture-based (PGS/VobSub) subtitle "
+                              "track -- both are restored unchanged either way. Off by default."))
     parser.add_argument("--convert-to-mvc", action="store_true",
                         help=("ADR-246: after conversion (and Restore Audio & Subtitles, if also on) "
                               "finishes, additionally run this job's finished output through 'SBS to 3D "

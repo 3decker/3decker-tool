@@ -58,7 +58,21 @@ import nunif.gui.subprocess_patch  # noqa
 import av
 
 from nunif.utils.video.metadata import parse_time
-from .utils import _find_mkvmerge, _get_ffmpeg_bin
+from .utils import _find_mkvmerge, _get_ffmpeg_bin, _find_ffprobe
+# ADR-254: real user request -- restored subtitles should be able to come back
+# already positioned for real 3D (ADR-053's "dual-eye" stereo positioning), not
+# just flat-copied from source the way they always have been. That positioning
+# math (_build_stereo_positioned_subs and its supporting helpers) lives in
+# subtitle_mux_cli.py, the one place it's implemented and tested -- imported here
+# rather than duplicated, a deliberate, narrow exception to this project's usual
+# "each standalone CLI tool imports only from iw3.utils, never from each other"
+# convention (see subtitle_mux_cli.py's own docstring), made specifically to
+# avoid two copies of nontrivial positioning math drifting out of sync.
+from .subtitle_mux_cli import (
+    _resolve_format, _probe_video_dimensions, _build_stereo_positioned_subs,
+    _default_font_size, _iso639_1_to_2, _HORIZONTAL_SPLIT_FORMATS, _VERTICAL_SPLIT_FORMATS,
+    _VALID_FORMATS,
+)
 
 
 def _format_cmd(cmd):
@@ -96,6 +110,24 @@ def create_parser():
     parser.add_argument("--source-end-time", type=str, default=None,
                          help="End time within --source to trim its audio/subtitle tracks to. "
                               "Default: end of --source.")
+    parser.add_argument("--dual-eye-subtitles", action="store_true",
+                         help=("ADR-254: position restored TEXT subtitle tracks (SRT/ASS/SSA/...) for "
+                               "real 3D instead of a flat copy -- same idea and same math as "
+                               "iw3.subtitle_mux_cli's own --dual-eye-subtitles (ADR-053): each cue is "
+                               "duplicated into two positioned copies, one centered in each eye-half, "
+                               "so it displays with real depth on a split-eye layout (Half/Full SBS, "
+                               "Half/Full TB, Cross-Eyed) instead of a plain centered subtitle landing "
+                               "on the seam between the two eyes. No effect on a non-split layout "
+                               "(RGB-D, Anaglyph) or on a picture-based (PGS/VobSub) subtitle track --"
+                               " both are restored unchanged either way. Off by default."))
+    parser.add_argument("--format", type=str, default="auto", choices=_VALID_FORMATS,
+                         help="Only with --dual-eye-subtitles: --input's stereo layout. 'auto' "
+                              "(default) detects it from --input's own filename (the same tag iw3 "
+                              "itself writes); set explicitly if that detection fails.")
+    parser.add_argument("--font-size", type=float, default=None,
+                         help="Only with --dual-eye-subtitles: exact ASS Fontsize (pixels) for the "
+                              "positioned track. Default: auto-scaled to the per-eye video height "
+                              "(same default iw3.subtitle_mux_cli uses).")
     return parser
 
 
@@ -249,6 +281,85 @@ def _trim_all_av(ffmpeg_bin, source_path, start_time, end_time, work_dir, progre
         "as a re-encode fallback. Last ffmpeg stderr:\n" + "\n".join(stderr_tail)), cmds_tried
 
 
+# Text-based subtitle codec names av/ffprobe report -- the only kind
+# _build_stereo_positioned_subs can reposition (it operates on real cue text, not
+# pixels). Matches iw3.sbs_to_mvc_cli._ffprobe_list_tracks's own S_TEXT set for the
+# same codec names, kept as a separate local copy rather than a third cross-import --
+# it's a one-line constant, not nontrivial logic that could drift out of sync.
+_TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+
+def _dual_eye_reposition_subs(mux_source_path, work_dir, ffmpeg_bin, resolved_format, width, height, font_size):
+    """ADR-254: for every TEXT subtitle stream in mux_source_path, extracts it and
+    builds a dual-eye stereo-positioned ASS replacement via subtitle_mux_cli.py's own
+    ADR-053 math (never duplicated here). Picture-based subtitle streams (PGS/VobSub)
+    are left completely alone -- there is no text to reposition, and this project has
+    no way to reposition a bitmap subtitle's own baked-in pixels; they're restored
+    unchanged either way, same as before this feature existed.
+
+    Returns (keep_ids, positioned_files, notes):
+    - keep_ids: comma-separated mkvmerge --subtitle-tracks value listing which of
+      mux_source_path's OWN subtitle tracks to still pull in as-is (every non-text
+      one, plus any text one that failed to extract/parse -- fails safe to the
+      original flat copy rather than silently dropping a track). None if there were
+      no subtitle streams at all (caller keeps today's unrestricted blanket copy).
+    - positioned_files: list of (ass_path, lang) tuples to mux in as new, separate
+      inputs alongside mux_source_path.
+    - notes: human-readable per-track outcome lines, for the caller to print.
+    """
+    import pysubs2
+
+    container = av.open(mux_source_path, mode="r", metadata_errors="ignore")
+    try:
+        tracks = []
+        for i, s in enumerate(container.streams.subtitles):
+            codec_name = s.codec_context.name if s.codec_context else ""
+            lang = (s.metadata or {}).get("language", "")
+            tracks.append((i, codec_name, lang))
+    finally:
+        container.close()
+
+    if not tracks:
+        return None, [], []
+
+    keep_ids = []
+    positioned_files = []
+    notes = []
+    for i, codec_name, lang in tracks:
+        if codec_name not in _TEXT_SUBTITLE_CODECS:
+            keep_ids.append(str(i))
+            notes.append(f"subtitle track {i + 1} ({codec_name or 'unknown'}): picture-based, "
+                         f"restored unchanged -- only text subtitles can be repositioned for 3D")
+            continue
+
+        srt_path = path.join(work_dir, f"dualeye_sub_{i}.srt")
+        r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", mux_source_path,
+                            "-map", f"0:s:{i}", "-c:s", "srt", srt_path],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not path.exists(srt_path):
+            keep_ids.append(str(i))
+            notes.append(f"subtitle track {i + 1} ({codec_name}): could not extract it for "
+                         f"repositioning, restored unchanged instead")
+            continue
+        try:
+            subs = pysubs2.load(srt_path)
+        except Exception as e:
+            keep_ids.append(str(i))
+            notes.append(f"subtitle track {i + 1} ({codec_name}): could not parse it for "
+                         f"repositioning ({e}), restored unchanged instead")
+            continue
+
+        positioned = _build_stereo_positioned_subs(subs, resolved_format, width, height, font_size=font_size)
+        ass_path = path.join(work_dir, f"dualeye_sub_{i}.ass")
+        positioned.save(ass_path)
+        positioned_files.append((ass_path, lang))
+        notes.append(f"subtitle track {i + 1} ({codec_name}, {lang or 'unknown language'}): "
+                     f"repositioned for 3D (dual-eye)")
+
+    keep_ids_str = ",".join(sorted(set(keep_ids), key=int)) if keep_ids else ""
+    return keep_ids_str, positioned_files, notes
+
+
 def run(args):
     input_path = str(args.input)
     source_path = str(args.source)
@@ -289,12 +400,19 @@ def run(args):
     os.makedirs(out_dir, exist_ok=True)
     tmp_output = path.splitext(output_path)[0] + ".avrestore_tmp" + path.splitext(output_path)[1]
 
+    dual_eye_subtitles = bool(getattr(args, "dual_eye_subtitles", False))
+
     work_dir = None
     mux_source_path = source_path
+    subtitle_track_select = []  # extra mkvmerge args placed right before mux_source_path
+    positioned_files = []       # extra (ass_path, lang) mkvmerge inputs, added after mux_source_path
     try:
-        if args.source_start_time or args.source_end_time:
-            ffmpeg_bin = _get_ffmpeg_bin()
+        if args.source_start_time or args.source_end_time or dual_eye_subtitles:
             work_dir = tempfile.mkdtemp(prefix="iw3_avrestore_")
+
+        ffmpeg_bin = _get_ffmpeg_bin() if work_dir else None
+
+        if args.source_start_time or args.source_end_time:
             print(f"[av-restore] trimming --source's audio/subtitle tracks to "
                   f"[{args.source_start_time or '0'}, {args.source_end_time or 'end'}) and "
                   f"shifting to start at 0...", file=sys.stderr)
@@ -308,6 +426,47 @@ def run(args):
             mux_source_path = trimmed_path
             print(f"[av-restore] trimmed audio/subtitles ready: {mux_source_path}", file=sys.stderr)
 
+        # ADR-254: --dual-eye-subtitles opt-in -- reposition every TEXT subtitle track
+        # for real 3D instead of restoring it flat. Runs AFTER trimming above (so it
+        # operates on the already-trimmed/rebased tracks when both are requested,
+        # same "compose correctly together" ordering subtitle_mux_cli.py's own
+        # --start-time/--end-time + --dual-eye-subtitles established). No effect when
+        # off (the default) or when --source has no subtitle tracks at all -- the
+        # final mkvmerge command below is then byte-for-byte what it always was.
+        if dual_eye_subtitles and subtitle_count > 0:
+            resolved_format, format_error = _resolve_format(getattr(args, "format", "auto"), input_path)
+            if format_error:
+                print(format_error, file=sys.stderr)
+                return 1
+            is_split = resolved_format in _HORIZONTAL_SPLIT_FORMATS or resolved_format in _VERTICAL_SPLIT_FORMATS
+            if not is_split:
+                print(f"[av-restore] --dual-eye-subtitles has no effect for format "
+                      f"'{resolved_format}' -- it isn't a two-eye split layout (see ADR-053). "
+                      f"Restoring subtitles unchanged.", file=sys.stderr)
+            else:
+                ffprobe_bin = _find_ffprobe()
+                width, height, probe_error = _probe_video_dimensions(input_path, ffprobe_bin)
+                if probe_error:
+                    print(probe_error, file=sys.stderr)
+                    print("ERROR: cannot correctly position stereo subtitles for a split-eye "
+                          "layout without --input's real video dimensions -- refusing rather "
+                          "than restoring possibly-mispositioned subtitles.", file=sys.stderr)
+                    return 1
+                font_size = getattr(args, "font_size", None)
+                resolved_font_size = font_size if font_size is not None else _default_font_size(
+                    resolved_format, height)
+                print(f"[av-restore] --dual-eye-subtitles: {resolved_format}, "
+                      f"{width}x{height}, font size {resolved_font_size}px "
+                      f"({'explicit --font-size' if font_size is not None else 'auto-scaled'})",
+                      file=sys.stderr)
+                keep_ids, positioned_files, notes = _dual_eye_reposition_subs(
+                    mux_source_path, work_dir, ffmpeg_bin or _get_ffmpeg_bin(),
+                    resolved_format, width, height, font_size)
+                for n in notes:
+                    print(f"[av-restore] {n}", file=sys.stderr)
+                if keep_ids is not None:
+                    subtitle_track_select = ["--subtitle-tracks", keep_ids] if keep_ids else ["--no-subtitles"]
+
         # --no-audio --no-subtitles on input_path drops its own single audio track
         # (see audio_restore_cli.py's docstring -- it's already just a copy of the
         # source's own first track) and any subtitle tracks it somehow had (none,
@@ -316,9 +475,20 @@ def run(args):
         # (audio + subtitles together). No --language/--track-name overrides --
         # every track's own metadata from --source is preserved as mkvmerge's
         # default "copy everything from this file" behavior for a file with no
-        # options in front of it.
+        # options in front of it. subtitle_track_select (ADR-254, empty unless
+        # --dual-eye-subtitles actually repositioned something) narrows which of
+        # mux_source_path's OWN subtitle tracks still come through unchanged --
+        # empty list here is a true no-op, so the default path is byte-for-byte
+        # what this command always was.
         cmd = [mkvmerge_bin, "-o", tmp_output, "--no-audio", "--no-subtitles", input_path,
-               "--no-video", "--no-chapters", mux_source_path]
+               "--no-video", "--no-chapters"] + subtitle_track_select + [mux_source_path]
+        # Positioned ASS tracks (ADR-254), each as its own separate mkvmerge input --
+        # same "--language 0:xx precedes a single-track file" convention
+        # subtitle_mux_cli.py's own mux command already established.
+        for ass_path, lang in positioned_files:
+            if lang:
+                cmd += ["--language", f"0:{_iso639_1_to_2(lang)}"]
+            cmd.append(ass_path)
         print(f"[av-restore] running: {_format_cmd(cmd)}", file=sys.stderr)
 
         try:
@@ -347,8 +517,9 @@ def run(args):
             return 1
 
         os.replace(tmp_output, output_path)
+        reposition_note = f" ({len(positioned_files)} repositioned for 3D)" if positioned_files else ""
         print(f"[av-restore] done -- wrote {output_path} with {audio_count} audio track(s) and "
-              f"{subtitle_count} subtitle track(s) restored from source", file=sys.stderr)
+              f"{subtitle_count} subtitle track(s) restored from source{reposition_note}", file=sys.stderr)
         return 0
     finally:
         if work_dir:
@@ -502,10 +673,84 @@ def _self_test_run_gating():
     print("_self_test_run_gating: PASS")
 
 
+def _self_test_dual_eye_subtitles_real_ffmpeg():
+    """ADR-254: real user request -- "Restore Audio & Subtitles" should be able to
+    restore a subtitle already positioned for real 3D, not just flat-copied, the
+    same way iw3.subtitle_mux_cli's own --dual-eye-subtitles (ADR-053) already can
+    for a manually-added track. Not mocked -- builds a real source .mkv (audio +
+    one real text subtitle cue) and a real "already-converted" 3D .mkv via the
+    bundled ffmpeg (no GPU needed), then calls the real run() end to end, twice:
+    once with --dual-eye-subtitles on (confirms the restored subtitle track is a
+    real repositioned ASS with two '\\pos(...)' events for the one source cue, one
+    per eye) and once off (confirms today's default behavior -- a flat, unpositioned
+    copy -- is completely unchanged)."""
+    import tempfile as _tempfile
+    from .utils import _get_ffmpeg_bin as get_ffmpeg_bin
+
+    ffmpeg_bin = get_ffmpeg_bin()
+    assert ffmpeg_bin is not None, "bundled ffmpeg must resolve for this test to be meaningful"
+
+    with _tempfile.TemporaryDirectory(prefix="iw3_avrestore_dualeye_selftest_") as tmpdir:
+        srt_path = path.join(tmpdir, "sub.srt")
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+
+        source_path = path.join(tmpdir, "source.mkv")
+        r = subprocess.run(
+            [ffmpeg_bin, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+             "-i", srt_path, "-map", "0:a", "-map", "1:s", "-c:a", "aac", "-c:s", "srt", source_path],
+            capture_output=True, text=True)
+        assert r.returncode == 0 and path.exists(source_path), r.stderr
+
+        input_path = path.join(tmpdir, "movie_LR.mkv")
+        r = subprocess.run(
+            [ffmpeg_bin, "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:d=1",
+             "-c:v", "libx264", input_path], capture_output=True, text=True)
+        assert r.returncode == 0 and path.exists(input_path), r.stderr
+
+        def _args(**overrides):
+            base = dict(input=input_path, source=source_path,
+                        source_start_time=None, source_end_time=None,
+                        dual_eye_subtitles=False, format="half_sbs", font_size=None)
+            base.update(overrides)
+            return argparse.Namespace(**base)
+
+        # (a) off (default): flat copy, no repositioning at all.
+        output_flat = path.join(tmpdir, "out_flat.mkv")
+        rc = run(_args(output=output_flat))
+        assert rc == 0, rc
+        assert path.exists(output_flat)
+        extracted_flat = path.join(tmpdir, "extracted_flat.srt")
+        subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", output_flat, "-map", "0:s:0",
+                        extracted_flat], capture_output=True, text=True)
+        with open(extracted_flat, encoding="utf-8") as f:
+            flat_text = f.read()
+        assert "\\pos(" not in flat_text, flat_text
+        assert "Hello" in flat_text, flat_text
+
+        # (b) on: the restored subtitle must be a real, positioned ASS track --
+        # two '\pos(...)' events (one per eye) for the one original cue.
+        output_3d = path.join(tmpdir, "out_3d.mkv")
+        rc = run(_args(output=output_3d, dual_eye_subtitles=True))
+        assert rc == 0, rc
+        assert path.exists(output_3d)
+        extracted_3d = path.join(tmpdir, "extracted_3d.ass")
+        r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", output_3d, "-map", "0:s:0",
+                            extracted_3d], capture_output=True, text=True)
+        assert r.returncode == 0 and path.exists(extracted_3d), r.stderr
+        with open(extracted_3d, encoding="utf-8") as f:
+            positioned_text = f.read()
+        assert positioned_text.count("\\pos(") == 2, positioned_text
+        assert positioned_text.count("Hello") == 2, positioned_text
+
+    print("_self_test_dual_eye_subtitles_real_ffmpeg: PASS")
+
+
 def _run_self_tests():
     _self_test_trim_cmd_construction()
     _self_test_av_track_counting()
     _self_test_run_gating()
+    _self_test_dual_eye_subtitles_real_ffmpeg()
     print("All av_restore_cli self-tests PASSED")
 
 

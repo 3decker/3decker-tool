@@ -4044,6 +4044,27 @@ class MainFrame(wx.Frame):
               "still exists separately for audio-only restoration on a file you've already "
               "converted."))
 
+        # ADR-254: real user request -- restore subtitles already positioned for real 3D
+        # instead of a flat copy, matching iw3.subtitle_mux_cli's own "Add Subtitle Track"
+        # dual-eye option (ADR-053), now available automatically here too.
+        self.chk_restore_dual_eye_subtitles = wx.CheckBox(
+            self.grp_postprocess,
+            label=T("Position subtitles in 3D (dual-eye)"),
+            name="chk_restore_dual_eye_subtitles")
+        self.chk_restore_dual_eye_subtitles.SetValue(False)
+        self.chk_restore_dual_eye_subtitles.SetToolTip(
+            T("What it's for: restored TEXT subtitles (most .srt/.ass sources) normally come back "
+              "flat -- identical on both eyes, which lands exactly on the seam between the two eyes "
+              "on a Half/Full SBS, Half/Full TB, or Cross-Eyed output, tearing every line in half on "
+              "a real 3D display or TV. This duplicates each subtitle line into two copies, one "
+              "positioned in each eye's own half, so it displays with real depth instead.\n"
+              "Con: no effect on a Stereo Format that isn't a two-eye split (RGB-D, Anaglyph), or on "
+              "a picture-based subtitle track (PGS/VobSub, common on some Blu-ray rips) -- both are "
+              "restored unchanged either way, same as with this off.\n"
+              "Recommended: on whenever your output is a split-eye format and you watch on a real "
+              "3D-capable player or TV, especially external ones (VLC, MPC-HC, a 3D TV) that have no "
+              "playback-time trick of their own for this like iw3-player does."))
+
         # ADR-246: real user request -- "the holy grail is to take a 2D movie and just convert it
         # to MKV-MVC directly". Runs the standalone "SBS to 3D Blu-ray MVC" tool automatically on
         # this job's own finished output (after Restore Audio & Subtitles, if also on, so MVC gets
@@ -4139,6 +4160,8 @@ class MainFrame(wx.Frame):
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 4), (j := j + 1, 0))
         layout.Add(self.chk_restore_audio_subtitles, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_restore_dual_eye_subtitles, (j := j + 1, 0), (0, 3),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
 
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -9380,6 +9403,7 @@ class MainFrame(wx.Frame):
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
+            restore_dual_eye_subtitles=self.chk_restore_dual_eye_subtitles.GetValue(),
             convert_to_mvc=self.chk_convert_to_mvc.GetValue(),
             mvc_output_type=self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection()),
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
@@ -10680,6 +10704,7 @@ class MainFrame(wx.Frame):
             _apply_combo_value(self.cbo_rife_mode, f"{args.rife_multiplier}x")
 
         self.chk_restore_audio_subtitles.SetValue(bool(getattr(args, "restore_audio_subtitles", False)))
+        self.chk_restore_dual_eye_subtitles.SetValue(bool(getattr(args, "restore_dual_eye_subtitles", False)))
         self.chk_convert_to_mvc.SetValue(bool(getattr(args, "convert_to_mvc", False)))
         mvc_output_type_value = getattr(args, "mvc_output_type", None) or "iso"
         for i in range(self.cbo_mvc_output_type.GetCount()):
@@ -18895,6 +18920,22 @@ def _self_test_restore_audio_subtitles_checkbox():
         frame.chk_restore_audio_subtitles.SetValue(False)
         command_off = frame.get_cli_command()
         assert "--restore-audio-subtitles" not in command_off, command_off
+
+        # ADR-254: real user request -- restore subtitles already positioned for real 3D
+        # instead of a flat copy. Off by default; only meaningful together with the main
+        # checkbox above, but wired independently the same way every other opt-in flag is.
+        assert frame.chk_restore_dual_eye_subtitles.GetParent() is frame.grp_postprocess
+        assert frame.chk_restore_dual_eye_subtitles.GetValue() is False
+        args_dual_eye_off = frame.parse_args(skip_set_state=True)
+        assert args_dual_eye_off.restore_dual_eye_subtitles is False
+        frame.chk_restore_dual_eye_subtitles.SetValue(True)
+        args_dual_eye_on = frame.parse_args(skip_set_state=True)
+        assert args_dual_eye_on.restore_dual_eye_subtitles is True
+        command_dual_eye_on = frame.get_cli_command()
+        assert "--restore-dual-eye-subtitles" in command_dual_eye_on, command_dual_eye_on
+        frame.chk_restore_dual_eye_subtitles.SetValue(False)
+        command_dual_eye_off = frame.get_cli_command()
+        assert "--restore-dual-eye-subtitles" not in command_dual_eye_off, command_dual_eye_off
     finally:
         if frame is not None:
             frame.Destroy()
@@ -20877,6 +20918,47 @@ def _self_test_stereo_tag_survives_post_steps():
     print("_self_test_stereo_tag_survives_post_steps: PASS")
 
 
+def _self_test_audio_subtitle_restore_dual_eye_flag():
+    """ADR-254: real user request -- restore subtitles already positioned for real 3D
+    instead of a flat copy. Confirms _run_audio_subtitle_restore()'s own built command
+    carries --dual-eye-subtitles only when args.restore_dual_eye_subtitles is on, and
+    is absent (today's default, unchanged) when it's off or not set at all."""
+    import tempfile
+    import types
+    from unittest.mock import patch
+    from . import utils as U
+
+    def make_args(**extra):
+        defaults = dict(restore_audio_subtitles=True, input="src.mkv", start_time=None, end_time=None,
+                        state={}, stereo_mode_tag=False)
+        defaults.update(extra)
+        return types.SimpleNamespace(**defaults)
+
+    with tempfile.TemporaryDirectory() as d:
+        base = os.path.join(d, "clip.mkv")
+        open(base, "wb").close()
+
+        captured = {}
+
+        def fake_restore(cmd, cwd, a):
+            captured["cmd"] = cmd
+            open(cmd[cmd.index("-o") + 1], "wb").close()
+
+        with patch.object(U, "_run_av_restore_with_progress", fake_restore), \
+                patch.object(U, "_notify_stage", lambda *a, **k: None), \
+                patch.object(U, "_apply_stereo_mode_tag", lambda p, a, *r, **k: None):
+            U._run_audio_subtitle_restore(base, make_args())
+            assert "--dual-eye-subtitles" not in captured["cmd"], captured["cmd"]
+
+            U._run_audio_subtitle_restore(base, make_args(restore_dual_eye_subtitles=False))
+            assert "--dual-eye-subtitles" not in captured["cmd"], captured["cmd"]
+
+            U._run_audio_subtitle_restore(base, make_args(restore_dual_eye_subtitles=True))
+            assert "--dual-eye-subtitles" in captured["cmd"], captured["cmd"]
+
+    print("_self_test_audio_subtitle_restore_dual_eye_flag: PASS")
+
+
 def _self_test_pop_panes_collapse_independently():
     """ADR-230: real user request -- Foreground/Midground/Background Pop are each their own
     nested wx.CollapsiblePane inside the "Depth Pop" pane, so a user only using one or two of
@@ -22419,6 +22501,7 @@ def _run_self_tests():
         _self_test_face_protect,
         _self_test_nt_auto_divergence_controls,
         _self_test_auto_divergence_metadata_tags,
+        _self_test_audio_subtitle_restore_dual_eye_flag,
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
         _self_test_mvc_conversion_step,

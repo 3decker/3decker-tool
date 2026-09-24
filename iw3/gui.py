@@ -21291,6 +21291,29 @@ def _self_test_find_disc_ssif_diagnostics():
         except RuntimeError as e:
             assert "no STREAM/SSIF folder inside it" in str(e), str(e)
 
+        # ADR-260: reproduced directly against a real disc (its own real volume label
+        # and structure) -- ripping tools commonly wrap the real disc root one level
+        # deeper than the folder they ask the user to choose, e.g.
+        # <output folder>/<Disc Title>/BDMV/... Pointing this tool at the OUTER folder
+        # (what the ripping tool's own dialog asked for) must still find the disc.
+        wrapper = path.join(tmpdir, "ripped_output")
+        wrapped_ssif_dir = path.join(wrapper, "Some Real Disc Title", "BDMV", "STREAM", "SSIF")
+        os.makedirs(wrapped_ssif_dir)
+        wrapped_stream = path.join(wrapped_ssif_dir, "00009.ssif")
+        with open(wrapped_stream, "wb") as f:
+            f.write(b"0" * 300)
+        assert M.find_disc_ssif(wrapper) == wrapped_stream
+
+        # a genuinely 2D-only wrapped folder (BDMV exists one level down, but no
+        # STREAM/SSIF inside it) must still be correctly refused, not falsely matched.
+        wrapper_2d = path.join(tmpdir, "ripped_2d_output")
+        os.makedirs(path.join(wrapper_2d, "Some 2D Movie", "BDMV", "PLAYLIST"))
+        try:
+            M.find_disc_ssif(wrapper_2d)
+            assert False, "a wrapped 2D-only disc must still be refused, not falsely matched"
+        except RuntimeError as e:
+            assert "Checked these locations" in str(e), str(e)
+
     print("_self_test_find_disc_ssif_diagnostics: PASS")
 
 

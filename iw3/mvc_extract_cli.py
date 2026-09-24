@@ -1125,36 +1125,56 @@ def dismount_iso(iso_path):
 def find_disc_ssif(root):
     """The main movie's 3D stream: the largest file in BDMV/STREAM/SSIF (extras and
     menus are tiny next to the feature). `root` may be the disc/drive root, its BDMV
-    folder, or a folder containing BDMV."""
+    folder, a folder containing BDMV, or (ADR-260) a ripping tool's own output folder
+    that wraps the real disc root one level deeper (e.g. <output>/<Disc Title>/BDMV)."""
     root = path.abspath(root)
-    candidates = [path.join(root, "BDMV"), root, path.dirname(root)]
     tried = []
-    for bdmv in candidates:
-        ssif_dir = path.join(bdmv, "STREAM", "SSIF")
+
+    def _check(bdmv):
+        # ADR-258: report exactly why a candidate didn't match, instead of one generic
+        # refusal, so a folder-level mismatch is immediately visible.
         is_bdmv = path.basename(bdmv).upper() == "BDMV"
-        # ADR-258: real user report -- a real, existing BDMV/STREAM/SSIF folder (confirmed
-        # by the user directly) still hit this refusal when pointed at a ripped folder
-        # (Xreveal), even though the exact same disc worked fine as a mounted .iso. Not
-        # reproducible here without that real folder to test against, so not blindly
-        # "fixed" by guessing which of the 3 candidate path shapes should have matched --
-        # instead, every candidate actually tried (and exactly why each one didn't match)
-        # is now reported, so a folder-level mismatch (the likely real cause -- e.g.
-        # pointing at the disc's own parent folder, or a nested wrapper folder a ripping
-        # tool added) is immediately visible instead of a dead-end refusal with no detail.
         if not is_bdmv:
             tried.append(f"{bdmv} (not named BDMV)")
-        elif not path.isdir(ssif_dir):
+            return None
+        ssif_dir = path.join(bdmv, "STREAM", "SSIF")
+        if not path.isdir(ssif_dir):
             tried.append(f"{bdmv} (named BDMV, but no STREAM/SSIF folder inside it)")
-        else:
-            files = [path.join(ssif_dir, f) for f in os.listdir(ssif_dir) if f.lower().endswith(".ssif")]
-            if files:
-                return max(files, key=path.getsize)
-            raise RuntimeError("this disc has no 3D video (its BDMV/STREAM/SSIF folder is empty)")
+            return None
+        files = [path.join(ssif_dir, f) for f in os.listdir(ssif_dir) if f.lower().endswith(".ssif")]
+        if files:
+            return max(files, key=path.getsize)
+        raise RuntimeError("this disc has no 3D video (its BDMV/STREAM/SSIF folder is empty)")
+
+    for bdmv in (path.join(root, "BDMV"), root, path.dirname(root)):
+        result = _check(bdmv)
+        if result:
+            return result
+
+    # ADR-260: real user report -- a real, existing BDMV/STREAM/SSIF folder (confirmed
+    # by the user directly) still hit this refusal when pointed at a ripped folder
+    # (Xreveal). Reproduced directly against a real disc's own real structure and volume
+    # label: ripping tools commonly wrap the real disc root one level deeper than the
+    # folder the user is asked to choose, i.e. <chosen output folder>/<Disc Title>/BDMV/...
+    # -- pointing this tool at the OUTER folder (the one the ripping tool's own dialog
+    # asked for) hits exactly this refusal, one level above where BDMV actually lives.
+    # If none of the 3 direct candidates matched, scan one level of immediate
+    # subfolders for a real BDMV/STREAM/SSIF inside any of them.
+    try:
+        subdirs = sorted(e for e in os.listdir(root) if path.isdir(path.join(root, e)))
+    except OSError:
+        subdirs = []
+    for sub in subdirs:
+        result = _check(path.join(root, sub, "BDMV"))
+        if result:
+            return result
+
     raise RuntimeError(
         "no Blu-ray 3D content found -- expected a BDMV/STREAM/SSIF folder (is this a 2D-only disc?)\n"
         "Checked these locations based on the path given:\n" + "\n".join(f"  - {t}" for t in tried) +
         "\nIf you know a real BDMV/STREAM/SSIF folder exists, point this tool directly at the folder "
-        "that CONTAINS the BDMV folder (the disc's own root), or at the BDMV folder itself.")
+        "that CONTAINS the BDMV folder (the disc's own root), at the BDMV folder itself, or at the "
+        "folder a ripping tool wrote its output into (its real disc-root subfolder is searched too).")
 
 
 def import_disc(source, output_path, work_dir=None, progress_cb=None, cut_end=None, **kwargs):

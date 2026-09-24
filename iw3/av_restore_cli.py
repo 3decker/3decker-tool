@@ -288,6 +288,34 @@ def _trim_all_av(ffmpeg_bin, source_path, start_time, end_time, work_dir, progre
 # it's a one-line constant, not nontrivial logic that could drift out of sync.
 _TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
 
+# ADR-255: real user question -- without a distinguishing name, a repositioned
+# track shows up in a player's subtitle menu as just a bare language ("English"),
+# indistinguishable from an ordinary flat track (this project has no general
+# language-name lookup anywhere, so this is intentionally NOT exhaustive -- covers
+# the common cases; anything else still gets a real, working, just less pretty
+# label via the code itself, see _dual_eye_track_name's own fallback).
+_COMMON_LANGUAGE_NAMES = {
+    "eng": "English", "spa": "Spanish", "fre": "French", "ger": "German",
+    "ita": "Italian", "por": "Portuguese", "jpn": "Japanese", "chi": "Chinese",
+    "kor": "Korean", "rus": "Russian", "ara": "Arabic", "hin": "Hindi",
+    "dut": "Dutch", "swe": "Swedish", "nor": "Norwegian", "dan": "Danish",
+    "pol": "Polish", "tur": "Turkish", "fin": "Finnish", "gre": "Greek",
+    "vie": "Vietnamese", "ind": "Indonesian", "cze": "Czech", "hun": "Hungarian",
+    "ukr": "Ukrainian",
+}
+
+
+def _dual_eye_track_name(lang):
+    """ADR-255: readable mkvmerge --track-name for a repositioned subtitle track,
+    e.g. "English (3D)" -- so it's distinguishable at a glance from a flat/original
+    track in a player's own subtitle menu. `lang` is whatever the source track's own
+    language metadata says (2 or 3 letter, or empty/unset)."""
+    code = _iso639_1_to_2(lang) if lang else ""
+    if not code:
+        return "Subtitle (3D)"
+    name = _COMMON_LANGUAGE_NAMES.get(code, code.upper())
+    return f"{name} (3D)"
+
 
 def _dual_eye_reposition_subs(mux_source_path, work_dir, ffmpeg_bin, resolved_format, width, height, font_size):
     """ADR-254: for every TEXT subtitle stream in mux_source_path, extracts it and
@@ -488,6 +516,12 @@ def run(args):
         for ass_path, lang in positioned_files:
             if lang:
                 cmd += ["--language", f"0:{_iso639_1_to_2(lang)}"]
+            # ADR-255: a real, readable name ("English (3D)") so this track is
+            # distinguishable at a glance from a flat/original one in a player's
+            # own subtitle menu -- real user question ("will have something like
+            # a 3d name tag on it?"), previously unset/blank either here or in
+            # subtitle_mux_cli.py's own --dual-eye-subtitles track.
+            cmd += ["--track-name", f"0:{_dual_eye_track_name(lang)}"]
             cmd.append(ass_path)
         print(f"[av-restore] running: {_format_cmd(cmd)}", file=sys.stderr)
 
@@ -698,7 +732,8 @@ def _self_test_dual_eye_subtitles_real_ffmpeg():
         source_path = path.join(tmpdir, "source.mkv")
         r = subprocess.run(
             [ffmpeg_bin, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-             "-i", srt_path, "-map", "0:a", "-map", "1:s", "-c:a", "aac", "-c:s", "srt", source_path],
+             "-i", srt_path, "-map", "0:a", "-map", "1:s", "-c:a", "aac", "-c:s", "srt",
+             "-metadata:s:s:0", "language=eng", source_path],
             capture_output=True, text=True)
         assert r.returncode == 0 and path.exists(source_path), r.stderr
 
@@ -742,6 +777,17 @@ def _self_test_dual_eye_subtitles_real_ffmpeg():
             positioned_text = f.read()
         assert positioned_text.count("\\pos(") == 2, positioned_text
         assert positioned_text.count("Hello") == 2, positioned_text
+
+        # ADR-255: real user question -- the repositioned track must have a real,
+        # readable name ("English (3D)") so it's distinguishable from a flat one in
+        # a player's own subtitle menu, not just a bare language. Read back via
+        # ffprobe (mkvmerge's own --track-name becomes the container's real title tag).
+        ffprobe_bin = _find_ffprobe()
+        r = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "s:0", "-show_entries",
+             "stream_tags=title", "-of", "default=noprint_wrappers=1:nokey=1", output_3d],
+            capture_output=True, text=True)
+        assert r.stdout.strip() == "English (3D)", (r.stdout, r.stderr)
 
     print("_self_test_dual_eye_subtitles_real_ffmpeg: PASS")
 

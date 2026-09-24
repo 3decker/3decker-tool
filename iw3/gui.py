@@ -5888,6 +5888,8 @@ class MainFrame(wx.Frame):
             T("Lossless 3D Blu-ray ISO (no re-encode, for 3D Blu-ray players / PowerDVD)"), "bd3d_iso")
         self.cbo_bluray_layout.Append(
             T("Lossless MVC .mkv (no re-encode, for MakeMKV/CloneBD-style 3D libraries)"), "mvc_mkv")
+        self.cbo_bluray_layout.Append(
+            T("MVC .mkv, Auto-crop applied (re-encode, one pass)"), "mvc_mkv_cropped")
         self.cbo_bluray_layout.SetSelection(0)
         self.cbo_bluray_layout.SetToolTip(
             T("What it's for: how the left-eye and right-eye pictures are arranged in the output video.\n"
@@ -5993,6 +5995,24 @@ class MainFrame(wx.Frame):
               "some fine film grain is always lost even at low numbers.\n"
               "Recommended: 18."))
 
+        # ADR-259: real user request -- go directly from a real 3D Blu-ray disc to a
+        # fresh, auto-cropped MVC .mkv in one re-encode instead of two (decode-to-flat,
+        # then flat-to-MVC as a separate second pass). Only meaningful for the
+        # "MVC .mkv, Auto-crop applied" layout, which uses FRIMEncode's own Mbps
+        # target instead of the CRF/constant-quality Quality field above.
+        self.lbl_bluray_bitrate = wx.StaticText(self.cpn_bluray.GetPane(), label=T("MVC Bitrate (Mbps)"))
+        self.txt_bluray_bitrate = EditableComboBox(self.cpn_bluray.GetPane(), choices=["10", "20", "30", "40"],
+                                                    name="txt_bluray_bitrate")
+        self.txt_bluray_bitrate.SetValue("20")
+        self.txt_bluray_bitrate.SetToolTip(
+            T("What it's for: only with the 'MVC .mkv, Auto-crop applied' layout -- target Mbps for the "
+              "fresh MVC re-encode (FRIMEncode), same meaning as the standalone 'SBS to 3D Blu-ray MVC' "
+              "tool's own Bitrate field.\n"
+              "Values: 2-40. 20 (default) is a solid, widely-used middle ground; 3D Blu-ray allows up to "
+              "about 40 combined (both eyes together) -- the highest quality this format can hold.\n"
+              "Recommended: 20 for a good balance; 40 if you want as close to the source quality as this "
+              "format allows and don't mind a bigger file and a longer encode."))
+
         self.chk_bluray_restore_av = wx.CheckBox(
             self.cpn_bluray.GetPane(), label=T("Restore audio && subtitles"), name="chk_bluray_restore_av")
         self.chk_bluray_restore_av.SetValue(True)
@@ -6061,6 +6081,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_bluray_codec, (h, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_bluray_quality, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_bluray_quality, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_bluray_bitrate, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_bluray_bitrate, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_bluray_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_bluray_run, (h := h + 1, 2), flag=wx.EXPAND)
         layout.Add(self.btn_bluray_cancel, (h, 3), flag=wx.EXPAND)
@@ -13150,6 +13172,16 @@ class MainFrame(wx.Frame):
         # so Codec/Quality/Auto-crop don't apply to either one (see on_changed_bluray_layout).
         return self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection()) in ("bd3d_iso", "mvc_mkv")
 
+    def _bluray_is_mvc_cropped_layout(self):
+        return self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection()) == "mvc_mkv_cropped"
+
+    def _bluray_uses_flat_encoder(self):
+        # ADR-259: mvc_mkv_cropped is a genuine re-encode too (not lossless), but via
+        # FRIMEncode/its own Mbps Bitrate field -- Codec/Quality (CRF, for the flat
+        # SBS/TB layouts' ffmpeg encode) never apply to it, same as the two lossless
+        # layouts, just for a different reason.
+        return not self._bluray_is_lossless_layout() and not self._bluray_is_mvc_cropped_layout()
+
     def _bluray_output_ext(self):
         return ".iso" if self._bluray_is_iso_layout() else ".mkv"
 
@@ -13191,8 +13223,11 @@ class MainFrame(wx.Frame):
         # to .iso -- mvc_mkv is still a plain .mkv, just like the re-encoded layouts.
         is_iso = self._bluray_is_iso_layout()
         is_lossless = self._bluray_is_lossless_layout()
-        self.cbo_bluray_codec.Enable(not is_lossless)
-        self.txt_bluray_quality.Enable(not is_lossless)
+        uses_flat_encoder = self._bluray_uses_flat_encoder()
+        is_mvc_cropped = self._bluray_is_mvc_cropped_layout()
+        self.cbo_bluray_codec.Enable(uses_flat_encoder)
+        self.txt_bluray_quality.Enable(uses_flat_encoder)
+        self.txt_bluray_bitrate.Enable(is_mvc_cropped)
         self.cbo_bluray_autocrop.Enable(not is_lossless)
         current = self.txt_bluray_output.GetValue().strip()
         old_ext, new_ext = (".mkv", ".iso") if is_iso else (".iso", ".mkv")
@@ -13211,7 +13246,8 @@ class MainFrame(wx.Frame):
         # these widgets from that thread.
         layout = self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection())
         mux_label = {"bd3d_iso": T("Copying to 3D Blu-ray ISO"),
-                    "mvc_mkv": T("Writing the MVC .mkv")}.get(layout, T("Muxing"))
+                    "mvc_mkv": T("Writing the MVC .mkv"),
+                    "mvc_mkv_cropped": T("Writing the cropped MVC .mkv")}.get(layout, T("Muxing"))
         names = {"mount": T("Opening the disc"), "demux": T("Reading the disc"),
                  "scan": T("Preparing frames"), "encode": T("Converting"),
                  "autocrop": T("Looking for black bars"),
@@ -13326,16 +13362,22 @@ class MainFrame(wx.Frame):
         wanted_ext = self._bluray_output_ext()
         if path.splitext(output_path)[1].lower() != wanted_ext:
             return None, T("Output File must end in %s.") % wanted_ext
-        if not self._bluray_is_lossless_layout() and not validate_number(
+        if self._bluray_uses_flat_encoder() and not validate_number(
                 self.txt_bluray_quality.GetValue(), 0, 51, allow_empty=False):
             return None, T("Quality must be a number between 0 and 51 (18 recommended).")
+        if self._bluray_is_mvc_cropped_layout() and not validate_number(
+                self.txt_bluray_bitrate.GetValue(), 2, 40, allow_empty=False):
+            return None, T("MVC Bitrate must be a number between 2 and 40 Mbps (20 recommended).")
         layout = self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection())
         codec = self.cbo_bluray_codec.GetClientData(self.cbo_bluray_codec.GetSelection())
         is_lossless = self._bluray_is_lossless_layout()
+        uses_flat_encoder = self._bluray_uses_flat_encoder()
         cmd = [sys.executable, "-m", "iw3.mvc_extract_cli", "--disc", disc, "--output", output_path,
                "--layout", layout, "--video-codec", codec,
-               "--quality", str(int(float(self.txt_bluray_quality.GetValue() or "18") if not is_lossless else 18)),
+               "--quality", str(int(float(self.txt_bluray_quality.GetValue() or "18") if uses_flat_encoder else 18)),
                "--gui-progress"]
+        if self._bluray_is_mvc_cropped_layout():
+            cmd += ["--bitrate", str(float(self.txt_bluray_bitrate.GetValue() or "20"))]
         autocrop = self.cbo_bluray_autocrop.GetClientData(self.cbo_bluray_autocrop.GetSelection())
         if autocrop and not is_lossless:
             cmd += ["--autocrop", autocrop]
@@ -19326,7 +19368,7 @@ def _self_test_bluray_import_panel():
                 [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())].index(value))
         assert [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())] == \
             ["full_sbs", "half_sbs", "full_tb", "half_tb", "full_sbs_4k", "half_sbs_4k", "full_tb_4k",
-             "half_tb_4k", "frame_packed", "bd3d_iso", "mvc_mkv"]
+             "half_tb_4k", "frame_packed", "bd3d_iso", "mvc_mkv", "mvc_mkv_cropped"]
         assert layout_of() == "full_sbs" and codec_of() == "hevc_nvenc"
         assert frame.txt_bluray_quality.GetValue() == "18"
         assert frame.chk_bluray_restore_av.GetValue() is True
@@ -19437,6 +19479,37 @@ def _self_test_bluray_import_panel():
             frame.cbo_bluray_autocrop.SetSelection(0)
             pick("full_sbs")
             frame.on_changed_bluray_layout(None)
+
+            # ADR-259: MVC .mkv, Auto-crop applied -- a genuine re-encode (unlike the
+            # two lossless layouts above) but via FRIMEncode/its own Bitrate field, not
+            # Codec/Quality (those stay disabled, same as the lossless layouts, just
+            # for a different reason) -- Auto-crop DOES apply here, unlike the lossless
+            # layouts, since this is the whole point of the feature.
+            pick("mvc_mkv_cropped")
+            frame.on_changed_bluray_layout(None)
+            assert not frame.cbo_bluray_codec.IsEnabled() and not frame.txt_bluray_quality.IsEnabled()
+            assert frame.cbo_bluray_autocrop.IsEnabled(), "Auto-crop must be usable for mvc_mkv_cropped"
+            assert frame.txt_bluray_bitrate.IsEnabled(), "Bitrate must be usable only for mvc_mkv_cropped"
+            assert frame.txt_bluray_output.GetValue().endswith(".mkv")
+            frame.cbo_bluray_autocrop.SetSelection(1)  # BLACK
+            frame.txt_bluray_bitrate.SetValue("30")
+            cmd, err = frame.build_bluray_command()
+            assert err is None and cmd[cmd.index("--layout") + 1] == "mvc_mkv_cropped", (cmd, err)
+            assert cmd[cmd.index("--bitrate") + 1] == "30.0", cmd
+            assert cmd[cmd.index("--autocrop") + 1] == "BLACK", cmd
+            frame.txt_bluray_bitrate.SetValue("1")  # below the real 2-40 range
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err, "an out-of-range Bitrate must be refused, not silently sent"
+            frame.txt_bluray_bitrate.SetValue("20")
+            frame.txt_bluray_output.SetValue(iso_out)
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err, "an .iso output must be refused for mvc_mkv_cropped too"
+            frame.txt_bluray_output.SetValue(out)
+            frame.cbo_bluray_autocrop.SetSelection(0)
+            pick("full_sbs")
+            frame.on_changed_bluray_layout(None)
+            assert not frame.txt_bluray_bitrate.IsEnabled(), \
+                "Bitrate must go back to disabled once a different layout is selected"
 
             # Run/Cancel/Clear lockstep, driven through the real handlers
             pick("full_sbs")
@@ -21285,6 +21358,117 @@ def _self_test_mux_bd3d_iso_audio_diagnostics():
     print("_self_test_mux_bd3d_iso_audio_diagnostics: PASS")
 
 
+def _self_test_extract_and_reencode_mvc():
+    """ADR-259: real user request -- go directly from a real 3D Blu-ray disc to a
+    fresh, auto-cropped MVC .mkv in ONE re-encode instead of two. A genuinely real
+    end-to-end run needs a real 3D Blu-ray disc (tsMuxeR demux + edge264 decode +
+    FRIMEncode re-encode of real MVC content) -- not available this session, same
+    real gap mux_lossless_mvc_mkv()'s own docstring already flags for its own
+    (unmodified) muxing step. This instead verifies, with every external tool
+    mocked, that the real command construction and control flow are correct: the
+    crop filter reaches ffmpeg, the chosen bitrate reaches FRIMEncode as a real VBR
+    target/max pair, the three-stage pipe (edge264 | ffmpeg | FRIMEncode) is wired
+    stdin-to-stdout in the right order, interleave_mvc()/_restore_disc_av() are
+    called on FRIMEncode's own fresh output (not the original demuxed streams), and
+    a real FRIMEncode failure is reported with its own exit code, not swallowed."""
+    import types
+    from unittest import mock
+    from . import mvc_extract_cli as M
+
+    class _FakeProc:
+        def __init__(self, returncode=0, stdout_lines=()):
+            self.returncode = returncode
+            self._lines = list(stdout_lines)
+            self.stdout = self
+            self.stdin = mock.MagicMock()
+            self._closed = False
+
+        def __iter__(self):
+            return iter(self._lines)
+
+        def read(self, n):
+            if self._lines:
+                return self._lines.pop(0)
+            return b""
+
+        def close(self):
+            self._closed = True
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            pass
+
+    calls = []
+
+    def fake_popen(cmd, **kw):
+        calls.append(cmd)
+        if cmd and "FRIMEncode" in str(cmd[0]):
+            # the real work: create FRIM's own two output files so the post-encode
+            # existence check passes, same as a real successful encode would.
+            base_idx = cmd.index("-o:mvc") + 1
+            for p in (cmd[base_idx], cmd[base_idx + 1]):
+                with open(p, "wb") as f:
+                    f.write(b"0")
+            return _FakeProc(returncode=0)
+        return _FakeProc(returncode=0)
+
+    with tempfile.TemporaryDirectory(prefix="iw3_mvc_reencode_selftest_") as tmpdir:
+        ssif_dir = path.join(tmpdir, "disc", "BDMV", "STREAM", "SSIF")
+        os.makedirs(ssif_dir)
+        ssif_path = path.join(ssif_dir, "00001.ssif")
+        with open(ssif_path, "wb") as f:
+            f.write(b"0")
+        m2ts_path = path.join(tmpdir, "disc", "BDMV", "STREAM", "00001.m2ts")
+        os.makedirs(path.dirname(m2ts_path), exist_ok=True)
+        with open(m2ts_path, "wb") as f:
+            f.write(b"0")
+        work_dir = path.join(tmpdir, "work")
+        output_path = path.join(tmpdir, "out.mkv")
+
+        with mock.patch.object(M, "_find_tsmuxer", return_value="tsmuxer.exe"), \
+                mock.patch.object(M, "_find_edge264_mvc", return_value="edge264.exe"), \
+                mock.patch.object(M, "_get_ffmpeg_bin", return_value="ffmpeg.exe"), \
+                mock.patch.object(M, "_find_mkvmerge", return_value="mkvmerge.exe"), \
+                mock.patch.object(M, "_find_frim", return_value="FRIMEncode64.exe"), \
+                mock.patch.object(M, "detect_eye_crop", return_value=(10, 20, 1880, 1040)), \
+                mock.patch.object(M.subprocess, "Popen", fake_popen), \
+                mock.patch.object(M, "_find_au_boundaries", return_value=[(0, 10), (10, 20)]), \
+                mock.patch.object(M, "interleave_mvc", return_value=(2, 2, 2)) as mock_interleave, \
+                mock.patch.object(M, "_restore_disc_av") as mock_restore, \
+                mock.patch.object(M, "_stream_interleaved"):
+            import sys as _sys
+            fake_sbs_to_mvc = types.ModuleType("iw3.sbs_to_mvc_cli")
+            fake_sbs_to_mvc.eye_filter = lambda layout, w, h, crop: f"FAKE_VF(layout={layout},w={w},h={h},crop={crop})"
+            fake_sbs_to_mvc.bd_frame_rate = lambda rate: ("23.976", "24000/1001")
+            fake_sbs_to_mvc.probe_video = lambda p: (1920, 1080, "24000/1001", 100.0, False)
+            with mock.patch.dict(_sys.modules, {"iw3.sbs_to_mvc_cli": fake_sbs_to_mvc}):
+                n = M.extract_and_reencode_mvc(
+                    ssif_path, avc_track=1, mvc_track=2, cut_start="0s", cut_end=None,
+                    work_dir=work_dir, output_path=output_path, bitrate_mbps=30.0,
+                    autocrop="BLACK", include_av=True)
+
+        assert n == 2, n
+        frim_cmd = next(c for c in calls if "FRIMEncode" in str(c[0]))
+        assert "-vbr" in frim_cmd and frim_cmd[frim_cmd.index("-vbr") + 1] == "30000", frim_cmd
+        assert frim_cmd[frim_cmd.index("-vbr") + 2] == "37500", frim_cmd  # 30000 * 1.25
+        ff_cmd = next(c for c in calls if "ffmpeg" in str(c[0]))
+        assert "FAKE_VF" in ff_cmd[ff_cmd.index("-vf") + 1], ff_cmd
+        assert "crop=(10, 20, 1880, 1040)" in ff_cmd[ff_cmd.index("-vf") + 1], ff_cmd
+        assert "rawvideo" in ff_cmd, "ffmpeg must output raw video, never actually encode here"
+        # interleave_mvc must run on FRIMEncode's OWN fresh output, not the original
+        # demuxed streams -- the whole point of a real re-encode.
+        interleave_args = mock_interleave.call_args[0]
+        assert "frim_base" in interleave_args[0] and "frim_dep" in interleave_args[1], interleave_args
+        mock_restore.assert_called_once()
+
+    print("_self_test_extract_and_reencode_mvc: PASS")
+
+
 def _self_test_pop_panes_collapse_independently():
     """ADR-230: real user request -- Foreground/Midground/Background Pop are each their own
     nested wx.CollapsiblePane inside the "Depth Pop" pane, so a user only using one or two of
@@ -22832,6 +23016,7 @@ def _run_self_tests():
         _self_test_run_iw3_main_with_job_log,
         _self_test_find_disc_ssif_diagnostics,
         _self_test_mux_bd3d_iso_audio_diagnostics,
+        _self_test_extract_and_reencode_mvc,
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
         _self_test_mvc_conversion_step,

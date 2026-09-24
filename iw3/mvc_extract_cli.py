@@ -833,6 +833,264 @@ def mux_lossless_mvc_mkv(ssif_path, avc_track, mvc_track, out_mkv, include_av=Tr
                                *((video_only,) if include_av else ()))
 
 
+def _find_frim():
+    """Local copy of sbs_to_mvc_cli.py's own find_frim() -- duplicated rather than
+    imported: sbs_to_mvc_cli.py already imports FROM this module (AUTOCROP_MODES,
+    Cancelled, detect_eye_crop, interleave_mvc), so importing back from it at module
+    load time would be circular. A tiny, self-contained binary locator, not
+    nontrivial logic that could drift out of sync -- see extract_and_reencode_mvc()'s
+    own docstring for the (lazy, function-body) import used for the real shared math
+    (eye_filter/bd_frame_rate/probe_video), the same pattern mux_lossless_mvc_mkv()
+    already established for probe_video() alone."""
+    import shutil
+    found = shutil.which("FRIMEncode64") or shutil.which("FRIMEncode64.exe")
+    if found:
+        return found
+    root = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    candidate = path.join(root, "frim", "FRIMEncode64.exe")
+    return candidate if path.exists(candidate) else None
+
+
+MVC_MKV_CROPPED_LAYOUT = "mvc_mkv_cropped"
+
+
+def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end, work_dir, output_path,
+                             bitrate_mbps=20.0, autocrop=None, swap_eyes=False, include_av=True,
+                             keep_temp=False, stop_event=None, progress_cb=None):
+    """ADR-259: real user request -- go directly from a real 3D Blu-ray disc to a
+    fresh, auto-cropped MVC .mkv in ONE re-encode, instead of the two-step
+    workaround (extract_and_decode() to a flat, cropped SBS file, then a completely
+    separate sbs_to_mvc_cli.convert() pass to turn THAT into MVC again). Removing
+    black bars always needs a real re-encode -- a compressed video's own bytes can't
+    be cropped without decoding and re-encoding it -- this does that exactly once
+    instead of twice, by feeding the decoded, cropped video straight into FRIMEncode
+    instead of writing an intermediate flat video file first.
+
+    Same real limitation as every other auto-crop path in this project (see
+    sbs_to_mvc_cli.eye_filter()'s own docstring): a real MVC/Blu-ray-spec video is
+    locked to exactly 1920x1080 per eye, so a genuinely non-16:9 movie still gets
+    padded back out to that size after cropping -- this tidies/tightens bars, it
+    does not guarantee a bar-free picture for real widescreen content. Confirmed
+    directly with the user before building this.
+
+    Pipeline: tsMuxeR demux -> interleave (streamed) -> edge264-mvc decode -> ffmpeg
+    (crop ONLY, raw video out, no actual encode) -> FRIMEncode (the real MVC
+    re-encode) -> interleave_mvc() (recombine FRIMEncode's own fresh base+dependent
+    output into one real MVC bitstream, same function mux_lossless_mvc_mkv() already
+    uses for the lossless case) -> mkvmerge (mux) -> _restore_disc_av() (the disc's
+    real audio/subtitles, same engine every other real-disc path here already uses).
+
+    eye_filter()/bd_frame_rate()/probe_video() are lazy-imported from
+    sbs_to_mvc_cli.py inside this function body (not at module top) -- the same
+    circular-import-avoidance pattern mux_lossless_mvc_mkv() already established for
+    probe_video() alone, extended here to the crop math too rather than duplicating it.
+
+    progress_cb(stage, done, total), stage in {"demux", "autocrop", "encode",
+    "interleave", "mux", "restore"}; stop_event (threading.Event) cancels cleanly.
+    Not verified end to end against a real disc in a real MVC-capable player this
+    session -- same real-hardware-verification gap mux_lossless_mvc_mkv() already
+    flags for its own (unmodified, still lossless) MVC muxing step, which this reuses."""
+    from .sbs_to_mvc_cli import eye_filter, bd_frame_rate, probe_video
+
+    tsmuxer_bin = _find_tsmuxer()
+    edge264_bin = _find_edge264_mvc()
+    ffmpeg_bin = _get_ffmpeg_bin()
+    mkvmerge_bin = _find_mkvmerge()
+    frim_bin = _find_frim()
+    if tsmuxer_bin is None:
+        raise RuntimeError("tsMuxeR not found -- see docs/ai/AI_DECISIONS.md ADR-182")
+    if edge264_bin is None:
+        raise RuntimeError("edge264-mvc not found -- see docs/ai/AI_DECISIONS.md ADR-182")
+    if ffmpeg_bin is None:
+        raise RuntimeError("ffmpeg not found")
+    if mkvmerge_bin is None:
+        raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
+    if frim_bin is None:
+        raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
+    if path.splitext(output_path)[1].lower() != ".mkv":
+        raise ValueError("this direct-to-MVC output must be saved as an .mkv file")
+    if not 2 <= bitrate_mbps <= 40:
+        raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
+
+    stem = path.splitext(path.basename(ssif_path))[0]
+    m2ts = path.join(path.dirname(path.dirname(path.abspath(ssif_path))), stem + ".m2ts")
+    if not path.exists(m2ts):
+        raise RuntimeError(f"{m2ts} not found -- can't determine the disc's real frame rate/dimensions")
+    eye_width, eye_height, rate, _, _ = probe_video(m2ts)
+    # the disc's own 2D-compatible clip is exactly one eye's own picture -- edge264's
+    # raw decode output is the full side-by-side frame, i.e. both eyes, twice the width.
+    sbs_width, sbs_height = eye_width * 2, eye_height
+    _, fps_frac = bd_frame_rate(rate)
+    # fps_frac is always one of bd_frame_rate()'s own two hardcoded "num/den" strings
+    # ("24000/1001" or "24/1") -- mkvmerge's --default-duration wants a decimal "fps"
+    # string instead, same conversion mux_lossless_mvc_mkv() already does from its own
+    # probed rate.
+    _fps_num, _fps_den = fps_frac.split("/")
+    mkv_fps_str = f"{int(_fps_num) / int(_fps_den):.6f}fps"
+
+    crop = None
+    if autocrop:
+        if progress_cb:
+            progress_cb("autocrop", 0, 1)
+        crop = detect_eye_crop(m2ts, autocrop)
+        if crop is None:
+            print("[mvc-extract] auto-crop: no black bars found; nothing cropped", file=sys.stderr)
+        else:
+            print(f"[mvc-extract] auto-crop: each eye cut to x={crop[0]} y={crop[1]} {crop[2]}x{crop[3]}",
+                 file=sys.stderr)
+
+    os.makedirs(work_dir, exist_ok=True)
+    meta_path = path.join(work_dir, "_mvc_extract.meta")
+    base_es_src = path.join(work_dir, f"{stem}.track_{avc_track}.264")
+    dep_es_src = path.join(work_dir, f"{stem}.track_{mvc_track}.mvc")
+    edge_log = path.join(work_dir, "_edge264_stderr.log")
+    frim_base_es = path.join(work_dir, f"{stem}.frim_base.264")
+    frim_dep_es = path.join(work_dir, f"{stem}.frim_dep.264")
+    combined_es = path.join(work_dir, f"{stem}.combined_mvc.264")
+    video_only = (path.splitext(output_path)[0] + ".video_only.mkv") if include_av else output_path
+    procs = []
+    _remove_stale_temp(base_es_src, dep_es_src, edge_log, frim_base_es, frim_dep_es, combined_es)
+    try:
+        cut_opts = f" --cut-start={cut_start} --cut-end={cut_end}" if cut_end else f" --cut-start={cut_start}"
+        ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            f.write(f"MUXOPT --demux{cut_opts}\n")
+            f.write(f"V_MPEG4/ISO/AVC, {ssif_meta}, track={avc_track}\n")
+            f.write(f"V_MPEG4/ISO/MVC, {ssif_meta}, track={mvc_track}\n")
+
+        if progress_cb:
+            progress_cb("demux", 0, 1)
+        demux = subprocess.Popen([tsmuxer_bin, meta_path, work_dir],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        procs.append(demux)
+        out_lines = []
+        for line in demux.stdout:
+            out_lines.append(line)
+            m = re.search(r"(\d+(?:\.\d+)?)%", line)
+            if m and progress_cb:
+                progress_cb("demux", float(m.group(1)), 100)
+            if stop_event is not None and stop_event.is_set():
+                demux.kill()
+                raise Cancelled()
+        demux.wait()
+        if demux.returncode != 0:
+            raise RuntimeError(f"tsMuxeR demux failed: {''.join(out_lines)[-2000:]}")
+
+        base_bounds = _find_au_boundaries(base_es_src, delimiter_types={9})
+        dep_bounds = _find_au_boundaries(dep_es_src, delimiter_types={24, 9})
+        n = min(len(base_bounds), len(dep_bounds))
+        if len(base_bounds) != len(dep_bounds):
+            print(f"[mvc-extract] WARNING: base AUs={len(base_bounds)} != dependent AUs={len(dep_bounds)}; "
+                  f"using the first {n}", file=sys.stderr)
+        print(f"[mvc-extract] base AUs={len(base_bounds)} dependent AUs={len(dep_bounds)} using={n}",
+              file=sys.stderr)
+
+        vf = eye_filter("full_sbs", sbs_width, sbs_height, crop)
+        ff_cmd = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", "-",
+                 "-an", "-sn", "-vf", vf, "-pix_fmt", "yuv420p", "-r", fps_frac,
+                 "-f", "rawvideo", "-"]
+        target = int(bitrate_mbps * 1000)
+        frim_cmd = [frim_bin, "-i", "-", "-o:mvc", frim_base_es, frim_dep_es, "-viewoutput", "-sbs", "2",
+                   "-w", "1920", "-h", "1080", "-f", fps_frac, "-profile", "high", "-level", "4.1",
+                   "-vbr", str(target), str(int(target * 1.25)), "-sw"]
+        if swap_eyes:
+            frim_cmd.append("-swaplr")
+
+        if progress_cb:
+            progress_cb("encode", 0, 1)
+        with open(edge_log, "wb") as edge_err:
+            edge264_proc = subprocess.Popen([edge264_bin, "-", "-O", "-k", "-y"],
+                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=edge_err)
+            procs.append(edge264_proc)
+            ffmpeg_proc = subprocess.Popen(ff_cmd, stdin=edge264_proc.stdout,
+                                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            procs.append(ffmpeg_proc)
+            edge264_proc.stdout.close()
+            frim_proc = subprocess.Popen(frim_cmd, stdin=ffmpeg_proc.stdout,
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            procs.append(frim_proc)
+            ffmpeg_proc.stdout.close()
+
+            feed_errors = []
+            feeder = threading.Thread(target=_stream_interleaved, daemon=True,
+                                      args=(edge264_proc.stdin, base_es_src, base_bounds, dep_es_src, dep_bounds,
+                                            n, stop_event, feed_errors))
+            tail = []
+
+            def _drain_frim():
+                for chunk in iter(lambda: frim_proc.stdout.read(256), b""):
+                    tail.append(chunk)
+
+            reader = threading.Thread(target=_drain_frim, daemon=True)
+            feeder.start()
+            reader.start()
+            while frim_proc.poll() is None:
+                if stop_event is not None and stop_event.is_set():
+                    for p in (frim_proc, ffmpeg_proc, edge264_proc):
+                        p.kill()
+                    raise Cancelled()
+                try:
+                    frim_proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    pass
+            feeder.join()
+            reader.join()
+            ffmpeg_proc.wait()
+            edge264_proc.wait()
+
+        frim_tail = b"".join(tail).decode(errors="replace")
+        if frim_proc.returncode != 0:
+            raise RuntimeError(f"the MVC encode failed (FRIMEncode exit code {frim_proc.returncode}):\n"
+                              f"{frim_tail[-3000:] if frim_tail.strip() else '(FRIMEncode produced no output)'}")
+        if edge264_proc.returncode not in (0, 1):
+            with open(edge_log, "rb") as f:
+                edge_msg = f.read()[-2000:].decode(errors="replace")
+            raise RuntimeError(f"decode failed (edge264 exit {edge264_proc.returncode}, "
+                              f"feeder errors {feed_errors}):\n{edge_msg}")
+        if not (path.exists(frim_base_es) and path.exists(frim_dep_es)):
+            raise RuntimeError("FRIMEncode exited cleanly but produced no output streams")
+
+        if progress_cb:
+            progress_cb("interleave", 0, 1)
+        base_n, dep_n, combined_n = interleave_mvc(frim_base_es, frim_dep_es, combined_es)
+        if base_n != dep_n:
+            print(f"[mvc-extract] WARNING: FRIM base AUs={base_n} != dependent AUs={dep_n}; using the "
+                 f"first {combined_n}", file=sys.stderr)
+        if progress_cb:
+            progress_cb("interleave", 1, 1)
+        if stop_event is not None and stop_event.is_set():
+            raise Cancelled()
+
+        if progress_cb:
+            progress_cb("mux", 0, 1)
+        mux = subprocess.Popen([mkvmerge_bin, "-o", video_only, "--default-duration", f"0:{mkv_fps_str}",
+                               combined_es], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        procs.append(mux)
+        mux_lines = []
+        for line in mux.stdout:
+            mux_lines.append(line)
+            m = re.search(r"Progress:\s*(\d+)%", line)
+            if m and progress_cb:
+                progress_cb("mux", float(m.group(1)), 100)
+            if stop_event is not None and stop_event.is_set():
+                mux.kill()
+                raise Cancelled()
+        mux.wait()
+        if mux.returncode != 0:
+            raise RuntimeError(f"mkvmerge failed: {''.join(mux_lines)[-2000:]}")
+
+        if include_av:
+            _restore_disc_av(ssif_path, video_only, output_path, cut_start, cut_end, progress_cb)
+        return combined_n
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+        if not keep_temp:
+            _remove_stale_temp(base_es_src, dep_es_src, edge_log, frim_base_es, frim_dep_es, combined_es,
+                               meta_path, *((video_only,) if include_av else ()))
+
+
 def _powershell(script):
     result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
                             capture_output=True, text=True, timeout=120)
@@ -958,6 +1216,25 @@ def import_disc(source, output_path, work_dir=None, progress_cb=None, cut_end=No
                                         include_av=kwargs.get("restore_av", True), cut_end=cut_end,
                                         work_dir=work_dir, keep_temp=kwargs.get("keep_temp", False),
                                         stop_event=kwargs.get("stop_event"), progress_cb=progress_cb)
+        if kwargs.get("layout") == MVC_MKV_CROPPED_LAYOUT:
+            # ADR-259: real re-encode, so the two demuxed source streams (~0.75x the
+            # .ssif) plus FRIMEncode's own fresh base+dependent output (at the chosen
+            # bitrate -- roughly comparable to or smaller than the source at a typical
+            # 20-40Mbps combined target) all exist on disk at some point; same
+            # conservative multiplier mux_lossless_mvc_mkv() already uses above.
+            work_created = not path.isdir(work_dir)
+            os.makedirs(work_dir, exist_ok=True)
+            need = int(path.getsize(ssif) * 1.5)
+            free = shutil.disk_usage(work_dir).free
+            if free < need * 1.05:
+                raise RuntimeError(f"not enough free disk space in {work_dir}: need about "
+                                   f"{need / 1e9:.0f} GB for temporary files, only {free / 1e9:.0f} GB free")
+            return extract_and_reencode_mvc(
+                ssif, avc_track, mvc_track, "0s", cut_end, work_dir, output_path,
+                bitrate_mbps=kwargs.get("bitrate_mbps", 20.0), autocrop=kwargs.get("autocrop"),
+                swap_eyes=kwargs.get("swap_eyes", False), include_av=kwargs.get("restore_av", True),
+                keep_temp=kwargs.get("keep_temp", False), stop_event=kwargs.get("stop_event"),
+                progress_cb=progress_cb)
         work_created = not path.isdir(work_dir)
         os.makedirs(work_dir, exist_ok=True)
         # the two demuxed streams together are roughly 3/4 of the .ssif
@@ -1001,13 +1278,18 @@ def main():
     parser.add_argument("--video-codec", type=str, default="hevc_nvenc", choices=CODECS)
     parser.add_argument("--quality", "--crf", type=int, default=18, dest="quality",
                          help="CRF (x264/x265) or constant-quality level (NVENC); lower = better/larger")
-    parser.add_argument("--layout", type=str, default="full_sbs", choices=LAYOUTS + (ISO_LAYOUT, MVC_MKV_LAYOUT),
+    parser.add_argument("--layout", type=str, default="full_sbs",
+                         choices=LAYOUTS + (ISO_LAYOUT, MVC_MKV_LAYOUT, MVC_MKV_CROPPED_LAYOUT),
                          help="bd3d_iso = lossless copy into a 3D Blu-ray .iso (no re-encode; --output must end in "
                               ".iso; codec/quality ignored) | "
                               "mvc_mkv = lossless copy into a plain .mkv holding the real combined MVC video "
                               "stream, no disc structure, no re-encode (--output must end in .mkv; codec/quality "
                               "ignored) -- for a library that plays real MVC files directly (e.g. via MakeMKV/"
                               "CloneBD-style rips), instead of this tool's own SBS/TB layouts | "
+                              "mvc_mkv_cropped = ADR-259: same real MVC .mkv output as mvc_mkv, but a genuine "
+                              "re-encode (via FRIMEncode, see --bitrate/--swap-eyes) with --autocrop applied -- "
+                              "for removing black bars in ONE pass instead of decoding to a flat video and "
+                              "re-encoding to MVC again as two separate steps | "
                               "full_sbs 3840x1080 | half_sbs 1920x1080 | full_tb 1920x2160 | half_tb 1920x1080 | "
                               "*_4k = the same four with each eye enlarged to 4K (full_sbs_4k 7680x2160, "
                               "half_sbs_4k 3840x2160, full_tb_4k 3840x4320, half_tb_4k 3840x2160) | "
@@ -1016,6 +1298,12 @@ def main():
                          help="remove black bars: BLACK = all sides, BLACK_TB = top/bottom only (FLAT / FLAT_TB do "
                               "the same for flat-colour borders). Both eyes get the same crop. Not used by "
                               "--layout bd3d_iso or --layout mvc_mkv (both copy the disc's video untouched).")
+    parser.add_argument("--bitrate", type=float, default=20.0,
+                         help="only with --layout mvc_mkv_cropped: target Mbps for the fresh FRIMEncode MVC "
+                              "re-encode (2-40; 3D Blu-ray allows about 40 combined) -- same meaning as "
+                              "sbs_to_mvc_cli's own --bitrate.")
+    parser.add_argument("--swap-eyes", action="store_true",
+                         help="only with --layout mvc_mkv_cropped: swap left/right in the fresh MVC re-encode.")
     parser.add_argument("--no-audio-subs", action="store_true",
                          help="skip restoring the disc's audio and subtitle tracks (video only)")
     parser.add_argument("--keep-temp", action="store_true", help="keep the demuxed elementary streams")
@@ -1034,6 +1322,9 @@ def main():
 
     common = dict(video_codec=args.video_codec, quality=args.quality, layout=args.layout,
                   restore_av=not args.no_audio_subs, keep_temp=args.keep_temp, progress_cb=show)
+    if args.layout == MVC_MKV_CROPPED_LAYOUT:
+        common["bitrate_mbps"] = args.bitrate
+        common["swap_eyes"] = args.swap_eyes
     if args.autocrop and args.layout in (ISO_LAYOUT, MVC_MKV_LAYOUT):
         print("[mvc-extract] note: --autocrop is ignored for this lossless layout (nothing is re-encoded)",
               file=sys.stderr)
@@ -1053,7 +1344,7 @@ def main():
                     parser.error(f"no MVC track found via {detect_from} -- not real 3D content, "
                                  f"or the wrong file")
                 print(f"[mvc-extract] auto-detected tracks: AVC={avc_track} MVC={mvc_track}", file=sys.stderr)
-            if args.layout in (ISO_LAYOUT, MVC_MKV_LAYOUT):
+            if args.layout in (ISO_LAYOUT, MVC_MKV_LAYOUT, MVC_MKV_CROPPED_LAYOUT):
                 parser.error(f"--layout {args.layout} works with --disc, not manual --ssif mode")
             frames = extract_and_decode(args.ssif, avc_track, mvc_track, args.cut_start, args.cut_end,
                                         args.work_dir, args.output, **common)

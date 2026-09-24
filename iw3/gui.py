@@ -20915,6 +20915,51 @@ def _self_test_sbs2mvc_text_subtitles():
     print("_self_test_sbs2mvc_text_subtitles: PASS")
 
 
+def _self_test_sbs2mvc_truehd_falls_through_to_ac3():
+    """ADR-243: real user report -- converting a source with TrueHD audio through
+    "SBS to 3D Blu-ray MVC" crashed the whole job with tsMuxeR's own
+    'Unsupported codec A_TRUEHD' and produced NO output at all. TrueHD was
+    originally in _BD_AUDIO (the "extract the bare elementary stream as-is, no
+    re-encode" set) on the unverified assumption that ffmpeg's plain `-c:a copy`
+    extraction of it was as safe as it is for AC-3/E-AC-3/DTS -- it wasn't: a real
+    tsMuxeR build (v2.7.0) flatly refuses to read a bare-extracted .thd file, even
+    though it reads TrueHD fine from within a real source container (confirmed by
+    mvc_extract_cli.py's mux_bd3d_iso(), which references tracks directly from the
+    original .ssif and was never affected by this). TrueHD now falls through to
+    the same AC-3 conversion path LPCM/MLP already used -- not bit-for-bit
+    lossless, but tsMuxeR can always mux the result, so a source with TrueHD audio
+    can never again produce zero output."""
+    import types
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    tracks = [
+        {"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
+        {"id": 0, "codec": "A_TRUEHD", "lang": "eng"},
+    ]
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = cmd[-1]
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("fake audio data")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(S, "_ffprobe_list_tracks", return_value=tracks), \
+            mock.patch.object(S.subprocess, "run", fake_run):
+        lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True)
+        assert "A_TRUEHD" not in S._BD_AUDIO, "TrueHD must not be in the extract-as-is set"
+        assert lines[0].startswith("A_AC3, "), \
+            f"TrueHD must fall through to AC-3 conversion, not extraction: {lines}"
+        assert any("converted to AC-3" in n for n in notes), notes
+        # the conversion path uses -c:a ac3 (transcode), never -c:a copy (bare extraction)
+        assert all("copy" not in c for c in calls[0]), calls[0]
+        assert "ac3" in calls[0]
+
+    print("_self_test_sbs2mvc_truehd_falls_through_to_ac3: PASS")
+
+
 def _self_test_sbs2mvc_ffprobe_track_detection():
     """ADR-239: real user report -- a source SBS file confirmed to have an audio track came out of
     'SBS to 3D Blu-ray MVC' with none. Root cause: track detection asked tsMuxeR itself to list
@@ -21849,6 +21894,7 @@ def _run_self_tests():
         _self_test_utils_hdr_to_sdr_gpu_decode,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
+        _self_test_sbs2mvc_truehd_falls_through_to_ac3,
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
         _self_test_sbs2mvc_fix_frame_rate,

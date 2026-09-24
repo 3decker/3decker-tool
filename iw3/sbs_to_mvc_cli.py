@@ -34,15 +34,20 @@ from .utils import _find_tsmuxer, _get_ffmpeg_bin
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
 _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
-# LPCM/MLP deliberately excluded from this "extract as-is" set (unlike AC-3/E-AC-3/DTS/TrueHD,
+# LPCM/MLP/TrueHD deliberately excluded from this "extract as-is" set (unlike AC-3/E-AC-3/DTS,
 # whose extension-based bare-elementary-stream extraction via `ffmpeg -c:a copy` is well-proven):
-# both need a specific container/header ffmpeg's plain stream copy to a bare file isn't guaranteed
-# to produce correctly, and this project has no real source to verify that against. A source using
-# either falls through to the AC-3 conversion path below instead -- same as any other codec that
-# isn't directly Blu-ray-legal -- which is always correct, just not bit-for-bit lossless for those
-# two specific, uncommon cases.
-_BD_AUDIO = {"A_AC3", "A_EAC3", "A_DTS", "A_TRUEHD"}
-_BD_AUDIO_EXT = {"A_AC3": "ac3", "A_EAC3": "eac3", "A_DTS": "dts", "A_TRUEHD": "thd"}
+# all three need a specific container/header ffmpeg's plain stream copy to a bare file isn't
+# guaranteed to produce correctly. TrueHD was originally included here on the (wrong) assumption
+# that its extraction was equally safe -- ADR-243: a real user's tsMuxeR (v2.7.0) hard-refused a
+# bare-extracted .thd file with "Unsupported codec A_TRUEHD" and the whole job produced no output
+# at all. tsMuxeR reads TrueHD fine from within a real source container (mvc_extract_cli.py's own
+# mux_bd3d_iso() references tracks directly from the original .ssif, never extracts a bare file,
+# and is unaffected by this) -- the bare single-stream extraction this module does is specifically
+# what breaks it. A source using any of these three now falls through to the AC-3 conversion path
+# below instead -- same as any other codec that isn't directly Blu-ray-legal -- which is always
+# correct, just not bit-for-bit lossless for these three specific, uncommon-in-practice cases.
+_BD_AUDIO = {"A_AC3", "A_EAC3", "A_DTS"}
+_BD_AUDIO_EXT = {"A_AC3": "ac3", "A_EAC3": "eac3", "A_DTS": "dts"}
 FRIM_URL = "https://drive.google.com/uc?export=download&id=1lumXLd74U-E2k195bzfETbHgFcHcT4sH"
 FRIM_SHA256 = "76689784495D53B34889F0EA67C9DB6B9750925DB9D1147F8FD9159E111C0778"
 # Extra places to fetch the same file from if the author's link stops working. Empty on purpose:

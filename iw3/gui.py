@@ -7137,6 +7137,18 @@ class MainFrame(wx.Frame):
         self.btn_suspend.Disable()
 
         self.load_preset()
+        # ADR-249: real user request -- load_preset() above restores every registered
+        # control's value from last session's saved iw3-gui.cfg, and these Standalone
+        # Tools log boxes get swept into that same generic mechanism with no exception
+        # carved out for them (wx.lib.agw.persist has no notion of "this is just status
+        # text, not a real setting"). That's the exact same stale-content problem
+        # ADR-157's Clear All button exists to fix manually (a real screenshot once
+        # caught a leftover file path sitting in one of these). Starting a NEW job
+        # already clears its own log box on its own -- every one of these tools'
+        # "Run" handlers already does `self.txt_..._log.SetValue(...)` at the top,
+        # confirmed by reading all twelve rather than assumed -- so the only real gap
+        # was a freshly-launched app still showing whatever finished last time.
+        self._clear_standalone_tool_logs()
         # probe_compile=False: skip the real torch.compile() GPU probe during
         # passive window construction -- a persisted "compile: on" setting from a
         # previous session must not grab a CUDA context before the user does
@@ -10193,6 +10205,17 @@ class MainFrame(wx.Frame):
     # The one field in that list whose real default isn't blank -- confirmed
     # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
     _CLEAR_ALL_STANDALONE_TEXT_DEFAULTS = {"txt_submux_language": "en"}
+
+    def _clear_standalone_tool_logs(self):
+        """ADR-249: empties every Standalone Tools *_log box -- reuses
+        _CLEAR_ALL_STANDALONE_TEXT_FIELDS (filtered to just the *_log entries) instead
+        of a second hardcoded list, so a future tool added to that one stays covered
+        here automatically. Called once at startup, right after load_preset() restores
+        last session's saved values (see __init__) -- these boxes are transient run
+        output, not real settings, and have no business surviving a restart."""
+        for name in self._CLEAR_ALL_STANDALONE_TEXT_FIELDS:
+            if name.endswith("_log"):
+                getattr(self, name).Clear()
 
     def on_click_btn_clear_all(self, event):
         """Resets every GUI setting to the app's own factory defaults (and
@@ -14235,6 +14258,46 @@ def _self_test_mvc_notes_shown_after_job():
             app.Destroy()
 
     print("_self_test_mvc_notes_shown_after_job: PASS")
+
+
+def _self_test_standalone_logs_cleared_on_startup():
+    """ADR-249: real user request -- a Standalone Tools log box showing leftover text
+    from a previous session (restored by load_preset(), the same generic mechanism
+    every other saved setting uses) is the exact same stale-content problem ADR-157's
+    Clear All button exists to fix manually. Starting a NEW job already clears its
+    own log box (every "Run" handler already does SetValue(...) at the top -- not
+    this fix's concern); the gap was a freshly-launched app still showing whatever
+    finished last time. Confirms _clear_standalone_tool_logs() empties every *_log
+    field in _CLEAR_ALL_STANDALONE_TEXT_FIELDS, and leaves non-log fields (real
+    input/output paths, which a user DOES want remembered across a restart) alone."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        log_names = [n for n in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS if n.endswith("_log")]
+        assert len(log_names) >= 10, "expected every standalone tool's log box to be covered here"
+        for name in log_names:
+            getattr(frame, name).SetValue("leftover output from a previous run, e.g. E:\\3d Movies\\real.mkv")
+
+        # a real non-log field from the same list must survive -- only *_log is in scope here.
+        frame.txt_sbs2mvc_input.SetValue("E:\\3d Movies\\input.mkv")
+
+        frame._clear_standalone_tool_logs()
+
+        for name in log_names:
+            assert getattr(frame, name).GetValue() == "", f"{name} should be empty after startup, wasn't"
+        assert frame.txt_sbs2mvc_input.GetValue() == "E:\\3d Movies\\input.mkv", \
+            "a real input path field must NOT be touched by the log-only clear"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_standalone_logs_cleared_on_startup: PASS")
 
 
 def _self_test_free_vram_on_job_finish():
@@ -22328,6 +22391,7 @@ def _run_self_tests():
         _self_test_post_steps_are_chained,
         _self_test_mvc_conversion_step,
         _self_test_mvc_notes_shown_after_job,
+        _self_test_standalone_logs_cleared_on_startup,
         _self_test_post_conversion_vram_release,
         _self_test_upscale_full4k_hdr_and_progress,
         _self_test_stereo_tag_survives_post_steps,

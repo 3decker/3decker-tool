@@ -1046,6 +1046,12 @@ def _run_mvc_conversion(output_path, args):
           "-i", str(output_path), "-o", mvc_path, "--layout", layout,
           "--bitrate", str(getattr(args, "mvc_bitrate", 20.0) or 20.0),
           "--gui-progress"]
+    # ADR-252: real user hit exactly this -- a Dolby Vision source made this step
+    # refuse ("HDR video is not supported for 3D Blu-ray here") with no way to opt
+    # into the same automatic HDR->SDR tone-map the standalone SBS-to-MVC tool
+    # already offers via its own "Convert HDR/DV to SDR" checkbox.
+    if getattr(args, "mvc_convert_hdr_to_sdr", False):
+        cmd.append("--convert-hdr-to-sdr")
 
     _notify_stage(args, STAGE_CONVERT_MVC)
     print(f"[iw3] Converting to 3D Blu-ray MVC ({ext})...", file=sys.stderr)
@@ -6645,6 +6651,13 @@ def create_parser(required_true=True):
     parser.add_argument("--mvc-bitrate", type=float, default=20.0,
                         help="only with --convert-to-mvc: target Mbps per view (default 20; 3D Blu-ray "
                              "allows about 40 combined) -- same meaning as sbs_to_mvc_cli's own --bitrate.")
+    parser.add_argument("--mvc-convert-hdr-to-sdr", action="store_true",
+                        help=("ADR-252: only with --convert-to-mvc. A real 3D Blu-ray/MVC file cannot carry "
+                              "HDR/Dolby Vision at all -- without this, an HDR source (e.g. a UHD Dolby "
+                              "Vision rip) makes the MVC step refuse with 'HDR video is not supported for "
+                              "3D Blu-ray here'. Same meaning and same tradeoff as sbs_to_mvc_cli's own "
+                              "--convert-hdr-to-sdr (opt-in since the HDR grade is genuinely gone afterward): "
+                              "off by default, tone-maps to plain SDR before the MVC encode when on."))
     parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
                         choices=["auto", "4k", "8k", "fsbs4k", "ftb4k"],
                         help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "

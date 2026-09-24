@@ -4097,6 +4097,24 @@ class MainFrame(wx.Frame):
             T("Target Mbps per eye for the MVC encode. 20 (default) is a solid, widely-used middle "
               "ground; 3D Blu-ray allows up to about 40 combined (both eyes together). Higher = better "
               "quality and a bigger file, same tradeoff as any other video bitrate setting."))
+        # ADR-252: real user report -- a real Dolby Vision UHD source made this step refuse
+        # ("HDR video is not supported for 3D Blu-ray here -- convert it to SDR first") with
+        # no way to opt into automatic handling, even though the standalone SBS-to-MVC tool
+        # already offers exactly this via its own "Convert HDR/DV to SDR" checkbox.
+        self.chk_convert_to_mvc_hdr_to_sdr = wx.CheckBox(
+            self.grp_postprocess, label=T("Convert HDR/DV to SDR first (needed for HDR sources)"),
+            name="chk_convert_to_mvc_hdr_to_sdr")
+        self.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
+        self.chk_convert_to_mvc_hdr_to_sdr.SetToolTip(
+            T("What it's for: a real 3D Blu-ray/MVC file cannot carry HDR or Dolby Vision at all, the "
+              "same real limitation an actual disc has -- if your source is HDR (e.g. a UHD Dolby "
+              "Vision rip), the MVC step refuses outright without this checked.\n"
+              "Con: the HDR grade is genuinely gone from the MVC file afterward, tone-mapped down to "
+              "plain SDR -- your regular converted output above is never touched by this, only the "
+              "separate _MVC file this step produces.\n"
+              "Recommended: on, whenever your source is HDR/Dolby Vision and you want the MVC file "
+              "too -- off (default) only makes sense for an already-SDR source, where it does nothing "
+              "either way."))
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -4129,6 +4147,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_mvc_output_type, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_mvc_output_type, (j, 1), flag=wx.EXPAND)
         layout.Add(self.txt_mvc_bitrate, (j, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_convert_to_mvc_hdr_to_sdr, (j := j + 1, 0), (0, 3),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -9363,6 +9383,7 @@ class MainFrame(wx.Frame):
             convert_to_mvc=self.chk_convert_to_mvc.GetValue(),
             mvc_output_type=self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection()),
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
+            mvc_convert_hdr_to_sdr=self.chk_convert_to_mvc_hdr_to_sdr.GetValue(),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
 
@@ -10668,6 +10689,7 @@ class MainFrame(wx.Frame):
         else:
             self.cbo_mvc_output_type.SetSelection(0)
         self.txt_mvc_bitrate.SetValue(str(getattr(args, "mvc_bitrate", None) or 20.0))
+        self.chk_convert_to_mvc_hdr_to_sdr.SetValue(bool(getattr(args, "mvc_convert_hdr_to_sdr", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
         self.chk_scene_detect_cache.SetValue(not args.disable_scene_cache)
@@ -18905,6 +18927,11 @@ def _self_test_convert_to_mvc_checkbox():
         assert frame.chk_convert_to_mvc.GetValue() is False
         assert frame.cbo_mvc_output_type.GetClientData(frame.cbo_mvc_output_type.GetSelection()) == "iso"
         assert frame.txt_mvc_bitrate.GetValue() == "20"
+        # ADR-252: real user report -- a Dolby Vision source made the MVC step refuse
+        # outright, with no way to opt into the same HDR->SDR tone-map the standalone
+        # SBS-to-MVC tool already offers. Off by default -- must not silently strip a
+        # regular SDR source's grade, or apply to a job that never touches HDR at all.
+        assert frame.chk_convert_to_mvc_hdr_to_sdr.GetValue() is False
 
         tip = frame.chk_convert_to_mvc.GetToolTip().GetTip()
         assert "MVC" in tip, tip
@@ -18924,6 +18951,12 @@ def _self_test_convert_to_mvc_checkbox():
         assert args_on.convert_to_mvc is True
         assert args_on.mvc_output_type == "iso"
         assert args_on.mvc_bitrate == 20.0
+        assert args_on.mvc_convert_hdr_to_sdr is False
+
+        frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(True)
+        args_hdr = frame.parse_args(skip_set_state=True)
+        assert args_hdr.mvc_convert_hdr_to_sdr is True
+        frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
         stages_on = frame._compute_job_stages(args_on)
         assert STAGE_CONVERT_MVC in stages_on, stages_on
 
@@ -20084,6 +20117,7 @@ def _self_test_mvc_conversion_step():
 
     def base_args(**extra):
         defaults = dict(convert_to_mvc=True, mvc_output_type="iso", mvc_bitrate=20.0,
+                        mvc_convert_hdr_to_sdr=False,
                         half_sbs=False, tb=False, half_tb=False, vr180=False, cross_eyed=False,
                         rgbd=False, half_rgbd=False, anaglyph=None, export=False,
                         export_disparity=False, debug_depth=False, state={})
@@ -20102,6 +20136,20 @@ def _self_test_mvc_conversion_step():
         assert cmd[cmd.index("--layout") + 1] == expected_layout, (kwargs, cmd)
         assert cmd[cmd.index("-o") + 1] == "C:/out/movie_MVC.iso", cmd
         assert cmd[cmd.index("--bitrate") + 1] == "20.0", cmd
+
+    # ADR-252: --convert-hdr-to-sdr only reaches the subprocess when the new checkbox is
+    # on -- must not silently strip an SDR source's grade for a job that never asked for it.
+    args = base_args()
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert "--convert-hdr-to-sdr" not in run_mvc.call_args[0][0]
+
+    args = base_args(mvc_convert_hdr_to_sdr=True)
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert "--convert-hdr-to-sdr" in run_mvc.call_args[0][0]
 
     # a format MVC conversion can't use at all is refused cleanly, no subprocess attempt
     for incompatible in ("vr180", "cross_eyed", "rgbd", "half_rgbd", "export", "export_disparity", "debug_depth"):

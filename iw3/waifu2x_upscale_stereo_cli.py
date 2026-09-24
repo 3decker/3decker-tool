@@ -34,6 +34,12 @@ import threading
 import time
 from os import path
 
+# ADR-253: this module runs as its own separate `python -m` process (see the
+# module docstring above) and calls ffmpeg/waifu2x.cli as its own nested
+# subprocesses -- each one would flash its own console window without this,
+# which only the GUI's own process (iw3/gui.py) imported before now.
+import nunif.gui.subprocess_patch  # noqa
+
 import numpy as np
 import torch
 import torch.nn.functional as F

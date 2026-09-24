@@ -33,6 +33,12 @@ import threading
 import time
 from os import path
 
+# ADR-253: this module runs as its own separate subprocess (see the module
+# docstring above) and calls ffmpeg/dovi_tool/hdr10plus_tool as its own nested
+# subprocesses -- each one would flash its own console window without this,
+# which only the GUI's own process (iw3/gui.py) imported before now.
+import nunif.gui.subprocess_patch  # noqa
+
 from nunif.utils.video.metadata import parse_time
 from .utils import (
     _get_ffmpeg_bin, _find_ffprobe, _find_dovi_tool, _find_hdr10plus_tool,

@@ -108,6 +108,12 @@ import sys
 import tempfile
 from os import path
 
+# ADR-253: this module runs as its own separate subprocess and calls
+# ffmpeg/mkvmerge as its own nested subprocesses -- each one would flash its
+# own console window without this, which only the GUI's own process
+# (iw3/gui.py) imported before now.
+import nunif.gui.subprocess_patch  # noqa
+
 from nunif.utils.video.metadata import parse_time
 from .utils import (
     _find_mkvmerge, _find_ffprobe, FULL_SBS_SUFFIX, HALF_SBS_SUFFIX, FULL_TB_SUFFIX,

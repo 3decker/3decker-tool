@@ -48,6 +48,13 @@ import tempfile
 import time
 from os import path
 
+# ADR-253: this module runs as its own separate subprocess (both as the main
+# pipeline's "Restore Audio & Subtitles" post-step and, potentially, standalone)
+# and calls ffmpeg/mkvmerge as its own nested subprocesses -- each one would
+# flash its own console window without this, which only the GUI's own process
+# (iw3/gui.py) imported before now.
+import nunif.gui.subprocess_patch  # noqa
+
 import av
 
 from nunif.utils.video.metadata import parse_time

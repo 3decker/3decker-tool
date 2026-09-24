@@ -1003,12 +1003,13 @@ def _run_mvc_conversion(output_path, args):
     with every track already restored, not the bare converted video.
 
     Only proceeds when the finished output is a packed two-eye layout sbs_to_mvc_cli
-    actually understands (Full/Half SBS, Full/Half TB) -- the GUI itself prevents
-    this mismatch by forcing Stereo Format to Full SBS whenever this checkbox is
-    checked (Half SBS/TB would throw away half the detail before MVC even starts),
-    but a raw CLI invocation combining --convert-to-mvc with an incompatible format
-    (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug Depth) is still possible, so this
-    is checked directly here rather than assumed.
+    actually understands (Full/Half SBS, Full/Half TB -- ADR-247: all four are
+    genuine, valid MVC inputs, the Half variants just give a lower-resolution MVC
+    file, same tradeoff as using them anywhere else) -- the GUI itself prevents a
+    genuinely incompatible format by forcing Stereo Format to Full SBS whenever this
+    checkbox is checked against VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug Depth,
+    but a raw CLI invocation combining --convert-to-mvc with one of those is still
+    possible, so this is checked directly here rather than assumed.
 
     Written to its own separate '<name>_MVC.iso'/'<name>_MVC.mkv' file -- the plain
     converted output is never modified or replaced, same convention as every other

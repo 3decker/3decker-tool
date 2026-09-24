@@ -4064,10 +4064,12 @@ class MainFrame(wx.Frame):
               "Con: MVC encoding is real extra processing time after the main conversion already "
               "finished -- it re-encodes the video through a separate program (FRIMEncode), CPU-only, "
               "not a quick remux like Restore Audio & Subtitles.\n"
-              "Forces Stereo Format (above) to Full SBS if anything else is selected: MVC needs a "
-              "real full-resolution frame -- Half SBS/TB would throw away half the detail before MVC "
-              "conversion even starts, and other formats (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug "
-              "Depth) aren't something MVC conversion understands at all.\n"
+              "Works with Stereo Format (above) set to Full SBS, Half SBS, Full TB, or Half TB -- the "
+              "Half variants give a lower-resolution (half the detail per eye) MVC file, same tradeoff "
+              "as using them anywhere else, but are otherwise fully valid. Any other format (VR90/Cross "
+              "Eyed/RGB-D/Anaglyph/Export/Debug Depth) isn't something MVC conversion understands at "
+              "all -- checking this box forces Stereo Format to Full SBS only if one of those is "
+              "currently selected.\n"
               "Not yet confirmed end-to-end in a real MVC-capable player -- see the Output Type choice "
               "below for the same caveat on both its options."))
         self.chk_convert_to_mvc.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_convert_to_mvc)
@@ -8967,14 +8969,16 @@ class MainFrame(wx.Frame):
         self.update_rife_interpolate()
 
     def on_changed_chk_convert_to_mvc(self, event):
-        # ADR-246, per explicit user confirmation: checking this box forces Stereo
-        # Format to Full SBS if anything else is selected -- MVC conversion needs a
-        # real full-resolution SBS/TB frame (Half SBS/TB would throw away half the
-        # detail before MVC even starts), and formats it can't use at all (VR90/
-        # Cross Eyed/RGB-D/Anaglyph/Export/Debug Depth) would just fail downstream
-        # in _run_mvc_conversion() otherwise. A silent, one-time correction, same
-        # spirit as "Frame Packed forces libx264" in the 3D Blu-ray Import panel.
-        if self.chk_convert_to_mvc.GetValue() and self.cbo_stereo_format.GetValue() != "Full SBS":
+        # ADR-247: real user follow-up -- Half SBS/Full TB/Half TB are all genuine,
+        # valid MVC inputs (sbs_to_mvc_cli.py, and _run_mvc_conversion()'s own layout
+        # detection, already handle all four), just with the expected resolution
+        # tradeoff for the Half variants -- ADR-246's original blanket "always force
+        # Full SBS" was more restrictive than necessary. Only a format MVC conversion
+        # genuinely cannot use at all (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug
+        # Depth) still needs correcting -- same spirit as "Frame Packed forces
+        # libx264" in the 3D Blu-ray Import panel, just narrower now.
+        mvc_compatible = ("Full SBS", "Half SBS", "Full TB", "Half TB")
+        if self.chk_convert_to_mvc.GetValue() and self.cbo_stereo_format.GetValue() not in mvc_compatible:
             self.cbo_stereo_format.SetStringSelection("Full SBS")
             self.on_selected_index_changed_cbo_stereo_format(None)
         event.Skip()
@@ -18794,9 +18798,10 @@ def _self_test_convert_to_mvc_checkbox():
     own coverage shape for the new option: exists/parented/default off, tooltip has
     real content, args/stage-list/get_cli_command() round-trip in both directions,
     output-type combo (iso/mkv) round-trips correctly, and -- the one behavior this
-    option adds beyond a plain checkbox -- checking it while Half SBS/TB (or another
-    MVC-incompatible format) is selected force-switches Stereo Format to Full SBS,
-    confirmed via the real on_changed_chk_convert_to_mvc handler, not just
+    option adds beyond a plain checkbox -- checking it leaves Full/Half SBS/TB alone
+    (all four are genuine, valid MVC inputs, ADR-247) but force-switches Stereo
+    Format to Full SBS for a genuinely incompatible format (e.g. VR90), confirmed
+    via the real on_changed_chk_convert_to_mvc handler, not just
     _run_mvc_conversion()'s own separate, defensive re-check for raw CLI use."""
     app = None
     frame = None
@@ -18846,22 +18851,25 @@ def _self_test_convert_to_mvc_checkbox():
         assert "--mvc-output-type mkv" in command_mkv, command_mkv
         frame.cbo_mvc_output_type.SetSelection(items.index("iso"))
 
-        # the one real side effect: checking this box while an incompatible format is
-        # selected force-switches Stereo Format to Full SBS
+        # ADR-247: Half SBS/Full TB/Half TB are all genuine, valid MVC inputs now --
+        # checking this box must NOT force them to Full SBS, only a format MVC
+        # conversion can't use at all still gets corrected.
+        for compatible_format in ("Half SBS", "Full TB", "Half TB", "Full SBS"):
+            frame.chk_convert_to_mvc.SetValue(False)
+            frame.cbo_stereo_format.SetStringSelection(compatible_format)
+            frame.chk_convert_to_mvc.SetValue(True)
+            frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
+            assert frame.cbo_stereo_format.GetValue() == compatible_format, \
+                f"{compatible_format} is a valid MVC input and must not be force-switched"
+
+        # a genuinely incompatible format still gets force-switched to Full SBS
         frame.chk_convert_to_mvc.SetValue(False)
-        frame.cbo_stereo_format.SetStringSelection("Half SBS")
-        assert frame.cbo_stereo_format.GetValue() == "Half SBS"
+        frame.cbo_stereo_format.SetStringSelection("VR90")
+        assert frame.cbo_stereo_format.GetValue() == "VR90"
         frame.chk_convert_to_mvc.SetValue(True)
         frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
         assert frame.cbo_stereo_format.GetValue() == "Full SBS", \
-            "checking Convert to MVC must force Stereo Format to Full SBS"
-
-        # already Full SBS: no-op, nothing to switch
-        frame.chk_convert_to_mvc.SetValue(False)
-        frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
-        frame.chk_convert_to_mvc.SetValue(True)
-        frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
-        assert frame.cbo_stereo_format.GetValue() == "Full SBS"
+            "an MVC-incompatible format (VR90) must still be force-switched to Full SBS"
     finally:
         if frame is not None:
             frame.Destroy()

@@ -4132,6 +4132,42 @@ class MainFrame(wx.Frame):
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
+        # --- shared output box for every Standalone Tool below (ADR-250) ---
+        # Real user suggestion: "you can only run one job at a time so you don't
+        # really need multiple info windows." This used to be 12 separate log boxes
+        # + Clear buttons, one duplicated inside every tool's own collapsible pane
+        # below. Constructed here (before the first tool that needs to alias it),
+        # but actually ADDED to tab_layout LAST, at the very bottom of this whole
+        # tab, below every tool's own collapsible pane -- so it's always visible
+        # regardless of which pane is expanded, and construction order here is
+        # purely a Python dependency detail, not the real on-screen position.
+        # Every tool's own self.txt_X_log/self.btn_X_clear further down is a plain
+        # Python alias to this SAME widget, not a separate one, so every existing Enable()/
+        # Disable()/AppendText()/SetValue() call site across all twelve tools keeps
+        # working completely unchanged. This composes correctly with "only one tool
+        # runs at a time" for free: whichever tool is running owns this one real
+        # box until it finishes, exactly like today, just no longer duplicated.
+        self.grp_standalone_log = wx.StaticBox(self.tab_tools, label=T("Output"))
+        self.txt_standalone_log = wx.TextCtrl(
+            self.grp_standalone_log, style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=self.FromDIP((-1, 150)), name="txt_standalone_log")
+        self.txt_standalone_log.SetToolTip(
+            T("What it's for: shows the output of whichever Standalone Tool below you last ran -- its "
+              "own messages, and the exact reason if it failed, not just a generic pass/fail.\n"
+              "Shared by every tool on this tab, since only one of them can ever be running at a "
+              "time -- starting a new tool's job always replaces this with that tool's own fresh "
+              "output.\n"
+              "Recommended: check this after any Standalone Tool run, especially one that failed."))
+        self.btn_standalone_log_clear = wx.Button(self.grp_standalone_log, label=T("Clear"))
+        self.btn_standalone_log_clear.SetToolTip(
+            T("Empties the box above -- output only accumulates run after run otherwise. Disabled "
+              "while a job is running so it can't wipe output you may still be reading mid-run; "
+              "re-enabled once the job finishes."))
+        self.btn_standalone_log_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_standalone_log.Clear())
+        sizer_standalone_log = wx.StaticBoxSizer(self.grp_standalone_log, wx.VERTICAL)
+        sizer_standalone_log.Add(self.txt_standalone_log, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_standalone_log.Add(self.btn_standalone_log_clear, 0, wx.ALL | wx.ALIGN_RIGHT, 4)
+
         # --- standalone utility: retroactive DV/HDR RPU reinjection (ADR-031) ---
         # NOT part of the main conversion pipeline -- a separate tool that takes an
         # ORIGINAL source file (real Dolby Vision/HDR10+ metadata) and an
@@ -4312,24 +4348,19 @@ class MainFrame(wx.Frame):
               "looking when no job has run yet this session."))
         self.lbl_reinject_progress = wx.StaticText(self.cpn_hdr_reinject.GetPane(), label="")
 
-        self.txt_reinject_log = wx.TextCtrl(self.cpn_hdr_reinject.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                             size=self.FromDIP((-1, 60)), name="txt_reinject_log")
-        self.txt_reinject_log.SetToolTip(
-            T("Shows this tool's own output: pre-flight frame-count/duration numbers, and the exact "
-              "reason if it refuses to proceed (e.g. a frame-count mismatch or detected RIFE "
-              "interpolation) -- not just a generic pass/fail."))
-        self.btn_reinject_clear = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("Clear"))
-        self.btn_reinject_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a job is running so it can't wipe output you may still be reading mid-run; "
-              "re-enabled once the job finishes."))
+        # ADR-250: self.txt_standalone_log/self.btn_standalone_log_clear are built ONCE,
+        # shared by every Standalone Tool -- see their construction just above the first
+        # tool's own section for why. Aliased under this tool's own familiar name so
+        # every existing call site below (Enable/Disable, AppendText/SetValue) keeps
+        # working completely unchanged.
+        self.txt_reinject_log = self.txt_standalone_log
+        self.btn_reinject_clear = self.btn_standalone_log_clear
 
         self.btn_reinject_source.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_source)
         self.btn_reinject_converted.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_converted)
         self.btn_reinject_output.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_output)
         self.btn_reinject_rife_manifest.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_rife_manifest)
         self.btn_reinject_run.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_run)
-        self.btn_reinject_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_reinject_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -4359,8 +4390,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_reinject, (h, 0), (0, 2), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_reinject_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_reinject_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_reinject_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_hdr_reinject.GetPane().SetSizer(layout)
 
         self.pnl_hdr_reinject_dot = wx.Panel(self.grp_hdr_reinject, size=self.FromDIP((10, 10)))
@@ -4488,25 +4517,15 @@ class MainFrame(wx.Frame):
               "Recommended: check the log below afterward for the saved file path and your "
               "remaining download quota for today."))
 
-        self.txt_subsearch_log = wx.TextCtrl(self.cpn_subsearch.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                              size=self.FromDIP((-1, 60)), name="txt_subsearch_log")
-        self.txt_subsearch_log.SetToolTip(
-            T("Shows this tool's own output verbatim, including the exact actionable message if no "
-              "OpenSubtitles API key is configured yet, and the server-reported download quota "
-              "(remaining/requests/reset time) after every download -- not just a generic pass/"
-              "fail."))
-        self.btn_subsearch_clear = wx.Button(self.cpn_subsearch.GetPane(), label=T("Clear"))
-        self.btn_subsearch_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a search or download is running so it can't wipe output you may still be reading "
-              "mid-run; re-enabled once it finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_subsearch_log = self.txt_standalone_log
+        self.btn_subsearch_clear = self.btn_standalone_log_clear
 
         self.btn_subsearch_source.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_source)
         self.btn_subsearch_search.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_search)
         self.lst_subsearch_results.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_select_lst_subsearch_results)
         self.lst_subsearch_results.Bind(wx.EVT_LIST_ITEM_DESELECTED, self.on_select_lst_subsearch_results)
         self.btn_subsearch_download.Bind(wx.EVT_BUTTON, self.on_click_btn_subsearch_download)
-        self.btn_subsearch_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_subsearch_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -4523,8 +4542,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_subsearch_search, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.lst_subsearch_results, (h := h + 1, 0), (0, 4), flag=wx.EXPAND)
         layout.Add(self.btn_subsearch_download, (h := h + 1, 3), flag=wx.EXPAND)
-        layout.Add(self.txt_subsearch_log, (h, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_subsearch_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_subsearch.GetPane().SetSizer(layout)
 
         self.pnl_subsearch_dot = wx.Panel(self.grp_subsearch, size=self.FromDIP((10, 10)))
@@ -4756,23 +4773,14 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded "
               "rather than refused."))
 
-        self.txt_submux_log = wx.TextCtrl(self.cpn_submux.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                           size=self.FromDIP((-1, 60)), name="txt_submux_log")
-        self.txt_submux_log.SetToolTip(
-            T("Shows this tool's own output verbatim, including the exact hard-refusal message "
-              "if Format detection fails or the SRT file fails validation -- not just a generic "
-              "pass/fail toast."))
-        self.btn_submux_clear = wx.Button(self.cpn_submux.GetPane(), label=T("Clear"))
-        self.btn_submux_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a job is running so it can't wipe output you may still be reading mid-run; "
-              "re-enabled once the job finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_submux_log = self.txt_standalone_log
+        self.btn_submux_clear = self.btn_standalone_log_clear
 
         self.btn_submux_input.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_input)
         self.btn_submux_srt.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_srt)
         self.btn_submux_output.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_output)
         self.btn_submux_run.Bind(wx.EVT_BUTTON, self.on_click_btn_submux_run)
-        self.btn_submux_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_submux_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -4805,8 +4813,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_submux_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_submux_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.btn_submux_run, (h := h + 1, 3), flag=wx.EXPAND)
-        layout.Add(self.txt_submux_log, (h, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_submux_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_submux.GetPane().SetSizer(layout)
 
         self.pnl_submux_dot = wx.Panel(self.grp_submux, size=self.FromDIP((10, 10)))
@@ -4945,23 +4951,14 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded "
               "rather than refused."))
 
-        self.txt_audiomux_log = wx.TextCtrl(self.cpn_audiomux.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                             size=self.FromDIP((-1, 60)), name="txt_audiomux_log")
-        self.txt_audiomux_log.SetToolTip(
-            T("Shows this tool's own output verbatim, including the exact ffmpeg trim "
-              "command(s) when Source Start/End Time is used, and the exact refusal reason "
-              "if anything fails -- not just a generic pass/fail toast."))
-        self.btn_audiomux_clear = wx.Button(self.cpn_audiomux.GetPane(), label=T("Clear"))
-        self.btn_audiomux_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a job is running so it can't wipe output you may still be reading mid-run; "
-              "re-enabled once the job finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_audiomux_log = self.txt_standalone_log
+        self.btn_audiomux_clear = self.btn_standalone_log_clear
 
         self.btn_audiomux_input.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_input)
         self.btn_audiomux_audio.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_audio)
         self.btn_audiomux_output.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_output)
         self.btn_audiomux_run.Bind(wx.EVT_BUTTON, self.on_click_btn_audiomux_run)
-        self.btn_audiomux_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_audiomux_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -4989,8 +4986,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_audiomux_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_audiomux_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.btn_audiomux_run, (h := h + 1, 3), flag=wx.EXPAND)
-        layout.Add(self.txt_audiomux_log, (h, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_audiomux_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_audiomux.GetPane().SetSizer(layout)
 
         self.pnl_audiomux_dot = wx.Panel(self.grp_audiomux, size=self.FromDIP((10, 10)))
@@ -5101,25 +5096,14 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded "
               "rather than refused."))
 
-        self.txt_audiorestore_log = wx.TextCtrl(
-            self.cpn_audiorestore.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-            size=self.FromDIP((-1, 60)), name="txt_audiorestore_log")
-        self.txt_audiorestore_log.SetToolTip(
-            T("Shows this tool's own output verbatim, including how many audio tracks were found "
-              "in the source, the exact ffmpeg trim command(s) when Source Start/End Time is "
-              "used, and the exact refusal reason if anything fails -- not just a generic "
-              "pass/fail toast."))
-        self.btn_audiorestore_clear = wx.Button(self.cpn_audiorestore.GetPane(), label=T("Clear"))
-        self.btn_audiorestore_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a job is running so it can't wipe output you may still be reading mid-run; "
-              "re-enabled once the job finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_audiorestore_log = self.txt_standalone_log
+        self.btn_audiorestore_clear = self.btn_standalone_log_clear
 
         self.btn_audiorestore_input.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_input)
         self.btn_audiorestore_source.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_source)
         self.btn_audiorestore_output.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_output)
         self.btn_audiorestore_run.Bind(wx.EVT_BUTTON, self.on_click_btn_audiorestore_run)
-        self.btn_audiorestore_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_audiorestore_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -5138,8 +5122,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_audiorestore_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_audiorestore_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.btn_audiorestore_run, (h := h + 1, 3), flag=wx.EXPAND)
-        layout.Add(self.txt_audiorestore_log, (h, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_audiorestore_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_audiorestore.GetPane().SetSizer(layout)
 
         self.pnl_audiorestore_dot = wx.Panel(self.grp_audiorestore, size=self.FromDIP((10, 10)))
@@ -5222,20 +5204,12 @@ class MainFrame(wx.Frame):
               "Recommended: check the log box below afterward to confirm it actually succeeded "
               "rather than refused."))
 
-        self.txt_stereotag_log = wx.TextCtrl(self.cpn_stereotag.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                             size=self.FromDIP((-1, 60)), name="txt_stereotag_log")
-        self.txt_stereotag_log.SetToolTip(
-            T("Shows this tool's own output verbatim, including the exact refusal reason if Format "
-              "detection fails or the resolved format isn't taggable -- not just a generic pass/fail."))
-        self.btn_stereotag_clear = wx.Button(self.cpn_stereotag.GetPane(), label=T("Clear"))
-        self.btn_stereotag_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a job is running so it can't wipe output you may still be reading mid-run; "
-              "re-enabled once the job finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_stereotag_log = self.txt_standalone_log
+        self.btn_stereotag_clear = self.btn_standalone_log_clear
 
         self.btn_stereotag_input.Bind(wx.EVT_BUTTON, self.on_click_btn_stereotag_input)
         self.btn_stereotag_run.Bind(wx.EVT_BUTTON, self.on_click_btn_stereotag_run)
-        self.btn_stereotag_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_stereotag_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -5247,8 +5221,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_stereotag_format, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_stereotag_backup, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_stereotag_run, (h := h + 1, 3), flag=wx.EXPAND)
-        layout.Add(self.txt_stereotag_log, (h, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_stereotag_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_stereotag.GetPane().SetSizer(layout)
 
         self.pnl_stereotag_dot = wx.Panel(self.grp_stereotag, size=self.FromDIP((10, 10)))
@@ -5419,21 +5391,13 @@ class MainFrame(wx.Frame):
               "hidden-looking when no job has run yet this session."))
         self.lbl_sharpen_progress = wx.StaticText(self.cpn_sharpen.GetPane(), label="")
 
-        self.txt_sharpen_log = wx.TextCtrl(self.cpn_sharpen.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                            size=self.FromDIP((-1, 60)), name="txt_sharpen_log")
-        self.txt_sharpen_log.SetToolTip(
-            T("Shows this tool's own output verbatim, including the exact hard-refusal "
-              "message if Format detection fails -- not just a generic pass/fail toast."))
-        self.btn_sharpen_clear = wx.Button(self.cpn_sharpen.GetPane(), label=T("Clear"))
-        self.btn_sharpen_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a job is running so it can't wipe output you may still be reading mid-run; "
-              "re-enabled once the job finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_sharpen_log = self.txt_standalone_log
+        self.btn_sharpen_clear = self.btn_standalone_log_clear
 
         self.btn_sharpen_input.Bind(wx.EVT_BUTTON, self.on_click_btn_sharpen_input)
         self.btn_sharpen_output.Bind(wx.EVT_BUTTON, self.on_click_btn_sharpen_output)
         self.btn_sharpen_run.Bind(wx.EVT_BUTTON, self.on_click_btn_sharpen_run)
-        self.btn_sharpen_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_sharpen_log.Clear())
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -5454,8 +5418,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_sharpen_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_sharpen, (h, 0), (0, 2), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_sharpen_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_sharpen_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_sharpen_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_sharpen.GetPane().SetSizer(layout)
 
         self.pnl_sharpen_dot = wx.Panel(self.grp_sharpen, size=self.FromDIP((10, 10)))
@@ -5702,21 +5664,9 @@ class MainFrame(wx.Frame):
         self.rife_standalone_cancelled = False
         self.rife_standalone_stage = "rife"
 
-        self.txt_rife_standalone_log = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
-                                                     style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                                     size=self.FromDIP((-1, 60)), name="txt_rife_standalone_log")
-        self.txt_rife_standalone_log.SetToolTip(
-            T("Shows this tool's own output verbatim, including the exact refusal message if Custom FPS "
-              "isn't genuinely higher than the source's own frame rate, and the manifest file path it "
-              "wrote on success. If you see \"[WARN] NVENC zero-copy CUDA frame handoff failed... "
-              "falling back to CPU-copy encode\" here on a GPU H.265 run, that's a known, harmless "
-              "fallback (see the Output Codec tooltip) -- it is unrelated to Dolby Vision metadata, "
-              "which this tool never writes anyway (see Run above)."))
-        self.btn_rife_standalone_clear = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Clear"))
-        self.btn_rife_standalone_clear.SetToolTip(
-            T("Empties the log box above -- output only accumulates run after run otherwise. Disabled "
-              "while a job is running so it can't wipe output you may still be reading mid-run; "
-              "re-enabled once the job finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_rife_standalone_log = self.txt_standalone_log
+        self.btn_rife_standalone_clear = self.btn_standalone_log_clear
 
         # ADR-170: live progress bar, same cross-process stdout-channel
         # convention as Sharpen (ADR-165)/HDR Reinjection (ADR-166) --
@@ -5739,7 +5689,6 @@ class MainFrame(wx.Frame):
         self.btn_rife_standalone_run.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_run)
         self.btn_rife_standalone_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_cancel)
         self.btn_rife_standalone_dv_source.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_dv_source)
-        self.btn_rife_standalone_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_rife_standalone_log.Clear())
         self.update_rife_standalone_mode()
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
@@ -5770,8 +5719,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.gauge_rife_standalone, (h := h + 1, 0), (0, 3), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_rife_standalone_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_rife_standalone_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_rife_standalone_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_rife_standalone.GetPane().SetSizer(layout)
 
         self.pnl_rife_standalone_dot = wx.Panel(self.grp_rife_standalone, size=self.FromDIP((10, 10)))
@@ -5984,15 +5931,9 @@ class MainFrame(wx.Frame):
               "from the background process -- not just a spinner."))
         self.lbl_bluray_progress = wx.StaticText(self.cpn_bluray.GetPane(), label="")
 
-        self.txt_bluray_log = wx.TextCtrl(self.cpn_bluray.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                           size=self.FromDIP((-1, 60)), name="txt_bluray_log")
-        self.txt_bluray_log.SetToolTip(
-            T("Shows this tool's own messages when the job ends: which movie stream and video tracks it "
-              "found, any warning, or the exact reason it refused or failed."))
-        self.btn_bluray_clear = wx.Button(self.cpn_bluray.GetPane(), label=T("Clear"))
-        self.btn_bluray_clear.SetToolTip(
-            T("Empties the log box above. Disabled while a job is running so it can't wipe output you "
-              "may still be reading mid-run; re-enabled once the job finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_bluray_log = self.txt_standalone_log
+        self.btn_bluray_clear = self.btn_standalone_log_clear
 
         self.btn_bluray_disc_iso.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_disc_iso)
         self.btn_bluray_disc_folder.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_disc_folder)
@@ -6000,7 +5941,6 @@ class MainFrame(wx.Frame):
         self.cbo_bluray_layout.Bind(wx.EVT_COMBOBOX, self.on_changed_bluray_layout)
         self.btn_bluray_run.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_run)
         self.btn_bluray_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_bluray_cancel)
-        self.btn_bluray_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_bluray_log.Clear())
         self.bluray_proc = None
         self.bluray_cancelled = False
         self.bluray_start_time = 0.0
@@ -6030,8 +5970,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_bluray_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_bluray, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_bluray_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_bluray_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_bluray_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_bluray.GetPane().SetSizer(layout)
 
         self.pnl_bluray_dot = wx.Panel(self.grp_bluray, size=self.FromDIP((10, 10)))
@@ -6223,20 +6161,14 @@ class MainFrame(wx.Frame):
               "from the background process."))
         self.lbl_sbs2mvc_progress = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label="")
 
-        self.txt_sbs2mvc_log = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                            size=self.FromDIP((-1, 60)), name="txt_sbs2mvc_log")
-        self.txt_sbs2mvc_log.SetToolTip(
-            T("Shows this tool's own messages when the job ends: notes (such as audio converted to AC-3 or "
-              "subtitles skipped) and the exact reason if it refused or failed."))
-        self.btn_sbs2mvc_clear = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Clear"))
-        self.btn_sbs2mvc_clear.SetToolTip(
-            T("Empties the log box above. Disabled while a job is running; re-enabled when it finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_sbs2mvc_log = self.txt_standalone_log
+        self.btn_sbs2mvc_clear = self.btn_standalone_log_clear
 
         self.btn_sbs2mvc_input.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_input)
         self.btn_sbs2mvc_output.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_output)
         self.btn_sbs2mvc_run.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_run)
         self.btn_sbs2mvc_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_cancel)
-        self.btn_sbs2mvc_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_sbs2mvc_log.Clear())
         self.sbs2mvc_proc = None
         self.sbs2mvc_cancelled = False
         self.sbs2mvc_start_time = 0.0
@@ -6264,8 +6196,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_sbs2mvc_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_sbs2mvc, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_sbs2mvc_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_sbs2mvc_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_sbs2mvc_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_sbs2mvc.GetPane().SetSizer(layout)
 
         self.pnl_sbs2mvc_dot = wx.Panel(self.grp_sbs2mvc, size=self.FromDIP((10, 10)))
@@ -6350,19 +6280,14 @@ class MainFrame(wx.Frame):
             T("Real progress of the current conversion, read live from the background process."))
         self.lbl_hdr_to_sdr_progress = wx.StaticText(self.cpn_hdr_to_sdr.GetPane(), label="")
 
-        self.txt_hdr_to_sdr_log = wx.TextCtrl(self.cpn_hdr_to_sdr.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                              size=self.FromDIP((-1, 60)), name="txt_hdr_to_sdr_log")
-        self.txt_hdr_to_sdr_log.SetToolTip(
-            T("Shows this tool's own messages when the job ends."))
-        self.btn_hdr_to_sdr_clear = wx.Button(self.cpn_hdr_to_sdr.GetPane(), label=T("Clear"))
-        self.btn_hdr_to_sdr_clear.SetToolTip(
-            T("Empties the log box above. Disabled while a job is running."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_hdr_to_sdr_log = self.txt_standalone_log
+        self.btn_hdr_to_sdr_clear = self.btn_standalone_log_clear
 
         self.btn_hdr_to_sdr_input.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_input)
         self.btn_hdr_to_sdr_output.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_output)
         self.btn_hdr_to_sdr_run.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_run)
         self.btn_hdr_to_sdr_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_hdr_to_sdr_cancel)
-        self.btn_hdr_to_sdr_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_hdr_to_sdr_log.Clear())
         self.hdr_to_sdr_proc = None
         self.hdr_to_sdr_cancelled = False
         self.hdr_to_sdr_start_time = 0.0
@@ -6382,8 +6307,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_hdr_to_sdr_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_hdr_to_sdr, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_hdr_to_sdr_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_hdr_to_sdr_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_hdr_to_sdr_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_hdr_to_sdr.GetPane().SetSizer(layout)
 
         self.pnl_hdr_to_sdr_dot = wx.Panel(self.grp_hdr_to_sdr, size=self.FromDIP((10, 10)))
@@ -6584,13 +6507,9 @@ class MainFrame(wx.Frame):
               "process. The stereo-aware modes make several passes, so the bar restarts for each one."))
         self.lbl_upscale_progress = wx.StaticText(self.cpn_upscale.GetPane(), label="")
 
-        self.txt_upscale_log = wx.TextCtrl(self.cpn_upscale.GetPane(), style=wx.TE_MULTILINE | wx.TE_READONLY,
-                                            size=self.FromDIP((-1, 60)), name="txt_upscale_log")
-        self.txt_upscale_log.SetToolTip(
-            T("Shows the tool's own output when the job ends, including the exact reason if it failed."))
-        self.btn_upscale_clear = wx.Button(self.cpn_upscale.GetPane(), label=T("Clear"))
-        self.btn_upscale_clear.SetToolTip(
-            T("Empties the log box above. Disabled while a job is running; re-enabled when it finishes."))
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_upscale_log = self.txt_standalone_log
+        self.btn_upscale_clear = self.btn_standalone_log_clear
 
         self.btn_upscale_input.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_input)
         self.btn_upscale_output.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_output)
@@ -6601,7 +6520,6 @@ class MainFrame(wx.Frame):
         self.cbo_upscale_mode.Bind(wx.EVT_COMBOBOX_CLOSEUP, self.on_upscale_mode_closeup)
         self.btn_upscale_run.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_run)
         self.btn_upscale_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_upscale_cancel)
-        self.btn_upscale_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_upscale_log.Clear())
         self.upscale_proc = None
         self.upscale_cancelled = False
         self.upscale_start_time = 0.0
@@ -6638,8 +6556,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.btn_upscale_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_upscale, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_upscale_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.txt_upscale_log, (h := h + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add(self.btn_upscale_clear, (h := h + 1, 3), flag=wx.EXPAND)
         self.cpn_upscale.GetPane().SetSizer(layout)
 
         self.pnl_upscale_dot = wx.Panel(self.grp_upscale, size=self.FromDIP((10, 10)))
@@ -6696,6 +6612,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_hdr_to_sdr, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_upscale, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_standalone_log, 1, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
         # ADR-037: the 7 category panels built above are already fully self-contained
@@ -10180,27 +10097,33 @@ class MainFrame(wx.Frame):
     _STANDALONE_TOOL_GROUP_NAMES = (
         "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone",
         "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_upscale",
+        "grp_standalone_log",
     )
 
+    # ADR-250: every tool's own *_log entry used to be a real, separate widget --
+    # now they're all plain Python aliases to the one shared self.txt_standalone_log
+    # (see its construction near the top of the Standalone Tools section), so
+    # listing all twelve names here would just clear the same physical widget
+    # twelve times over. One "txt_standalone_log" entry covers all of them.
     _CLEAR_ALL_STANDALONE_TEXT_FIELDS = (
         "txt_reinject_source", "txt_reinject_converted", "txt_reinject_output",
-        "txt_reinject_rife_manifest", "txt_reinject_log",
-        "txt_subsearch_source", "txt_subsearch_title", "txt_subsearch_imdb", "txt_subsearch_log",
+        "txt_reinject_rife_manifest",
+        "txt_subsearch_source", "txt_subsearch_title", "txt_subsearch_imdb",
         "txt_submux_input", "txt_submux_srt", "txt_submux_output",
-        "txt_submux_language", "txt_submux_track_name", "txt_submux_font_size", "txt_submux_log",
+        "txt_submux_language", "txt_submux_track_name", "txt_submux_font_size",
         "txt_audiomux_input", "txt_audiomux_audio", "txt_audiomux_output",
-        "txt_audiomux_track_name", "txt_audiomux_log",
+        "txt_audiomux_track_name",
         "txt_audiorestore_input", "txt_audiorestore_source", "txt_audiorestore_output",
-        "txt_audiorestore_log",
-        "txt_stereotag_input", "txt_stereotag_log",
-        "txt_sharpen_input", "txt_sharpen_output", "txt_sharpen_log",
+        "txt_stereotag_input",
+        "txt_sharpen_input", "txt_sharpen_output",
         "txt_rife_standalone_input", "txt_rife_standalone_output",
-        "txt_rife_standalone_target_fps", "txt_rife_standalone_log",
+        "txt_rife_standalone_target_fps",
         "txt_rife_standalone_dv_source", "txt_rife_standalone_dv_start", "txt_rife_standalone_dv_end",
-        "txt_bluray_disc", "txt_bluray_output", "txt_bluray_log",
-        "txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log",
-        "txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output", "txt_hdr_to_sdr_log",
-        "txt_upscale_input", "txt_upscale_output", "txt_upscale_log",
+        "txt_bluray_disc", "txt_bluray_output",
+        "txt_sbs2mvc_input", "txt_sbs2mvc_output",
+        "txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output",
+        "txt_upscale_input", "txt_upscale_output",
+        "txt_standalone_log",
     )
     # The one field in that list whose real default isn't blank -- confirmed
     # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
@@ -14269,7 +14192,12 @@ def _self_test_standalone_logs_cleared_on_startup():
     this fix's concern); the gap was a freshly-launched app still showing whatever
     finished last time. Confirms _clear_standalone_tool_logs() empties every *_log
     field in _CLEAR_ALL_STANDALONE_TEXT_FIELDS, and leaves non-log fields (real
-    input/output paths, which a user DOES want remembered across a restart) alone."""
+    input/output paths, which a user DOES want remembered across a restart) alone.
+
+    Post-ADR-250: there is now exactly ONE real log field (txt_standalone_log, shared
+    by every tool -- see ADR-250), not twelve separate ones, but every tool's own
+    self.txt_X_log is still a real, valid alias to it -- so clearing it through any
+    one tool's own name must be visible through every other tool's name too."""
     app = None
     frame = None
     try:
@@ -14277,17 +14205,19 @@ def _self_test_standalone_logs_cleared_on_startup():
         frame = MainFrame()
 
         log_names = [n for n in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS if n.endswith("_log")]
-        assert len(log_names) >= 10, "expected every standalone tool's log box to be covered here"
-        for name in log_names:
-            getattr(frame, name).SetValue("leftover output from a previous run, e.g. E:\\3d Movies\\real.mkv")
+        assert log_names == ["txt_standalone_log"], \
+            f"expected the one shared log field (ADR-250), got {log_names}"
+        frame.txt_sbs2mvc_log.SetValue("leftover output from a previous run, e.g. E:\\3d Movies\\real.mkv")
 
         # a real non-log field from the same list must survive -- only *_log is in scope here.
         frame.txt_sbs2mvc_input.SetValue("E:\\3d Movies\\input.mkv")
 
         frame._clear_standalone_tool_logs()
 
-        for name in log_names:
-            assert getattr(frame, name).GetValue() == "", f"{name} should be empty after startup, wasn't"
+        # cleared through the shared name AND every tool's own alias -- same real widget.
+        assert frame.txt_standalone_log.GetValue() == ""
+        assert frame.txt_sbs2mvc_log.GetValue() == "" and frame.txt_upscale_log.GetValue() == "", \
+            "every tool's own *_log alias must reflect the one shared widget being cleared"
         assert frame.txt_sbs2mvc_input.GetValue() == "E:\\3d Movies\\input.mkv", \
             "a real input path field must NOT be touched by the log-only clear"
     finally:
@@ -17125,10 +17055,13 @@ def _self_test_rife_standalone_panel():
         for name in ("txt_rife_standalone_input", "txt_rife_standalone_output",
                      "cbo_rife_standalone_model", "cbo_rife_standalone_mode",
                      "txt_rife_standalone_target_fps", "cbo_rife_standalone_gpu",
-                     "cbo_rife_standalone_codec",
-                     "btn_rife_standalone_run", "txt_rife_standalone_log"):
+                     "cbo_rife_standalone_codec", "btn_rife_standalone_run"):
             ctrl = getattr(frame, name)
             assert ctrl.GetParent() is frame.cpn_rife_standalone.GetPane(), name
+        # ADR-250: txt_rife_standalone_log is now a plain alias to the one shared
+        # txt_standalone_log, parented to grp_standalone_log at the bottom of the
+        # whole tab -- not inside this tool's own pane like the fields above.
+        assert frame.txt_rife_standalone_log is frame.txt_standalone_log
 
         # Output Codec: real, confirmed fix (2026-09-08, see docs/ai/AI_DECISIONS.md
         # ADR-051/ADR-064 amendments) for the bug that RIFE could never output HEVC
@@ -17544,20 +17477,23 @@ def _self_test_reinject_progress_bar():
 
 
 def _self_test_tool_log_clear_buttons():
-    """Regression test for the "Clear" button added next to each standalone tool's
-    log/output box on the Tools tab (Retroactive HDR/DV Reinjection, Search
-    Subtitles, Add Subtitle Track, Add Audio Track, Restore All Audio Tracks (ADR-169),
-    Stereo Mode Tag, Sharpen, RIFE Frame Interpolation), so a finished run's output
-    doesn't just accumulate run after run with no way to empty it. Confirms every one
-    of the 8 new Clear buttons exists next to its real log box and is enabled by
-    default (a fresh GUI has no job
-    running); that clicking it -- a real fired wx.EVT_BUTTON event, not just calling
-    TextCtrl.Clear() directly -- empties exactly that log box and no other; and, for
-    two representative panels using different underlying tools (Sharpen, Retroactive
-    HDR/DV Reinjection), that starting a job disables Clear in lockstep with Run (so
-    it can't wipe output still being read mid-run -- the safer of the two options
-    named in the task, chosen over leaving it always-clickable) and finishing the job
-    re-enables both together. No GPU or real movie file needed: startWorker is
+    """Regression test for the "Clear" button next to the log/output box on the
+    Tools tab. Originally (pre-ADR-250) each standalone tool had its own separate
+    log box + Clear button; ADR-250 consolidated all twelve into ONE shared box +
+    button at the bottom of the tab (real user request: "you can only run one job
+    at a time so you don't really need multiple info windows"), with every tool's
+    own txt_X_log/btn_X_clear name kept as a plain Python alias to that one real
+    widget. Confirms: every one of the 8 tools' own names here really does resolve
+    to that same shared widget (not eight separate ones); the shared button is
+    enabled by default (a fresh GUI has no job running); that clicking it -- a real
+    fired wx.EVT_BUTTON event, not just calling TextCtrl.Clear() directly, and
+    reached via a DIFFERENT tool's own button name than the one that wrote the
+    content -- still empties the one shared box; and, for two representative panels
+    using different underlying tools (Sharpen, Retroactive HDR/DV Reinjection), that
+    starting a job disables Clear in lockstep with Run (so it can't wipe output
+    still being read mid-run) and finishing the job re-enables both together --
+    this composes correctly with "only one job at a time" for free, since it's the
+    same real button either way. No GPU or real movie file needed: startWorker is
     monkeypatched to capture args instead of launching a real subprocess."""
     import iw3.gui as gui_mod
 
@@ -17579,35 +17515,36 @@ def _self_test_tool_log_clear_buttons():
     try:
         frame = gui_mod.MainFrame()
 
-        # ADR-101 wrapped each of these 8 tools' fields in its own collapsible pane
-        # (cpn_*) -- the real parent is each pane's content area now, not the
-        # grp_* StaticBox directly (the StaticBox itself still holds the pane).
+        # ADR-250: every tool's own txt_X_log/btn_X_clear name must resolve to the
+        # ONE real shared widget (self.txt_standalone_log/self.btn_standalone_log_clear,
+        # parented to grp_standalone_log at the bottom of the tab -- not inside any
+        # one tool's own collapsible pane).
         pairs = [
-            ("txt_reinject_log", "btn_reinject_clear", "cpn_hdr_reinject"),
-            ("txt_subsearch_log", "btn_subsearch_clear", "cpn_subsearch"),
-            ("txt_submux_log", "btn_submux_clear", "cpn_submux"),
-            ("txt_audiomux_log", "btn_audiomux_clear", "cpn_audiomux"),
-            ("txt_audiorestore_log", "btn_audiorestore_clear", "cpn_audiorestore"),
-            ("txt_stereotag_log", "btn_stereotag_clear", "cpn_stereotag"),
-            ("txt_sharpen_log", "btn_sharpen_clear", "cpn_sharpen"),
-            ("txt_rife_standalone_log", "btn_rife_standalone_clear", "cpn_rife_standalone"),
+            ("txt_reinject_log", "btn_reinject_clear"),
+            ("txt_subsearch_log", "btn_subsearch_clear"),
+            ("txt_submux_log", "btn_submux_clear"),
+            ("txt_audiomux_log", "btn_audiomux_clear"),
+            ("txt_audiorestore_log", "btn_audiorestore_clear"),
+            ("txt_stereotag_log", "btn_stereotag_clear"),
+            ("txt_sharpen_log", "btn_sharpen_clear"),
+            ("txt_rife_standalone_log", "btn_rife_standalone_clear"),
         ]
-        for log_name, btn_name, pane_name in pairs:
-            btn = getattr(frame, btn_name)
-            pane = getattr(frame, pane_name)
-            assert btn.GetParent() is pane.GetPane(), btn_name
-            assert btn.GetLabelText() == T("Clear"), btn_name
-            assert btn.IsEnabled(), f"{btn_name} must be enabled by default (no job running)"
+        for log_name, btn_name in pairs:
+            assert getattr(frame, log_name) is frame.txt_standalone_log, log_name
+            assert getattr(frame, btn_name) is frame.btn_standalone_log_clear, btn_name
+        assert frame.btn_standalone_log_clear.GetParent() is frame.grp_standalone_log
+        assert frame.btn_standalone_log_clear.GetLabelText() == T("Clear")
+        assert frame.btn_standalone_log_clear.IsEnabled(), "must be enabled by default (no job running)"
 
-        # Functional: clicking Clear empties exactly its own log box, none other.
+        # Functional: Clear empties the one real shared box, reached here via a
+        # DIFFERENT tool's own button name than the one that wrote the content --
+        # proving it's genuinely the same widget, not independently tracked state.
         frame.txt_sharpen_log.SetValue("sharpen output")
-        frame.txt_reinject_log.SetValue("reinject output")
-        _click(frame.btn_sharpen_clear)
-        assert frame.txt_sharpen_log.GetValue() == "", "Clear must empty the Sharpen log"
-        assert frame.txt_reinject_log.GetValue() == "reinject output", \
-            "Clearing Sharpen's log must not touch Reinjection's log"
+        assert frame.txt_reinject_log.GetValue() == "sharpen output", \
+            "txt_reinject_log is the SAME shared widget -- must already show what Sharpen just wrote"
         _click(frame.btn_reinject_clear)
-        assert frame.txt_reinject_log.GetValue() == "", "Clear must empty the Reinjection log"
+        assert frame.txt_sharpen_log.GetValue() == "", \
+            "Clear reached via Reinject's own button name must still empty the one shared box"
 
         # Disabled while a job is running, re-enabled once it finishes -- two
         # representative panels driven through their real on_click_btn_*_run/
@@ -19222,9 +19159,12 @@ def _self_test_bluray_import_panel():
         frame = gui_mod.MainFrame()
         assert frame.cpn_bluray.GetPane().GetName() == "cpn_bluray_pane"
         assert frame.cpn_bluray in frame.get_standalone_tools_sliders_and_panes()
-        for name in ("txt_bluray_disc", "txt_bluray_output", "txt_bluray_log"):
+        for name in ("txt_bluray_disc", "txt_bluray_output"):
             assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
             assert hasattr(frame, name), name
+        # ADR-250: txt_bluray_log is now a plain alias to the one shared
+        # txt_standalone_log (see its own entry in _CLEAR_ALL_STANDALONE_TEXT_FIELDS).
+        assert hasattr(frame, "txt_bluray_log") and frame.txt_bluray_log is frame.txt_standalone_log
 
         layout_of = lambda: frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection())  # noqa
         codec_of = lambda: frame.cbo_bluray_codec.GetClientData(frame.cbo_bluray_codec.GetSelection())  # noqa
@@ -19400,8 +19340,10 @@ def _self_test_sbs2mvc_panel():
         frame = gui_mod.MainFrame()
         assert frame.cpn_sbs2mvc.GetPane().GetName() == "cpn_sbs2mvc_pane"
         assert frame.cpn_sbs2mvc in frame.get_standalone_tools_sliders_and_panes()
-        for name in ("txt_sbs2mvc_input", "txt_sbs2mvc_output", "txt_sbs2mvc_log"):
+        for name in ("txt_sbs2mvc_input", "txt_sbs2mvc_output"):
             assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        # ADR-250: txt_sbs2mvc_log is now a plain alias to the one shared txt_standalone_log.
+        assert frame.txt_sbs2mvc_log is frame.txt_standalone_log
         assert [frame.cbo_sbs2mvc_layout.GetClientData(i) for i in range(frame.cbo_sbs2mvc_layout.GetCount())] == \
             ["full_sbs", "half_sbs", "full_tb", "half_tb", "full_sbs_4k", "half_sbs_4k", "full_tb_4k",
              "half_tb_4k"]
@@ -19526,8 +19468,10 @@ def _self_test_hdr_to_sdr_panel():
         frame = gui_mod.MainFrame()
         assert frame.cpn_hdr_to_sdr.GetPane().GetName() == "cpn_hdr_to_sdr_pane"
         assert frame.cpn_hdr_to_sdr in frame.get_standalone_tools_sliders_and_panes()
-        for name in ("txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output", "txt_hdr_to_sdr_log"):
+        for name in ("txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output"):
             assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        # ADR-250: txt_hdr_to_sdr_log is now a plain alias to the one shared txt_standalone_log.
+        assert frame.txt_hdr_to_sdr_log is frame.txt_standalone_log
         # 10-bit is the default -- this general-purpose tool has no 3D Blu-ray bit-depth
         # constraint, unlike the SBS2MVC checkbox's own always-8-bit tonemap_hdr_to_sdr_for_bd.
         assert frame.cbo_hdr_to_sdr_bit_depth.GetClientData(
@@ -19759,8 +19703,10 @@ def _self_test_upscale_panel():
         frame = gui_mod.MainFrame()
         assert frame.cpn_upscale.GetPane().GetName() == "cpn_upscale_pane"
         assert frame.cpn_upscale in frame.get_standalone_tools_sliders_and_panes()
-        for name in ("txt_upscale_input", "txt_upscale_output", "txt_upscale_log"):
+        for name in ("txt_upscale_input", "txt_upscale_output"):
             assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        # ADR-250: txt_upscale_log is now a plain alias to the one shared txt_standalone_log.
+        assert frame.txt_upscale_log is frame.txt_standalone_log
         mode_of = lambda: frame.cbo_upscale_mode.GetClientData(frame.cbo_upscale_mode.GetSelection())  # noqa
         assert [frame.cbo_upscale_mode.GetClientData(i) for i in range(3)] == ["whole", "4k", "8k"]
         assert mode_of() == "whole"
@@ -21541,6 +21487,43 @@ def _self_test_sbs2mvc_extract_all_av_for_mkv():
     print("_self_test_sbs2mvc_extract_all_av_for_mkv: PASS")
 
 
+def _self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg():
+    """ADR-251: real user report -- every text subtitle track was silently dropped from
+    the direct-to-.mkv MVC output; audio came through fine. Root cause: this bundled
+    ffmpeg's muxer auto-detection does not recognize the ".mks" extension at all
+    ("Unable to choose an output format"), confirmed by directly reproducing the exact
+    command against a real file -- ".mka" happens to be recognized (why audio worked),
+    ".mks" isn't. _self_test_sbs2mvc_extract_all_av_for_mkv above mocks subprocess.run
+    entirely, so it could never have caught this -- a real ffmpeg muxer failure needs a
+    real ffmpeg call to surface at all. This test makes that real call: builds a real
+    tiny MKV (a 1-frame video + a real subtitle track, via the bundled ffmpeg, no GPU
+    needed) and confirms _extract_all_av_for_mkv() actually pulls the subtitle out into
+    a real, non-empty file -- not mocked, not assumed."""
+    from . import sbs_to_mvc_cli as S
+    from .utils import _get_ffmpeg_bin
+
+    ffmpeg_bin = _get_ffmpeg_bin()
+    assert ffmpeg_bin is not None, "bundled ffmpeg must resolve for this test to be meaningful"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        srt_path = path.join(tmp, "sub.srt")
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+        combined = path.join(tmp, "combined.mkv")
+        r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1",
+                            "-i", srt_path, "-map", "0:v", "-map", "1:s", "-c:v", "libx264", "-c:s", "srt",
+                            combined], capture_output=True, text=True)
+        assert r.returncode == 0 and path.exists(combined), r.stderr
+
+        extracted = S._extract_all_av_for_mkv(combined, tmp, ffmpeg_bin)
+
+        subs = [p for p in extracted if p.endswith(".mks")]
+        assert len(subs) == 1, f"expected the one real subtitle track to be extracted, got {extracted}"
+        assert path.getsize(subs[0]) > 0, "the extracted .mks file must not be empty"
+
+    print("_self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg: PASS")
+
+
 def _self_test_sbs2mvc_fix_frame_rate():
     """A 25fps (or any non-23.976/24) input to sbs_to_mvc_cli.convert(): by default still
     refused (ADR-182's original 'never silently change your movie's speed' rule, untouched);
@@ -22379,6 +22362,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
         _self_test_sbs2mvc_extract_all_av_for_mkv,
+        _self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_convert_hdr_to_sdr,
         _self_test_dolby_vision_step_progress,

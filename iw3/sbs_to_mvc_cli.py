@@ -614,6 +614,18 @@ def _extract_all_av_for_mkv(input_path, work_dir, ffmpeg_bin):
     of which codec is inside, so there is no bare-stream-format guessing per codec, and
     no risk of a specific codec (TrueHD, PGS, whatever) needing special-case handling
     here the way the Blu-ray path needed for TrueHD."""
+    # ADR-251: real user report -- every text subtitle track was silently dropped from
+    # the direct-to-.mkv MVC output (audio came through fine). Root cause, confirmed
+    # by directly reproducing the exact command below against a real file: this
+    # bundled ffmpeg's muxer auto-detection does not recognize the ".mks" extension at
+    # all ("Unable to choose an output format for '...mks'") -- ".mka" happens to be
+    # recognized (which is why audio worked), but ".mks" isn't, so every subtitle
+    # extraction failed immediately, 100% reproducibly, regardless of subtitle codec.
+    # Fixed by telling ffmpeg the container explicitly (-f matroska) instead of
+    # relying on it guessing the muxer from the output filename's extension -- applied
+    # to both commands below, not just the one that was actually broken, since relying
+    # on extension-guessing for a non-standard extension (.mka/.mks) was fragile
+    # either way even where it happened to work.
     tracks = _ffprobe_list_tracks(input_path, ffmpeg_bin)
     extracted = []
     audio_index = subtitle_index = 0
@@ -622,7 +634,7 @@ def _extract_all_av_for_mkv(input_path, work_dir, ffmpeg_bin):
         if codec.startswith("A_"):
             out = path.join(work_dir, f"audio_{audio_index}.mka")
             r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
-                                f"0:a:{audio_index}", "-vn", "-c:a", "copy", out],
+                                f"0:a:{audio_index}", "-vn", "-c:a", "copy", "-f", "matroska", out],
                                capture_output=True, text=True)
             if r.returncode == 0 and path.exists(out):
                 extracted.append(out)
@@ -633,7 +645,7 @@ def _extract_all_av_for_mkv(input_path, work_dir, ffmpeg_bin):
         elif codec.startswith("S_"):
             out = path.join(work_dir, f"subtitle_{subtitle_index}.mks")
             r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
-                                f"0:s:{subtitle_index}", "-c:s", "copy", out],
+                                f"0:s:{subtitle_index}", "-c:s", "copy", "-f", "matroska", out],
                                capture_output=True, text=True)
             if r.returncode == 0 and path.exists(out):
                 extracted.append(out)

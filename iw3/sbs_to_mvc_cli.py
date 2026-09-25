@@ -535,6 +535,43 @@ def _ffprobe_list_tracks(input_path, ffmpeg_bin):
     return tracks
 
 
+def _dedupe_dual_eye_subs(ass_path, srt_path):
+    """ADR-271: a real Blu-ray/MVC disc plays each eye as its own full, separate
+    frame -- unlike this project's own packed SBS/TB flat-video output, it has no
+    use for iw3's dual-eye trick of baking TWO differently-positioned copies of
+    the same line into one packed frame (see av_restore_cli.py's
+    --dual-eye-subtitles, ADR-254). Real, confirmed bug: this module always
+    converted whatever text track it found straight to plain SRT before handing
+    it to tsMuxeR's own text-to-PGS renderer -- SRT has no way to represent an ASS
+    `\\pos(...)` override, so a track that already had dual-eye positioning lost
+    it silently, leaving TWO identical, unpositioned, same-timestamp cues that
+    render as an overlapping duplicate line on the real disc. Reproduced directly:
+    a real dual-eye ASS file converted via `ffmpeg -c:s srt` came out as two
+    back-to-back cues, same timestamp, `\\pos(...)` gone.
+
+    Collapses any such pair (same start/end, same real text once ASS override
+    codes are stripped) down to ONE plain cue -- the normal, single-position-per-
+    cue subtitle every other Blu-ray movie already uses (subtitles are shown
+    identically to both eyes at screen depth on virtually every real 3D Blu-ray).
+    A source that was never dual-eye positioned to begin with (the common case)
+    has no duplicates to collapse and no override tags to strip, so this is a
+    safe, harmless no-op for it -- always applied here, not conditionally, so
+    there's only one code path to trust."""
+    import pysubs2
+    subs = pysubs2.load(ass_path)
+    seen = set()
+    deduped = pysubs2.SSAFile()
+    for event in subs:
+        key = (event.start, event.end, event.plaintext)
+        if key in seen:
+            continue
+        seen.add(key)
+        clean = event.copy()
+        clean.text = event.plaintext  # drop any leftover override tags (\pos, \an, ...)
+        deduped.append(clean)
+    deduped.save(srt_path)
+
+
 def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.976",
                      width=1920, height=1080):
     """Returns (meta_lines, notes). Compatible audio goes in as-is, anything else is
@@ -602,10 +639,24 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
                 else:
                     notes.append(f"{label} skipped: could not extract it")
             elif codec.startswith("S_TEXT"):
+                # ADR-271: extract as ASS (not straight to SRT) so any dual-eye
+                # \pos(...) positioning already on this track (--dual-eye-subtitles,
+                # ADR-254) survives the extraction -- a plain SRT source converts
+                # losslessly through ASS too, so this is safe either way.
+                # _dedupe_dual_eye_subs() then collapses any dual-eye-positioned
+                # duplicate pair down to one plain cue before the real SRT this
+                # tool actually feeds tsMuxeR gets written -- see that function's
+                # own docstring for the real bug this fixes.
+                ass_tmp = path.join(work_dir, f"subtitle_{subtitle_index}.extracted.ass")
                 out = path.join(work_dir, f"subtitle_{subtitle_index}.srt")
                 r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
-                                    f"0:s:{subtitle_index}", "-c:s", "srt", out],
+                                    f"0:s:{subtitle_index}", "-c:s", "ass", ass_tmp],
                                    capture_output=True, text=True)
+                if r.returncode == 0 and path.exists(ass_tmp) and path.getsize(ass_tmp) > 0:
+                    try:
+                        _dedupe_dual_eye_subs(ass_tmp, out)
+                    except Exception as e:
+                        r = subprocess.CompletedProcess(r.args, 1, r.stdout, str(e))
                 if r.returncode == 0 and path.exists(out) and path.getsize(out) > 0:
                     lines.append(_text_sub_meta(out, t["lang"], fps_text, width, height))
                     subtitle_count += 1

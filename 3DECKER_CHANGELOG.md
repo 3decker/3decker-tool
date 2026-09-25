@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 25, 2026 (3)
+## Latest Update — September 25, 2026 (4)
+
+**Fixed: subtitles positioned for real 3D viewing came out duplicated and overlapping on a real Blu-ray/MVC disc.** If a movie went through "Restore Audio & Subtitles" with Dual-Eye Subtitles turned on, then was later turned into a real 3D Blu-ray disc with "SBS to 3D Blu-ray MVC," the subtitles could show up doubled — the same line appearing twice, stacked on top of itself. Root cause: real Blu-ray discs can only hold picture-based subtitles, so text subtitles always get converted for that step — but that conversion was silently throwing away the special positioning (one copy for each eye) that Dual-Eye Subtitles adds, leaving two identical, unpositioned copies of every line behind. Fixed to properly collapse those back into one clean line before the disc-legal conversion happens — which is also the technically correct behavior, since a real 3D Blu-ray disc plays each eye as its own full picture and has no use for that packed-frame trick to begin with; every normal 3D movie's subtitles are just one flat track shown the same to both eyes. Movies without Dual-Eye Subtitles are completely unaffected.
+
+## Update — September 25, 2026 (3)
 
 **Fixed: "SBS to 3D Blu-ray MVC" could fail with "Unsupported codec A_EAC3" on a source using E-AC-3 (Dolby Digital Plus) audio.** A real job failed partway through with this error after successfully handling every subtitle track. Same underlying cause as an earlier TrueHD fix: this tool's bundled disc-authoring program can't read a specific kind of audio file (E-AC-3) once it's been pulled out on its own, even though it reads that same audio fine from inside a normal video file. E-AC-3 sources are now automatically converted to standard AC-3 instead (the same safe fallback already used for other uncommon audio types), so the job completes instead of failing outright.
 

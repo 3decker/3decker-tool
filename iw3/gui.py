@@ -4265,9 +4265,38 @@ class MainFrame(wx.Frame):
               "while a job is running so it can't wipe output you may still be reading mid-run; "
               "re-enabled once the job finishes."))
         self.btn_standalone_log_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_standalone_log.Clear())
+        # ADR-266: real user request -- "Write a Log File for This Job" (main tab) only
+        # ever covered the main conversion's own single run, never a Standalone Tool run
+        # afterward (RIFE, Restore Audio & Subtitles, etc. each launch their own separate
+        # program). One shared checkbox here covers every tool on this tab instead of
+        # adding twelve separate ones -- see _write_standalone_job_log()'s own docstring
+        # for how it picks each tool's own output path.
+        self.chk_standalone_write_job_log = wx.CheckBox(
+            self.grp_standalone_log, label=T("Write a Log File for Standalone Tool Runs"),
+            name="chk_standalone_write_job_log")
+        self.chk_standalone_write_job_log.SetValue(False)
+        self.chk_standalone_write_job_log.SetToolTip(
+            T("What it's for: saves whichever Standalone Tool you run below's own output -- every "
+              "stage, warning, and the exact reason if it failed -- into a real text file next to "
+              "THAT tool's own output file, named '<output name>_log.txt'. Separate from \"Write a "
+              "Log File for This Job\" on the main tab, which only ever covers the main conversion's "
+              "own single run -- RIFE, Restore Audio & Subtitles, and every other tool here run as "
+              "their own separate program, so they need this of their own to get a persistent log.\n"
+              "How it works: applies to whichever tool you run, every time, while checked -- lets you "
+              "check what actually happened with a specific standalone run later, even after this "
+              "box above has moved on to a different tool's output, or the app has been closed and "
+              "reopened entirely.\n"
+              "Con: one small extra text file per run -- never affects the tool's own real output "
+              "file in any way.\n"
+              "Recommended: on if you chain several Standalone Tools together (e.g. RIFE, then "
+              "Restore Audio & Subtitles) and want a record of each step."))
         sizer_standalone_log = wx.StaticBoxSizer(self.grp_standalone_log, wx.VERTICAL)
         sizer_standalone_log.Add(self.txt_standalone_log, 1, wx.ALL | wx.EXPAND, 4)
-        sizer_standalone_log.Add(self.btn_standalone_log_clear, 0, wx.ALL | wx.ALIGN_RIGHT, 4)
+        sizer_standalone_log_row = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_standalone_log_row.Add(self.chk_standalone_write_job_log, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+        sizer_standalone_log_row.AddStretchSpacer(1)
+        sizer_standalone_log_row.Add(self.btn_standalone_log_clear, 0, wx.ALL, 4)
+        sizer_standalone_log.Add(sizer_standalone_log_row, 0, wx.EXPAND)
 
         # --- standalone utility: retroactive DV/HDR RPU reinjection (ADR-031) ---
         # NOT part of the main conversion pipeline -- a separate tool that takes an
@@ -9175,6 +9204,38 @@ class MainFrame(wx.Frame):
         with wx.MessageDialog(None, message=message, caption=T("Error"), style=wx.OK) as dlg:
             dlg.ShowModal()
 
+    def _write_standalone_job_log(self, tool_label, output_path, log_text):
+        """ADR-266: real user request -- "Write a Log File for This Job" (main tab) only
+        ever covered the main conversion's own single run; every Standalone Tool (RIFE,
+        Restore Audio & Subtitles, etc.) launches its own separate program and was never
+        covered at all. Mirrors utils.py's own _job_log_path() naming ("<output>_log.txt"
+        next to the real output file) so both kinds of log land in the same familiar
+        place, but lives here in gui.py rather than utils.py since every Standalone Tool
+        is always launched from the GUI as its own subprocess -- there is no CLI-only
+        entry point for any of them that would need this too.
+
+        No-ops silently if the checkbox is off, or if `output_path` is blank (nothing
+        was actually configured to run against yet) -- never raises up into a caller's
+        own exit-handler flow; a failed log write is reported to stderr (reaches the
+        shared Standalone Tools output box next run) and otherwise ignored, exactly
+        like utils.py's own version does for the main job's log."""
+        if not self.chk_standalone_write_job_log.GetValue():
+            return
+        output_path = (output_path or "").strip()
+        if not output_path:
+            return
+        base, _ = path.splitext(output_path)
+        log_path = f"{base}_log.txt"
+        try:
+            os.makedirs(path.dirname(log_path) or ".", exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n---- {tool_label} run {datetime.now().isoformat(timespec='seconds')} ----\n")
+                f.write(log_text.replace("\r", "\n") if log_text else "")
+                f.write("\n")
+            print(f"[iw3] Standalone job log written: {log_path}", file=sys.stderr)
+        except OSError as e:
+            print(f"[iw3] Could not write standalone job log ({log_path}): {e}", file=sys.stderr)
+
     def scene_auto_ema_gate_ok(self):
         """`Auto EMA by Scene Length` is meaningless without scene boundaries to key
         off of -- true unless it's off, or either `Scene Detection` (the regular,
@@ -12085,10 +12146,12 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_reinject_log.AppendText(message)
+            self._write_standalone_job_log(T("Retroactive HDR/DV Reinjection"), self.txt_reinject_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
+        self._write_standalone_job_log(T("Retroactive HDR/DV Reinjection"), self.txt_reinject_output.GetValue(), output)
         self.txt_reinject_log.SetValue(output)
         self.txt_reinject_log.ShowPosition(self.txt_reinject_log.GetLastPosition())
         if returncode == 0:
@@ -12432,10 +12495,12 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_submux_log.AppendText(message)
+            self._write_standalone_job_log(T("Add Subtitle Track"), self.txt_submux_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
+        self._write_standalone_job_log(T("Add Subtitle Track"), self.txt_submux_output.GetValue(), output)
         self.txt_submux_log.SetValue(output)
         self.txt_submux_log.ShowPosition(self.txt_submux_log.GetLastPosition())
         if returncode == 0:
@@ -12550,10 +12615,12 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_audiomux_log.AppendText(message)
+            self._write_standalone_job_log(T("Add Audio Track"), self.txt_audiomux_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
+        self._write_standalone_job_log(T("Add Audio Track"), self.txt_audiomux_output.GetValue(), output)
         self.txt_audiomux_log.SetValue(output)
         self.txt_audiomux_log.ShowPosition(self.txt_audiomux_log.GetLastPosition())
         if returncode == 0:
@@ -12661,10 +12728,12 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_audiorestore_log.AppendText(message)
+            self._write_standalone_job_log(T("Restore All Audio Tracks"), self.txt_audiorestore_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
+        self._write_standalone_job_log(T("Restore All Audio Tracks"), self.txt_audiorestore_output.GetValue(), output)
         self.txt_audiorestore_log.SetValue(output)
         self.txt_audiorestore_log.ShowPosition(self.txt_audiorestore_log.GetLastPosition())
         if returncode == 0:
@@ -12739,10 +12808,12 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_stereotag_log.AppendText(message)
+            self._write_standalone_job_log(T("Retroactively Tag MKV as 3D"), self.txt_stereotag_input.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
+        self._write_standalone_job_log(T("Retroactively Tag MKV as 3D"), self.txt_stereotag_input.GetValue(), output)
         self.txt_stereotag_log.SetValue(output)
         self.txt_stereotag_log.ShowPosition(self.txt_stereotag_log.GetLastPosition())
         if returncode == 0:
@@ -12866,10 +12937,12 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_sharpen_log.AppendText(message)
+            self._write_standalone_job_log(T("Sharpen"), self.txt_sharpen_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
+        self._write_standalone_job_log(T("Sharpen"), self.txt_sharpen_output.GetValue(), output)
         self.txt_sharpen_log.SetValue(output)
         self.txt_sharpen_log.ShowPosition(self.txt_sharpen_log.GetLastPosition())
         if returncode == 0:
@@ -13120,10 +13193,12 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_rife_standalone_log.AppendText(message)
+            self._write_standalone_job_log(T("RIFE Interpolation"), self.txt_rife_standalone_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
+        self._write_standalone_job_log(T("RIFE Interpolation"), self.txt_rife_standalone_output.GetValue(), output)
         self.txt_rife_standalone_log.SetValue(output)
         self.txt_rife_standalone_log.ShowPosition(self.txt_rife_standalone_log.GetLastPosition())
         if self.rife_standalone_cancelled:
@@ -13403,9 +13478,11 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_bluray_log.AppendText(message)
+            self._write_standalone_job_log(T("3D Blu-ray Import"), self.txt_bluray_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
+        self._write_standalone_job_log(T("3D Blu-ray Import"), self.txt_bluray_output.GetValue(), output)
         self.txt_bluray_log.SetValue(output.replace("\r", "\n"))
         self.txt_bluray_log.ShowPosition(self.txt_bluray_log.GetLastPosition())
         if self.bluray_cancelled:
@@ -13630,9 +13707,11 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_sbs2mvc_log.AppendText(message)
+            self._write_standalone_job_log(T("SBS to 3D Blu-ray MVC"), self.txt_sbs2mvc_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
+        self._write_standalone_job_log(T("SBS to 3D Blu-ray MVC"), self.txt_sbs2mvc_output.GetValue(), output)
         self.txt_sbs2mvc_log.SetValue(output.replace("\r", "\n"))
         self.txt_sbs2mvc_log.ShowPosition(self.txt_sbs2mvc_log.GetLastPosition())
         if self.sbs2mvc_cancelled:
@@ -13792,9 +13871,11 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_hdr_to_sdr_log.AppendText(message)
+            self._write_standalone_job_log(T("Convert HDR/DV to SDR"), self.txt_hdr_to_sdr_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
+        self._write_standalone_job_log(T("Convert HDR/DV to SDR"), self.txt_hdr_to_sdr_output.GetValue(), output)
         self.txt_hdr_to_sdr_log.SetValue(output.replace("\r", "\n"))
         self.txt_hdr_to_sdr_log.ShowPosition(self.txt_hdr_to_sdr_log.GetLastPosition())
         if self.hdr_to_sdr_cancelled:
@@ -14027,9 +14108,11 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             self.txt_upscale_log.AppendText(message)
+            self._write_standalone_job_log(T("Upscale with waifu2x"), self.txt_upscale_output.GetValue(), message)
             self.SetStatusText(T("Error"))
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
+        self._write_standalone_job_log(T("Upscale with waifu2x"), self.txt_upscale_output.GetValue(), output)
         self.txt_upscale_log.SetValue(output)
         self.txt_upscale_log.ShowPosition(self.txt_upscale_log.GetLastPosition())
         if self.upscale_cancelled:
@@ -21280,6 +21363,68 @@ def _self_test_write_job_log_checkbox():
     print("_self_test_write_job_log_checkbox: PASS")
 
 
+def _self_test_standalone_write_job_log():
+    """ADR-266: real user report -- "Write a Log File for This Job" produced no file
+    for a Standalone Tools run (RIFE, then Restore Audio & Subtitles, chained
+    manually). Traced to a real scope gap: that checkbox only ever wraps the main
+    conversion's own single run (run_iw3_main_with_job_log() in utils.py) -- every
+    Standalone Tool launches its own separate program and was never covered at all,
+    even though the docstring never claimed otherwise; the checkbox itself is simply
+    parented to grp_postprocess on the main tab. Asked to extend it: one new shared
+    checkbox (chk_standalone_write_job_log, next to the shared Standalone Tools
+    output box) plus one shared _write_standalone_job_log() helper, wired into every
+    real Standalone Tool's own on_exit_*_worker. Confirms the checkbox exists in the
+    right place defaulting off, and that the helper itself no-ops when off or given a
+    blank path, writes a real file next to a real output path when on, and appends
+    (not overwrites) across multiple calls -- the same multi-run-accumulates
+    behavior utils.py's own _job_log_path()-based log already has."""
+    import tempfile
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.chk_standalone_write_job_log.GetParent() is frame.grp_standalone_log
+        assert frame.chk_standalone_write_job_log.GetValue() is False
+
+        with tempfile.TemporaryDirectory(prefix="iw3_standalone_log_selftest_") as tmpdir:
+            out_path = path.join(tmpdir, "movie_3D.mkv")
+            log_path = path.join(tmpdir, "movie_3D_log.txt")
+
+            # off (default): no file, regardless of a real path being given.
+            frame._write_standalone_job_log("Sharpen", out_path, "some real output text")
+            assert not path.exists(log_path), "must not write anything while the checkbox is off"
+
+            frame.chk_standalone_write_job_log.SetValue(True)
+
+            # on, but blank output path (nothing configured yet) -> still no file, no crash.
+            frame._write_standalone_job_log("Sharpen", "", "text")
+            frame._write_standalone_job_log("Sharpen", "   ", "text")
+            assert not path.exists(log_path)
+
+            # on, real path -> a real file, containing the tool label and the real text.
+            frame._write_standalone_job_log("Sharpen", out_path, "first run output")
+            assert path.exists(log_path)
+            content = open(log_path, encoding="utf-8").read()
+            assert "Sharpen" in content and "first run output" in content, content
+
+            # a second run appends rather than overwrites -- same convention as the
+            # main job's own log for a resumed/re-run job.
+            frame._write_standalone_job_log("RIFE Interpolation", out_path, "second run output")
+            content = open(log_path, encoding="utf-8").read()
+            assert "first run output" in content and "second run output" in content, content
+            assert "RIFE Interpolation" in content, content
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_standalone_write_job_log: PASS")
+
+
 def _self_test_audio_subtitle_restore_dual_eye_flag():
     """ADR-254: real user request -- restore subtitles already positioned for real 3D
     instead of a flat copy. Confirms _run_audio_subtitle_restore()'s own built command
@@ -23247,6 +23392,7 @@ def _run_self_tests():
         _self_test_auto_divergence_metadata_tags,
         _self_test_audio_subtitle_restore_dual_eye_flag,
         _self_test_write_job_log_checkbox,
+        _self_test_standalone_write_job_log,
         _self_test_run_iw3_main_with_job_log,
         _self_test_find_disc_ssif_diagnostics,
         _self_test_mux_bd3d_iso_audio_diagnostics,

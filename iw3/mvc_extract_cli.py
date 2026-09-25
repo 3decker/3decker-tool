@@ -595,13 +595,17 @@ ISO_LAYOUT = "bd3d_iso"
 
 def list_tracks(ssif_path, tsmuxer_bin):
     """Every track tsMuxeR sees in the .ssif, as dicts: id, codec (e.g. V_MPEG4/ISO/MVC,
-    A_AC3, S_HDMV/PGS) and lang (3-letter code or "")."""
+    A_AC3, S_HDMV/PGS), stream_type (tsMuxeR's own free-text label, e.g. "TRUE-HD" for a
+    TrueHD/Atmos track muxed under the A_AC3 codec -- see ADR-262) and lang (3-letter
+    code or "")."""
     out = subprocess.run([tsmuxer_bin, str(ssif_path)], capture_output=True, text=True).stdout
     tracks, cur = [], None
     for line in out.splitlines():
         if line.startswith("Track ID:"):
-            cur = {"id": int(line.split(":", 1)[1].strip()), "codec": "", "lang": ""}
+            cur = {"id": int(line.split(":", 1)[1].strip()), "codec": "", "stream_type": "", "lang": ""}
             tracks.append(cur)
+        elif cur is not None and line.startswith("Stream type:"):
+            cur["stream_type"] = line.split(":", 1)[1].strip()
         elif cur is not None and line.startswith("Stream ID:"):
             cur["codec"] = line.split(":", 1)[1].strip()
         elif cur is not None and line.startswith("Stream lang:"):
@@ -624,35 +628,44 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
     if not any(t["codec"] == "V_MPEG4/ISO/MVC" for t in tracks):
         raise RuntimeError("no 3D (MVC) video track found in this disc's main movie")
     wanted = [t for t in tracks if t["codec"].startswith("V_") or (include_av and t["codec"][:2] in ("A_", "S_"))]
-    # ADR-258: real user report -- a real disc's ISO came out with its video intact but
-    # no audio track at all, despite include_av=True and the source clearly having one
-    # (confirmed by the reporting user: the ISO's own file size was consistent with the
-    # audio genuinely being there). Unlike extract_and_decode()/mux_lossless_mvc_mkv()
-    # (both confirmed working correctly by that same user, including a real TrueHD+Atmos
-    # source), which find audio/subtitle tracks via av_restore_cli.py's own ffmpeg/PyAV-
-    # based detection against the disc's plain .m2ts clip, this function is the only one
-    # of the three that still trusts tsMuxeR's OWN track-detection (list_tracks(), which
-    # just parses tsMuxeR's plain console listing) -- the exact same class of "tsMuxeR's
-    # own codec detection is narrower than ffmpeg's" issue ADR-239 already found and
-    # fixed in a sibling function (sbs_to_mvc_cli.py's _ffprobe_list_tracks()). Not
-    # reproducible here without the actual failing disc, so not blindly "fixed" by
-    # guessing -- instead, every track tsMuxeR itself reports is now printed so this
-    # is immediately visible (not silent) the next time it happens, and there's real
-    # diagnostic data to work from instead of an empty result with no explanation.
+    # ADR-258 found tsMuxeR does correctly DETECT every track on a real disc (ruled out
+    # in ADR-261's real end-to-end test); ADR-262 found the REAL bug, one level deeper:
+    # for a TrueHD/Atmos track (tsMuxeR labels it Stream type "TRUE-HD" even though its
+    # muxing codec is the generic A_AC3), tsMuxeR's --blu-ray disc-AUTHORING step itself
+    # corrupts the audio data while regenerating a brand-new BDMV/CLPI structure -- real,
+    # decoded-audio evidence: ffmpeg decoding 30s of the produced track threw dozens of
+    # "Invalid nonrestart_substr" errors and only yielded 4.56s of actual audio (heard
+    # by the reporting user as fast/"chipmunk" playback), while the SAME 30s decoded
+    # perfectly from the untouched source disc. This is why extract_and_decode()/
+    # mux_lossless_mvc_mkv() never hit this: both pull audio via av_restore_cli.py's
+    # ffmpeg-based stream copy from the plain .m2ts instead, never routing it through
+    # tsMuxeR's disc-authoring engine at all. tsMuxeR's own --help documents a per-track
+    # "down-to-ac3" option specifically for TRUE-HD tracks ("Filter out HD part") --
+    # confirmed by direct testing (real disc, real decode) to produce a clean, fully
+    # decodable 384Kbps 5.1 AC3 core with zero errors. Applied automatically below for
+    # any TRUE-HD track: real, working AC3-core audio beats a silently corrupted
+    # "lossless" TrueHD/Atmos track in every case, but it IS a real quality tradeoff
+    # (lossless video is unaffected -- this only downgrades that one audio track), so
+    # it's printed clearly, not silently swapped.
     print(f"[mvc-extract] tsMuxeR detected {len(tracks)} track(s) on this disc:", file=sys.stderr)
     for t in tracks:
-        print(f"[mvc-extract]   track {t['id']}: {t['codec']}" + (f" (lang={t['lang']})" if t["lang"] else ""),
-             file=sys.stderr)
+        note = f" (lang={t['lang']})" if t["lang"] else ""
+        print(f"[mvc-extract]   track {t['id']}: {t['codec']}{note}", file=sys.stderr)
     if include_av and not any(t["codec"].startswith("A_") for t in tracks):
         print("[mvc-extract] WARNING: tsMuxeR reported ZERO audio tracks on this disc -- if you know "
-             "this disc has audio, this is very likely the same kind of narrow codec detection ADR-239 "
-             "found in a different tool, not a genuinely audio-less disc. Please report this with the "
-             "track list printed just above.", file=sys.stderr)
+             "this disc has audio, please report this with the track list printed just above.",
+             file=sys.stderr)
     ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
     cut = f" --cut-start=0s --cut-end={cut_end}" if cut_end else ""
     lines = [f"MUXOPT --blu-ray --auto-chapters=10{cut}"]
     for t in wanted:
         extra = f", lang={t['lang']}" if t["lang"] else ""
+        if t.get("stream_type") == "TRUE-HD":
+            extra += ", down-to-ac3"
+            print(f"[mvc-extract]   NOTE: track {t['id']} is TrueHD/Atmos -- tsMuxeR's disc-authoring "
+                 "step corrupts the full HD extension when rebuilding a new disc structure (ADR-262), "
+                 "so only its AC3 core (384Kbps 5.1) is included -- real, working audio instead of a "
+                 "silently broken \"lossless\" track.", file=sys.stderr)
         lines.append(f"{t['codec']}, {ssif_meta}, track={t['id']}{extra}")
     os.makedirs(path.dirname(path.abspath(out_iso)), exist_ok=True)
     meta_path = path.splitext(path.abspath(out_iso))[0] + ".mux.meta"

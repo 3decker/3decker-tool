@@ -21319,11 +21319,19 @@ def _self_test_find_disc_ssif_diagnostics():
 
 def _self_test_mux_bd3d_iso_audio_diagnostics():
     """ADR-258: real user report -- a real disc's Lossless 3D Blu-ray ISO came out
-    with video but no audio track, despite the source clearly having one. Root cause
-    not reproducible without the real disc (flagged, not guessed at); this covers the
-    diagnostic fix that IS safe to make without it -- every track tsMuxeR itself
-    reports is now printed, and a real, specific warning fires when zero audio tracks
-    are found despite include_av=True, instead of a silent, unexplained empty result."""
+    with video but no audio track, despite the source clearly having one. ADR-261
+    tested the leading "tsMuxeR detection" theory end to end on a real disc and ruled
+    it out -- tsMuxeR detects every track correctly. ADR-262 found the REAL bug one
+    level deeper (real decoded-audio evidence, not mocked): tsMuxeR's --blu-ray
+    disc-authoring step corrupts a TrueHD/Atmos track's audio data while rebuilding a
+    new BDMV/CLPI structure -- tsMuxeR labels such a track Stream type "TRUE-HD" even
+    though its muxing codec is the generic A_AC3. Fixed by adding tsMuxeR's own
+    documented "down-to-ac3" per-track option (confirmed by real decode testing to
+    produce a clean, fully decodable AC3 core) automatically for any TRUE-HD track.
+    This covers: every track tsMuxeR reports is printed, a TRUE-HD track gets the
+    down-to-ac3 fix (and a clear NOTE explaining the quality tradeoff) while a plain
+    AC3 track does NOT, and the zero-audio warning still fires when genuinely no
+    audio track exists."""
     import io
     import contextlib
     from unittest import mock
@@ -21344,29 +21352,55 @@ def _self_test_mux_bd3d_iso_audio_diagnostics():
                 pass
         return _P()
 
-    # (a) a real audio track present -- listed, no warning.
-    tracks_with_audio = [
-        {"id": 1, "codec": "V_MPEG4/ISO/MVC", "lang": ""},
-        {"id": 2, "codec": "A_TRUEHD", "lang": "eng"},
-        {"id": 3, "codec": "S_HDMV/PGS", "lang": "eng"},
+    # (a) a real TrueHD/Atmos track (ADR-262's exact real-disc shape) -- listed under
+    # its real codec (A_AC3, not a made-up "A_TRUEHD"), gets down-to-ac3 appended to
+    # its meta-file line plus a clear NOTE explaining why, no zero-audio warning.
+    tracks_truehd = [
+        {"id": 1, "codec": "V_MPEG4/ISO/MVC", "stream_type": "MVC", "lang": ""},
+        {"id": 2, "codec": "A_AC3", "stream_type": "TRUE-HD", "lang": "eng"},
+        {"id": 3, "codec": "S_HDMV/PGS", "stream_type": "PGS", "lang": "eng"},
     ]
     err = io.StringIO()
-    with mock.patch.object(M, "list_tracks", return_value=tracks_with_audio), \
+    m = mock.mock_open()
+    with mock.patch.object(M, "list_tracks", return_value=tracks_truehd), \
             mock.patch.object(M.subprocess, "Popen", fake_popen), \
             mock.patch("os.makedirs"), mock.patch.object(M, "_remove_stale_temp"), \
-            mock.patch("builtins.open", mock.mock_open()), \
+            mock.patch("builtins.open", m), \
             contextlib.redirect_stderr(err):
         M.mux_bd3d_iso("disc.ssif", "out.iso")
     out = err.getvalue()
     assert "tsMuxeR detected 3 track(s)" in out, out
-    assert "A_TRUEHD" in out and "lang=eng" in out, out
+    assert "track 2: A_AC3 (lang=eng)" in out, out
+    assert "NOTE: track 2 is TrueHD/Atmos" in out, out
     assert "WARNING: tsMuxeR reported ZERO audio tracks" not in out, out
+    written = "".join(c.args[0] for c in m.return_value.write.call_args_list)
+    assert "track=2, lang=eng, down-to-ac3" in written, written
 
-    # (b) the exact real-world symptom -- video found, but zero audio tracks reported
+    # (b) a plain (non-TrueHD) AC3 track must NOT get down-to-ac3 -- only a real
+    # TRUE-HD-labeled track needs the workaround.
+    tracks_plain_ac3 = [
+        {"id": 1, "codec": "V_MPEG4/ISO/MVC", "stream_type": "MVC", "lang": ""},
+        {"id": 2, "codec": "A_AC3", "stream_type": "AC3", "lang": "eng"},
+    ]
+    err = io.StringIO()
+    m2 = mock.mock_open()
+    with mock.patch.object(M, "list_tracks", return_value=tracks_plain_ac3), \
+            mock.patch.object(M.subprocess, "Popen", fake_popen), \
+            mock.patch("os.makedirs"), mock.patch.object(M, "_remove_stale_temp"), \
+            mock.patch("builtins.open", m2), \
+            contextlib.redirect_stderr(err):
+        M.mux_bd3d_iso("disc.ssif", "out.iso")
+    out = err.getvalue()
+    assert "NOTE: track 2 is TrueHD/Atmos" not in out, out
+    written2 = "".join(c.args[0] for c in m2.return_value.write.call_args_list)
+    assert "down-to-ac3" not in written2, written2
+    assert "track=2, lang=eng\n" in written2 or written2.rstrip().endswith("track=2, lang=eng"), written2
+
+    # (c) the exact real-world symptom -- video found, but zero audio tracks reported
     # despite include_av=True -- must warn clearly, not stay silent.
     tracks_no_audio = [
-        {"id": 1, "codec": "V_MPEG4/ISO/MVC", "lang": ""},
-        {"id": 3, "codec": "S_HDMV/PGS", "lang": "eng"},
+        {"id": 1, "codec": "V_MPEG4/ISO/MVC", "stream_type": "MVC", "lang": ""},
+        {"id": 3, "codec": "S_HDMV/PGS", "stream_type": "PGS", "lang": "eng"},
     ]
     err = io.StringIO()
     with mock.patch.object(M, "list_tracks", return_value=tracks_no_audio), \

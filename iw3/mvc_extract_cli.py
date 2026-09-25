@@ -869,7 +869,7 @@ MVC_MKV_CROPPED_LAYOUT = "mvc_mkv_cropped"
 
 def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end, work_dir, output_path,
                              bitrate_mbps=20.0, autocrop=None, swap_eyes=False, include_av=True,
-                             keep_temp=False, stop_event=None, progress_cb=None):
+                             target_usage=4, keep_temp=False, stop_event=None, progress_cb=None):
     """ADR-259: real user request -- go directly from a real 3D Blu-ray disc to a
     fresh, auto-cropped MVC .mkv in ONE re-encode, instead of the two-step
     workaround (extract_and_decode() to a flat, cropped SBS file, then a completely
@@ -902,7 +902,23 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
     "interleave", "mux", "restore"}; stop_event (threading.Event) cancels cleanly.
     Not verified end to end against a real disc in a real MVC-capable player this
     session -- same real-hardware-verification gap mux_lossless_mvc_mkv() already
-    flags for its own (unmodified, still lossless) MVC muxing step, which this reuses."""
+    flags for its own (unmodified, still lossless) MVC muxing step, which this reuses.
+
+    ADR-263: real user report -- the progress bar sat frozen (0%, just "Converting")
+    for the entire "encode" stage, which is the slowest part of this whole pipeline.
+    progress_cb("encode", ...) was only ever called once, at the very start, with a
+    placeholder total of 1 -- unlike this exact same FRIMEncode invocation in
+    sbs_to_mvc_cli.py, which already parses FRIMEncode's own live "Frame number: N"
+    console output. Fixed by parsing that same output here (FRIMEncode rewrites that
+    line in place with \\r, so lines are split on \\r or \\n, not just \\n) and calling
+    progress_cb repeatedly with the real frame count as it decodes/encodes.
+
+    target_usage (1-7, default 4): FRIMEncode's own "-u" quality/speed tradeoff
+    (1=best quality/slowest .. 7=fastest/lower quality). Also from ADR-263: this
+    re-encode is CPU-only -- FRIMEncode's hardware mode is documented as broken on
+    current Intel graphics and was never able to use an NVIDIA GPU either way (see
+    sbs_to_mvc_cli.py's own pipeline docstring) -- so this is the real, working lever
+    for trading quality for speed, separate from bitrate_mbps."""
     from .sbs_to_mvc_cli import eye_filter, bd_frame_rate, probe_video
 
     tsmuxer_bin = _find_tsmuxer()
@@ -924,6 +940,8 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
         raise ValueError("this direct-to-MVC output must be saved as an .mkv file")
     if not 2 <= bitrate_mbps <= 40:
         raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
+    if not 1 <= target_usage <= 7:
+        raise ValueError("speed (FRIMEncode target usage) must be between 1 (quality) and 7 (speed)")
 
     stem = path.splitext(path.basename(ssif_path))[0]
     m2ts = path.join(path.dirname(path.dirname(path.abspath(ssif_path))), stem + ".m2ts")
@@ -1005,12 +1023,12 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
         target = int(bitrate_mbps * 1000)
         frim_cmd = [frim_bin, "-i", "-", "-o:mvc", frim_base_es, frim_dep_es, "-viewoutput", "-sbs", "2",
                    "-w", "1920", "-h", "1080", "-f", fps_frac, "-profile", "high", "-level", "4.1",
-                   "-vbr", str(target), str(int(target * 1.25)), "-sw"]
+                   "-vbr", str(target), str(int(target * 1.25)), "-sw", "-u", str(target_usage)]
         if swap_eyes:
             frim_cmd.append("-swaplr")
 
         if progress_cb:
-            progress_cb("encode", 0, 1)
+            progress_cb("encode", 0, n)
         with open(edge_log, "wb") as edge_err:
             edge264_proc = subprocess.Popen([edge264_bin, "-", "-O", "-k", "-y"],
                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=edge_err)
@@ -1031,8 +1049,28 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
             tail = []
 
             def _drain_frim():
-                for chunk in iter(lambda: frim_proc.stdout.read(256), b""):
-                    tail.append(chunk)
+                # ADR-263: real user report -- the progress bar sat frozen at "Converting"
+                # for the entire encode. progress_cb("encode", 0, 1) was only ever called
+                # once, before FRIMEncode even started -- unlike this exact same FRIMEncode
+                # call in sbs_to_mvc_cli.py, which already parses its live "Frame number: N"
+                # console output (FRIMEncode rewrites that line in place with \r, so lines
+                # must be split on \r or \n, not just \n). Mirrors that working parsing here.
+                buf = b""
+                while True:
+                    chunk = frim_proc.stdout.read(256)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while True:
+                        m = re.search(rb"[\r\n]", buf)
+                        if not m:
+                            break
+                        line, buf = buf[:m.start()], buf[m.end():]
+                        tail.append(line.decode(errors="replace"))
+                        del tail[:-20]
+                        fm = re.search(rb"Frame number:\s*(\d+)", line)
+                        if fm and progress_cb:
+                            progress_cb("encode", min(int(fm.group(1)), n), n)
 
             reader = threading.Thread(target=_drain_frim, daemon=True)
             feeder.start()
@@ -1051,7 +1089,7 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
             ffmpeg_proc.wait()
             edge264_proc.wait()
 
-        frim_tail = b"".join(tail).decode(errors="replace")
+        frim_tail = "\n".join(tail)
         if frim_proc.returncode != 0:
             raise RuntimeError(f"the MVC encode failed (FRIMEncode exit code {frim_proc.returncode}):\n"
                               f"{frim_tail[-3000:] if frim_tail.strip() else '(FRIMEncode produced no output)'}")
@@ -1266,8 +1304,8 @@ def import_disc(source, output_path, work_dir=None, progress_cb=None, cut_end=No
                 ssif, avc_track, mvc_track, "0s", cut_end, work_dir, output_path,
                 bitrate_mbps=kwargs.get("bitrate_mbps", 20.0), autocrop=kwargs.get("autocrop"),
                 swap_eyes=kwargs.get("swap_eyes", False), include_av=kwargs.get("restore_av", True),
-                keep_temp=kwargs.get("keep_temp", False), stop_event=kwargs.get("stop_event"),
-                progress_cb=progress_cb)
+                target_usage=kwargs.get("target_usage", 4), keep_temp=kwargs.get("keep_temp", False),
+                stop_event=kwargs.get("stop_event"), progress_cb=progress_cb)
         work_created = not path.isdir(work_dir)
         os.makedirs(work_dir, exist_ok=True)
         # the two demuxed streams together are roughly 3/4 of the .ssif
@@ -1335,6 +1373,12 @@ def main():
                          help="only with --layout mvc_mkv_cropped: target Mbps for the fresh FRIMEncode MVC "
                               "re-encode (2-40; 3D Blu-ray allows about 40 combined) -- same meaning as "
                               "sbs_to_mvc_cli's own --bitrate.")
+    parser.add_argument("--speed", type=int, default=4, choices=range(1, 8), metavar="1-7",
+                         help="only with --layout mvc_mkv_cropped: FRIMEncode's own quality/speed tradeoff "
+                              "('target usage', 1=best quality/slowest .. 7=fastest/lower quality, "
+                              "default 4=balanced) -- this re-encode is CPU-only (no working GPU/hardware "
+                              "mode exists for FRIMEncode), so this is the real speed lever, separate from "
+                              "--bitrate.")
     parser.add_argument("--swap-eyes", action="store_true",
                          help="only with --layout mvc_mkv_cropped: swap left/right in the fresh MVC re-encode.")
     parser.add_argument("--no-audio-subs", action="store_true",
@@ -1358,6 +1402,7 @@ def main():
     if args.layout == MVC_MKV_CROPPED_LAYOUT:
         common["bitrate_mbps"] = args.bitrate
         common["swap_eyes"] = args.swap_eyes
+        common["target_usage"] = args.speed
     if args.autocrop and args.layout in (ISO_LAYOUT, MVC_MKV_LAYOUT):
         print("[mvc-extract] note: --autocrop is ignored for this lossless layout (nothing is re-encoded)",
               file=sys.stderr)

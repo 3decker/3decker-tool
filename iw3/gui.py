@@ -6013,6 +6013,30 @@ class MainFrame(wx.Frame):
               "Recommended: 20 for a good balance; 40 if you want as close to the source quality as this "
               "format allows and don't mind a bigger file and a longer encode."))
 
+        # ADR-263: real user question -- this re-encode is CPU-only (FRIMEncode's hardware
+        # mode is broken on current Intel graphics and was never able to use an NVIDIA GPU
+        # anyway -- see sbs_to_mvc_cli.py's own pipeline docstring), so speed comes only from
+        # FRIMEncode's own quality/speed tradeoff ("target usage", -u 1-7), never set before now.
+        self.lbl_bluray_speed = wx.StaticText(self.cpn_bluray.GetPane(), label=T("MVC Encoding Speed"))
+        self.cbo_bluray_speed = wx.ComboBox(self.cpn_bluray.GetPane(), name="cbo_bluray_speed")
+        self.cbo_bluray_speed.SetEditable(False)
+        # ClientData is the real FRIMEncode -u value
+        self.cbo_bluray_speed.Append(T("Quality (slower)"), 2)
+        self.cbo_bluray_speed.Append(T("Balanced (default)"), 4)
+        self.cbo_bluray_speed.Append(T("Fast"), 6)
+        self.cbo_bluray_speed.Append(T("Fastest"), 7)
+        self.cbo_bluray_speed.SetSelection(1)
+        self.cbo_bluray_speed.SetToolTip(
+            T("What it's for: only with the 'MVC .mkv, Auto-crop applied' layout -- this re-encode runs "
+              "entirely on the CPU (FRIMEncode has no working hardware/GPU mode), so this is the real "
+              "lever for trading some quality for real speed, separate from Bitrate.\n"
+              "Values: Quality is slower but squeezes more out of the same Bitrate; Balanced matches "
+              "FRIMEncode's own default; Fast/Fastest trade visible quality for noticeably less time.\n"
+              "Con: at the same Bitrate, a faster setting looks softer, most visible in complex/detailed "
+              "scenes.\n"
+              "Recommended: Balanced. Try Fast for a quick preview pass, or Quality when the extra time "
+              "genuinely doesn't matter to you."))
+
         self.chk_bluray_restore_av = wx.CheckBox(
             self.cpn_bluray.GetPane(), label=T("Restore audio && subtitles"), name="chk_bluray_restore_av")
         self.chk_bluray_restore_av.SetValue(True)
@@ -6083,6 +6107,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_bluray_quality, (h, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_bluray_bitrate, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_bluray_bitrate, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_bluray_speed, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_bluray_speed, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_bluray_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_bluray_run, (h := h + 1, 2), flag=wx.EXPAND)
         layout.Add(self.btn_bluray_cancel, (h, 3), flag=wx.EXPAND)
@@ -13228,6 +13254,7 @@ class MainFrame(wx.Frame):
         self.cbo_bluray_codec.Enable(uses_flat_encoder)
         self.txt_bluray_quality.Enable(uses_flat_encoder)
         self.txt_bluray_bitrate.Enable(is_mvc_cropped)
+        self.cbo_bluray_speed.Enable(is_mvc_cropped)
         self.cbo_bluray_autocrop.Enable(not is_lossless)
         current = self.txt_bluray_output.GetValue().strip()
         old_ext, new_ext = (".mkv", ".iso") if is_iso else (".iso", ".mkv")
@@ -13378,6 +13405,8 @@ class MainFrame(wx.Frame):
                "--gui-progress"]
         if self._bluray_is_mvc_cropped_layout():
             cmd += ["--bitrate", str(float(self.txt_bluray_bitrate.GetValue() or "20"))]
+            speed = self.cbo_bluray_speed.GetClientData(self.cbo_bluray_speed.GetSelection())
+            cmd += ["--speed", str(speed)]
         autocrop = self.cbo_bluray_autocrop.GetClientData(self.cbo_bluray_autocrop.GetSelection())
         if autocrop and not is_lossless:
             cmd += ["--autocrop", autocrop]
@@ -19490,6 +19519,9 @@ def _self_test_bluray_import_panel():
             assert not frame.cbo_bluray_codec.IsEnabled() and not frame.txt_bluray_quality.IsEnabled()
             assert frame.cbo_bluray_autocrop.IsEnabled(), "Auto-crop must be usable for mvc_mkv_cropped"
             assert frame.txt_bluray_bitrate.IsEnabled(), "Bitrate must be usable only for mvc_mkv_cropped"
+            assert frame.cbo_bluray_speed.IsEnabled(), "Speed must be usable only for mvc_mkv_cropped"
+            assert frame.cbo_bluray_speed.GetClientData(frame.cbo_bluray_speed.GetSelection()) == 4, \
+                "default speed must be FRIMEncode's own default (4, balanced)"
             assert frame.txt_bluray_output.GetValue().endswith(".mkv")
             frame.cbo_bluray_autocrop.SetSelection(1)  # BLACK
             frame.txt_bluray_bitrate.SetValue("30")
@@ -19497,6 +19529,11 @@ def _self_test_bluray_import_panel():
             assert err is None and cmd[cmd.index("--layout") + 1] == "mvc_mkv_cropped", (cmd, err)
             assert cmd[cmd.index("--bitrate") + 1] == "30.0", cmd
             assert cmd[cmd.index("--autocrop") + 1] == "BLACK", cmd
+            assert cmd[cmd.index("--speed") + 1] == "4", cmd
+            frame.cbo_bluray_speed.SetSelection(3)  # Fastest -> 7
+            cmd, err = frame.build_bluray_command()
+            assert cmd[cmd.index("--speed") + 1] == "7", cmd
+            frame.cbo_bluray_speed.SetSelection(1)  # back to Balanced
             frame.txt_bluray_bitrate.SetValue("1")  # below the real 2-40 range
             cmd, err = frame.build_bluray_command()
             assert cmd is None and err, "an out-of-range Bitrate must be refused, not silently sent"
@@ -19510,6 +19547,8 @@ def _self_test_bluray_import_panel():
             frame.on_changed_bluray_layout(None)
             assert not frame.txt_bluray_bitrate.IsEnabled(), \
                 "Bitrate must go back to disabled once a different layout is selected"
+            assert not frame.cbo_bluray_speed.IsEnabled(), \
+                "Speed must go back to disabled once a different layout is selected"
 
             # Run/Cancel/Clear lockstep, driven through the real handlers
             pick("full_sbs")
@@ -21471,7 +21510,11 @@ def _self_test_extract_and_reencode_mvc():
             for p in (cmd[base_idx], cmd[base_idx + 1]):
                 with open(p, "wb") as f:
                     f.write(b"0")
-            return _FakeProc(returncode=0)
+            # ADR-263: real FRIMEncode console output rewrites "Frame number: N" in
+            # place with \r as it works -- simulates that here to verify _drain_frim()
+            # actually parses live progress instead of only reporting 0% for the
+            # whole encode (the real bug this fixed).
+            return _FakeProc(returncode=0, stdout_lines=[b"Frame number: 1\r", b"Frame number: 2\r"])
         return _FakeProc(returncode=0)
 
     with tempfile.TemporaryDirectory(prefix="iw3_mvc_reencode_selftest_") as tmpdir:
@@ -21503,16 +21546,29 @@ def _self_test_extract_and_reencode_mvc():
             fake_sbs_to_mvc.eye_filter = lambda layout, w, h, crop: f"FAKE_VF(layout={layout},w={w},h={h},crop={crop})"
             fake_sbs_to_mvc.bd_frame_rate = lambda rate: ("23.976", "24000/1001")
             fake_sbs_to_mvc.probe_video = lambda p: (1920, 1080, "24000/1001", 100.0, False)
+            progress_events = []
             with mock.patch.dict(_sys.modules, {"iw3.sbs_to_mvc_cli": fake_sbs_to_mvc}):
                 n = M.extract_and_reencode_mvc(
                     ssif_path, avc_track=1, mvc_track=2, cut_start="0s", cut_end=None,
                     work_dir=work_dir, output_path=output_path, bitrate_mbps=30.0,
-                    autocrop="BLACK", include_av=True)
+                    autocrop="BLACK", include_av=True, target_usage=6,
+                    progress_cb=lambda stage, done, total: progress_events.append((stage, done, total)))
 
         assert n == 2, n
         frim_cmd = next(c for c in calls if "FRIMEncode" in str(c[0]))
         assert "-vbr" in frim_cmd and frim_cmd[frim_cmd.index("-vbr") + 1] == "30000", frim_cmd
         assert frim_cmd[frim_cmd.index("-vbr") + 2] == "37500", frim_cmd  # 30000 * 1.25
+        # ADR-263: target_usage (FRIMEncode's own "-u" speed/quality flag) reaches
+        # the real command -- previously never set at all.
+        assert "-u" in frim_cmd and frim_cmd[frim_cmd.index("-u") + 1] == "6", frim_cmd
+        # ADR-263: the "encode" stage must report real, growing frame counts parsed
+        # from FRIMEncode's own output, not just a single placeholder call at the
+        # very start (the real bug: the progress bar sat frozen the whole encode).
+        encode_events = [e for e in progress_events if e[0] == "encode"]
+        assert len(encode_events) >= 3, encode_events  # initial 0/n call + 2 real "Frame number" updates
+        assert encode_events[0][1] == 0, encode_events
+        assert encode_events[-1][1] == 2, encode_events  # the last parsed "Frame number: 2"
+        assert all(e[2] == 2 for e in encode_events), encode_events  # total is the real AU count (n=2), not 1
         ff_cmd = next(c for c in calls if "ffmpeg" in str(c[0]))
         assert "FAKE_VF" in ff_cmd[ff_cmd.index("-vf") + 1], ff_cmd
         assert "crop=(10, 20, 1880, 1040)" in ff_cmd[ff_cmd.index("-vf") + 1], ff_cmd

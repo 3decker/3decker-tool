@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 25, 2026 (2)
+## Latest Update — September 25, 2026 (3)
+
+**Fixed: "SBS to 3D Blu-ray MVC" could fail with "Unsupported codec A_EAC3" on a source using E-AC-3 (Dolby Digital Plus) audio.** A real job failed partway through with this error after successfully handling every subtitle track. Same underlying cause as an earlier TrueHD fix: this tool's bundled disc-authoring program can't read a specific kind of audio file (E-AC-3) once it's been pulled out on its own, even though it reads that same audio fine from inside a normal video file. E-AC-3 sources are now automatically converted to standard AC-3 instead (the same safe fallback already used for other uncommon audio types), so the job completes instead of failing outright.
+
+## Update — September 25, 2026 (2)
 
 **Fixed: the settings a video was made with could get silently lost after RIFE or Stereo Upscale.** Every finished video normally carries its own settings tucked inside the file (visible if you check its Properties/Details, or in the job log — see below) so you can always find out later exactly how it was made. Found a real gap: running a file through RIFE Frame Interpolation, or the Stereo Upscale tool, wiped that information out completely — the file that came out the other end had no record of its settings at all, even though the file right before that step did. Restore Audio & Subtitles and Sharpen were already carrying it through correctly. Fixed for RIFE and Stereo Upscale so the settings now survive the entire chain, however many of these tools you run one after another.
 

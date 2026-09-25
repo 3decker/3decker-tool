@@ -1439,9 +1439,14 @@ class MainFrame(wx.Frame):
               "Con: on a shot that genuinely, continuously changes distance throughout (a long push/pull "
               "reveal), the default (off) tracks that continuous change more closely -- Hold Steady only "
               "glides to it in the same gradual, deadband-gated way it handles any other mid-shot change.\n"
-              "Recommended: on, for most content using sod_v1/Face Detect -- it directly fixes the "
-              "\"drifts within a shot\" con those modes otherwise have. Leave off only if you specifically "
-              "want the older, more reactive behavior, or are comparing the two."))
+              "Requires Scene Detection (or Automated Scene Batch) to also be turned on: this is how it "
+              "learns WHERE a cut happened. Without either one, it never gets that signal at all -- it "
+              "just settles once near the start of the whole video and silently never re-locks at a real "
+              "scene change, even though it's checked. Starting the job with this on and both of those off "
+              "is blocked with an explanation, rather than let it quietly do nothing.\n"
+              "Recommended: on (with Scene Detection also on), for most content using sod_v1/Face Detect -- "
+              "it directly fixes the \"drifts within a shot\" con those modes otherwise have. Leave off "
+              "only if you specifically want the older, more reactive behavior, or are comparing the two."))
 
         self.chk_convergence_overlay = wx.CheckBox(
             self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
@@ -9179,6 +9184,20 @@ class MainFrame(wx.Frame):
             return True
         return self.chk_scene_batch.GetValue() or self.chk_scene_detect.IsChecked()
 
+    def convergence_scene_hold_gate_ok(self):
+        """`Hold Steady Per Scene` (sod_v1/face_detect) settles on one value shortly
+        after a cut and holds it -- but it only learns WHERE the cuts are from the
+        same scene-boundary detection `Scene Detection` produces. Without either that
+        or `Automated Scene Batch` (which pre-splits the video into one job per scene,
+        so there are no cuts left WITHIN any single job for it to miss) on, it never
+        receives a single cut signal: it settles once near the start of the whole
+        video and then only ever drifts via the deadband-gated glide, never actually
+        re-locking at a real scene change the way the checkbox's own name promises.
+        True unless Hold Steady is off, or either of those two is on."""
+        if not self.chk_convergence_scene_hold.GetValue():
+            return True
+        return self.chk_scene_batch.GetValue() or self.chk_scene_detect.IsChecked()
+
     def parse_args(self, skip_set_state=False):
         if not validate_number(self.cbo_divergence.GetValue(), 0.0, 100.0):
             self.show_validation_error_message(T("3D Strength"), 0.0, 100.0)
@@ -9233,6 +9252,14 @@ class MainFrame(wx.Frame):
                 T("`Auto EMA by Scene Length` requires either `Scene Detection` or "
                   "`Automated Scene Batch` to be turned on -- there are no scene "
                   "boundaries to key off of otherwise."))
+            return None
+        if not self.convergence_scene_hold_gate_ok():
+            self.show_error_message(
+                T("`Hold Steady Per Scene` requires either `Scene Detection` or "
+                  "`Automated Scene Batch` to be turned on -- without one of those, "
+                  "it never learns where a scene cut happened, so it settles once "
+                  "near the start of the video and never actually re-locks at a "
+                  "real scene change."))
             return None
         if self.chk_depth_blend.GetValue() and not validate_number(self.cbo_depth_blend_strength.GetValue(), 0.0, 1.0):
             self.show_validation_error_message(T("Dual-Pass Depth Blend"), 0.0, 1.0)
@@ -16669,6 +16696,53 @@ def _self_test_scene_auto_ema_regular_gate():
     print("_self_test_scene_auto_ema_regular_gate: PASS")
 
 
+def _self_test_convergence_scene_hold_gate():
+    """ADR-265: real user question -- "i have [Hold Steady Per Scene] checked on, but
+    i assume it needs scene detection on?" Confirmed by reading the real code: the
+    tracker's cut signal comes from the same segment_pts Scene Detection produces
+    (empty otherwise), so without it (or Automated Scene Batch, which pre-splits the
+    video into one job per scene, leaving no cuts WITHIN any single job to miss),
+    Hold Steady never receives a cut signal at all and silently never re-locks at a
+    real scene change. Drives the real MainFrame.convergence_scene_hold_gate_ok()
+    (the exact method parse_args() calls), mirroring
+    _self_test_scene_auto_ema_regular_gate's own structure for the analogous gate."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # Hold Steady on, neither Scene Detection nor Scene Batch on -> blocked.
+        frame.chk_convergence_scene_hold.SetValue(True)
+        frame.chk_scene_batch.SetValue(False)
+        frame.chk_scene_detect.SetValue(False)
+        assert not frame.convergence_scene_hold_gate_ok(), \
+            "must be blocked with no scene boundaries to key off of"
+
+        # Hold Steady on, Scene Detection on -> gate passes.
+        frame.chk_scene_detect.SetValue(True)
+        assert frame.convergence_scene_hold_gate_ok(), "Scene Detection alone must satisfy the gate"
+
+        # Hold Steady on, Scene Batch on (already pre-split into single-scene jobs) -> gate passes too.
+        frame.chk_scene_detect.SetValue(False)
+        frame.chk_scene_batch.SetValue(True)
+        assert frame.convergence_scene_hold_gate_ok(), "Automated Scene Batch alone must satisfy the gate"
+
+        # Hold Steady off -> gate never blocks, regardless of the other two.
+        frame.chk_convergence_scene_hold.SetValue(False)
+        frame.chk_scene_batch.SetValue(False)
+        frame.chk_scene_detect.SetValue(False)
+        assert frame.convergence_scene_hold_gate_ok(), "gate must not block when Hold Steady Per Scene is off"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_convergence_scene_hold_gate: PASS")
+
+
 def _self_test_auto_ema_relocated_and_disables_ema_fields():
     """Regression test for the ADR-057 relocation amendment (2026-09-08): Auto EMA by
     Scene Length's controls (chk_scene_batch_auto_ema/cbo_scene_batch_auto_ema_model/
@@ -22631,6 +22705,10 @@ def _self_test_convergence_scene_hold_gui_and_metadata():
         frame.update_convergence_mode()
         assert frame.chk_convergence_scene_hold.IsEnabled(), "must enable once mode is sod_v1"
 
+        # ADR-265: Hold Steady Per Scene now requires Scene Detection (or Scene Batch)
+        # on too -- parse_args() blocks otherwise. Turned on here since this test is
+        # about the checkbox/CLI-round-trip/GUI-restore behavior, not that gate.
+        frame.chk_scene_detect.SetValue(True)
         frame.chk_convergence_scene_hold.SetValue(True)
         args = frame.parse_args(skip_set_state=True)
         assert args.convergence_scene_hold is True
@@ -23108,6 +23186,7 @@ def _run_self_tests():
         _self_test_drama_slow_paced_ema_option,
         _self_test_auto_ema_default_is_nagadomi_reference,
         _self_test_scene_auto_ema_regular_gate,
+        _self_test_convergence_scene_hold_gate,
         _self_test_auto_ema_relocated_and_disables_ema_fields,
         _self_test_genre_preset_quick_fill,
         _self_test_3decker_quick_preset,

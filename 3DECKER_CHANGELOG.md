@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 24, 2026
+## Latest Update — September 25, 2026
+
+**Fixed: "Hold Steady Per Scene" could be checked on and silently do nothing, with no explanation.** Asked directly: "i have it checked on, but i assume it needs scene detection on?" Confirmed: yes — this setting learns where a scene cut happened from the same detection Scene Detect provides, and without it turned on too, it never gets that signal at all. It would just settle on one value near the start of the whole video and quietly never re-lock at a real scene change, even though the checkbox looked on and working. Starting a job with this combination is now blocked with a clear explanation instead of letting it silently do nothing, and the tooltip now says so directly too. Tested for real: converted a real 90-second clip spanning an actual scene change, and confirmed from the on-screen convergence value that it genuinely holds steady for several seconds at a time within a shot, then jumps to a new value exactly at the real cut — not before, not gradually.
+
+## Update — September 24, 2026
 
 **Improved: the "3D Blu-ray Import" Layout dropdown's tooltip now clearly explains what each option is actually for, from real questions asked while using it.** A few real "wait, what does this actually do" moments turned into real fixes to the explanations themselves: what "Lossless 3D Blu-ray ISO" is genuinely useful for if you already have a disc image (stripping bloat down to just the movie, adding chapters, turning a ripped folder into a proper ISO) and when it isn't worth running; a clear side-by-side of "Lossless 3D Blu-ray ISO" vs "Lossless MVC .mkv" so it's obvious which one fits your player/library; and a brand-new explanation for "MVC .mkv, Auto-crop applied" that had never had its own tooltip before — including the honest limitation that Auto-crop does nothing for an ordinary widescreen movie (the most common case), and what this option is still genuinely good for regardless (the only way to get a smaller real-MVC file, via a chosen Bitrate, instead of the fixed ~20-34 GB the Lossless options always produce). Also fixed a separate small overclaim: "Restore audio & subtitles" said every format including TrueHD stays lossless — true everywhere except the Lossless ISO option specifically, now called out clearly there too.
 

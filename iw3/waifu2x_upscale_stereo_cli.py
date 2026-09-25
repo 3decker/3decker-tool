@@ -291,7 +291,13 @@ def _join_video(left_path, right_path, audio_source_path, axis, output_path, ffm
     """Inverse of _split_video -- hstack ("sbs") / vstack ("tb") the two final
     eye videos back together, the video-codec equivalent of
     iw3.utils.join_stereo_frame, and re-muxes the ORIGINAL packed source's own
-    audio track (never re-encoded)."""
+    audio track (never re-encoded).
+
+    ADR-269: explicit -map_metadata 2 (audio_source_path, the real ORIGINAL source --
+    left_path/right_path are throwaway per-eye temp files with no tags of their own)
+    so the source's iw3_* settings COMMENT tag survives Stereo Upscale. Without it,
+    ffmpeg's own default (global metadata from input 0 = left_path) silently dropped
+    it, same class of bug as RIFE/Sharpen -- see iw3.utils.read_source_comment_metadata."""
     stack_filter = "hstack=inputs=2" if axis == "sbs" else "vstack=inputs=2"
     if hdr_codec is not None:
         # the stack filter drops the colour tags of its inputs; without this the final .mkv comes out with an
@@ -300,7 +306,7 @@ def _join_video(left_path, right_path, audio_source_path, axis, output_path, ffm
     cmd = [ffmpeg_bin, "-y",
            "-i", left_path, "-i", right_path, "-i", audio_source_path,
            "-filter_complex", f"[0:v][1:v]{stack_filter}[v]",
-           "-map", "[v]", "-map", "2:a?"] + _video_encode_args(hdr_codec, crf, preset, gpu, sdr_codec) + [
+           "-map", "[v]", "-map", "2:a?", "-map_metadata", "2"] + _video_encode_args(hdr_codec, crf, preset, gpu, sdr_codec) + [
            "-c:a", "aac",
            output_path]
     _run_ffmpeg_with_progress(cmd, total_frames, "[4/4] joining")
@@ -507,6 +513,20 @@ def _self_test():
     assert resolve_waifu2x_method_for_tier("realesrgan_x4", 4) == "realesrgan_x4"
     assert resolve_waifu2x_method_for_tier("onnx:custom", 4) == "onnx:custom"
     print("[self-test] resolve_waifu2x_method_for_tier: PASS")
+
+    # --- 5. ADR-269: _join_video must pull global metadata from the real original
+    # source (input index 2, audio_source_path), not ffmpeg's own default of input 0
+    # (left_path -- a throwaway per-eye temp file with no tags of its own). Without
+    # -map_metadata 2 here, a file's iw3_* settings COMMENT tag was silently dropped
+    # by Stereo Upscale, same class of bug as RIFE/Sharpen. Mocked -- no real
+    # ffmpeg/video file needed, just confirms the built command shape.
+    from unittest.mock import patch
+    with patch(f"{__name__}._run_ffmpeg_with_progress") as mock_run:
+        _join_video("left.mp4", "right.mp4", "source.mkv", "tb", "out.mkv", "ffmpeg", "20", "medium")
+        built_cmd = mock_run.call_args[0][0]
+        assert "-map_metadata" in built_cmd, built_cmd
+        assert built_cmd[built_cmd.index("-map_metadata") + 1] == "2", built_cmd
+    print("[self-test] _join_video carries forward original source's metadata (-map_metadata 2): PASS")
 
     print("[self-test] ALL PASS")
 

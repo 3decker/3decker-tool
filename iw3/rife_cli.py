@@ -45,6 +45,7 @@ import nunif.utils.video as VU
 from nunif.device import create_device
 from nunif.utils.video.metadata import convert_fps_fraction
 from .rife_model import DEFAULT_RIFE_MODEL, RIFE_TIERS, interpolate_frame, load_rife_model
+from .utils import read_source_comment_metadata
 
 
 class _SubprocessProgressPrinter:
@@ -303,17 +304,24 @@ def _output_pix_fmt(high_bit_source, video_codec):
     return "yuv420p10le" if (high_bit_source and video_codec in _HEVC_FAMILY) else "yuv420p"
 
 
-def _build_output_config(target_fps, video_codec, gpu, high_bit_source=False):
+def _build_output_config(target_fps, video_codec, gpu, high_bit_source=False, comment=None):
     """Builds the VideoOutputConfig for run()'s config_callback -- pulled out into
     its own function so --video-codec's effect on the real config object is
     directly unit-testable without needing a GPU/real video decode (see
-    _test_rife_video_codec_options)."""
+    _test_rife_video_codec_options).
+
+    comment (ADR-269): the source file's own iw3_* settings COMMENT tag, read back
+    by iw3.utils.read_source_comment_metadata() before this config is built, and
+    carried into the new output here -- RIFE previously never set any metadata at
+    all, so every RIFE-processed file silently lost its settings tag. None (no tag
+    on the source, or a non-iw3 source) keeps prior behavior exactly."""
     return VU.VideoOutputConfig(
         pix_fmt=_output_pix_fmt(high_bit_source, video_codec),
         fps=None,  # no input resampling -- every real decoded frame is kept
         output_fps=float(target_fps),
         video_codec=video_codec,
         options=_resolve_encoder_options(video_codec, gpu),
+        metadata={"comment": comment} if comment else {},
     )
 
 
@@ -368,6 +376,10 @@ def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
     manifest_frames = []
     frame_callback = _make_frame_callback(model, device, ratio_state, manifest_frames)
     fps_info = {}
+    # ADR-269: read once, up front -- input_path never changes mid-run, and this way
+    # a source-read failure (logged inside the helper as None) can't happen more than
+    # once per job.
+    source_comment = read_source_comment_metadata(input_path)
 
     def config_callback(sw_format):
         orig_fps = sw_format.get_fps()
@@ -377,7 +389,8 @@ def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         fps_info["orig_fps"] = float(orig_fps_frac)
         fps_info["target_fps"] = float(target_fps)
         return _build_output_config(target_fps, video_codec, gpu,
-                                    high_bit_source=bool(getattr(sw_format, "use_16bit", False)))
+                                    high_bit_source=bool(getattr(sw_format, "use_16bit", False)),
+                                    comment=source_comment)
 
     VU.process_video(
         input_path,
@@ -859,6 +872,28 @@ def _test_rife_output_pix_fmt():
     print("_test_rife_output_pix_fmt: PASS")
 
 
+def _test_rife_carries_forward_source_comment_metadata():
+    """ADR-269: real, confirmed bug -- a file that went through the main conversion
+    (which embeds an iw3_* settings COMMENT tag) then RIFE lost that tag entirely,
+    because _build_output_config() never set any metadata at all. Confirmed directly
+    via ffprobe on a real file (..._TB_rife_alldub.mkv had NO iw3_* tag, while the
+    earlier ..._TB.mkv stage of the same job did).
+
+    comment=None (no tag on the source, e.g. a plain non-iw3 input) must keep prior
+    behavior byte-identical -- empty metadata dict, same as before this fix."""
+    cfg_with_comment = _build_output_config(Fraction(48), None, 0, comment="iw3_depth_model=Any_V3_Metric_Large")
+    assert cfg_with_comment.metadata == {"comment": "iw3_depth_model=Any_V3_Metric_Large"}, cfg_with_comment.metadata
+
+    cfg_no_comment = _build_output_config(Fraction(48), None, 0, comment=None)
+    assert cfg_no_comment.metadata == {}, cfg_no_comment.metadata
+
+    # Backward compat: the pre-ADR-269 call shape (no comment kwarg at all) is unchanged.
+    cfg_legacy = _build_output_config(Fraction(48), None, 0)
+    assert cfg_legacy.metadata == {}, cfg_legacy.metadata
+
+    print("_test_rife_carries_forward_source_comment_metadata: PASS")
+
+
 def _run_self_tests():
     _test_ensure_rife_model_downloads_model_package()
     _test_rife_cpu_device_not_overridden_by_cuda_availability()
@@ -868,6 +903,7 @@ def _run_self_tests():
     _test_rife_manifest_emission()
     _test_rife_video_codec_options()
     _test_rife_output_pix_fmt()
+    _test_rife_carries_forward_source_comment_metadata()
     print("All iw3.rife_cli self-tests PASSED")
 
 

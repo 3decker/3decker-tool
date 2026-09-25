@@ -2586,6 +2586,25 @@ def make_output_filename(input_filename, args, video=False):
     return basename + metadata + auto_detect_suffix + extension
 
 
+def read_source_comment_metadata(input_path):
+    """Reads back the iw3_* COMMENT tag (if any) already embedded in a video file by
+    _build_iw3_comment_metadata(), so a downstream re-encode step (RIFE, Sharpen,
+    Stereo Upscale -- anything that decodes and re-writes a fresh video track) can
+    carry it forward instead of silently dropping it, matching the same convention
+    every other optional/best-effort read in this project uses: never worth failing
+    or slowing down a real job over, so any failure (not a video, no tag, unreadable
+    file) just returns None. See ADR-269 -- found via a real file
+    (..._TB_rife_alldub.mkv) that had lost its settings tag during the standalone
+    RIFE + Restore Audio & Subtitles chain."""
+    try:
+        import av as _av
+        with _av.open(str(input_path), mode="r", metadata_errors="ignore") as container:
+            comment = container.metadata.get("comment") or container.metadata.get("COMMENT")
+            return comment or None
+    except Exception:
+        return None
+
+
 def _build_iw3_comment_metadata(args, video=True):
     """Builds the iw3_* embedded COMMENT metadata string, mirroring make_output_filename's
     own tags (same fields, same conditions) so renaming a file never loses the settings
@@ -7634,7 +7653,27 @@ def run_iw3_main_with_job_log(args):
         return iw3_main(args)
 
     log_file.write(f"\n---- iw3 job started {datetime.now().isoformat(timespec='seconds')} ----\n")
-    log_file.write(f"Input: {args.input}\nOutput: {args.output}\n\n")
+    log_file.write(f"Input: {args.input}\nOutput: {args.output}\n")
+    # ADR-268: real user report -- the log had no record of which settings were
+    # actually used for the job, just paths and the live progress text. Reuses
+    # _build_iw3_comment_metadata() (the exact same settings string already embedded
+    # in the output file's own COMMENT tag and baked into the filename with
+    # --metadata filename) rather than building a second, separate settings dump that
+    # could drift out of sync with what the file itself actually records. One
+    # "key=value" per line here (the embedded tag keeps them on one line, fine for a
+    # machine-readable comment but harder to read in a plain text log).
+    try:
+        settings = _build_iw3_comment_metadata(args)
+    except Exception:
+        # Defensive: this is a convenience addition to the log, never a reason to
+        # fail a real job over -- e.g. a caller that built its own minimal/partial
+        # args object without every field _build_iw3_comment_metadata() expects.
+        settings = None
+    if settings:
+        log_file.write("Settings:\n")
+        for token in settings.split():
+            log_file.write(f"  {token}\n")
+    log_file.write("\n")
     log_file.flush()
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
     sys.stdout = _TeeStream(orig_stdout, log_file)

@@ -80,7 +80,7 @@ import nunif.utils.video as VU
 from nunif.device import create_device
 from . import depth_effects as DE
 from .utils import (
-    _find_mkvmerge,
+    _find_mkvmerge, read_source_comment_metadata,
     FULL_SBS_SUFFIX, HALF_SBS_SUFFIX, FULL_TB_SUFFIX, HALF_TB_SUFFIX,
     CROSS_EYED_SUFFIX, RGBD_SUFFIX, HALF_RGBD_SUFFIX, VR180_SUFFIX, ANAGLYPH_SUFFIX,
 )
@@ -399,12 +399,18 @@ def _sharpen_video(input_path, output_path, resolved_format, strength, detail_pe
         x = VU.to_tensor(frame, device=device)
         return sharpen_frame_tensor(x, resolved_format, strength, detail_percentile)
 
+    # ADR-269: carry the source's own iw3_* settings COMMENT tag forward -- without
+    # this, VU.process_video's fresh output container had no metadata at all, and the
+    # tag was silently lost the moment a file went through Sharpen.
+    source_comment = read_source_comment_metadata(input_path)
+
     def config_callback(sw_format):
         return VU.VideoOutputConfig(
             fps=None,
             output_fps=None,
             video_codec=video_codec,
             options=_resolve_encoder_options(video_codec, crf, preset, gpu),
+            metadata={"comment": source_comment} if source_comment else {},
         )
 
     VU.process_video(
@@ -845,6 +851,35 @@ def _self_test_video_codec_options():
     print("_self_test_video_codec_options: PASS")
 
 
+def _self_test_carries_forward_source_comment_metadata():
+    """ADR-269: real, confirmed bug -- a source file's iw3_* settings COMMENT tag was
+    silently lost after going through Sharpen, because config_callback never set any
+    metadata at all. Mocks read_source_comment_metadata (the input file need not
+    really exist) and confirms it lands in the built VideoOutputConfig.metadata,
+    same _fake_process_video capture pattern as _self_test_video_codec_options."""
+    from unittest.mock import patch
+    captured = {}
+
+    def _fake_process_video(input_path, output_path, frame_callback, config_callback,
+                             title, device, tqdm_fn):
+        captured["config"] = config_callback(None)
+
+    with patch.object(VU, "process_video", _fake_process_video), \
+         patch(f"{__name__}.read_source_comment_metadata", return_value="iw3_depth_model=Any_V3_Metric_Large"):
+        _sharpen_video("in.mkv", "out.mkv", "half_sbs", 0.5, 95.0,
+                        torch.device("cpu"), "16", "medium")
+        assert captured["config"].metadata == {"comment": "iw3_depth_model=Any_V3_Metric_Large"}, \
+            captured["config"].metadata
+
+    with patch.object(VU, "process_video", _fake_process_video), \
+         patch(f"{__name__}.read_source_comment_metadata", return_value=None):
+        _sharpen_video("in.mkv", "out.mkv", "half_sbs", 0.5, 95.0,
+                        torch.device("cpu"), "16", "medium")
+        assert captured["config"].metadata == {}, captured["config"].metadata
+
+    print("_self_test_carries_forward_source_comment_metadata: PASS")
+
+
 def _run_self_tests():
     _self_test_format_detection()
     _self_test_split_join_round_trip()
@@ -854,6 +889,7 @@ def _run_self_tests():
     _self_test_sharpen_frame_tensor_seam_independence()
     _self_test_run_gating()
     _self_test_video_codec_options()
+    _self_test_carries_forward_source_comment_metadata()
     print("All sharpen_cli self-tests PASSED")
 
 

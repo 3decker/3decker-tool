@@ -21566,6 +21566,30 @@ def _self_test_run_iw3_main_with_job_log():
             content = f.read()
         assert "about to fail" in content and "FAILED" in content, content
 
+        # ADR-268: real user report -- the log recorded paths and progress text, but
+        # never which settings were actually used. A real, fully-populated args
+        # object (create_parser(), not a hand-built partial one like above) must
+        # produce a real "Settings:" block reusing the same iw3_* tags already
+        # embedded in the output file's own COMMENT metadata -- one per line.
+        parser = U.create_parser(required_true=False)
+        real_args = parser.parse_args(["-i", "source.mkv", "-o", output_path, "--depth-model", "Any_V3_Small"])
+        real_args.write_job_log = True
+        with patch.object(U, "iw3_main", fake_iw3_main):
+            U.run_iw3_main_with_job_log(real_args)
+        with open(log_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "Settings:" in content, content
+        assert "iw3_depth_model=Any_V3_Small" in content, content
+        assert "iw3_method=" in content and "iw3_divergence=" in content, content
+
+        # A minimal/partial args object (missing most fields _build_iw3_comment_metadata()
+        # expects) must never break the job itself -- the settings block is just omitted.
+        with patch.object(U, "iw3_main", fake_iw3_main):
+            U.run_iw3_main_with_job_log(args)  # the bare SimpleNamespace from above
+        with open(log_path, encoding="utf-8") as f:
+            content = f.read()
+        assert "fake stage: done" in content, "a minimal args object must not break the job itself"
+
     print("_self_test_run_iw3_main_with_job_log: PASS")
 
 

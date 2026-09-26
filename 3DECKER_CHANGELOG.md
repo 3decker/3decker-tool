@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (6)
+## Latest Update — September 26, 2026 (7)
+
+**New: "Direct to 3D Blu-ray MVC" — a faster, single-pass way to get an MVC file, skipping the in-between step entirely.** Real idea relayed from a user, and checked against the actual code before building: today, making an MVC file is two steps — convert to a regular 3D video first, then a second pass turns that into the MVC file. This new checkbox (Post-Processing, next to "Convert to 3D Blu-ray MVC") does it in one continuous pass instead — nothing gets written to your drive in between, which means real time and real disk space saved for a movie you only ever want as an MVC file. Trade-off, stated plainly in its own tooltip: turning this on switches off Auto Resume, RIFE Frame Interpolation, and MVC Auto-crop for that job, since none of them have a finished file partway through to work from — if the job gets interrupted, the whole thing has to start over. HDR/Dolby Vision sources still need "Convert HDR to SDR" turned on first, same as the existing MVC option, and you'll get asked automatically if you forget. Off by default; use the existing two-step option if you want Auto Resume or RIFE available, or if you also want a separate flat 2D/3D copy alongside the MVC file.
+
+## Update — September 26, 2026 (6)
 
 **Improved: the "MVC (Blu-ray)" Stereo Format shortcut now offers all four real formats, not just Full SBS.** Direct follow-up to the shortcut added earlier today: what if the MVC you want is based on Half SBS, or Top/Bottom instead? Now there are four choices right in the dropdown — "MVC (Blu-ray, Full SBS)", "MVC (Blu-ray, Half SBS)", "MVC (Blu-ray, Full TB)", "MVC (Blu-ray, Half TB)" — pick the one matching the format you actually want, and it sets the real format plus checks "Convert to 3D Blu-ray MVC" for you, same as before, just for whichever of the four you pick.
 

@@ -4384,7 +4384,7 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
     return html_path
 
 
-def process_video_full(input_filename, output_path, args, depth_model, side_model):
+def process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
     is_preview = getattr(args, "preview", False)
     scene_cache_max_fps = args.max_fps  # capture before --preview clamps it, so cache key stays stable
     use_16bit = VU.pix_fmt_requires_16bit(args.pix_fmt)
@@ -4702,6 +4702,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             options=make_video_codec_option(args, input_filename),
             container_options={"movflags": "+faststart"} if args.video_format == "mp4" else {},
             metadata=extra_meta,
+            raw_frame_sink=raw_frame_sink,
         )
 
     # ADR-072: process_video_full() (this function) never announced
@@ -6789,6 +6790,17 @@ def create_parser(required_true=True):
                               "on all sides, BLACK_TB only top/bottom. Same meaning as sbs_to_mvc_cli's own "
                               "--autocrop (already available in the standalone 'SBS to 3D Blu-ray MVC' tool); "
                               "unset (default) leaves the video's own bars exactly as the source has them."))
+    parser.add_argument("--direct-mvc", action="store_true",
+                        help=("ADR-283: single-pass alternative to --convert-to-mvc -- the main conversion "
+                              "encodes straight into the MVC pipe (ffmpeg | FRIMEncode), no finished SBS/TB "
+                              "file is ever written to disk at all, then that file IS the '<name>_MVC.iso'/"
+                              "'<name>_MVC.mkv' output (there is no separate plain-converted file this time). "
+                              "Not compatible with --resume, --auto-resume, --rife-interpolate, or "
+                              "--mvc-autocrop (a finished file to resume/interpolate/sample black bars from "
+                              "never exists) -- if interrupted, the whole job must be started over. Uses the "
+                              "same --mvc-bitrate as --convert-to-mvc; HDR sources need --hdr-to-sdr (the main "
+                              "pipeline's own toggle, not --mvc-convert-hdr-to-sdr) turned on first, same "
+                              "reason as --convert-to-mvc's own HDR refusal (ADR-252)."))
     parser.add_argument("--waifu2x-upscale-target", type=str, default="auto",
                         choices=["auto", "4k", "8k", "fsbs4k", "ftb4k"],
                         help=("Only takes effect together with --waifu2x-upscale on a packed two-eye "
@@ -7618,7 +7630,15 @@ def iw3_main(args):
     elif is_video(args.input):
         if not depth_model.is_video_supported():
             raise ValueError(f"{args.depth_model} does not support video input")
-        process_video(args.input, args.output, args, depth_model, side_model)
+        if getattr(args, "direct_mvc", False):
+            # ADR-283: single-pass 2D -> 3D Blu-ray MVC, bypassing process_video()'s own
+            # post-conversion chain (waifu2x/RIFE/Restore AV/two-stage MVC subprocess)
+            # entirely -- convert_direct() IS the whole job, there is no intermediate
+            # "plain converted output" file for any of those steps to act on.
+            from .direct_mvc_cli import convert_direct
+            convert_direct(args.input, args.output, args, depth_model, side_model)
+        else:
+            process_video(args.input, args.output, args, depth_model, side_model)
     elif is_image(args.input):
         if not depth_model.is_image_supported():
             raise ValueError(f"{args.depth_model} does not support image input")

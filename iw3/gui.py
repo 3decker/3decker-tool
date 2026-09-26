@@ -4192,6 +4192,41 @@ class MainFrame(wx.Frame):
               "Recommended: on for a movie with real black bars, matching whichever side(s) they're "
               "actually on -- off (default) leaves the video exactly as the source has it."))
 
+        # ADR-283: real user request -- could the two-stage "convert to a finished SBS
+        # file, then feed that file into 'SBS to 3D Blu-ray MVC'" process instead happen
+        # as one continuous pass, with no finished SBS file ever written at all? This is
+        # that opt-in alternative -- narrower than the checkbox above (no Auto Resume/
+        # RIFE/Autocrop), but genuinely faster and saves real disk space for a movie
+        # someone only ever wants as an MVC file, never as a separate flat copy.
+        self.chk_direct_mvc = wx.CheckBox(
+            self.grp_postprocess,
+            label=T("Direct to 3D Blu-ray MVC (single pass, no intermediate file)"),
+            name="chk_direct_mvc")
+        self.chk_direct_mvc.SetValue(False)
+        self.chk_direct_mvc.SetToolTip(
+            T("What it's for: the same real MVC output as 'Convert to 3D Blu-ray MVC' above, but as a "
+              "single pass -- the main conversion encodes straight into the MVC pipe, so no finished SBS/TB "
+              "file is ever written to disk at all. There is no separate plain-converted file this "
+              "time -- the MVC file (.iso/.mkv, same Output Type/Bitrate settings above) IS this job's "
+              "only output.\n"
+              "How it's faster: skips writing, then re-reading, an entire finished video file between "
+              "the two stages -- real time and real disk space saved, worthwhile for a movie you only "
+              "ever want as an MVC file.\n"
+              "Con: turning this on switches OFF Auto Resume, RIFE Frame Interpolation, and Auto-crop "
+              "(MVC) for this job, and disables their controls -- none of them has a finished file to "
+              "resume from, interpolate, or sample black bars from partway through a live single-pass "
+              "encode. If the job is interrupted for any reason, the WHOLE job must be started over "
+              "from scratch -- there is no partial-progress checkpoint the way on-disk segment files "
+              "give Auto Resume elsewhere.\n"
+              "Works with the same Stereo Format restriction as 'Convert to 3D Blu-ray MVC' above (Full/"
+              "Half SBS or Full/Half TB); HDR/Dolby Vision sources need 'Convert HDR to SDR' (further "
+              "up this tab) turned on first -- a real 3D Blu-ray/MVC file cannot carry HDR at all.\n"
+              "Recommended: on if you never want the separate flat 2D/3D file 'Convert to 3D Blu-ray "
+              "MVC' above also produces -- off (default) if you want both, or if you might need Auto "
+              "Resume/RIFE for this particular job."))
+        self.chk_direct_mvc.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_direct_mvc)
+        self.update_direct_mvc()
+
         # ADR-256: real user request -- "have it write a log file for each job into the
         # output folder so you can always see what happened with each job... maybe even
         # make it optional and that option could be saved with your presets." All three
@@ -4251,6 +4286,7 @@ class MainFrame(wx.Frame):
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.lbl_mvc_autocrop, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_mvc_autocrop, (j, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_direct_mvc, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
 
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -9442,6 +9478,51 @@ class MainFrame(wx.Frame):
             self.on_selected_index_changed_cbo_stereo_format(None)
         event.Skip()
 
+    def update_direct_mvc(self):
+        """Enables/disables the controls Direct to MVC is incompatible with, matching
+        whether it's currently checked -- the real correctness guarantee is the
+        defensive force-off block in parse_args() (this can drift out of sync with a
+        widget's Enable state, e.g. update_input_option_state() re-enabling Resume
+        after an input file change; that block is what actually stops a bad
+        combination from ever reaching a real job, this is just keeping the on-screen
+        controls honest about it)."""
+        on = self.chk_direct_mvc.GetValue()
+        self.chk_resume.Enable(not on)
+        self.chk_auto_resume.Enable(not on)
+        self.chk_rife_interpolate.Enable(not on)
+        self.cbo_mvc_autocrop.Enable(not on)
+        if not on:
+            # Re-apply whatever Resume's own real rule (input type-dependent) says,
+            # rather than leaving it force-enabled regardless of input type.
+            self.update_input_option_state()
+
+    def on_changed_chk_direct_mvc(self, event):
+        # ADR-283: real incompatibilities -- Auto Resume needs real on-disk segment
+        # files to reopen, RIFE needs a finished file to interpolate, and MVC
+        # Auto-crop needs a finished file to sample black bars from; none of those
+        # exist for a single continuous encode-straight-into-the-MVC-pipe job.
+        # Explained once, only when checking this actually changes something --
+        # unlike on_changed_chk_convert_to_mvc's own silent Stereo Format fix, losing
+        # Auto Resume/RIFE progress on a long job is significant enough to say so.
+        if self.chk_direct_mvc.GetValue():
+            changed = (self.chk_resume.GetValue() or self.chk_auto_resume.GetValue()
+                      or self.chk_rife_interpolate.GetValue()
+                      or bool(self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection())))
+            self.chk_resume.SetValue(False)
+            self.chk_auto_resume.SetValue(False)
+            self.chk_rife_interpolate.SetValue(False)
+            self.update_rife_interpolate()
+            self.cbo_mvc_autocrop.SetSelection(0)
+            if changed:
+                wx.MessageBox(
+                    T("Direct to 3D Blu-ray MVC encodes straight into the MVC pipe in one pass, with no "
+                      "finished file at any point for Auto Resume to reopen, RIFE to interpolate, or "
+                      "Auto-crop (MVC) to sample black bars from -- so all three have been turned off "
+                      "for this job."),
+                    T("Direct to 3D Blu-ray MVC"), wx.OK | wx.ICON_INFORMATION)
+        self.update_direct_mvc()
+        event.Skip()
+
     def update_temporal_stabilize(self):
         if self.chk_temporal_stabilize.IsChecked():
             self.cbo_temporal_stabilize_strength.Enable()
@@ -9798,6 +9879,53 @@ class MainFrame(wx.Frame):
                 else:
                     return None
 
+        # ADR-283: convert_direct()/iw3_main() only ever checks args.direct_mvc on the
+        # single-video-file branch -- a directory/batch input takes a completely
+        # different code path in iw3_main() that never looks at this flag at all, so
+        # without this guard, checking Direct to MVC against a folder would silently
+        # run a normal per-file conversion for every video in it with no MVC output
+        # and no error. Caught here, before Start, same "return None blocks Start"
+        # pattern as every other real validation in this function.
+        if self.chk_direct_mvc.GetValue() and path.isdir(input_path):
+            self.show_error_message(
+                T("Direct to 3D Blu-ray MVC only works on a single video file -- it does not support "
+                  "a folder/batch input. Point Input at one movie file, or turn this off."))
+            return None
+
+        # ADR-283: same real HDR pre-flight pattern as ADR-281 immediately above,
+        # narrowed to the ONE toggle Direct to MVC actually uses (the main pipeline's
+        # own "Convert HDR to SDR" -- there is no separate flat output file here for
+        # a Direct MVC-only toggle to protect the way the two-stage flow's own one does).
+        if (self.chk_direct_mvc.GetValue() and not self.chk_hdr_to_sdr.GetValue()
+                and path.isfile(input_path)):
+            from . import utils as iw3_utils
+            ffprobe_bin = iw3_utils._find_ffprobe()
+            if ffprobe_bin and iw3_utils._detect_pq_or_hlg(input_path, ffprobe_bin):
+                answer = wx.MessageBox(
+                    T("This source looks like HDR/Dolby Vision, but a real 3D Blu-ray/MVC file "
+                      "cannot carry HDR at all -- \"Direct to 3D Blu-ray MVC\" would refuse "
+                      "immediately otherwise.\n\n"
+                      "Convert it to SDR automatically, and continue?\n\n"
+                      "Yes: turns on \"Convert HDR to SDR\" and starts the job.\n"
+                      "No: does not start, so you can adjust settings yourself first."),
+                    T("HDR Source, Direct MVC Requested"), wx.YES_NO | wx.ICON_QUESTION)
+                if answer == wx.YES:
+                    self.chk_hdr_to_sdr.SetValue(True)
+                else:
+                    return None
+
+        # ADR-283: real, unconditional guarantee -- not just on_changed_chk_direct_mvc's
+        # own Enable()/uncheck, which a later update_input_option_state() call could
+        # otherwise re-enable -- that a Direct-to-MVC job never carries a setting into
+        # convert_direct()/process_video_full() that can't work against a live
+        # single-pass pipe (see direct_mvc_cli.py's own module docstring for why each
+        # of these needs a real, already-finished file that never exists here).
+        if self.chk_direct_mvc.GetValue():
+            self.chk_resume.SetValue(False)
+            self.chk_auto_resume.SetValue(False)
+            self.chk_rife_interpolate.SetValue(False)
+            self.cbo_mvc_autocrop.SetSelection(0)
+
         resume = self.chk_resume.IsEnabled() and self.chk_resume.GetValue()
         recursive = path.isdir(input_path) and self.chk_recursive.GetValue()
         skip_error = self.chk_skip_error.IsEnabled() and self.chk_skip_error.GetValue()
@@ -9955,6 +10083,7 @@ class MainFrame(wx.Frame):
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
             restore_dual_eye_subtitles=self.chk_restore_dual_eye_subtitles.GetValue(),
             convert_to_mvc=self.chk_convert_to_mvc.GetValue(),
+            direct_mvc=self.chk_direct_mvc.GetValue(),
             mvc_output_type=self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection()),
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
             mvc_convert_hdr_to_sdr=self.chk_convert_to_mvc_hdr_to_sdr.GetValue(),
@@ -11226,6 +11355,8 @@ class MainFrame(wx.Frame):
                 break
         else:
             self.cbo_mvc_autocrop.SetSelection(0)
+        self.chk_direct_mvc.SetValue(bool(getattr(args, "direct_mvc", False)))
+        self.update_direct_mvc()
         self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
@@ -19803,6 +19934,158 @@ def _self_test_mvc_hdr_preflight_prompt():
     print("_self_test_mvc_hdr_preflight_prompt: PASS")
 
 
+def _self_test_direct_mvc_checkbox():
+    """ADR-283: Direct to 3D Blu-ray MVC. Covers: the checkbox exists with tooltip
+    content naming the real incompatibilities, checking it force-disables Auto
+    Resume/RIFE/Autocrop through the real on_changed_chk_direct_mvc handler (not a
+    bare value flip), the one-time explanatory message fires only when something
+    actually changed, the same real ADR-281-style HDR pre-flight prompt fires for
+    this checkbox too, and parse_args() both reports the mode active AND still
+    forces the incompatible settings off even if a widget's Enable state drifted
+    (simulating the update_input_option_state() re-enable race update_direct_mvc's
+    own docstring describes) -- the actual correctness guarantee, not just the UI."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.chk_direct_mvc.GetParent() is frame.grp_postprocess
+        assert frame.chk_direct_mvc.GetValue() is False
+        tip = frame.chk_direct_mvc.GetToolTip().GetTip()
+        for phrase in ("single pass", "Auto Resume", "RIFE", "Auto-crop", "started over"):
+            assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
+
+        # Explicitly neutralized to a known baseline, not assumed off: a fresh
+        # MainFrame() restores whatever THIS install's own config has saved, not
+        # framework defaults -- Resume defaults True at construction regardless, and
+        # a real install can just as easily have Auto Resume/RIFE/Autocrop/the
+        # two-stage MVC checkbox already on as real user settings (confirmed live in
+        # the "3decker new test" install, not hypothetical -- two separate real
+        # failures here before this reset covered every relevant checkbox).
+        frame.chk_resume.SetValue(False)
+        frame.chk_auto_resume.SetValue(False)
+        frame.chk_rife_interpolate.SetValue(False)
+        frame.cbo_mvc_autocrop.SetSelection(0)
+        frame.chk_convert_to_mvc.SetValue(False)
+        frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
+        frame.chk_hdr_to_sdr.SetValue(False)
+
+        # (a) checking it with nothing incompatible actually on -- no message needed,
+        # nothing changed.
+        with mock.patch.object(wx, "MessageBox") as msgbox:
+            frame.chk_direct_mvc.SetValue(True)
+            frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+        msgbox.assert_not_called()
+        assert not frame.chk_resume.IsEnabled()
+        assert not frame.chk_auto_resume.IsEnabled()
+        assert not frame.chk_rife_interpolate.IsEnabled()
+        assert not frame.cbo_mvc_autocrop.IsEnabled()
+        frame.chk_direct_mvc.SetValue(False)
+        frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+        # update_input_option_state() was re-applied (not left force-disabled) --
+        # with no input file chosen yet, ITS OWN real rule is "disabled", same as a
+        # fresh window that never touched Direct MVC at all.
+        assert not frame.chk_resume.IsEnabled()
+
+        # (b) checking it while Auto Resume/RIFE/Autocrop are actually on -- forced
+        # off THROUGH THE REAL HANDLER, and explained once.
+        frame.chk_auto_resume.SetValue(True)
+        frame.chk_rife_interpolate.SetValue(True)
+        items = [frame.cbo_mvc_autocrop.GetClientData(i) for i in range(frame.cbo_mvc_autocrop.GetCount())]
+        frame.cbo_mvc_autocrop.SetSelection(items.index("BLACK"))
+        with mock.patch.object(wx, "MessageBox") as msgbox:
+            frame.chk_direct_mvc.SetValue(True)
+            frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+        msgbox.assert_called_once()
+        assert frame.chk_auto_resume.GetValue() is False
+        assert frame.chk_rife_interpolate.GetValue() is False
+        assert frame.cbo_mvc_autocrop.GetClientData(frame.cbo_mvc_autocrop.GetSelection()) == ""
+
+        # (b.5) a folder input must be refused, not silently ignored -- iw3_main()'s
+        # directory/batch branch never looks at args.direct_mvc at all. Faking
+        # wx.MessageDialog (not wx.MessageBox) matches this file's own established
+        # convention for show_error_message()'s real dialog class, so no real modal
+        # window is attempted.
+        class _FakeErrorDialog:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def ShowModal(self):
+                return wx.ID_OK
+
+        with tempfile.TemporaryDirectory() as batch_dir:
+            frame.pnl_file.set_input_path(batch_dir)
+            frame.pnl_file.set_output_path(batch_dir)
+            with mock.patch.object(wx, "MessageDialog", _FakeErrorDialog):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is None, "a folder input with Direct to MVC checked must not start"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = path.join(tmpdir, "movie.mkv")
+            open(src, "wb").close()
+            frame.pnl_file.set_input_path(src)
+            frame.pnl_file.set_output_path(path.join(tmpdir, "movie_MVC.iso"))
+
+            # (c) parse_args() reports the mode active.
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            assert args.direct_mvc is True
+            assert args.resume is False and args.rife_interpolate is False
+            assert getattr(args, "auto_resume", None) is False
+            assert getattr(args, "mvc_autocrop", None) is None
+
+            # (d) same real HDR pre-flight prompt as ADR-281's, for this checkbox.
+            frame.chk_hdr_to_sdr.SetValue(False)
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=True), \
+                 mock.patch.object(wx, "MessageBox", return_value=wx.YES) as msgbox:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None, "Yes must let the job start"
+            assert args.hdr_to_sdr is True
+            assert frame.chk_hdr_to_sdr.GetValue() is True
+            msgbox.assert_called_once()
+            frame.chk_hdr_to_sdr.SetValue(False)
+
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=True), \
+                 mock.patch.object(wx, "MessageBox", return_value=wx.NO):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is None, "No must cancel Start, not proceed to a job that will fail"
+
+            # (e) the defensive force-off in parse_args() still holds even if a
+            # widget's Enable state drifted back on (the real race update_direct_mvc's
+            # docstring names) -- this is the actual guarantee, not the UI polish.
+            frame.chk_hdr_to_sdr.SetValue(True)
+            frame.chk_resume.Enable()
+            frame.chk_resume.SetValue(True)
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            assert args.resume is False, "parse_args() must force Resume off even if a widget re-enabled it"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_direct_mvc_checkbox: PASS")
+
+
 def _self_test_max_negative_parallax_field():
     """ADR-179: Max Negative Parallax (GUI label "Max Pop-Out Limit"), a safety cap
     on pop-out that's independent from the Convergence Plane slider -- Convergence
@@ -24129,6 +24412,7 @@ def _run_self_tests():
         _self_test_convert_to_mvc_checkbox,
         _self_test_stereo_format_mvc_shortcut,
         _self_test_mvc_hdr_preflight_prompt,
+        _self_test_direct_mvc_checkbox,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,

@@ -307,6 +307,11 @@ def _process_video(
     config = config_callback(sw_format)
     config.fps = convert_fps_fraction(config.fps)
     config.output_fps = convert_fps_fraction(config.output_fps)
+    # ADR-283: direct-to-MVC single-pass mode. When set, no output container/temp
+    # file is ever opened on the video side -- finished frames go straight to this
+    # callable instead (see iw3/direct_mvc_cli.py). None (the default, every existing
+    # caller) takes the unchanged path below byte-for-byte.
+    raw_sink_mode = config.raw_frame_sink is not None
 
     if not config.container_format:
         config.container_format = path.splitext(output_path)[-1].lower()[1:]
@@ -314,9 +319,6 @@ def _process_video(
         config.video_codec = get_default_video_codec(config.container_format)
     configure_video_codec(config)
 
-    output_container = av.open(output_path_tmp, mode="w", options=config.container_options)
-    if config.metadata:
-        output_container.metadata.update(config.metadata)
     output_fps = config.output_fps or config.fps
     input_reformat_options, output_reformatter = setup_color_transform(sw_format, config, device=device)
     config.pix_fmt = output_reformatter.dst_pix_fmt
@@ -328,12 +330,22 @@ def _process_video(
     if config.state_updated is not None:
         config.state_updated(config)
 
-    video_output_stream = output_container.add_stream(config.video_codec, output_fps)
-    apply_color_settings(video_output_stream, output_reformatter)
+    if raw_sink_mode:
+        output_container = None
+        video_output_stream = None
+        audio_output_stream = None
+        audio_copy = False
+    else:
+        output_container = av.open(output_path_tmp, mode="w", options=config.container_options)
+        if config.metadata:
+            output_container.metadata.update(config.metadata)
+        video_output_stream = output_container.add_stream(config.video_codec, output_fps)
+        apply_color_settings(video_output_stream, output_reformatter)
 
-    video_output_stream.thread_type = "AUTO"
-    video_output_stream.pix_fmt = config.pix_fmt
-    video_output_stream.options = config.options
+        video_output_stream.thread_type = "AUTO"
+        video_output_stream.pix_fmt = config.pix_fmt
+        video_output_stream.options = config.options
+
     video_preprocessor = VideoPreprocessor(
         stream_pix_fmt=video_input_stream.pix_fmt,
         sw_format=sw_format,
@@ -345,31 +357,32 @@ def _process_video(
         input_reformat_options=input_reformat_options,
     )
 
-    uninitialized: bool = True
+    uninitialized: bool = not raw_sink_mode
     unmux_packets: List[av.Packet | List[av.Packet]] = []
 
-    if config.output_width is not None and config.output_height is not None:
-        video_output_stream.width = config.output_width
-        video_output_stream.height = config.output_height
-        uninitialized = False
+    if not raw_sink_mode:
+        if config.output_width is not None and config.output_height is not None:
+            video_output_stream.width = config.output_width
+            video_output_stream.height = config.output_height
+            uninitialized = False
 
-    # utvideo + flac crashes on windows media player
-    # default_acodec = "flac" if config.container_format == "avi" else "aac"
-    default_acodec = "aac"
-    if audio_input_stream is not None:
-        if audio_input_stream.rate < 16000:
-            audio_output_stream = output_container.add_stream(default_acodec, 16000)
-            audio_copy = False
-        elif start_time is not None:
-            audio_output_stream = output_container.add_stream(default_acodec, audio_input_stream.rate)
-            audio_copy = False
-        else:
-            if test_audio_copy(input_path, output_path):
-                audio_output_stream = output_container.add_stream_from_template(template=audio_input_stream)
-                audio_copy = True
-            else:
+        # utvideo + flac crashes on windows media player
+        # default_acodec = "flac" if config.container_format == "avi" else "aac"
+        default_acodec = "aac"
+        if audio_input_stream is not None:
+            if audio_input_stream.rate < 16000:
+                audio_output_stream = output_container.add_stream(default_acodec, 16000)
+                audio_copy = False
+            elif start_time is not None:
                 audio_output_stream = output_container.add_stream(default_acodec, audio_input_stream.rate)
                 audio_copy = False
+            else:
+                if test_audio_copy(input_path, output_path):
+                    audio_output_stream = output_container.add_stream_from_template(template=audio_input_stream)
+                    audio_copy = True
+                else:
+                    audio_output_stream = output_container.add_stream(default_acodec, audio_input_stream.rate)
+                    audio_copy = False
 
     desc = title if title else input_path
     ncols = len(desc) + 60
@@ -381,7 +394,8 @@ def _process_video(
         end_time=end_time,
     )
     pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
-    streams = [s for s in [video_input_stream, audio_input_stream] if s is not None]
+    streams = ([video_input_stream] if raw_sink_mode else
+               [s for s in [video_input_stream, audio_input_stream] if s is not None])
 
     enable_gc_collect = hwaccel in {"cuda"}
     frame_count = 0
@@ -412,15 +426,21 @@ def _process_video(
                             if is_warmup_frame:
                                 continue  # depth model warmed up, don't encode this frame
                             reformatted_frame = output_reformatter(new_frame)
-                            if uninitialized:
-                                set_output_size_and_flash(
-                                    output_container, video_output_stream, reformatted_frame, unmux_packets
+                            if raw_sink_mode:
+                                config.raw_frame_sink(
+                                    reformatted_frame.to_ndarray().tobytes(),
+                                    reformatted_frame.width, reformatted_frame.height, config.pix_fmt,
                                 )
-                                uninitialized = False
-                            # print(video_input_stream.format, new_frame.format, reformatted_frame.format)
-                            enc_packets = video_output_stream.encode(reformatted_frame)
-                            if enc_packets:
-                                output_container.mux(enc_packets)
+                            else:
+                                if uninitialized:
+                                    set_output_size_and_flash(
+                                        output_container, video_output_stream, reformatted_frame, unmux_packets
+                                    )
+                                    uninitialized = False
+                                # print(video_input_stream.format, new_frame.format, reformatted_frame.format)
+                                enc_packets = video_output_stream.encode(reformatted_frame)
+                                if enc_packets:
+                                    output_container.mux(enc_packets)
                             pbar.update(1)
             elif packet.stream.type == "audio":
                 assert isinstance(audio_output_stream, av.AudioStream)
@@ -455,13 +475,18 @@ def _process_video(
                     gc.collect()
 
                 ref_frame = output_reformatter(new_frame)
-                if uninitialized:
-                    set_output_size_and_flash(output_container, video_output_stream, ref_frame, unmux_packets)
-                    uninitialized = False
+                if raw_sink_mode:
+                    config.raw_frame_sink(
+                        ref_frame.to_ndarray().tobytes(), ref_frame.width, ref_frame.height, config.pix_fmt,
+                    )
+                else:
+                    if uninitialized:
+                        set_output_size_and_flash(output_container, video_output_stream, ref_frame, unmux_packets)
+                        uninitialized = False
 
-                enc_packets = video_output_stream.encode(ref_frame)
-                if enc_packets:
-                    output_container.mux(enc_packets)
+                    enc_packets = video_output_stream.encode(ref_frame)
+                    if enc_packets:
+                        output_container.mux(enc_packets)
                 pbar.update(1)
 
         for new_frame in get_new_frames(frame_callback(None)):
@@ -469,26 +494,34 @@ def _process_video(
                 gc.collect()
 
             ref_frame = output_reformatter(new_frame)
-            if uninitialized:
-                set_output_size_and_flash(output_container, video_output_stream, ref_frame, unmux_packets)
-                uninitialized = False
-            enc_packets = video_output_stream.encode(ref_frame)
-            if enc_packets:
-                output_container.mux(enc_packets)
+            if raw_sink_mode:
+                config.raw_frame_sink(
+                    ref_frame.to_ndarray().tobytes(), ref_frame.width, ref_frame.height, config.pix_fmt,
+                )
+            else:
+                if uninitialized:
+                    set_output_size_and_flash(output_container, video_output_stream, ref_frame, unmux_packets)
+                    uninitialized = False
+                enc_packets = video_output_stream.encode(ref_frame)
+                if enc_packets:
+                    output_container.mux(enc_packets)
             pbar.update(1)
 
-        enc_packets = video_output_stream.encode(None)
-        if enc_packets:
-            output_container.mux(enc_packets)
+        if not raw_sink_mode:
+            enc_packets = video_output_stream.encode(None)
+            if enc_packets:
+                output_container.mux(enc_packets)
 
     except KeyboardInterrupt:
         pbar.close()
-        output_container.close()
+        if output_container is not None:
+            output_container.close()
         input_container.close()
         raise
     except:  # noqa
         pbar.close()
-        output_container.close()
+        if output_container is not None:
+            output_container.close()
         input_container.close()
         output_path_error = make_error_file_path(output_path)
         if path.exists(output_path_tmp):
@@ -496,7 +529,8 @@ def _process_video(
         raise
 
     pbar.close()
-    output_container.close()
+    if output_container is not None:
+        output_container.close()
     input_container.close()
 
     if not (stop_event is not None and stop_event.is_set()):

@@ -18,6 +18,7 @@ class VideoOutputConfig:
     video_codec: str | None
     state_updated: Callable[["VideoOutputConfig"], None] | None
     device: torch.device | None
+    raw_frame_sink: Callable[[bytes, int, int, str], None] | None
 
     # State properties
     output_colorspace: int | None
@@ -43,6 +44,7 @@ class VideoOutputConfig:
         output_color_trc: ColorTrc | int | None = None,
         source_color_range: ColorRange | int | None = None,
         metadata: Dict[str, str] | None = None,
+        raw_frame_sink: Callable[[bytes, int, int, str], None] | None = None,
     ):
         self.pix_fmt = pix_fmt
         self.fps = fps
@@ -55,6 +57,11 @@ class VideoOutputConfig:
         self.colorspace = colorspace if colorspace is not None else "auto"
         self.container_format = container_format
         self.video_codec = video_codec
+        # ADR-283: direct-to-MVC single-pass mode -- when set, _process_video() sends
+        # each finished frame's raw bytes straight here instead of opening an output
+        # container/temp file at all. None (the default) is a byte-for-byte no-op for
+        # every existing caller (this file is shared with waifu2x).
+        self.raw_frame_sink = raw_frame_sink
 
         self.state_updated = lambda config: None
 

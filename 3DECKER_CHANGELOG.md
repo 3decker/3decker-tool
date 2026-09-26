@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (3)
+## Latest Update — September 26, 2026 (4)
+
+**New: batch/folder conversions now give every movie its own separate log file, instead of one combined log for the whole run.** Requested directly: "i do batches or folder sometimes, so i will like to keep each log separate for each movie if possible." Before this, converting a whole folder of movies in one go only ever produced one shared log covering everything. Now, with "Write a Log File for This Job" checked, each movie in a batch gets its own real log next to its own output — same as converting one movie at a time already worked. (Still covers movies only for now, not a folder made up entirely of images.)
+
+## Update — September 26, 2026 (3)
 
 **Fixed: "Write a Log File for This Job" wasn't actually missing — it was landing in the wrong place.** Reported (and reproduced live with a fresh test conversion): the checkbox was on, but no `_log.txt` ever showed up next to the finished file. Root cause: when the output box is set to a folder (the normal way this app works — you pick a folder, and it builds the full descriptive filename itself), the log file was being saved one level up, outside that folder entirely, under a mangled name based on the folder itself instead of the real output file. It was being written the whole time, just somewhere nobody would think to look. Fixed so the log now always lands inside the real output folder, named after the real output file, right where you'd expect it.
 

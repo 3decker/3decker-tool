@@ -21978,6 +21978,87 @@ def _self_test_job_log_path_folder_output():
     print("_self_test_job_log_path_folder_output: PASS")
 
 
+def _self_test_process_video_with_job_log_per_movie():
+    """ADR-279: real user request -- "each movie will have their own log" for real
+    batch/folder conversions (decker: "i do batches or folder sometimes"). Before
+    this, directory input got exactly one shared log for the whole batch run;
+    confirms each movie in a batch now gets its own separate, correctly-named log
+    file instead, with no cross-contamination between them."""
+    import tempfile
+    from unittest.mock import patch
+    from . import utils as U
+
+    def fake_process_video(video_file, output_target, args, depth_model, side_model):
+        print(f"fake processing: {video_file}", file=sys.stderr)
+        return None
+
+    with tempfile.TemporaryDirectory() as out_dir:
+        parser = U.create_parser(required_true=False)
+        args = parser.parse_args(["-i", "placeholder.mkv", "-o", out_dir,
+                                   "--depth-model", "Any_V3_Small", "--tb"])
+        # Normally set by set_state_args() (skipped here, same as
+        # _self_test_job_log_path_folder_output -- it instantiates a real depth
+        # model, well outside what this test needs).
+        args.video_extension = "." + args.video_format
+        args.write_job_log = True
+
+        with patch.object(U, "process_video", fake_process_video):
+            U._process_video_with_job_log("movie_a.mkv", out_dir, args, None, None)
+            U._process_video_with_job_log("movie_b.mkv", out_dir, args, None, None)
+
+        log_a = U._resolve_single_file_log_path(args, "movie_a.mkv", out_dir)
+        log_b = U._resolve_single_file_log_path(args, "movie_b.mkv", out_dir)
+        assert log_a != log_b, "two different movies must get two different log files"
+        assert os.path.exists(log_a), log_a
+        assert os.path.exists(log_b), log_b
+        with open(log_a, encoding="utf-8") as f:
+            content_a = f.read()
+        with open(log_b, encoding="utf-8") as f:
+            content_b = f.read()
+        assert "fake processing: movie_a.mkv" in content_a, content_a
+        assert "fake processing: movie_b.mkv" not in content_a, \
+            "movie_a's log must not contain movie_b's output"
+        assert "fake processing: movie_b.mkv" in content_b, content_b
+        assert "fake processing: movie_a.mkv" not in content_b, \
+            "movie_b's log must not contain movie_a's output"
+
+        # write_job_log off: no logs at all, straight passthrough (today's default).
+        args.write_job_log = False
+        with patch.object(U, "process_video", fake_process_video):
+            U._process_video_with_job_log("movie_c.mkv", out_dir, args, None, None)
+        log_c = U._resolve_single_file_log_path(args, "movie_c.mkv", out_dir)
+        assert not os.path.exists(log_c), "off (default) must not create a log file at all"
+
+    print("_self_test_process_video_with_job_log_per_movie: PASS")
+
+
+def _self_test_run_iw3_main_with_job_log_skips_batch_wrapping():
+    """ADR-279: run_iw3_main_with_job_log() must not open its own whole-run log at
+    all once args.input is a real directory -- per-movie logging happens entirely
+    inside iw3_main()'s own batch loop instead (_process_video_with_job_log()).
+    Confirms no stray log file (the old ADR-256 combined "iw3_batch_log_*.txt" or
+    otherwise) appears in the output directory just from calling the wrapper, even
+    with logging turned on."""
+    import tempfile
+    import types
+    from unittest.mock import patch
+    from . import utils as U
+
+    def fake_iw3_main(args):
+        print("fake batch run", file=sys.stderr)
+        return args
+
+    with tempfile.TemporaryDirectory() as in_dir, tempfile.TemporaryDirectory() as out_dir:
+        args = types.SimpleNamespace(input=in_dir, output=out_dir, write_job_log=True)
+        with patch.object(U, "iw3_main", fake_iw3_main):
+            result = U.run_iw3_main_with_job_log(args)
+        assert result is args
+        assert os.listdir(out_dir) == [], \
+            f"directory input must not create any whole-run log file, found: {os.listdir(out_dir)}"
+
+    print("_self_test_run_iw3_main_with_job_log_skips_batch_wrapping: PASS")
+
+
 def _self_test_find_disc_ssif_diagnostics():
     """ADR-258: real user report -- a real, existing BDMV/STREAM/SSIF folder (confirmed
     directly by the user) still hit "no Blu-ray 3D content found" when pointed at a
@@ -23836,6 +23917,8 @@ def _run_self_tests():
         _self_test_standalone_write_job_log,
         _self_test_run_iw3_main_with_job_log,
         _self_test_job_log_path_folder_output,
+        _self_test_process_video_with_job_log_per_movie,
+        _self_test_run_iw3_main_with_job_log_skips_batch_wrapping,
         _self_test_find_disc_ssif_diagnostics,
         _self_test_mux_bd3d_iso_audio_diagnostics,
         _self_test_extract_and_reencode_mvc,

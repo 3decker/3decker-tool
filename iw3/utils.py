@@ -7552,7 +7552,7 @@ def iw3_main(args):
                     if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                         return args
                     try:
-                        process_video(video_file, args.output, args, depth_model, side_model)
+                        _process_video_with_job_log(video_file, args.output, args, depth_model, side_model)
                     except KeyboardInterrupt:
                         raise
                     except: # noqa
@@ -7576,7 +7576,7 @@ def iw3_main(args):
                         if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                             return args
                         try:
-                            process_video(video_file, output_dir, args, depth_model, side_model)
+                            _process_video_with_job_log(video_file, output_dir, args, depth_model, side_model)
                         except KeyboardInterrupt:
                             raise
                         except: # noqa
@@ -7613,7 +7613,7 @@ def iw3_main(args):
             for video_file in video_files:
                 if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                     return args
-                process_video(video_file, args.output, args, depth_model, side_model)
+                _process_video_with_job_log(video_file, args.output, args, depth_model, side_model)
                 gc_collect()
     elif is_video(args.input):
         if not depth_model.is_video_supported():
@@ -7678,25 +7678,15 @@ class _TeeStream:
             pass
 
 
-def _job_log_path(args):
-    """ADR-256: real user request -- a persistent per-job log file saved next to the
-    output, so what happened during a run stays visible even after the GUI's own
-    shared Standalone Tools output box (ADR-250) has moved on to something else, or
-    the app has been closed and reopened entirely.
+def _resolve_single_file_log_path(args, input_path, output_path):
+    """Real per-file log path for one specific input/output pair -- shared by the
+    single-file whole-run wrapper (run_iw3_main_with_job_log()) and the per-movie
+    batch wrapper (_process_video_with_job_log(), ADR-279).
 
-    Single-file input (the common case, --input is one video/image): named after
-    the real, already-known output file -- "<name>_log.txt" next to it.
-
-    Directory/batch input: the real per-file output name isn't decided until each
-    file's own processing runs (make_output_filename()), so a true per-movie log
-    for batch mode would need hooking deep inside process_images()/process_videos()
-    -- a bigger, separate change. One combined log for the whole batch run, written
-    into the output directory itself, is the scoped-down version here.
-
-    Real user-found bug (2026-09-26): the GUI's normal single-file workflow leaves
-    args.output as a bare OUTPUT FOLDER (e.g. "E:\\3d Movies") -- the real tagged
-    filename (all the depth-model/divergence/etc. suffixes) is only computed later,
-    the same way resolve_output_path()/process_video() do it via
+    Real user-found bug (2026-09-26, ADR-278): the GUI's normal single-file workflow
+    leaves the output as a bare OUTPUT FOLDER (e.g. "E:\\3d Movies") -- the real
+    tagged filename (all the depth-model/divergence/etc. suffixes) is only computed
+    later, the same way resolve_output_path()/process_video() do it via
     make_output_filename(). Without this check, path.splitext() on the bare folder
     silently produced a malformed sibling path one level UP from the real output
     (e.g. "E:\\3d Movies" -> "E:\\3d Movies_log.txt" sitting in E:\\ instead of
@@ -7704,40 +7694,46 @@ def _job_log_path(args):
     just somewhere the user would never think to look, indistinguishable from no
     log being written at all. Resolve the real final filename here the same way
     the rest of the app already does, before ever building the log path from it."""
-    output = str(args.output)
-    if path.isdir(str(args.input)):
-        out_dir = output if path.isdir(output) else (path.dirname(output) or ".")
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return path.join(out_dir, f"iw3_batch_log_{stamp}.txt")
+    output = str(output_path)
     if is_output_dir(output):
-        output = path.join(output, make_output_filename(args.input, args, video=is_video(args.input)))
+        output = path.join(output, make_output_filename(input_path, args, video=is_video(input_path)))
     base, _ = path.splitext(output)
     return f"{base}_log.txt"
 
 
-def run_iw3_main_with_job_log(args):
-    """ADR-256: runs iw3_main(args), optionally teeing every print() it (or any
-    post-processing subprocess step it relays output from) makes into a real log
-    file next to the output -- opt-in (--write-job-log), off by default. Wraps the
-    CALL SITE rather than iw3_main()'s own body specifically to avoid re-indenting
-    that already-large, already-tested function; the log still captures everything
-    meaningful, since every real status/warning/note anywhere in this pipeline
-    already goes through a plain print(..., file=sys.stderr) (or stdout) call, not
-    some separate, harder-to-intercept channel."""
-    if not getattr(args, "write_job_log", False):
-        return iw3_main(args)
+def _job_log_path(args):
+    """ADR-256/278: real per-file log path for the single-file (or YAML-config)
+    whole-run case -- see _resolve_single_file_log_path() for the real logic and
+    the folder-output bug it fixes. Directory/batch input never reaches this
+    function any more (ADR-279): run_iw3_main_with_job_log() skips its own
+    whole-run wrapping for that case entirely, and each movie gets its own real
+    per-file log from inside iw3_main()'s own batch loop instead -- see
+    _process_video_with_job_log()."""
+    return _resolve_single_file_log_path(args, args.input, args.output)
 
-    log_path = _job_log_path(args)
+
+@contextlib.contextmanager
+def _job_log_scope(args, log_path, input_display, output_display):
+    """Core of ADR-256/268/272/278's job log: opens `log_path`, writes the header
+    (Input/Output/Settings/Command) and a start marker, tees stdout/stderr for the
+    duration of the `with` block, then writes a finished/FAILED marker and always
+    restores stdout/stderr and closes the file. Shared by run_iw3_main_with_job_log()
+    (single-file/whole-run case) and _process_video_with_job_log() (real per-movie
+    logs in batch/directory mode, ADR-279) so both write logs in the identical
+    format. `input_display`/`output_display` are shown in the log's own
+    "Input:"/"Output:" header lines -- the real per-file paths in batch mode, not
+    the batch-level directory args.input/args.output would otherwise show."""
     try:
         os.makedirs(path.dirname(log_path) or ".", exist_ok=True)
         log_file = open(log_path, "a", encoding="utf-8")
     except Exception as e:
         print(f"[iw3] Could not open job log file ({log_path}): {e} -- continuing without it",
              file=sys.stderr)
-        return iw3_main(args)
+        yield
+        return
 
     log_file.write(f"\n---- iw3 job started {datetime.now().isoformat(timespec='seconds')} ----\n")
-    log_file.write(f"Input: {args.input}\nOutput: {args.output}\n")
+    log_file.write(f"Input: {input_display}\nOutput: {output_display}\n")
     # ADR-268: real user report -- the log had no record of which settings were
     # actually used for the job, just paths and the live progress text. Reuses
     # _build_iw3_comment_metadata() (the exact same settings string already embedded
@@ -7776,9 +7772,8 @@ def run_iw3_main_with_job_log(args):
     sys.stdout = _TeeStream(orig_stdout, log_file)
     sys.stderr = _TeeStream(orig_stderr, log_file)
     try:
-        result = iw3_main(args)
+        yield
         log_file.write(f"\n---- iw3 job finished {datetime.now().isoformat(timespec='seconds')} ----\n")
-        return result
     except BaseException as e:
         log_file.write(f"\n---- iw3 job FAILED: {e!r} ----\n")
         raise
@@ -7786,6 +7781,52 @@ def run_iw3_main_with_job_log(args):
         sys.stdout, sys.stderr = orig_stdout, orig_stderr
         log_file.close()
         print(f"[iw3] Job log written: {log_path}", file=sys.stderr)
+
+
+def _process_video_with_job_log(video_file, output_target, args, depth_model, side_model):
+    """ADR-279: real user request -- "each movie will have their own log," for real
+    batch/folder conversions (decker: "i do batches or folder sometimes"). Before
+    this, directory/batch input got exactly one combined log for the whole run
+    (ADR-256's original scoped-down design); this gives every individual movie in a
+    batch its own real per-movie log, in the same format and same location
+    (next to that movie's own output) as a real single-file conversion already
+    gets. No-ops straight through to process_video() when logging is off --
+    identical to today's behavior whenever --write-job-log isn't set."""
+    if not getattr(args, "write_job_log", False):
+        return process_video(video_file, output_target, args, depth_model, side_model)
+
+    log_path = _resolve_single_file_log_path(args, video_file, output_target)
+    with _job_log_scope(args, log_path, video_file, output_target):
+        return process_video(video_file, output_target, args, depth_model, side_model)
+
+
+def run_iw3_main_with_job_log(args):
+    """ADR-256: runs iw3_main(args), optionally teeing every print() it (or any
+    post-processing subprocess step it relays output from) makes into a real log
+    file next to the output -- opt-in (--write-job-log), off by default. Wraps the
+    CALL SITE rather than iw3_main()'s own body specifically to avoid re-indenting
+    that already-large, already-tested function; the log still captures everything
+    meaningful, since every real status/warning/note anywhere in this pipeline
+    already goes through a plain print(..., file=sys.stderr) (or stdout) call, not
+    some separate, harder-to-intercept channel.
+
+    ADR-279: real user request -- "each movie will have their own log" for real
+    batch/folder conversions, not one shared log for the whole run. Directory
+    (and text-file-list) input is deliberately NOT wrapped here any more -- once
+    iw3_main() reaches its own batch loop, each individual movie gets its own
+    real per-file log via _process_video_with_job_log() instead, matching what a
+    real single-file conversion already gets. This function now only opens its
+    own whole-run log for the cases where there's exactly one real output to log
+    against up front (a single video/image, or a YAML export-config resume)."""
+    if not getattr(args, "write_job_log", False):
+        return iw3_main(args)
+
+    if path.isdir(str(args.input)) or is_text(args.input):
+        return iw3_main(args)
+
+    log_path = _job_log_path(args)
+    with _job_log_scope(args, log_path, args.input, args.output):
+        return iw3_main(args)
 
 
 def find_param(args, depth_model, side_model):

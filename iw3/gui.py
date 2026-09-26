@@ -8712,6 +8712,12 @@ class MainFrame(wx.Frame):
         ("flat2d", "3d_video"): ("processor", None, None),
         ("3d_video", "mvc"): ("grp_sbs2mvc", "cpn_sbs2mvc", None),
         ("disc", "3d_video"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "full_sbs")),
+        # ADR-276: real gap found live by decker -- a real disc/ISO's own video IS
+        # already MVC (that's what a genuine 3D Blu-ray disc's video stream is), so
+        # "disc -> a real 3D Blu-ray disc (MVC)" is a real, valid combination this
+        # project already has (3D Blu-ray Import's own "Lossless 3D Blu-ray ISO"
+        # layout, no re-encode) -- missed when the routes table was first built.
+        ("disc", "mvc"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso")),
         ("disc", "lossless_copy"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso")),
         ("hdr", "sdr"): ("grp_hdr_to_sdr", "cpn_hdr_to_sdr", None),
     }
@@ -20131,6 +20137,14 @@ def _self_test_quick_convert_panel():
         assert not frame.cpn_bluray.IsCollapsed()
         assert frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection()) == "full_sbs", \
             "disc->3d_video must pre-select a real 3D layout, not leave the previous selection"
+
+        # disc -> mvc: ADR-276 real gap fix -- a real disc's own video IS already MVC,
+        # so this is the same lossless ISO layout, not a separate re-encode.
+        frame.nb_options.SetSelection(0)
+        frame.cbo_bluray_layout.SetSelection(bluray_items.index("full_sbs"))
+        pick("disc", "mvc")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection()) == "bd3d_iso"
 
         # disc -> lossless_copy: same tool, Layout pre-selected to the lossless ISO mode instead.
         frame.nb_options.SetSelection(0)

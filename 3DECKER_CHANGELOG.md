@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 25, 2026 (8)
+## Latest Update — September 26, 2026
+
+**Fixed: "Quick Convert" was missing "a real disc → a real 3D Blu-ray disc (MVC)" as a direct match.** Found live: a real 3D Blu-ray disc's own video is already MVC — that's what 3D Blu-ray video actually is — so this combination already had a real answer (the same "Lossless 3D Blu-ray ISO" option as the "lossless disc copy" choice, no re-encode), it just wasn't wired up yet. Fixed.
+
+## Update — September 25, 2026 (8)
 
 **Reversed: "Hold Steady Per Scene" no longer requires Scene Detection to be turned on.** An earlier update this same day blocked this combination, believing it silently did nothing without Scene Detection. Real, direct pushback and a closer look at the actual code proved that framing wrong: without Scene Detection, this setting doesn't do nothing — it settles once, then keeps gently drifting the whole rest of the movie without ever snapping to a new value. With Scene Detection, it deliberately snaps to a fresh value at every detected cut instead. Both are real, legitimate looks, not one broken and one working — and the no-snap version can genuinely look smoother, especially paired with a large Flicker Reduction Buffer (which Scene Detection resets at every cut, working against a large Buffer's whole purpose). The block is gone; both combinations work again, and the tooltip now explains both real behaviors honestly instead of only describing one as correct.
 

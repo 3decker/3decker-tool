@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 25, 2026 (4)
+## Latest Update — September 25, 2026 (5)
+
+**New: "Write a Log File for This Job" now also records the real command line for the job, not just the settings list.** Requested directly: a way to see "what would be in a CLI" for a finished job, written into the log as a readable record — not an interactive command line, just a copy of the equivalent command. The log now includes a real "Command:" line right after the Settings: list, built from the exact same code already behind the "Copy Command" button, so the two can never disagree with each other.
+
+## Update — September 25, 2026 (4)
 
 **Fixed: subtitles positioned for real 3D viewing came out duplicated and overlapping on a real Blu-ray/MVC disc.** If a movie went through "Restore Audio & Subtitles" with Dual-Eye Subtitles turned on, then was later turned into a real 3D Blu-ray disc with "SBS to 3D Blu-ray MVC," the subtitles could show up doubled — the same line appearing twice, stacked on top of itself. Root cause: real Blu-ray discs can only hold picture-based subtitles, so text subtitles always get converted for that step — but that conversion was silently throwing away the special positioning (one copy for each eye) that Dual-Eye Subtitles adds, leaving two identical, unpositioned copies of every line behind. Fixed to properly collapse those back into one clean line before the disc-legal conversion happens — which is also the technically correct behavior, since a real 3D Blu-ray disc plays each eye as its own full picture and has no use for that packed-frame trick to begin with; every normal 3D movie's subtitles are just one flat track shown the same to both eyes. Movies without Dual-Eye Subtitles are completely unaffected.
 

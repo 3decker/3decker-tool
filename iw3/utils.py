@@ -2605,6 +2605,76 @@ def read_source_comment_metadata(input_path):
         return None
 
 
+def build_cli_command_from_args(args):
+    """ADR-272: reconstructs a real, ready-to-copy-paste 'python -m iw3 ...' command
+    line from a real args Namespace, diffing every field against create_parser()'s
+    own pure defaults and emitting only what differs from default -- the exact
+    algorithm iw3.gui's own "Copy Command" button (get_cli_command()) already used,
+    pulled out here so the job log (run_iw3_main_with_job_log()) can write the same
+    real command line into the log too, not just the settings key=value list
+    ADR-268 already added. Real user request, via decker: "a file that maybe
+    writes out what would be in a CLI as it ran the job" -- not an interactive
+    CLI, just a readable record of the equivalent command line.
+
+    Requires a real, fully-populated args object (every field create_parser()'s own
+    defaults have) -- raises AttributeError immediately on the first missing field
+    rather than silently emitting a wrong/garbled command line for a partial args
+    object. Callers with a possibly-partial args object should catch their own
+    exceptions, same convention as _build_iw3_comment_metadata()."""
+    from subprocess import list2cmdline
+    import argparse as _argparse
+
+    default_parser = create_parser(required_true=False)
+    # Explicit empty arg list, not the implicit sys.argv[1:] default -- this must
+    # always resolve to the parser's own pure defaults regardless of how this
+    # process itself was actually launched (see get_cli_command()'s own ADR-109
+    # note on why this matters under --self-test).
+    default_args = vars(default_parser.parse_args([]))
+
+    argv = []
+    yes = False
+    for name in default_args.keys():
+        if not hasattr(args, name):
+            raise AttributeError(f"args is missing '{name}' -- not a real, fully-parsed args object")
+        action = next(a for a in default_parser._actions if a.dest == name)
+        a = getattr(args, name)
+        b = default_args.get(name)
+        if name == "input":
+            flag = "-i"
+        elif name == "output":
+            flag = "-o"
+        else:
+            flag = "--" + name.replace("_", "-")
+        if flag == "--yes":
+            yes = True
+            continue
+
+        if isinstance(action, _argparse._StoreTrueAction):
+            if a:
+                argv.append(flag)
+            continue
+        if isinstance(action, _argparse._StoreFalseAction):
+            if not a:
+                argv.append(flag)
+            continue
+
+        if a == b:
+            continue
+
+        if isinstance(a, (list, tuple)):
+            argv.append(flag)
+            for item in a:
+                argv.append(item)
+        else:
+            argv.append(flag)
+            argv.append(a)
+
+    if yes:
+        argv.append("--yes")
+
+    return list2cmdline(["python", "-m", "iw3"] + [str(v) for v in argv])
+
+
 def _build_iw3_comment_metadata(args, video=True):
     """Builds the iw3_* embedded COMMENT metadata string, mirroring make_output_filename's
     own tags (same fields, same conditions) so renaming a file never loses the settings
@@ -7673,6 +7743,19 @@ def run_iw3_main_with_job_log(args):
         log_file.write("Settings:\n")
         for token in settings.split():
             log_file.write(f"  {token}\n")
+    # ADR-272: real user request, via decker -- not an interactive CLI, just a
+    # readable record of "what would be in a CLI as it ran the job". Reuses the
+    # exact same reconstruction iw3.gui's own "Copy Command" button already uses
+    # (build_cli_command_from_args()) so this can never format a setting
+    # differently than that button would. Same defensive try/except convention as
+    # the Settings: block above -- a caller with a partial/minimal args object
+    # (e.g. some existing tests) just gets this line silently omitted.
+    try:
+        command = build_cli_command_from_args(args)
+    except Exception:
+        command = None
+    if command:
+        log_file.write(f"Command:\n  {command}\n")
     log_file.write("\n")
     log_file.flush()
     orig_stdout, orig_stderr = sys.stdout, sys.stderr

@@ -22,7 +22,7 @@ import torch
 from .utils import (
     create_parser, set_state_args, iw3_main, run_iw3_main_with_job_log,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
-    _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram,
+    _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram, build_cli_command_from_args,
     STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
     STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
     STAGE_RESTORE_AV,
@@ -10624,64 +10624,15 @@ class MainFrame(wx.Frame):
             self.cbo_pad.Enable()
 
     def get_cli_command(self):
-        from subprocess import list2cmdline
-        import argparse
-
+        # ADR-272: the actual diffing/formatting logic now lives in
+        # build_cli_command_from_args() (iw3/utils.py), shared with the job log's
+        # own real command-line record -- this stays a thin wrapper so the GUI's
+        # "Copy Command" button and the job log can never format a setting
+        # differently from each other.
         gui_args = self.parse_args(skip_set_state=True)
         if gui_args is None:
             return None
-        default_parser = create_parser(required_true=False)
-        # Explicit empty arg list, not the implicit sys.argv[1:] default -- this must
-        # always resolve to the parser's own pure defaults regardless of how this
-        # process itself was actually launched. A real launch (pythonw -m iw3.gui,
-        # no extra args) never exposed this, but running under `--self-test` does:
-        # that flag is real process argv this parser doesn't recognize, causing a
-        # genuine argparse SystemExit(2) -- found via the self-test harness fix that
-        # stopped swallowing it (ADR-109).
-        default_args = default_parser.parse_args([])
-        gui_args = vars(gui_args)
-        default_args = vars(default_args)
-
-        argv = []
-        yes = False
-        for name in default_args.keys():
-            action = next(a for a in default_parser._actions if a.dest == name)
-            a = gui_args.get(name)
-            b = default_args.get(name)
-            if name == "input":
-                name = "-i"
-            elif name == "output":
-                name = "-o"
-            else:
-                name = "--" + name.replace("_", "-")
-            if name == "--yes":
-                yes = True
-                continue
-
-            if isinstance(action, argparse._StoreTrueAction):
-                if a:
-                    argv.append(name)
-                continue
-            if isinstance(action, argparse._StoreFalseAction):
-                if not a:
-                    argv.append(name)
-                continue
-
-            if a == b:
-                continue
-
-            if isinstance(a, (list, tuple)):
-                argv.append(name)
-                for item in a:
-                    argv.append(item)
-            else:
-                argv.append(name)
-                argv.append(a)
-
-        if yes:
-            argv.append("--yes")
-
-        return list2cmdline(["python", "-m", "iw3"] + [str(v) for v in argv])
+        return build_cli_command_from_args(gui_args)
 
     def on_click_btn_copy_command(self, event):
         command = self.get_cli_command()
@@ -21582,8 +21533,20 @@ def _self_test_run_iw3_main_with_job_log():
         assert "iw3_depth_model=Any_V3_Small" in content, content
         assert "iw3_method=" in content and "iw3_divergence=" in content, content
 
-        # A minimal/partial args object (missing most fields _build_iw3_comment_metadata()
-        # expects) must never break the job itself -- the settings block is just omitted.
+        # ADR-272: real user request, via decker -- "a file that maybe writes out
+        # what would be in a CLI as it ran the job." A real, fully-populated args
+        # object must also produce a "Command:" line with the real reconstructed
+        # CLI -- the non-default depth model must show up as a real flag, and
+        # anything left at its default must NOT appear (same diff-against-defaults
+        # behavior as the GUI's own "Copy Command" button, which shares this exact
+        # function now).
+        assert "Command:" in content, content
+        assert "--depth-model Any_V3_Small" in content, content
+        assert "-i source.mkv" in content and f"-o {output_path}" in content, content
+
+        # A minimal/partial args object (missing most fields _build_iw3_comment_metadata()/
+        # build_cli_command_from_args() expect) must never break the job itself --
+        # both the settings block and the Command: line are just omitted.
         with patch.object(U, "iw3_main", fake_iw3_main):
             U.run_iw3_main_with_job_log(args)  # the bare SimpleNamespace from above
         with open(log_path, encoding="utf-8") as f:

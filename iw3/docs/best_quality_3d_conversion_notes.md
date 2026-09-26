@@ -2692,3 +2692,85 @@ different artifact risk.
 | A landscape/wide shot feels flat | Background Divergence, or negative Foreground Scale | Raising Auto Range Min (risks miniaturization on every wide shot, 15.4) |
 | A close-up face/hand reads flat/cardboard | Positive Foreground Scale | Raising Auto Range Max (real confirmed halo risk past ~`5.5` on dark/fine-detail subjects, 15.3) |
 | A close-up looks artifacted/haloed | Lower Auto Range Max | Raising resolution or Depth Refine -- both already ruled out as fixes for this exact problem (15.3) |
+
+### 15.7 Outside research — real stereography/cinematography sources (2026-09-26)
+
+15.1-15.6 above were derived from this project's own code and prior testing.
+This subsection is deliberately independent of that -- real outside sources
+(stereography community, cinematography guides, and the actual upstream
+project this tool forks from), checked to see whether they agree or
+contradict what the code already does. Short answer: they agree, and in a
+couple of places are even more conservative than this project already is.
+
+**Comfort/depth-budget limits** (International Stereoscopic Union, "The
+Three Golden Rules of Stereo (3D) Photography," [isu3d.org/goldenrules](https://isu3d.org/goldenrules/)):
+- Max parallax deviation shouldn't exceed **1/30 of the image width** for
+  normal viewing.
+- Elements popping out toward the viewer (close-up/foreground pop territory)
+  get extra room specifically for that -- up to **1/50 of image width** --
+  not a flat increase applied everywhere.
+- Big cinema screens actually get **tighter**, not looser: **1/40 of image
+  width** -- the same disparity reads as more on a bigger screen.
+- Background separation should stay close to real human eye separation
+  (**65-70mm**), loosening only slowly (~10mm per extra meter of projection
+  distance) as the image gets larger/farther.
+
+**Close-ups specifically** (DPReview 3D/Stereo Photography forum thread,
+[dpreview.com/forums/thread/4387345](https://www.dpreview.com/forums/thread/4387345);
+dvinfo.net, ["A Beginner's Guide to Shooting Stereoscopic 3D"](https://www.dvinfo.net/article/acquisition/stereoscopic/a-beginners-guide-to-shooting-stereoscopic-3d.html)):
+- The simple "1/30 rule" (interaxial = distance-to-subject ÷ 30) **breaks
+  down under about 1 meter** -- real close-up work needs a different formula
+  (the "Davis modified Bercovitz formula"), not a scaled-down version of the
+  wide-shot rule. Real, independent confirmation that close-ups are a
+  genuinely different regime, not just "the wide-shot rule with a smaller
+  number."
+- A real, specific trap named directly: shooting a close-up with a long lens
+  on a simple side-by-side rig gives **"bad roundness"** -- i.e. the wrong
+  lens/rig combination for close work makes the subject *flatter*, not
+  rounder, even with plenty of raw separation. Parallel to 15.5's point that
+  close-up roundness isn't purely a "how much separation" question.
+
+**Wide/landscape shots** (same DPReview thread):
+- Professional feature films use a noticeably **more conservative** ratio
+  for wide cinema work than the basic 1/30 rule suggests -- **1/60, 1/100,
+  or higher** for the big screen, not a stronger push. The opposite
+  direction from "crank it up for landscapes."
+- The consistent theme across every source checked: **interaxial/divergence
+  should vary shot to shot, not stay fixed for a whole film** -- "fixing
+  interaxial distance is hugely restrictive." A real, independent
+  confirmation (found with zero reference to this project's own code) of
+  the same idea Auto 3D Strength already automates (15.1).
+
+**Upstream `nunif` itself** -- the literal base project this fork is built
+on, its own README ([github.com/nagadomi/nunif/blob/master/iw3/README.md](https://github.com/nagadomi/nunif/blob/master/iw3/README.md)):
+- Default Divergence: **`2.0`** -- matches this project's own "restrained"
+  band (Section 5) almost exactly.
+- Trained/safe range: **`0.0`-`5.0`** for the default method (`row_flow_v3`),
+  **`0.0`-`10.0`** for the `mlbw_l2`/`mlbw_l4` methods.
+- Direct quote: **"with higher value, artifacts are more visible."**
+  Independent confirmation, from this tool's own original author, of exactly
+  the real halo problem found on 2026-09-26 (15.3).
+- Their own published recipe for a flat/close subject:
+  `--divergence 4 --convergence 0 --foreground-scale 3` -- raising Divergence
+  *and* Foreground Scale together, not Divergence alone. Lines up with 15.5's
+  recommendation to reach for Foreground Scale for close-up roundness rather
+  than pushing Divergence by itself.
+
+**A commercial AI conversion tool explaining the same physics to its own
+users** (Owl3D, ["Best AI 2D to 3D Video Converters"](https://www.owl3d.com/blog/the-best-ai-2d-to-3d-video-converters-2026)):
+- "A person's face close to camera shifts significantly, while mountains in
+  the background barely shift at all" -- the identical close-up-vs-landscape
+  asymmetry nt_auto3d's own docstring describes (15.1), arrived at
+  completely independently by a different product.
+
+**Conclusion:** nothing in real outside stereography/cinematography sources
+contradicts what this project's own code already does -- if anything, the
+outside sources are *more* conservative about wide/landscape shots (weaker
+push for cinema screens, not stronger) than a naive reading of "landscapes
+need more depth" would suggest, which directly backs up 15.4's
+miniaturization-trap warning against raising Auto Range Min. The one
+genuinely new, actionable idea from outside research: nunif's own published
+`--foreground-scale 3` pairing with a raised Divergence for flat/close
+subjects is a real, author-endorsed recipe worth testing directly against
+this project's existing "positive Foreground Scale alone" recommendation
+(15.5) on a real close-up shot.

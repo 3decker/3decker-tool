@@ -427,9 +427,22 @@ def _process_video(
                                 continue  # depth model warmed up, don't encode this frame
                             reformatted_frame = output_reformatter(new_frame)
                             if raw_sink_mode:
+                                # ADR-283 follow-up: a live test found this producing a visibly
+                                # wrong-colored file even with correct color tags -- root cause was
+                                # here, not the tags: config.pix_fmt is the CONFIGURED target
+                                # ("yuv420p"), but the frame's own REAL format on a CUDA/hwaccel
+                                # pipeline is often "nv12" (one Y plane + one INTERLEAVED UV plane,
+                                # a completely different byte layout from planar YUV420P's separate
+                                # U-then-V planes) -- .encode() converts this correctly internally,
+                                # .to_ndarray() does not, so telling ffmpeg the wrong pix_fmt made it
+                                # misinterpret every frame's real bytes. Always use the frame's own
+                                # actual format, never the merely-configured one.
                                 config.raw_frame_sink(
                                     reformatted_frame.to_ndarray().tobytes(),
-                                    reformatted_frame.width, reformatted_frame.height, config.pix_fmt,
+                                    reformatted_frame.width, reformatted_frame.height,
+                                    reformatted_frame.format.name,
+                                    int(reformatted_frame.colorspace), int(reformatted_frame.color_primaries),
+                                    int(reformatted_frame.color_trc), int(reformatted_frame.color_range),
                                 )
                             else:
                                 if uninitialized:
@@ -477,7 +490,10 @@ def _process_video(
                 ref_frame = output_reformatter(new_frame)
                 if raw_sink_mode:
                     config.raw_frame_sink(
-                        ref_frame.to_ndarray().tobytes(), ref_frame.width, ref_frame.height, config.pix_fmt,
+                        ref_frame.to_ndarray().tobytes(), ref_frame.width, ref_frame.height,
+                        ref_frame.format.name,
+                        int(ref_frame.colorspace), int(ref_frame.color_primaries),
+                        int(ref_frame.color_trc), int(ref_frame.color_range),
                     )
                 else:
                     if uninitialized:
@@ -496,7 +512,10 @@ def _process_video(
             ref_frame = output_reformatter(new_frame)
             if raw_sink_mode:
                 config.raw_frame_sink(
-                    ref_frame.to_ndarray().tobytes(), ref_frame.width, ref_frame.height, config.pix_fmt,
+                    ref_frame.to_ndarray().tobytes(), ref_frame.width, ref_frame.height,
+                    ref_frame.format.name,
+                    int(ref_frame.colorspace), int(ref_frame.color_primaries),
+                    int(ref_frame.color_trc), int(ref_frame.color_range),
                 )
             else:
                 if uninitialized:

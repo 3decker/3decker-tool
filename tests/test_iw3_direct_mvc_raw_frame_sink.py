@@ -18,6 +18,16 @@ Synthetic/isolated: a tiny real 4-frame clip is built with PyAV (libx264, no GPU
 and fed through the real, unmocked `_process_video()` -- only the frame source is
 synthetic, matching how this project's own hwaccel/color-transform tests are built.
 
+Real known coverage gap, found the hard way: this test runs on `device="cpu"`, where
+frames really do come out as `yuv420p`. It would NOT have caught the real live-test bug
+this feature shipped with -- on a CUDA/hwaccel pipeline, `output_reformatter`'s frames
+are frequently `nv12` (interleaved UV) instead, and the first version of this feature
+declared the CONFIGURED pix_fmt ("yuv420p") instead of the frame's own REAL one,
+silently feeding a raw-video reader the wrong byte layout. Confirmed pixel-identical to
+the existing two-stage MVC path only after fixing that (`reformatted_frame.format.name`,
+not `config.pix_fmt`) in a real GPU run against real footage -- no synthetic CPU-only
+test alone would have surfaced this; treat this file as necessary, not sufficient.
+
 Run directly: python tests/test_iw3_direct_mvc_raw_frame_sink.py (from the nunif/ dir),
 or import and call main().
 """
@@ -59,8 +69,8 @@ def _test_raw_frame_sink_receives_ordered_frames_and_writes_no_file():
 
         calls = []
 
-        def fake_sink(raw_bytes, width, height, pix_fmt):
-            calls.append((raw_bytes, width, height, pix_fmt))
+        def fake_sink(raw_bytes, width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range):
+            calls.append((raw_bytes, width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range))
 
         def config_callback(metadata):
             return VideoOutputConfig(fps=FPS, pix_fmt="yuv420p", raw_frame_sink=fake_sink)
@@ -74,10 +84,17 @@ def _test_raw_frame_sink_receives_ordered_frames_and_writes_no_file():
 
         assert len(calls) == NUM_FRAMES, f"expected {NUM_FRAMES} sink calls, got {len(calls)}"
         expected_len = WIDTH * HEIGHT * 3 // 2  # yuv420p: Y + U/4 + V/4
-        for raw_bytes, width, height, pix_fmt in calls:
+        for raw_bytes, width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range in calls:
             assert width == WIDTH and height == HEIGHT, f"unexpected frame size {width}x{height}"
             assert pix_fmt == "yuv420p", f"unexpected pix_fmt {pix_fmt!r}"
             assert len(raw_bytes) == expected_len, f"expected {expected_len} raw bytes, got {len(raw_bytes)}"
+            # Real live-test regression check (ADR-283 follow-up): raw video carries
+            # no embedded color metadata on its own -- these must be real, non-null
+            # ints (not e.g. all zeros/None), or a downstream decoder has nothing to
+            # go on and guesses wrong, producing a visibly wrong-colored file.
+            for name, value in (("colorspace", colorspace), ("color_primaries", color_primaries),
+                                ("color_trc", color_trc), ("color_range", color_range)):
+                assert isinstance(value, int) and value > 0, f"{name} must be a real, non-zero int, got {value!r}"
 
         # Frames were encoded with strictly increasing mean luma (0, 30, 60, 90) -- the
         # Y plane's mean byte value must come back out in that same order, proving the

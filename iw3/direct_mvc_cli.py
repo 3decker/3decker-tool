@@ -100,11 +100,11 @@ class _DirectMvcPipe:
         self._reader = None
         self.frame_count = 0
 
-    def write(self, raw_bytes, width, height, pix_fmt):
+    def write(self, raw_bytes, width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range):
         if self._stop_event is not None and self._stop_event.is_set():
             raise Cancelled()
         if self.ff is None:
-            self._start(width, height, pix_fmt)
+            self._start(width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range)
         try:
             self.ff.stdin.write(raw_bytes)
         except (BrokenPipeError, OSError) as e:
@@ -113,15 +113,24 @@ class _DirectMvcPipe:
                 f"(FRIMEncode likely crashed or refused): {e}") from e
         self.frame_count += 1
 
-    def _start(self, width, height, pix_fmt):
+    def _start(self, width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range):
         # Same ffmpeg eye-split/scale chain sbs_to_mvc_cli.convert() already uses
         # (eye_filter() -> "-pix_fmt yuv420p ... -f rawvideo -" into FRIM), except
         # this leg's OWN input is a headerless raw pipe (not a real file with its own
         # container), so it needs explicit -f rawvideo/-pix_fmt/-s/-r on the input
         # side too, unlike convert()'s "-i <real file>".
+        # Real live-test finding: raw video (-f rawvideo) carries NO embedded color
+        # metadata at all -- without these 4 flags telling ffmpeg how to interpret the
+        # incoming YCbCr bytes, it guesses wrong, producing a visibly desaturated/
+        # wrong-colored file (confirmed side-by-side against the same clip run through
+        # the normal two-stage path with identical settings). The values are the real,
+        # per-frame ones processor.py's output_reformatter already computed -- same
+        # PyAV enum ints ffmpeg's own AVOption parser accepts directly.
         vf = eye_filter(self._layout, width, height, None)
         ff_cmd = [self._ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
                   "-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", f"{width}x{height}", "-r", self._fps_frac,
+                  "-colorspace", str(colorspace), "-color_primaries", str(color_primaries),
+                  "-color_trc", str(color_trc), "-color_range", str(color_range),
                   "-i", "-", "-an", "-sn", "-vf", vf, "-pix_fmt", "yuv420p",
                   "-r", self._fps_frac, "-f", "rawvideo", "-"]
         target = int(self._bitrate_mbps * 1000)
@@ -400,10 +409,12 @@ def _self_test_mocked_end_to_end():
     import tempfile
     from unittest import mock
 
+    # colorspace/color_primaries/color_trc/color_range: real BT.709 tv-range values
+    # (1, 1, 1, 1), matching what output_reformatter actually produces for SDR yuv420p.
     frames = [
-        (bytes([10]) * 100, 64, 32, "yuv420p"),
-        (bytes([20]) * 100, 64, 32, "yuv420p"),
-        (bytes([30]) * 100, 64, 32, "yuv420p"),
+        (bytes([10]) * 100, 64, 32, "yuv420p", 1, 1, 1, 1),
+        (bytes([20]) * 100, 64, 32, "yuv420p", 1, 1, 1, 1),
+        (bytes([30]) * 100, 64, 32, "yuv420p", 1, 1, 1, 1),
     ]
     written_to_ffmpeg_stdin = []
 
@@ -439,7 +450,10 @@ def _self_test_mocked_end_to_end():
         def kill(self):
             pass
 
+    popen_cmds = []
+
     def fake_popen(cmd, **kwargs):
+        popen_cmds.append(cmd)
         proc = _FakeProc(cmd)
         if "-o:mvc" in cmd:
             base_es, dep_es = cmd[cmd.index("-o:mvc") + 1], cmd[cmd.index("-o:mvc") + 2]
@@ -450,8 +464,8 @@ def _self_test_mocked_end_to_end():
         return proc
 
     def fake_process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
-        for raw_bytes, width, height, pix_fmt in frames:
-            raw_frame_sink(raw_bytes, width, height, pix_fmt)
+        for frame_args in frames:
+            raw_frame_sink(*frame_args)
         return output_path
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -471,6 +485,15 @@ def _self_test_mocked_end_to_end():
         assert len(written_to_ffmpeg_stdin) == len(frames), \
             f"expected {len(frames)} writes to the ffmpeg pipe, got {len(written_to_ffmpeg_stdin)}"
         assert written_to_ffmpeg_stdin == [f[0] for f in frames], "frames must reach the pipe in order"
+        # Real live-test regression check: raw video carries no embedded color
+        # metadata, so the ffmpeg leg MUST be told the real colorspace/primaries/
+        # trc/range explicitly, or the output comes out visibly wrong-colored
+        # (confirmed side-by-side against the normal two-stage path).
+        ff_cmd = popen_cmds[0]
+        for flag, expected in (("-colorspace", "1"), ("-color_primaries", "1"),
+                               ("-color_trc", "1"), ("-color_range", "1")):
+            assert flag in ff_cmd, f"ffmpeg command missing {flag}: {ff_cmd}"
+            assert ff_cmd[ff_cmd.index(flag) + 1] == expected, ff_cmd
         # The work dir (and any stray raw/SBS file in it) is cleaned up on success --
         # the real point of this whole feature is that no such intermediate ever lands
         # anywhere durable.

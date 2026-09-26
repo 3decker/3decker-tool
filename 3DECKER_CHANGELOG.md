@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (8)
+## Latest Update — September 26, 2026 (9)
+
+**Fixed: real MVC 3D Blu-ray files weren't telling players they were 3D at all.** A real user reported their TV played a converted MVC file flat/wrong ("like TAB") and that the file itself showed no 3D tag. Checked a Gemini AI suggestion sent in alongside the report against the actual code — most of its guesses didn't hold up, but one real gap was confirmed: the app's MVC files never told the container "this is a stereo 3D video." Fixed by tagging every MVC `.mkv` this app makes with the same real marker (`StereoMode`) that MakeMKV — the standard tool for ripping real 3D Blu-rays — already uses, so compatible players can recognize it properly. Verified the fix is really in the file with a real conversion. Important honesty note: this fixes a real, confirmed gap, but we don't yet know for certain it resolves that specific user's TV issue — some TVs and players simply can't play real dual-track MVC 3D at all, tag or no tag, so we're waiting on them to re-test.
+
+## Update — September 26, 2026 (8)
 
 **Fixed: "Direct to 3D Blu-ray MVC" was producing files with visibly wrong, washed-out color.** Caught immediately by testing on a real short clip before trusting the new feature: the video came out valid and playable, but colors were badly desaturated (autumn leaves showing white instead of orange) compared to the regular two-step MVC tool on the same clip. Root cause: a real, internal format mismatch specific to how this new single-pass mode reads video frames on the GPU — now fixed and confirmed pixel-for-pixel matching against the regular tool on the same source. If you tried "Direct to 3D Blu-ray MVC" before this update and the colors looked off, that's this bug — safe to use now.
 

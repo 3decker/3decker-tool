@@ -283,8 +283,9 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
     if hdr:
         processing_source, hdr_tmp_file = _tonemap_hdr_to_sdr(original_source_path, args)
 
+    swap_eyes = getattr(args, "mvc_swap_eyes", False)
     pipe = _DirectMvcPipe(ffmpeg, frim, layout, fps_frac, bitrate_mbps,
-                          getattr(args, "mvc_swap_eyes", False), base_es, dep_es, ffmpeg_log, stop_event)
+                          swap_eyes, base_es, dep_es, ffmpeg_log, stop_event)
     ok = False
     try:
         try:
@@ -311,7 +312,12 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
             mkvmerge_bin = _find_mkvmerge()
             if mkvmerge_bin is None:
                 raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
+            # ADR-284: same real fix as sbs_to_mvc_cli.py's own .mkv path -- see its
+            # comment for the full real-world research (MakeMKV's own established
+            # StereoMode 13/14 convention for real MVC content).
+            stereo_mode_value = "14" if swap_eyes else "13"
             mux_cmd = [mkvmerge_bin, "-o", output_path, "--default-duration", f"0:{fps_frac}fps",
+                      "--stereo-mode", f"0:{stereo_mode_value}",
                       combined_es] + av_files
             result = subprocess.run(mux_cmd, capture_output=True)
             if result.returncode != 0:

@@ -936,7 +936,20 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
                 raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
             if progress_cb:
                 progress_cb("mux", 0, 100)
+            # ADR-284: real user report -- a real MVC .mkv played back on a real TV, but
+            # wasn't recognized as 3D at all (MediaInfo correctly showed "stereo" for the
+            # video stream itself, but no Matroska-level signal existed for a player to
+            # act on before even trying to decode it). Real-world precedent confirmed via
+            # research: MakeMKV -- the tool that established the practice of ripping real
+            # Blu-ray MVC discs to MKV -- uses exactly StereoMode 13 (both eyes, left eye
+            # first) / 14 (right eye first) for this, there being no dedicated Matroska
+            # enum value for "H.264 MVC" specifically. eye_filter()'s own crop order
+            # (left half cropped first, becoming FRIM's base/first view) makes the base
+            # view the left eye unless swap_eyes flips it -- matches this project's own
+            # already-established left-eye-first convention.
+            stereo_mode_value = "14" if swap_eyes else "13"
             mux_cmd = [mkvmerge_bin, "-o", output_iso, "--default-duration", f"0:{fps_frac}fps",
+                      "--stereo-mode", f"0:{stereo_mode_value}",
                       combined_es] + av_files
             mux = subprocess.Popen(mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             procs.append(mux)

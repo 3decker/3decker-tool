@@ -8701,30 +8701,72 @@ class MainFrame(wx.Frame):
         wx.CallAfter(scroller.Scroll, *view_start)  # see on_toggled_stereo_collapsible_pane's comment
         event.Skip()
 
-    # ADR-274: (have, want) -> a route describing where "Take Me There" sends the
-    # user. "processor" means the main Processor tab (the 2D-to-3D conversion
+    # ADR-274/277: (have, want) -> a route describing where "Take Me There" sends
+    # the user. "processor" means the main Processor tab (the 2D-to-3D conversion
     # itself, not a Standalone Tool); every other value names a target StaticBox
-    # group in Standalone Tools, with an optional (combobox attr name, client data
-    # value) to pre-select that tool's own output-type dropdown so it already
-    # matches what the user asked for. A combination with no entry here has no
+    # group in Standalone Tools. Tuple shape: (target, pane_name, layout_extra,
+    # checkboxes) -- layout_extra is an optional (combobox attr name, client data
+    # value) to pre-select that tool's own output-type dropdown; checkboxes is an
+    # optional tuple of checkbox attr names to check, for a route that needs more
+    # than just navigating (e.g. HDR straight to a real MVC disc genuinely needs
+    # BOTH "Convert to 3D Blu-ray MVC" and "Convert HDR/DV to SDR first" checked,
+    # not just showing the Processor tab). A combination with no entry here has no
     # single matching tool in this project (see on_click_btn_quick_convert_go).
     _QUICK_CONVERT_ROUTES = {
-        ("flat2d", "3d_video"): ("processor", None, None),
-        ("3d_video", "mvc"): ("grp_sbs2mvc", "cpn_sbs2mvc", None),
-        ("disc", "3d_video"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "full_sbs")),
+        ("flat2d", "3d_video"): ("processor", None, None, None),
+        # ADR-277: real gap -- the main 2D-to-3D pipeline already extracts and
+        # re-injects Dolby Vision RPU / HDR10(+) metadata natively (this project's
+        # own core HDR handling, not an opt-in checkbox) -- an HDR/DV source goes
+        # to 3D exactly the same way a plain SDR one does, same tab, same target.
+        ("hdr", "3d_video"): ("processor", None, None, None),
+        ("3d_video", "mvc"): ("grp_sbs2mvc", "cpn_sbs2mvc", None, None),
+        # ADR-277: real gap -- "Convert HDR/DV to SDR" (grp_hdr_to_sdr) is a plain
+        # ffmpeg tone-map filter with zero awareness of what's spatially IN the
+        # frame (confirmed by reading tonemap_hdr_to_sdr() directly) -- it treats a
+        # packed SBS/TB frame exactly like a plain 2D one, uniformly, so it tone-maps
+        # an HDR 3D video down to SDR while perfectly preserving the stereo packing.
+        ("3d_video", "sdr"): ("grp_hdr_to_sdr", "cpn_hdr_to_sdr", None, None),
+        ("disc", "3d_video"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "full_sbs"), None),
         # ADR-276: real gap found live by decker -- a real disc/ISO's own video IS
         # already MVC (that's what a genuine 3D Blu-ray disc's video stream is), so
         # "disc -> a real 3D Blu-ray disc (MVC)" is a real, valid combination this
         # project already has (3D Blu-ray Import's own "Lossless 3D Blu-ray ISO"
         # layout, no re-encode) -- missed when the routes table was first built.
-        ("disc", "mvc"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso")),
-        ("disc", "lossless_copy"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso")),
-        ("hdr", "sdr"): ("grp_hdr_to_sdr", "cpn_hdr_to_sdr", None),
+        ("disc", "mvc"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso"), None),
+        ("disc", "lossless_copy"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso"), None),
+        ("hdr", "sdr"): ("grp_hdr_to_sdr", "cpn_hdr_to_sdr", None, None),
+        # ADR-277: real gap -- HDR/DV straight to a real MVC disc IS a real, single-
+        # screen (Processor tab) workflow, just needs two checkboxes, not one: MVC
+        # conversion itself, AND its own "Convert HDR/DV to SDR first" sibling,
+        # since a real MVC/Blu-ray file cannot carry HDR/DV at all (same real
+        # limitation an actual disc has -- see chk_convert_to_mvc_hdr_to_sdr's own
+        # tooltip). Both live in the same Post-Processing group on the same tab.
+        ("hdr", "mvc"): ("processor", None, None, ("chk_convert_to_mvc", "chk_convert_to_mvc_hdr_to_sdr")),
+    }
+
+    # ADR-277: a handful of (have, want) combinations aren't "no tool for this" --
+    # they're "you likely don't need to convert anything," which deserves an honest,
+    # specific explanation instead of the generic "no direct match" text below.
+    # Plain, untranslated text here (not T(...)) -- this is a class body, evaluated
+    # at class-definition time, before T() is callable; translated at actual
+    # display time in on_click_btn_quick_convert_go() instead.
+    _QUICK_CONVERT_SPECIAL_MESSAGES = {
+        ("flat2d", "sdr"): (
+            "No Conversion Needed",
+            "An ordinary flat 2D video is virtually always already SDR -- there's nothing to convert "
+            "for this combination.\n\nIf your source is actually HDR or Dolby Vision, pick "
+            "\"An HDR / Dolby Vision video\" for I Have instead, and use \"A regular SDR video\" for "
+            "I Want -- that combination has a real matching tool (Convert HDR/DV to SDR)."),
     }
 
     def on_click_btn_quick_convert_go(self, event):
         have = self.cbo_quick_convert_have.GetClientData(self.cbo_quick_convert_have.GetSelection())
         want = self.cbo_quick_convert_want.GetClientData(self.cbo_quick_convert_want.GetSelection())
+        special = self._QUICK_CONVERT_SPECIAL_MESSAGES.get((have, want))
+        if special is not None:
+            title, message = special
+            wx.MessageBox(T(message), T(title), wx.OK | wx.ICON_INFORMATION)
+            return
         route = self._QUICK_CONVERT_ROUTES.get((have, want))
         if route is None:
             wx.MessageBox(
@@ -8734,28 +8776,42 @@ class MainFrame(wx.Frame):
                   "tool for the rest)."),
                 T("No Direct Match"), wx.OK | wx.ICON_INFORMATION)
             return
-        target_name, pane_name, layout_extra = route
+        target_name, pane_name, layout_extra, checkboxes = route
         if target_name == "processor":
-            self._quick_convert_navigate(self.tab_processor)
+            self._quick_convert_navigate(self.tab_processor, checkboxes=checkboxes)
         else:
-            self._quick_convert_navigate(self.tab_tools, getattr(self, target_name), pane_name, layout_extra)
+            self._quick_convert_navigate(self.tab_tools, getattr(self, target_name), pane_name, layout_extra,
+                                         checkboxes=checkboxes)
 
-    def _quick_convert_navigate(self, target_tab_panel, target_group=None, pane_name=None, layout_extra=None):
+    def _quick_convert_navigate(self, target_tab_panel, target_group=None, pane_name=None, layout_extra=None,
+                                checkboxes=None):
         """Switches to whichever tab/page holds target_tab_panel (a no-op if it's
         already showing), pre-selects an output-type dropdown if layout_extra names
-        one, expands target_group's own Settings pane if it's currently collapsed
-        (reusing the exact same reflow sequence
-        on_toggled_standalone_tools_collapsible_pane already uses for a real user
-        click, just called directly instead of through a real wx event -- so this
-        can never drift from what that already-proven path does), then scrolls
-        target_group into view. Never runs anything -- the user still picks their
-        own file and presses Run on the destination tool itself."""
+        one, checks any checkbox named in checkboxes (replicating
+        on_changed_chk_convert_to_mvc's own Stereo Format compatibility fix inline
+        for chk_convert_to_mvc specifically, since setting a checkbox's value in
+        code never fires its real EVT_CHECKBOX handler), expands target_group's own
+        Settings pane if it's currently collapsed (reusing the exact same reflow
+        sequence on_toggled_standalone_tools_collapsible_pane already uses for a
+        real user click, just called directly instead of through a real wx event --
+        so this can never drift from what that already-proven path does), then
+        scrolls target_group into view. Never runs anything -- the user still picks
+        their own file and presses Run/Start on the destination tool itself."""
         if self.layout_mode == LAYOUT_MODE_TABS:
             for i in range(self.nb_options.GetPageCount()):
                 page = self.nb_options.GetPage(i)
                 if target_tab_panel in page.GetChildren():
                     self.nb_options.SetSelection(i)
                     break
+
+        if checkboxes is not None:
+            for name in checkboxes:
+                getattr(self, name).SetValue(True)
+            if "chk_convert_to_mvc" in checkboxes:
+                mvc_compatible = ("Full SBS", "Half SBS", "Full TB", "Half TB")
+                if self.cbo_stereo_format.GetValue() not in mvc_compatible:
+                    self.cbo_stereo_format.SetStringSelection("Full SBS")
+                    self.on_selected_index_changed_cbo_stereo_format(None)
 
         if layout_extra is not None:
             cbo_name, data_value = layout_extra
@@ -20161,13 +20217,62 @@ def _self_test_quick_convert_panel():
         assert frame.nb_options.GetSelection() == tools_tab_index()
         assert not frame.cpn_hdr_to_sdr.IsCollapsed()
 
-        # An unmapped combination (e.g. flat2d -> sdr) must show a plain message,
-        # never silently do nothing and never guess at the closest tool.
+        # ADR-277: hdr -> 3d_video -- the main pipeline handles HDR/DV sources
+        # natively (RPU/HDR10+ extract+reinject), same target as flat2d->3d_video.
+        frame.nb_options.SetSelection(0)
+        pick("hdr", "3d_video")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.nb_options.GetSelection() == processor_tab_index(), \
+            "hdr->3d_video must land on the Processor tab, same as flat2d->3d_video"
+
+        # ADR-277: 3d_video -> sdr -- Convert HDR/DV to SDR is format-agnostic (a
+        # plain per-pixel tone-map filter), so it applies to an HDR 3D video too.
+        frame.nb_options.SetSelection(0)
+        frame.cpn_hdr_to_sdr.Collapse(True)
+        pick("3d_video", "sdr")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.nb_options.GetSelection() == tools_tab_index()
+        assert not frame.cpn_hdr_to_sdr.IsCollapsed()
+
+        # ADR-277: hdr -> mvc -- a real, single-screen (Processor tab) workflow that
+        # needs TWO checkboxes checked, not just navigation: MVC conversion itself,
+        # and its own "Convert HDR/DV to SDR first" sibling (a real MVC/disc file
+        # cannot carry HDR at all). Also exercises the Stereo Format compatibility
+        # fix (mirrors on_changed_chk_convert_to_mvc's own real behavior) when an
+        # MVC-incompatible format was previously selected.
+        frame.nb_options.SetSelection(0)
+        frame.chk_convert_to_mvc.SetValue(False)
+        frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
+        frame.cbo_stereo_format.SetStringSelection("Debug Depth")
+        pick("hdr", "mvc")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.nb_options.GetSelection() == processor_tab_index()
+        assert frame.chk_convert_to_mvc.GetValue(), "must check Convert to 3D Blu-ray MVC"
+        assert frame.chk_convert_to_mvc_hdr_to_sdr.GetValue(), "must check Convert HDR/DV to SDR first"
+        assert frame.cbo_stereo_format.GetValue() == "Full SBS", \
+            "an MVC-incompatible Stereo Format must be corrected, same as a real user checking the box"
+
+        # ADR-277: flat2d -> sdr is a real "no conversion needed" case, not a "no
+        # matching tool" one -- must show ITS OWN specific message, not the generic
+        # "no direct match" text, and must not navigate anywhere either way.
         frame.nb_options.SetSelection(0)
         pick("flat2d", "sdr")
         with patch.object(wx, "MessageBox") as mock_box:
             frame.on_click_btn_quick_convert_go(None)
             mock_box.assert_called_once()
+            title = mock_box.call_args[0][1]
+            assert title == "No Conversion Needed", title
+        assert frame.nb_options.GetSelection() == 0, "the special-message case must not navigate anywhere"
+
+        # A genuinely unmapped combination (no tool for this at all) must show the
+        # separate, generic "no direct match" message instead.
+        frame.nb_options.SetSelection(0)
+        pick("flat2d", "mvc")
+        with patch.object(wx, "MessageBox") as mock_box:
+            frame.on_click_btn_quick_convert_go(None)
+            mock_box.assert_called_once()
+            title = mock_box.call_args[0][1]
+            assert title == "No Direct Match", title
         assert frame.nb_options.GetSelection() == 0, "an unmapped combination must not navigate anywhere"
     finally:
         if frame is not None:

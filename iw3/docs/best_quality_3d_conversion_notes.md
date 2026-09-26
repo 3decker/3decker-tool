@@ -2524,3 +2524,171 @@ config's total spread across the whole sweep is tiny regardless (0.08%-
 0.43%), consistent with 11.8/12.7's original "weak lever" finding -- but
 within that narrow band, 3/2 is never meaningfully behind and usually
 exactly at the top. No reason to change it; the earlier caveat is resolved.
+
+---
+
+## 15. Divergence for Close-Ups vs. Landscape/Wide Shots (2026-09-26) — good separation, roundness, and immersion, both ends
+
+Requested directly: "what will be a good divergence value for a 3d movie that
+will provide good separation and roundness... for close ups and for
+landscape shots." Research + documentation task, not a code change.
+
+### 15.1 The real answer: a single fixed Divergence structurally cannot do both well
+
+Grounded in this project's own already-built `nt_auto3d` add-on
+(`nt_auto3d/nt_autostrength/autodiv.py`, "Auto 3D Strength" in the GUI --
+already this project's own active setting for Hocus Pocus, Section
+"Hocus Pocus — user-designated 'best of today'" above), whose own docstring
+states the core problem exactly:
+
+> iw3 normalises every frame's depth to 0..1 before warping, so a mountain
+> range gets exactly the same depth budget as a face filling the frame. A
+> real stereo camera does the opposite: distant scenes have almost no
+> disparity, close-ups a lot. One fixed 3D Strength is therefore always
+> wrong for somebody -- a landscape turns into a miniature diorama at the
+> strength a close-up needs, and a close-up looks flat at the strength a
+> landscape can take.
+
+This isn't a stylistic take, it's the real mechanism: iw3 normalizes each
+frame's own depth map to a 0..1 range regardless of the scene's actual
+physical scale. A close-up face (real depth range: a few centimeters, nose
+to ears) and a wide landscape (real depth range: kilometers) both get
+squashed into that same 0..1 budget, then multiplied by the same Divergence.
+Pick a Divergence strong enough to give a landscape real separation, and a
+close-up run through that same value gets pushed well past its comfortable
+range. Pick a Divergence gentle enough to keep close-ups comfortable, and a
+landscape run through that same low value reads flat and toy-like -- the
+"miniature diorama" effect the docstring names directly.
+
+**Bottom line: the right tool for "good separation and roundness, for
+close-ups AND for landscape shots, in the same movie" is Auto 3D Strength,
+not a bigger fixed Divergence number.** It already exists, is already wired
+into both the CLI (`--auto-divergence`, `--auto-divergence-mode`,
+`--divergence-min`, `--divergence-max`, `--auto-divergence-stability`) and
+the GUI (Stereo group, right under 3D Strength), and it is already this
+project's own real, active choice for Hocus Pocus.
+
+### 15.2 How it actually decides "how close is this shot" (code-verified)
+
+Not guessed from iw3's own depth map -- the per-frame normalization above
+throws the real scale away, and a depth-only estimate (mean depth + a
+ground-plane cue) only ranked 0.59 against 32 hand-labelled test photos, per
+the code's own comments. Instead, a real CLIP vision model (ViT-B/32,
+zero-shot, image half only, ~176MB) scores each frame against six shot-scale
+text prompts ("an extreme wide shot of a vast landscape" ... "a macro
+photo"), averaged over three crops covering the whole frame, into a single
+closeness score from `0` (extreme wide) to `1` (extreme close-up). Measured
+accuracy: `0.945` (mean error `0.074`) on those same 32 hand-labelled photos.
+
+That closeness score feeds a curve (`strength_curve()` in `autodiv.py`):
+
+```
+strength = min + (max - min) * closeness ** gamma
+```
+
+with `gamma` chosen so a **medium shot (closeness `0.5`) lands exactly on
+the plain "3D Strength" value** -- the existing "3D Strength" field becomes
+"what an ordinary shot gets," not a hard cap. Min bounds the widest shots,
+Max bounds the closest, and the curve interpolates every shot in between.
+
+**Real measured examples, straight from the code's own docstring** (Min `2`
+/ Max `16` / typical `6`): wide shot ~`2.8`, medium `6`, close-up ~`11.4`,
+extreme close-up `16`. On a real test video built from public photos:
+skyline `2.4`, aerial view `2.8`, street `2.7`, interior `4.1`, man at a
+stall `5.6`, pumpkins (near macro) `11.7`, flower macro `15.2`.
+
+### 15.3 Recommended values
+
+| Setting | Tool default | This project's own real active value | Recommendation |
+|---|---|---|---|
+| 3D Strength (typical, what a medium shot gets) | -- | `2.8` (Hocus Pocus) | Keep in the `2.0`-`2.8` restrained band (Section 5) -- this is the base every other shot scales from, so an inflated typical value inflates everything else with it |
+| Auto Range Min (widest shots/landscapes) | `2.0` | `2.8` | `2.0`-`3.0`. Do **not** chase "more landscape immersion" by raising this a lot -- see 15.4, this is specifically what keeps a landscape from reading as a miniature diorama |
+| Auto Range Max (extreme close-ups) | `16.0` | `5.5` | **Verify against your riskiest real close-ups (dark background + fine detail, e.g. hands/fingers) before trusting a number above ~`5.5`-`6.0`** -- real, confirmed evidence below |
+| Mode | `hybrid` | `cuts` | `cuts` -- matches this project's own already-confirmed finding that a value held steady within a shot and stepped only at cuts is more comfortable than one that continuously drifts (Section 3, "Why `constant` beat `sod_v1` in practice" -- the identical logic applies here: continuous mid-shot drift, even gentle, is ongoing vergence-tracking work for the eyes that "held until the next cut" avoids) |
+| Stability | `medium` | `low` | `low`-`medium` -- `low` reacts fastest to a shot's real framing, which is the whole point of this feature; step up to `medium` only if strength feels like it's changing too eagerly within otherwise-static shots |
+
+**Real evidence behind the Max `5.5` caution:** a live investigation this
+same day (2026-09-26) on `Any_V3_Metric_Large`/`mlbw_l2_inpaint` at
+Divergence `5.5` -- a hand/fingers close-up shot, dark background -- found a
+real, visible halo/fringe artifact around the hand. Four real candidate
+fixes were tested and ruled out one at a time: Edge Dilation (`2/1` through
+`6/4`, all still showed it), Depth Resolution (`384`/`900`/`1080`, no fix,
+and `1080` additionally corrupted the render with a torn inpainting patch),
+Depth Refine (off/`0.75`/`1.25`/`1.75`, no visible effect despite being a
+confirmed-useful lever for general noise on this exact model), and TTA
+(moved pixels around slightly but the fringe stayed visible). Conclusion:
+likely a genuine per-edge depth-estimation error at that Divergence on that
+kind of subject (fine detail against a dark background), not something any
+of the usual anti-artifact levers fix -- treated as a known limit of this
+model/method combination at high Divergence on close, detailed subjects,
+not something to keep chasing. This is exactly the failure mode Auto Range
+Max controls the ceiling for -- `5.5` is not an arbitrary conservative
+guess, it's the real measured edge of where this specific problem starts.
+
+### 15.4 Why "less for landscapes" is not "less immersive" — the miniaturization trap
+
+It's tempting to read "wide shots get less Divergence" as "landscapes get
+shortchanged," and try to fix that by raising Auto Range Min. **Resist
+that** -- real stereo photography backs up the tool's own default
+direction, but for a specific, counter-intuitive reason.
+
+In real stereo photography, a landscape shot at normal human eye separation
+genuinely has almost no usable parallax past a few hundred meters -- which
+is why real stereographers shooting grand vistas use **hyperstereo** (camera
+pairs spaced *meters* apart, far more than eye separation) specifically to
+manufacture perceptible depth in a scene that would otherwise look flat.
+That might suggest landscapes need *more* divergence, not less.
+
+But that logic applies to a real camera capturing real physical distances
+directly. iw3 doesn't do that -- it normalizes each frame's own depth map to
+`0..1` *first*, regardless of whether that range represents 30cm (a face) or
+3km (a mountain range), and only *then* applies Divergence. A landscape's
+real, already-enormous depth range has *already* been compressed into the
+same budget a close-up gets, before Divergence even runs. Applying a
+close-up-strength Divergence on top of that double-compresses it into
+something that reads as a *toy model* of the landscape, not a deep one --
+the classic tilt-shift miniaturization look. Auto 3D Strength's lower value
+for wide shots isn't reducing immersion; it's the correction that keeps a
+landscape reading as a landscape instead of a diorama.
+
+**If a specific landscape shot still feels flat** after this, the right
+levers are ones this project already built for exactly that, without
+touching the shared Divergence curve at all:
+- **Background Divergence** (`--background-divergence`, GUI "Background
+  Divergence," Section 3) -- a true per-region Divergence override for just
+  the farthest 15% of the depth range, the actual distant background of a
+  landscape shot. Raise it independently of the base curve.
+- **Negative Foreground Scale** (Section 3, "Foreground Scale — verified
+  mechanism") -- redistributes separation toward the background at the cost
+  of the foreground; `-0.5` moderate, `-1.0` stronger. A landscape shot has
+  little meaningful foreground to begin with, so this trade costs almost
+  nothing there.
+
+### 15.5 Close-up "roundness" specifically — it isn't only a Divergence question
+
+Section 4's professional-conversion research already names the real cause of
+a flat-looking close-up: **insufficient internal roundness per object** --
+"a whole character/face on one flat depth plane reads as flat even if
+separated from the background," fixed manually by professional
+stereographers with per-feature depth gradients (nose, cheeks, ears, lips,
+each its own subtle depth), not by cranking the whole scene's push stronger.
+
+The automated equivalent already in this project is **positive Foreground
+Scale** (Section 3): it reshapes the depth curve to stretch apart the *near
+half* of the range specifically -- giving a close-up subject more internal
+separation between its own near and far features (nose vs. ears) -- without
+raising the base Divergence that also governs how far the subject pops out
+and how much edge/halo risk it carries (15.3's real `5.5` finding). `+0.5`
+moderate, `+1.0`-`1.5` stronger. This is the safer tool for "make this face
+read rounder"; raising Divergence itself (or Auto Range Max) is the riskier
+one for "make it pop out more" -- they solve different complaints and carry
+different artifact risk.
+
+### 15.6 Quick reference
+
+| Goal | Right lever | Wrong lever (real risk) |
+|---|---|---|
+| Whole movie handles both close-ups and landscapes well | Auto 3D Strength, `cuts` mode | One fixed Divergence for the whole film |
+| A landscape/wide shot feels flat | Background Divergence, or negative Foreground Scale | Raising Auto Range Min (risks miniaturization on every wide shot, 15.4) |
+| A close-up face/hand reads flat/cardboard | Positive Foreground Scale | Raising Auto Range Max (real confirmed halo risk past ~`5.5` on dark/fine-detail subjects, 15.3) |
+| A close-up looks artifacted/haloed | Lower Auto Range Max | Raising resolution or Depth Refine -- both already ruled out as fixes for this exact problem (15.3) |

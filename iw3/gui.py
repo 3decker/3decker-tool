@@ -6273,6 +6273,40 @@ class MainFrame(wx.Frame):
               "refuses to start if there isn't enough free space."))
         self.btn_sbs2mvc_output = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("..."))
 
+        # ADR-273: real end-user suggestion ("What if you opt to skip the ISO
+        # creation and straight to MVC?") -- the .mkv-direct option (ADR-245)
+        # already existed, but only reachable by knowing to type a ".mkv"
+        # extension into the output field yourself; nothing in the UI presented
+        # it as an actual choice. Mirrors the main tab's own
+        # cbo_mvc_output_type (same two choices, same client data, same
+        # tooltip content) for a consistent choice in both places.
+        self.lbl_sbs2mvc_output_type = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Output Type"))
+        self.cbo_sbs2mvc_output_type = wx.ComboBox(self.cpn_sbs2mvc.GetPane(), name="cbo_sbs2mvc_output_type")
+        self.cbo_sbs2mvc_output_type.SetEditable(False)
+        self.cbo_sbs2mvc_output_type.Append(T("3D Blu-ray ISO"), "iso")
+        self.cbo_sbs2mvc_output_type.Append(T("Plain MKV (direct MVC, no disc)"), "mkv")
+        self.cbo_sbs2mvc_output_type.SetSelection(0)
+        self.cbo_sbs2mvc_output_type.SetToolTip(
+            T("3D Blu-ray ISO: a real disc image with menus/chapters, playable on a 3D Blu-ray player "
+              "or PowerDVD, or burnable to a BD-R. The proven, more widely tested option.\n"
+              "Plain MKV: the same real MVC video written directly into a plain .mkv instead, no disc "
+              "structure -- for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
+              "rips) rather than a disc image (ADR-245).\n"
+              "Real, confirmed benefit either way, even for a homemade AI conversion like this one (not "
+              "just a real studio disc rip): a real end user pointed out, and this project directly "
+              "confirmed by decoding a real MVC file with a completely ordinary player engine, that the "
+              "MVC video plays as ordinary 2D on ANY normal player -- VLC, MPC-HC, a TV's own USB "
+              "player, etc. -- since the base picture is a fully standard, backward-compatible video "
+              "track on its own; the extra 3D data is simply ignored by anything that doesn't "
+              "understand it. That means one MVC file covers both a 2D watch and a real 3D watch (on a "
+              "real MVC-capable player -- Kodi/OSMC/LibreELEC, several Android streaming boxes, some "
+              "hardware 3D Blu-ray/UHD players), instead of keeping separate 2D and 3D copies of the "
+              "same movie.\n"
+              "Neither plays as 3D in VLC, MPC-HC or most everyday TVs -- both still need a real "
+              "MVC-capable player specifically for the 3D side.\n"
+              "Changing this also updates the Output File extension above, if you already have a path "
+              "typed in."))
+
         self.lbl_sbs2mvc_layout = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Input Layout"))
         self.cbo_sbs2mvc_layout = wx.ComboBox(self.cpn_sbs2mvc.GetPane(), name="cbo_sbs2mvc_layout")
         self.cbo_sbs2mvc_layout.SetEditable(False)
@@ -6419,6 +6453,7 @@ class MainFrame(wx.Frame):
 
         self.btn_sbs2mvc_input.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_input)
         self.btn_sbs2mvc_output.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_output)
+        self.cbo_sbs2mvc_output_type.Bind(wx.EVT_COMBOBOX, self.on_changed_sbs2mvc_output_type)
         self.btn_sbs2mvc_run.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_run)
         self.btn_sbs2mvc_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_sbs2mvc_cancel)
         self.sbs2mvc_proc = None
@@ -6434,6 +6469,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_sbs2mvc_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_sbs2mvc_output, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.btn_sbs2mvc_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_sbs2mvc_output_type, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sbs2mvc_output_type, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_sbs2mvc_layout, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_sbs2mvc_layout, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_sbs2mvc_swap, (h, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13572,7 +13609,8 @@ class MainFrame(wx.Frame):
             input_path = dlg.GetPath()
         self.txt_sbs2mvc_input.SetValue(input_path)
         if not self.txt_sbs2mvc_output.GetValue():
-            self.txt_sbs2mvc_output.SetValue(f"{path.splitext(input_path)[0]}_MVC.iso")
+            out_ext = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+            self.txt_sbs2mvc_output.SetValue(f"{path.splitext(input_path)[0]}_MVC.{out_ext}")
         try:
             from .sbs_to_mvc_cli import probe_video, guess_layout
             width, height = probe_video(input_path)[:2]
@@ -13593,13 +13631,31 @@ class MainFrame(wx.Frame):
             pass
 
     def on_click_btn_sbs2mvc_output(self, event):
-        with wx.FileDialog(self, message=T("Save 3D Blu-ray Disc Image As"),
-                           wildcard="Disc images (*.iso)|*.iso|All files (*.*)|*.*",
+        is_mkv = self.cbo_sbs2mvc_output_type.GetClientData(
+            self.cbo_sbs2mvc_output_type.GetSelection()) == "mkv"
+        message = T("Save MVC .mkv File As") if is_mkv else T("Save 3D Blu-ray Disc Image As")
+        wildcard = ("MKV files (*.mkv)|*.mkv|All files (*.*)|*.*" if is_mkv
+                    else "Disc images (*.iso)|*.iso|All files (*.*)|*.*")
+        with wx.FileDialog(self, message=message, wildcard=wildcard,
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
             if self.txt_sbs2mvc_output.GetValue():
                 dlg.SetPath(self.txt_sbs2mvc_output.GetValue())
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_sbs2mvc_output.SetValue(dlg.GetPath())
+
+    def on_changed_sbs2mvc_output_type(self, event):
+        # ADR-273: makes the file extension picking rule (this tool's own
+        # is_mkv_output = extension check in sbs_to_mvc_cli.py) a real, explicit,
+        # discoverable UI choice instead of something only reachable by knowing
+        # to type ".mkv" yourself. A harmless no-op if the output field is still
+        # empty, or already has neither a real .iso nor .mkv extension typed.
+        current = self.txt_sbs2mvc_output.GetValue().strip()
+        if not current:
+            return
+        out_ext = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+        base, ext = path.splitext(current)
+        if ext.lower() in (".iso", ".mkv"):
+            self.txt_sbs2mvc_output.SetValue(f"{base}.{out_ext}")
 
     def _update_sbs2mvc_progress(self, stage, done, total):
         # Called via wx.CallAfter from run_sbs2mvc's background thread.
@@ -19771,6 +19827,7 @@ def _self_test_sbs2mvc_panel():
     command building and validation, Run/Cancel/Clear lockstep, cancel cleanup. No
     encoder or disc is used: startWorker is monkeypatched."""
     import iw3.gui as gui_mod
+    from unittest.mock import patch
 
     class _FakeResult:
         def __init__(self, value):
@@ -19827,11 +19884,57 @@ def _self_test_sbs2mvc_panel():
             assert "--fix-frame-rate" not in cmd and "--convert-hdr-to-sdr" not in cmd
 
             # ADR-245: .mkv output (direct MVC .mkv, no disc structure) is now accepted too --
-            # picked purely by the extension typed in Output File, no separate dropdown.
+            # picked purely by the extension typed in Output File. ADR-273: Output Type
+            # (cbo_sbs2mvc_output_type) makes that same choice a real, discoverable
+            # dropdown instead of something only reachable by knowing to type ".mkv"
+            # yourself -- still just drives the extension, build_sbs2mvc_command() itself
+            # is unchanged (still reads the extension straight off the Output File field).
             out_mkv = path.join(tmpdir, "movie_MVC.mkv")
             frame.txt_sbs2mvc_output.SetValue(out_mkv)
             cmd, err = frame.build_sbs2mvc_command()
             assert err is None and cmd[cmd.index("--output") + 1] == out_mkv, (cmd, err)
+            frame.txt_sbs2mvc_output.SetValue(out)
+
+            # ADR-273: real end-user suggestion -- "What if you opt to skip the ISO
+            # creation and straight to MVC?" Output Type defaults to ISO; switching it
+            # to Plain MKV must update an EXISTING typed path's extension in place.
+            assert frame.cbo_sbs2mvc_output_type.GetClientData(
+                frame.cbo_sbs2mvc_output_type.GetSelection()) == "iso", "must default to ISO"
+            items = [frame.cbo_sbs2mvc_output_type.GetClientData(i)
+                     for i in range(frame.cbo_sbs2mvc_output_type.GetCount())]
+            frame.txt_sbs2mvc_output.SetValue(out)  # "movie_MVC.iso"
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("mkv"))
+            frame.on_changed_sbs2mvc_output_type(None)
+            assert frame.txt_sbs2mvc_output.GetValue() == out_mkv, frame.txt_sbs2mvc_output.GetValue()
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("iso"))
+            frame.on_changed_sbs2mvc_output_type(None)
+            assert frame.txt_sbs2mvc_output.GetValue() == out, frame.txt_sbs2mvc_output.GetValue()
+            # An empty output field, or one with neither a real .iso nor .mkv extension
+            # typed, is a harmless no-op -- never overwrites what's actually there.
+            frame.txt_sbs2mvc_output.SetValue("")
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("mkv"))
+            frame.on_changed_sbs2mvc_output_type(None)
+            assert frame.txt_sbs2mvc_output.GetValue() == "", "empty output field must stay empty"
+            weird = path.join(tmpdir, "movie.mp4")
+            frame.txt_sbs2mvc_output.SetValue(weird)
+            frame.on_changed_sbs2mvc_output_type(None)
+            assert frame.txt_sbs2mvc_output.GetValue() == weird, "an unrelated extension must be left alone"
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("iso"))
+            frame.txt_sbs2mvc_output.SetValue(out)
+
+            # on_click_btn_sbs2mvc_input's own auto-fill must use whichever Output Type
+            # is currently selected, not always ".iso" -- exercised via the real
+            # handler (its own wx.FileDialog is mocked, same convention
+            # on_click_btn_sbs2mvc_output already uses elsewhere in this suite).
+            frame.txt_sbs2mvc_output.SetValue("")
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("mkv"))
+            with patch("wx.FileDialog") as mock_dlg:
+                instance = mock_dlg.return_value.__enter__.return_value
+                instance.ShowModal.return_value = wx.ID_OK
+                instance.GetPath.return_value = video
+                frame.on_click_btn_sbs2mvc_input(None)
+            assert frame.txt_sbs2mvc_output.GetValue().endswith("_MVC.mkv"), frame.txt_sbs2mvc_output.GetValue()
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("iso"))
             frame.txt_sbs2mvc_output.SetValue(out)
 
             frame.cbo_sbs2mvc_layout.SetSelection(3)

@@ -13,7 +13,9 @@ it matters.
 
 ---
 
-## Latest Update — September 25, 2026 (5)
+## Latest Update — September 25, 2026 (6)
+
+**New: "SBS to 3D Blu-ray MVC" now has a real "Output Type" dropdown to pick between a full disc image and a plain MKV file.** Real user suggestion: "What if you opt to skip the ISO creation and straight to MVC?" That option already existed — saving to a ".mkv" file instead of ".iso" skips the whole disc-building step — but there was no visible way to choose it other than knowing to type that extension yourself. Now there's a real dropdown: "3D Blu-ray ISO" or "Plain MKV (direct MVC, no disc)." Picking a source file fills in the right extension automatically based on your choice, and switching the dropdown later updates an already-typed output path to match.
 
 **New: "Write a Log File for This Job" now also records the real command line for the job, not just the settings list.** Requested directly: a way to see "what would be in a CLI" for a finished job, written into the log as a readable record — not an interactive command line, just a copy of the equivalent command. The log now includes a real "Command:" line right after the Settings: list, built from the exact same code already behind the "Copy Command" button, so the two can never disagree with each other.
 

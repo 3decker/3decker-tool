@@ -6856,6 +6856,60 @@ class MainFrame(wx.Frame):
         sizer_upscale = wx.StaticBoxSizer(self.grp_upscale, wx.VERTICAL)
         sizer_upscale.Add(pane_header_row_upscale, 0, wx.ALL | wx.EXPAND, 4)
 
+        # ADR-274: real end-user idea, relayed by decker -- "making the stereo format
+        # drop-down something where people could simply pick the type of output they
+        # want in one place rather than having a bunch of standalone tools." Scoped
+        # down from a full unified in/out pipeline (would need real new conversion
+        # logic and touch every tool's own settings) to a pure NAVIGATION aid: pick
+        # what you have and what you want, and it takes you straight to whichever
+        # existing tool already does that -- zero new conversion logic, nothing here
+        # runs anything itself. Placed first in Standalone Tools (below) so it's the
+        # first thing a user seeing "a bunch of standalone tools" for the first time
+        # actually finds.
+        self.grp_quick_convert = wx.StaticBox(self.tab_tools, label=T("Quick Convert"))
+        self.lbl_quick_convert_have = wx.StaticText(self.grp_quick_convert, label=T("I Have"))
+        self.cbo_quick_convert_have = wx.ComboBox(self.grp_quick_convert, name="cbo_quick_convert_have")
+        self.cbo_quick_convert_have.SetEditable(False)
+        self.cbo_quick_convert_have.Append(T("A flat 2D video"), "flat2d")
+        self.cbo_quick_convert_have.Append(T("An existing 3D video (Side-by-Side or Top-Bottom)"), "3d_video")
+        self.cbo_quick_convert_have.Append(T("A real 3D Blu-ray disc or ISO"), "disc")
+        self.cbo_quick_convert_have.Append(T("An HDR / Dolby Vision video"), "hdr")
+        self.cbo_quick_convert_have.SetSelection(0)
+        self.cbo_quick_convert_have.SetToolTip(
+            T("What you're starting with. Paired with \"I Want\" below to figure out which existing "
+              "tool actually does that job -- this doesn't convert anything itself, it just takes you "
+              "to the right place."))
+
+        self.lbl_quick_convert_want = wx.StaticText(self.grp_quick_convert, label=T("I Want"))
+        self.cbo_quick_convert_want = wx.ComboBox(self.grp_quick_convert, name="cbo_quick_convert_want")
+        self.cbo_quick_convert_want.SetEditable(False)
+        self.cbo_quick_convert_want.Append(T("A 3D video (Side-by-Side or Top-Bottom)"), "3d_video")
+        self.cbo_quick_convert_want.Append(T("A real 3D Blu-ray disc (MVC)"), "mvc")
+        self.cbo_quick_convert_want.Append(T("A lossless disc copy"), "lossless_copy")
+        self.cbo_quick_convert_want.Append(T("A regular SDR video"), "sdr")
+        self.cbo_quick_convert_want.SetSelection(0)
+        self.cbo_quick_convert_want.SetToolTip(
+            T("What you're trying to end up with. Only some I Have / I Want combinations have a single "
+              "matching tool -- \"Take Me There\" says plainly if yours doesn't, rather than guessing."))
+
+        self.btn_quick_convert_go = wx.Button(self.grp_quick_convert, label=T("Take Me There"))
+        self.btn_quick_convert_go.SetToolTip(
+            T("What it's for: jumps straight to whichever existing tool matches your I Have / I Want "
+              "choice above -- switches to its tab if needed, opens its Settings, and scrolls it into "
+              "view. You still pick your own file and press that tool's own Run button there; this "
+              "button only navigates, it never starts a conversion by itself.\n"
+              "Con: only covers the most common single-step conversions. A combination this project "
+              "doesn't have a direct tool for (or that needs two tools run one after another) shows a "
+              "plain message instead of guessing at something wrong."))
+
+        sizer_quick_convert = wx.StaticBoxSizer(self.grp_quick_convert, wx.HORIZONTAL)
+        sizer_quick_convert.Add(self.lbl_quick_convert_have, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        sizer_quick_convert.Add(self.cbo_quick_convert_have, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_quick_convert.Add(self.lbl_quick_convert_want, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 4)
+        sizer_quick_convert.Add(self.cbo_quick_convert_want, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_quick_convert.Add(self.btn_quick_convert_go, 0, wx.ALL, 4)
+        self.btn_quick_convert_go.Bind(wx.EVT_BUTTON, self.on_click_btn_quick_convert_go)
+
         # Each category below is its own panel (a Notebook tab, or a Single Page
         # section -- see ADR-037) instead of one big 4-column grid -- every sizer_*
         # here was already fully built above (unchanged), this only changes how
@@ -6889,6 +6943,7 @@ class MainFrame(wx.Frame):
         self.tab_processor.SetSizer(tab_layout)
 
         tab_layout = wx.BoxSizer(wx.VERTICAL)
+        tab_layout.Add(sizer_quick_convert, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_hdr_reinject, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_subsearch, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_submux, 0, wx.ALL | wx.EXPAND, 4)
@@ -8642,6 +8697,83 @@ class MainFrame(wx.Frame):
         self._clamp_frame_to_screen()
         wx.CallAfter(scroller.Scroll, *view_start)  # see on_toggled_stereo_collapsible_pane's comment
         event.Skip()
+
+    # ADR-274: (have, want) -> a route describing where "Take Me There" sends the
+    # user. "processor" means the main Processor tab (the 2D-to-3D conversion
+    # itself, not a Standalone Tool); every other value names a target StaticBox
+    # group in Standalone Tools, with an optional (combobox attr name, client data
+    # value) to pre-select that tool's own output-type dropdown so it already
+    # matches what the user asked for. A combination with no entry here has no
+    # single matching tool in this project (see on_click_btn_quick_convert_go).
+    _QUICK_CONVERT_ROUTES = {
+        ("flat2d", "3d_video"): ("processor", None, None),
+        ("3d_video", "mvc"): ("grp_sbs2mvc", "cpn_sbs2mvc", None),
+        ("disc", "3d_video"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "full_sbs")),
+        ("disc", "lossless_copy"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso")),
+        ("hdr", "sdr"): ("grp_hdr_to_sdr", "cpn_hdr_to_sdr", None),
+    }
+
+    def on_click_btn_quick_convert_go(self, event):
+        have = self.cbo_quick_convert_have.GetClientData(self.cbo_quick_convert_have.GetSelection())
+        want = self.cbo_quick_convert_want.GetClientData(self.cbo_quick_convert_want.GetSelection())
+        route = self._QUICK_CONVERT_ROUTES.get((have, want))
+        if route is None:
+            wx.MessageBox(
+                T("3DECKER doesn't have a single tool that goes directly from what you picked to what "
+                  "you want.\n\nCheck the Standalone Tools tab for something close, or this might need "
+                  "two tools run one after another (for example, converting to 3D first, then a second "
+                  "tool for the rest)."),
+                T("No Direct Match"), wx.OK | wx.ICON_INFORMATION)
+            return
+        target_name, pane_name, layout_extra = route
+        if target_name == "processor":
+            self._quick_convert_navigate(self.tab_processor)
+        else:
+            self._quick_convert_navigate(self.tab_tools, getattr(self, target_name), pane_name, layout_extra)
+
+    def _quick_convert_navigate(self, target_tab_panel, target_group=None, pane_name=None, layout_extra=None):
+        """Switches to whichever tab/page holds target_tab_panel (a no-op if it's
+        already showing), pre-selects an output-type dropdown if layout_extra names
+        one, expands target_group's own Settings pane if it's currently collapsed
+        (reusing the exact same reflow sequence
+        on_toggled_standalone_tools_collapsible_pane already uses for a real user
+        click, just called directly instead of through a real wx event -- so this
+        can never drift from what that already-proven path does), then scrolls
+        target_group into view. Never runs anything -- the user still picks their
+        own file and presses Run on the destination tool itself."""
+        if self.layout_mode == LAYOUT_MODE_TABS:
+            for i in range(self.nb_options.GetPageCount()):
+                page = self.nb_options.GetPage(i)
+                if target_tab_panel in page.GetChildren():
+                    self.nb_options.SetSelection(i)
+                    break
+
+        if layout_extra is not None:
+            cbo_name, data_value = layout_extra
+            cbo = getattr(self, cbo_name)
+            for i in range(cbo.GetCount()):
+                if cbo.GetClientData(i) == data_value:
+                    cbo.SetSelection(i)
+                    break
+
+        if pane_name is not None:
+            cpn = getattr(self, pane_name, None)
+            if cpn is not None and cpn.IsCollapsed():
+                cpn.Expand()
+                refresh_layouts(self)
+                if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+                    self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+                else:
+                    wrap_sizer = self.tab_wrap_tools.GetSizer()
+                    if wrap_sizer is not None:
+                        self.tab_wrap_tools.SetMinSize(wrap_sizer.CalcMin())
+                refresh_layouts(self)
+                self._update_frame_min_size()
+                self._clamp_frame_to_screen()
+
+        if target_group is not None:
+            scroller = self.pnl_single if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE else self.tab_wrap_tools
+            wx.CallAfter(scroller.ScrollChildIntoView, target_group)
 
     def get_editable_comboboxes(self):
         editable_comboboxes = [
@@ -10442,6 +10574,7 @@ class MainFrame(wx.Frame):
     # Every Standalone Tools group box (title) that the theme code paints in the accent colour.
     # A tool missing from this list keeps the default black title, unreadable on the dark theme.
     _STANDALONE_TOOL_GROUP_NAMES = (
+        "grp_quick_convert",
         "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone",
         "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_upscale",
         "grp_standalone_log",
@@ -19995,6 +20128,107 @@ def _self_test_sbs2mvc_panel():
     print("_self_test_sbs2mvc_panel: PASS")
 
 
+def _self_test_quick_convert_panel():
+    """ADR-274: real end-user idea, relayed by decker -- "making the stereo format
+    drop-down something where people could simply pick the type of output they
+    want in one place." Pure navigation, zero new conversion logic: confirms every
+    real route in _QUICK_CONVERT_ROUTES actually lands where it says (right
+    notebook page in Tabbed mode, right output-type dropdown pre-selected, the
+    destination tool's own Settings pane expanded if it started collapsed), and
+    that an unmapped combination shows a plain "no direct match" message instead
+    of silently doing nothing or guessing."""
+    import iw3.gui as gui_mod
+    from unittest.mock import patch
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        # Deterministic layout mode regardless of persisted config/environment,
+        # same convention every other test that needs Tabbed mode specifically
+        # already uses (e.g. the real notebook-page-switch behavior below only
+        # applies in Tabbed mode -- Single Page has no separate pages to switch).
+        frame.switch_layout_mode(gui_mod.LAYOUT_MODE_TABS)
+
+        def pick(have, want):
+            have_items = [frame.cbo_quick_convert_have.GetClientData(i)
+                          for i in range(frame.cbo_quick_convert_have.GetCount())]
+            want_items = [frame.cbo_quick_convert_want.GetClientData(i)
+                          for i in range(frame.cbo_quick_convert_want.GetCount())]
+            frame.cbo_quick_convert_have.SetSelection(have_items.index(have))
+            frame.cbo_quick_convert_want.SetSelection(want_items.index(want))
+
+        def tools_tab_index():
+            for i in range(frame.nb_options.GetPageCount()):
+                if frame.tab_tools in frame.nb_options.GetPage(i).GetChildren():
+                    return i
+            return None
+
+        def processor_tab_index():
+            for i in range(frame.nb_options.GetPageCount()):
+                if frame.tab_processor in frame.nb_options.GetPage(i).GetChildren():
+                    return i
+            return None
+
+        # flat2d -> 3d_video: the main Processor tab, not a Standalone Tool at all.
+        frame.nb_options.SetSelection(0)
+        pick("flat2d", "3d_video")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.nb_options.GetSelection() == processor_tab_index(), \
+            "flat2d->3d_video must land on the Processor tab"
+
+        # 3d_video -> mvc: Standalone Tools tab, grp_sbs2mvc's own Settings pane expanded.
+        frame.nb_options.SetSelection(0)
+        frame.cpn_sbs2mvc.Collapse(True)
+        pick("3d_video", "mvc")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.nb_options.GetSelection() == tools_tab_index(), \
+            "3d_video->mvc must land on the Standalone Tools tab"
+        assert not frame.cpn_sbs2mvc.IsCollapsed(), "must expand the destination tool's own Settings pane"
+
+        # disc -> 3d_video: 3D Blu-ray Import, Layout pre-selected to a real 3D layout.
+        frame.nb_options.SetSelection(0)
+        frame.cpn_bluray.Collapse(True)
+        bluray_items = [frame.cbo_bluray_layout.GetClientData(i) for i in range(frame.cbo_bluray_layout.GetCount())]
+        frame.cbo_bluray_layout.SetSelection(bluray_items.index("bd3d_iso"))
+        pick("disc", "3d_video")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.nb_options.GetSelection() == tools_tab_index()
+        assert not frame.cpn_bluray.IsCollapsed()
+        assert frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection()) == "full_sbs", \
+            "disc->3d_video must pre-select a real 3D layout, not leave the previous selection"
+
+        # disc -> lossless_copy: same tool, Layout pre-selected to the lossless ISO mode instead.
+        frame.nb_options.SetSelection(0)
+        frame.cbo_bluray_layout.SetSelection(bluray_items.index("full_sbs"))
+        pick("disc", "lossless_copy")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.cbo_bluray_layout.GetClientData(frame.cbo_bluray_layout.GetSelection()) == "bd3d_iso"
+
+        # hdr -> sdr: Convert HDR/DV to SDR, its own Settings pane expanded.
+        frame.nb_options.SetSelection(0)
+        frame.cpn_hdr_to_sdr.Collapse(True)
+        pick("hdr", "sdr")
+        frame.on_click_btn_quick_convert_go(None)
+        assert frame.nb_options.GetSelection() == tools_tab_index()
+        assert not frame.cpn_hdr_to_sdr.IsCollapsed()
+
+        # An unmapped combination (e.g. flat2d -> sdr) must show a plain message,
+        # never silently do nothing and never guess at the closest tool.
+        frame.nb_options.SetSelection(0)
+        pick("flat2d", "sdr")
+        with patch.object(wx, "MessageBox") as mock_box:
+            frame.on_click_btn_quick_convert_go(None)
+            mock_box.assert_called_once()
+        assert frame.nb_options.GetSelection() == 0, "an unmapped combination must not navigate anywhere"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_quick_convert_panel: PASS")
+
+
 def _self_test_hdr_to_sdr_panel():
     """Convert HDR/DV to SDR standalone tool (built alongside ADR-222's SBS2MVC opt-in HDR
     checkbox, per explicit user request -- 'could you also build an hdr/dv to sdr oiption under
@@ -23491,6 +23725,7 @@ def _run_self_tests():
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
+        _self_test_quick_convert_panel,
         _self_test_hdr_to_sdr_panel,
         _self_test_sbs2mvc_crash_diagnosis,
         _self_test_confirm_dangerous_buttons,

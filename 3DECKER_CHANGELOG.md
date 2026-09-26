@@ -13,9 +13,15 @@ it matters.
 
 ---
 
-## Latest Update — September 25, 2026 (6)
+## Latest Update — September 25, 2026 (7)
+
+**New: "Quick Convert" — a real shortcut for finding the right tool, at the top of Standalone Tools.** Real user idea: instead of hunting through a bunch of separate standalone tools, just pick what you have and what you want in one place. Now there's exactly that at the top of the Standalone Tools tab: two dropdowns ("I Have" / "I Want") and a "Take Me There" button. Pick a combination like "A flat 2D video" → "A 3D video," and it jumps you straight to the right tool, opens its settings, and scrolls it into view — you still pick your own file and press that tool's own Run button, this just gets you to the right place faster. Covers the most common conversions (2D→3D, 3D video→Blu-ray disc, real disc→3D video or a lossless copy, HDR→SDR); anything without a direct match gets an honest message instead of a guess.
+
+## Update — September 25, 2026 (6)
 
 **New: "SBS to 3D Blu-ray MVC" now has a real "Output Type" dropdown to pick between a full disc image and a plain MKV file.** Real user suggestion: "What if you opt to skip the ISO creation and straight to MVC?" That option already existed — saving to a ".mkv" file instead of ".iso" skips the whole disc-building step — but there was no visible way to choose it other than knowing to type that extension yourself. Now there's a real dropdown: "3D Blu-ray ISO" or "Plain MKV (direct MVC, no disc)." Picking a source file fills in the right extension automatically based on your choice, and switching the dropdown later updates an already-typed output path to match.
+
+## Update — September 25, 2026 (5)
 
 **New: "Write a Log File for This Job" now also records the real command line for the job, not just the settings list.** Requested directly: a way to see "what would be in a CLI" for a finished job, written into the log as a readable record — not an interactive command line, just a copy of the equivalent command. The log now includes a real "Command:" line right after the Settings: list, built from the exact same code already behind the "Copy Command" button, so the two can never disagree with each other.
 

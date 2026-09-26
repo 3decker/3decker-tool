@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (5)
+## Latest Update — September 26, 2026 (6)
+
+**Improved: the "MVC (Blu-ray)" Stereo Format shortcut now offers all four real formats, not just Full SBS.** Direct follow-up to the shortcut added earlier today: what if the MVC you want is based on Half SBS, or Top/Bottom instead? Now there are four choices right in the dropdown — "MVC (Blu-ray, Full SBS)", "MVC (Blu-ray, Half SBS)", "MVC (Blu-ray, Full TB)", "MVC (Blu-ray, Half TB)" — pick the one matching the format you actually want, and it sets the real format plus checks "Convert to 3D Blu-ray MVC" for you, same as before, just for whichever of the four you pick.
+
+## Update — September 26, 2026 (5)
 
 **New: "MVC (Blu-ray)" is now a direct choice in the Stereo Format dropdown.** Real user question: can converting to 3D Blu-ray MVC be picked right from the main Stereo Format list, instead of only from its own checkbox further down the page? Picking it sets everything up for you in one click — the real format underneath becomes Full SBS (what MVC needs to work from) and "Convert to 3D Blu-ray MVC after conversion" gets checked automatically. Same end result as picking Full SBS and checking that box yourself, just faster to find.
 

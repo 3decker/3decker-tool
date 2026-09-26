@@ -2944,7 +2944,8 @@ class MainFrame(wx.Frame):
             self.grp_stereo,
             choices=["Full SBS", "Half SBS",
                      "Full TB", "Half TB",
-                     "MVC (Blu-ray)",
+                     "MVC (Blu-ray, Full SBS)", "MVC (Blu-ray, Half SBS)",
+                     "MVC (Blu-ray, Full TB)", "MVC (Blu-ray, Half TB)",
                      "VR90",
                      "Cross Eyed",
                      "RGB-D",
@@ -2969,11 +2970,14 @@ class MainFrame(wx.Frame):
               "3D Blu-rays and TVs use to auto-detect 3D and switch modes on their own, without you "
               "manually telling the TV/player it's a 3D side-by-side or top-bottom file. Only works with "
               "the H.264 (libx264) codec option — HEVC and NVENC don't support embedding this signal.\n"
-              "\"MVC (Blu-ray)\" is a shortcut, not a real format of its own: real MVC (the dual-stream "
-              "format actual 3D Blu-rays use) can only be produced by a second pass over a finished Full "
-              "SBS file, so picking this snaps the format back to Full SBS for you and turns on "
-              "\"Convert to 3D Blu-ray MVC after conversion\" (Post-Processing, Processor tab) instead — "
-              "same result as picking Full SBS and checking that box yourself, just in one click from here."))
+              "The four \"MVC (Blu-ray, ...)\" entries are shortcuts, not real formats of their own: "
+              "real MVC (the dual-stream format actual 3D Blu-rays use) is always produced by a second "
+              "pass over an already-finished Full/Half SBS or Full/Half TB file — all four work as real "
+              "MVC input, just with the expected resolution tradeoff for the Half variants (smaller "
+              "file, less detail per eye than Full). Picking one of these snaps the format to the "
+              "matching real one for you and turns on \"Convert to 3D Blu-ray MVC after conversion\" "
+              "(Post-Processing, Processor tab) instead — same result as picking that format and "
+              "checking that box yourself, just in one click from here."))
 
         self.lbl_anaglyph_method = wx.StaticText(self.grp_stereo, label=T("Anaglyph Method"))
         self.cbo_anaglyph_method = wx.ComboBox(
@@ -9091,23 +9095,41 @@ class MainFrame(wx.Frame):
         self.update_inpaint_options()
         self.update_splat_blend_temperature()
 
+    # ADR-280/282: the four MVC shortcut entries in cbo_stereo_format, each
+    # mapped to the real format it resolves to -- all four are genuine, valid
+    # MVC inputs (ADR-247's own finding, sbs_to_mvc_cli.py handles all four),
+    # just with the expected resolution tradeoff for the Half variants.
+    _MVC_STEREO_FORMAT_SHORTCUTS = {
+        "MVC (Blu-ray, Full SBS)": "Full SBS",
+        "MVC (Blu-ray, Half SBS)": "Half SBS",
+        "MVC (Blu-ray, Full TB)": "Full TB",
+        "MVC (Blu-ray, Half TB)": "Half TB",
+    }
+
     def on_selected_index_changed_cbo_stereo_format(self, event):
-        if self.cbo_stereo_format.GetValue() == "MVC (Blu-ray)":
+        real_format = self._MVC_STEREO_FORMAT_SHORTCUTS.get(self.cbo_stereo_format.GetValue())
+        if real_format is not None:
             # ADR-280: real end-user request, relayed by decker -- "can this be
             # integrated under Stereo Format as options" (screenshot circled
             # "Convert to 3D Blu-ray MVC after conversion"). Real MVC can't be a
             # genuine Stereo Format entry -- it's a second-pass re-encode
-            # (FRIMEncode) over an already-finished Full SBS file, not something
-            # the main render step outputs directly (see
-            # on_changed_chk_convert_to_mvc's own comment) -- so this is a pure
-            # shortcut: snap the real format back to Full SBS (MVC's own required
-            # input) and check the real checkbox, exactly what Quick Convert's
-            # hdr->mvc route already does from the Standalone Tools screen.
+            # (FRIMEncode) over an already-finished Full/Half SBS or Full/Half TB
+            # file, not something the main render step outputs directly (see
+            # on_changed_chk_convert_to_mvc's own comment) -- so each of these is
+            # a pure shortcut: snap the real format to the one it names and check
+            # the real checkbox, exactly what Quick Convert's hdr->mvc route
+            # already does from the Standalone Tools screen.
+            # ADR-282: real follow-up -- "what happens if the mvc i want is for
+            # half sbs or even for top/bot" -- the original single "MVC
+            # (Blu-ray)" entry only ever offered Full SBS. Four explicit entries
+            # (one per real MVC-compatible format, ADR-247) let the user pick
+            # exactly the one they want in one click, rather than forcing Full
+            # SBS and requiring a second manual change afterward.
             # SetValue() in code never fires chk_convert_to_mvc's own EVT_CHECKBOX
             # handler, but nothing else is bound to it besides that same
-            # Full-SBS-correction this already performs directly.
+            # format-correction this already performs directly.
             self.chk_convert_to_mvc.SetValue(True)
-            self.cbo_stereo_format.SetStringSelection("Full SBS")
+            self.cbo_stereo_format.SetStringSelection(real_format)
         self.update_input_option_state()
         self.update_anaglyph_state()
         self.update_export_option_state()
@@ -19616,48 +19638,60 @@ def _self_test_convert_to_mvc_checkbox():
 
 
 def _self_test_stereo_format_mvc_shortcut():
-    """ADR-280: real end-user request, relayed by decker (a screenshot circling
-    "Convert to 3D Blu-ray MVC after conversion") -- "can this be integrated under
-    Stereo Format as options". Real MVC can't be a genuine Stereo Format entry (it's
-    a second-pass FRIMEncode re-encode of an already-finished Full SBS file, not
-    something the main render step outputs directly -- see
-    on_changed_chk_convert_to_mvc's own comment), so "MVC (Blu-ray)" is a pure
-    shortcut: selecting it snaps the real format to Full SBS and checks "Convert to
-    3D Blu-ray MVC after conversion" for you, exactly what Quick Convert's
-    hdr->mvc route already does from a different screen. Confirms it's never the
-    real persisted value -- parse_args()/get_cli_command() must see plain Full SBS,
-    not a fake "MVC (Blu-ray)" format."""
+    """ADR-280/282: real end-user requests, relayed by decker -- first "can this be
+    integrated under Stereo Format as options" (a screenshot circling "Convert to
+    3D Blu-ray MVC after conversion"), then the direct follow-up "what happens if
+    the mvc i want is for half sbs or even for top/bot". Real MVC can't be a
+    genuine Stereo Format entry (it's a second-pass FRIMEncode re-encode of an
+    already-finished packed file, not something the main render step outputs
+    directly -- see on_changed_chk_convert_to_mvc's own comment), so all four
+    "MVC (Blu-ray, ...)" entries are pure shortcuts: each selects a real,
+    MVC-compatible format (ADR-247: Full/Half SBS, Full/Half TB are all genuine
+    valid MVC inputs) and checks "Convert to 3D Blu-ray MVC after conversion" for
+    you, exactly what Quick Convert's hdr->mvc route already does from a
+    different screen. Confirms none of the four ever persists as the real value
+    -- parse_args()/get_cli_command() must see the plain real format, never a fake
+    "MVC (Blu-ray, ...)" label."""
     app = None
     frame = None
     try:
         app = wx.App()
         frame = MainFrame()
 
-        assert "MVC (Blu-ray)" in frame.cbo_stereo_format.GetStrings()
+        strings = frame.cbo_stereo_format.GetStrings()
         tip = frame.cbo_stereo_format.GetToolTip().GetTip()
-        assert "MVC (Blu-ray)" in tip and "shortcut" in tip.lower(), tip
+        for shortcut_label in MainFrame._MVC_STEREO_FORMAT_SHORTCUTS:
+            assert shortcut_label in strings, strings
+        assert "MVC (Blu-ray" in tip and "shortcut" in tip.lower(), tip
 
         frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
         frame.pnl_file.set_output_path("C:\\test output dir")
 
-        assert frame.chk_convert_to_mvc.GetValue() is False
-        frame.cbo_stereo_format.SetStringSelection("MVC (Blu-ray)")
-        frame.on_selected_index_changed_cbo_stereo_format(wx.CommandEvent())
+        for shortcut_label, real_format in MainFrame._MVC_STEREO_FORMAT_SHORTCUTS.items():
+            frame.chk_convert_to_mvc.SetValue(False)
+            frame.cbo_stereo_format.SetStringSelection(shortcut_label)
+            frame.on_selected_index_changed_cbo_stereo_format(wx.CommandEvent())
 
-        # the shortcut never persists as the real value -- it resolves immediately
-        assert frame.cbo_stereo_format.GetValue() == "Full SBS", \
-            f"must snap back to Full SBS, got: {frame.cbo_stereo_format.GetValue()}"
-        assert frame.chk_convert_to_mvc.GetValue() is True
+            # the shortcut never persists as the real value -- it resolves immediately
+            assert frame.cbo_stereo_format.GetValue() == real_format, \
+                f"{shortcut_label} must snap to {real_format}, got: {frame.cbo_stereo_format.GetValue()}"
+            assert frame.chk_convert_to_mvc.GetValue() is True
 
-        args = frame.parse_args(skip_set_state=True)
-        assert args.convert_to_mvc is True
-        assert not args.half_sbs and not args.tb and not args.half_tb, \
-            "must resolve to plain Full SBS, not some other packed format"
+            args = frame.parse_args(skip_set_state=True)
+            assert args.convert_to_mvc is True
+            expect = {
+                "Full SBS": (False, False, False),
+                "Half SBS": (True, False, False),
+                "Full TB": (False, True, False),
+                "Half TB": (False, False, True),
+            }[real_format]
+            assert (args.half_sbs, args.tb, args.half_tb) == expect, \
+                f"{shortcut_label} resolved to the wrong real format: {(args.half_sbs, args.tb, args.half_tb)}"
 
-        command = frame.get_cli_command()
-        assert "--convert-to-mvc" in command, command
-        assert "MVC (Blu-ray)" not in command, \
-            "the fake dropdown label must never leak into the real CLI command"
+            command = frame.get_cli_command()
+            assert "--convert-to-mvc" in command, command
+            assert shortcut_label not in command, \
+                "the fake dropdown label must never leak into the real CLI command"
     finally:
         if frame is not None:
             frame.Destroy()

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 25, 2026 (7)
+## Latest Update — September 25, 2026 (8)
+
+**Reversed: "Hold Steady Per Scene" no longer requires Scene Detection to be turned on.** An earlier update this same day blocked this combination, believing it silently did nothing without Scene Detection. Real, direct pushback and a closer look at the actual code proved that framing wrong: without Scene Detection, this setting doesn't do nothing — it settles once, then keeps gently drifting the whole rest of the movie without ever snapping to a new value. With Scene Detection, it deliberately snaps to a fresh value at every detected cut instead. Both are real, legitimate looks, not one broken and one working — and the no-snap version can genuinely look smoother, especially paired with a large Flicker Reduction Buffer (which Scene Detection resets at every cut, working against a large Buffer's whole purpose). The block is gone; both combinations work again, and the tooltip now explains both real behaviors honestly instead of only describing one as correct.
+
+## Update — September 25, 2026 (7)
 
 **New: "Quick Convert" — a real shortcut for finding the right tool, at the top of Standalone Tools.** Real user idea: instead of hunting through a bunch of separate standalone tools, just pick what you have and what you want in one place. Now there's exactly that at the top of the Standalone Tools tab: two dropdowns ("I Have" / "I Want") and a "Take Me There" button. Pick a combination like "A flat 2D video" → "A 3D video," and it jumps you straight to the right tool, opens its settings, and scrolls it into view — you still pick your own file and press that tool's own Run button, this just gets you to the right place faster. Covers the most common conversions (2D→3D, 3D video→Blu-ray disc, real disc→3D video or a lossless copy, HDR→SDR); anything without a direct match gets an honest message instead of a guess.
 

@@ -21946,6 +21946,38 @@ def _self_test_run_iw3_main_with_job_log():
     print("_self_test_run_iw3_main_with_job_log: PASS")
 
 
+def _self_test_job_log_path_folder_output():
+    """Real user-found bug (2026-09-26, decker): the GUI's normal single-file
+    workflow leaves args.output as a bare OUTPUT FOLDER, not a specific filename --
+    the real tagged filename is only computed later via make_output_filename(), the
+    same way resolve_output_path() does for display. _job_log_path() naively did
+    path.splitext() on the bare folder, which produced a malformed sibling path one
+    level UP from the real output (e.g. "E:\\3d Movies" -> "E:\\3d Movies_log.txt"
+    sitting in E:\\ instead of inside the folder) -- decker checked "Write a Log
+    File for This Job" on two real conversions and the log genuinely never appeared
+    next to the output; found by checking the parent drive and finding it exactly
+    there. Confirms the fix: when output is a directory, the log must land INSIDE
+    that directory, named after the real resolved output filename -- not as a
+    mangled sibling of the folder name."""
+    import tempfile
+    from . import utils as U
+
+    with tempfile.TemporaryDirectory() as out_dir:
+        parser = U.create_parser(required_true=False)
+        args = parser.parse_args(["-i", "source.mkv", "-o", out_dir, "--depth-model", "Any_V3_Small", "--tb"])
+        # Normally set by set_state_args() (skipped here -- it instantiates a real
+        # depth model, well outside what this path-construction test needs).
+        args.video_extension = "." + args.video_format
+        log_path = U._job_log_path(args)
+        assert os.path.dirname(log_path) == out_dir, \
+            f"log must land inside the output folder, got: {log_path}"
+        assert log_path.endswith("_log.txt"), log_path
+        assert not log_path.startswith(out_dir.rstrip("\\/") + "_"), \
+            f"must not be a mangled sibling of the folder name: {log_path}"
+
+    print("_self_test_job_log_path_folder_output: PASS")
+
+
 def _self_test_find_disc_ssif_diagnostics():
     """ADR-258: real user report -- a real, existing BDMV/STREAM/SSIF folder (confirmed
     directly by the user) still hit "no Blu-ray 3D content found" when pointed at a
@@ -23803,6 +23835,7 @@ def _run_self_tests():
         _self_test_write_job_log_checkbox,
         _self_test_standalone_write_job_log,
         _self_test_run_iw3_main_with_job_log,
+        _self_test_job_log_path_folder_output,
         _self_test_find_disc_ssif_diagnostics,
         _self_test_mux_bd3d_iso_audio_diagnostics,
         _self_test_extract_and_reencode_mvc,

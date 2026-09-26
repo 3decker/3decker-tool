@@ -7691,12 +7691,26 @@ def _job_log_path(args):
     file's own processing runs (make_output_filename()), so a true per-movie log
     for batch mode would need hooking deep inside process_images()/process_videos()
     -- a bigger, separate change. One combined log for the whole batch run, written
-    into the output directory itself, is the scoped-down version here."""
+    into the output directory itself, is the scoped-down version here.
+
+    Real user-found bug (2026-09-26): the GUI's normal single-file workflow leaves
+    args.output as a bare OUTPUT FOLDER (e.g. "E:\\3d Movies") -- the real tagged
+    filename (all the depth-model/divergence/etc. suffixes) is only computed later,
+    the same way resolve_output_path()/process_video() do it via
+    make_output_filename(). Without this check, path.splitext() on the bare folder
+    silently produced a malformed sibling path one level UP from the real output
+    (e.g. "E:\\3d Movies" -> "E:\\3d Movies_log.txt" sitting in E:\\ instead of
+    inside the folder) -- the log file was actually being written the whole time,
+    just somewhere the user would never think to look, indistinguishable from no
+    log being written at all. Resolve the real final filename here the same way
+    the rest of the app already does, before ever building the log path from it."""
     output = str(args.output)
     if path.isdir(str(args.input)):
         out_dir = output if path.isdir(output) else (path.dirname(output) or ".")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return path.join(out_dir, f"iw3_batch_log_{stamp}.txt")
+    if is_output_dir(output):
+        output = path.join(output, make_output_filename(args.input, args, video=is_video(args.input)))
     base, _ = path.splitext(output)
     return f"{base}_log.txt"
 

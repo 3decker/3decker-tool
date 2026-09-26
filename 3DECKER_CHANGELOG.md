@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (2)
+## Latest Update — September 26, 2026 (3)
+
+**Fixed: "Write a Log File for This Job" wasn't actually missing — it was landing in the wrong place.** Reported (and reproduced live with a fresh test conversion): the checkbox was on, but no `_log.txt` ever showed up next to the finished file. Root cause: when the output box is set to a folder (the normal way this app works — you pick a folder, and it builds the full descriptive filename itself), the log file was being saved one level up, outside that folder entirely, under a mangled name based on the folder itself instead of the real output file. It was being written the whole time, just somewhere nobody would think to look. Fixed so the log now always lands inside the real output folder, named after the real output file, right where you'd expect it.
+
+## Update — September 26, 2026 (2)
 
 **New: "Quick Convert" now covers four more real combinations — HDR/DV sources to 3D or to a Blu-ray disc, and an existing 3D video down to SDR.** Checked overnight, at request, against the real code rather than assumed: "An HDR / Dolby Vision video" → "A 3D video" now works (the main conversion already handles HDR/DV sources natively). "An existing 3D video" → "A regular SDR video" now works too (the SDR conversion tool doesn't care whether the video is flat or 3D-packed, so it works on both). "An HDR / Dolby Vision video" → "A real 3D Blu-ray disc (MVC)" now works as a genuine one-click link — real Blu-ray discs can't carry HDR at all, so this one automatically turns on both "Convert to 3D Blu-ray MVC" and "Convert HDR/DV to SDR first" for you, not just one. And "A flat 2D video" → "A regular SDR video" now gives its own honest explanation instead of a generic "no match" — an ordinary video is already SDR, so there's nothing to convert unless it's actually HDR.
 

@@ -2944,6 +2944,7 @@ class MainFrame(wx.Frame):
             self.grp_stereo,
             choices=["Full SBS", "Half SBS",
                      "Full TB", "Half TB",
+                     "MVC (Blu-ray)",
                      "VR90",
                      "Cross Eyed",
                      "RGB-D",
@@ -2967,7 +2968,12 @@ class MainFrame(wx.Frame):
               "also gets a real \"Frame Packing\" 3D signal embedded in it — the same standard real "
               "3D Blu-rays and TVs use to auto-detect 3D and switch modes on their own, without you "
               "manually telling the TV/player it's a 3D side-by-side or top-bottom file. Only works with "
-              "the H.264 (libx264) codec option — HEVC and NVENC don't support embedding this signal."))
+              "the H.264 (libx264) codec option — HEVC and NVENC don't support embedding this signal.\n"
+              "\"MVC (Blu-ray)\" is a shortcut, not a real format of its own: real MVC (the dual-stream "
+              "format actual 3D Blu-rays use) can only be produced by a second pass over a finished Full "
+              "SBS file, so picking this snaps the format back to Full SBS for you and turns on "
+              "\"Convert to 3D Blu-ray MVC after conversion\" (Post-Processing, Processor tab) instead — "
+              "same result as picking Full SBS and checking that box yourself, just in one click from here."))
 
         self.lbl_anaglyph_method = wx.StaticText(self.grp_stereo, label=T("Anaglyph Method"))
         self.cbo_anaglyph_method = wx.ComboBox(
@@ -9086,6 +9092,22 @@ class MainFrame(wx.Frame):
         self.update_splat_blend_temperature()
 
     def on_selected_index_changed_cbo_stereo_format(self, event):
+        if self.cbo_stereo_format.GetValue() == "MVC (Blu-ray)":
+            # ADR-280: real end-user request, relayed by decker -- "can this be
+            # integrated under Stereo Format as options" (screenshot circled
+            # "Convert to 3D Blu-ray MVC after conversion"). Real MVC can't be a
+            # genuine Stereo Format entry -- it's a second-pass re-encode
+            # (FRIMEncode) over an already-finished Full SBS file, not something
+            # the main render step outputs directly (see
+            # on_changed_chk_convert_to_mvc's own comment) -- so this is a pure
+            # shortcut: snap the real format back to Full SBS (MVC's own required
+            # input) and check the real checkbox, exactly what Quick Convert's
+            # hdr->mvc route already does from the Standalone Tools screen.
+            # SetValue() in code never fires chk_convert_to_mvc's own EVT_CHECKBOX
+            # handler, but nothing else is bound to it besides that same
+            # Full-SBS-correction this already performs directly.
+            self.chk_convert_to_mvc.SetValue(True)
+            self.cbo_stereo_format.SetStringSelection("Full SBS")
         self.update_input_option_state()
         self.update_anaglyph_state()
         self.update_export_option_state()
@@ -9723,6 +9745,37 @@ class MainFrame(wx.Frame):
             max_output_width, max_output_height = [int(s) for s in max_output_size.split("x")]
 
         input_path = self.pnl_file.input_path
+
+        # ADR-281: real end-user report, relayed by decker (a screenshot of the
+        # post-job "3D Blu-ray MVC: audio/subtitle notes" dialog) -- an HDR source
+        # with "Convert to 3D Blu-ray MVC" checked but "Convert HDR/DV to SDR
+        # first" left off ran the ENTIRE main conversion (potentially hours) only
+        # to fail at the very last step, since a real MVC file cannot carry HDR at
+        # all (ADR-252). Catch this before Start, not after the whole job wastes
+        # its time -- probe the real source for HDR (same PQ/HLG transfer check
+        # sbs_to_mvc_cli.probe_video() itself uses, so this never disagrees with
+        # what would actually fail later) and offer to fix it automatically.
+        # Skipped entirely when the main pipeline's own separate "Convert HDR to
+        # SDR" is already on -- the file feeding into MVC would already be SDR by
+        # then, so nothing would fail and asking would be a false alarm.
+        if (self.chk_convert_to_mvc.GetValue() and not self.chk_convert_to_mvc_hdr_to_sdr.GetValue()
+                and not self.chk_hdr_to_sdr.GetValue() and path.isfile(input_path)):
+            from . import utils as iw3_utils
+            ffprobe_bin = iw3_utils._find_ffprobe()
+            if ffprobe_bin and iw3_utils._detect_pq_or_hlg(input_path, ffprobe_bin):
+                answer = wx.MessageBox(
+                    T("This source looks like HDR/Dolby Vision, but a real 3D Blu-ray/MVC file "
+                      "cannot carry HDR at all -- \"Convert to 3D Blu-ray MVC\" would fail at the "
+                      "very last step otherwise, after the entire conversion has already run.\n\n"
+                      "Convert it to SDR automatically before that step, and continue?\n\n"
+                      "Yes: turns on \"Convert HDR/DV to SDR first\" and starts the job.\n"
+                      "No: does not start, so you can adjust settings yourself first."),
+                    T("HDR Source, MVC Requested"), wx.YES_NO | wx.ICON_QUESTION)
+                if answer == wx.YES:
+                    self.chk_convert_to_mvc_hdr_to_sdr.SetValue(True)
+                else:
+                    return None
+
         resume = self.chk_resume.IsEnabled() and self.chk_resume.GetValue()
         recursive = path.isdir(input_path) and self.chk_recursive.GetValue()
         skip_error = self.chk_skip_error.IsEnabled() and self.chk_skip_error.GetValue()
@@ -19562,6 +19615,160 @@ def _self_test_convert_to_mvc_checkbox():
     print("_self_test_convert_to_mvc_checkbox: PASS")
 
 
+def _self_test_stereo_format_mvc_shortcut():
+    """ADR-280: real end-user request, relayed by decker (a screenshot circling
+    "Convert to 3D Blu-ray MVC after conversion") -- "can this be integrated under
+    Stereo Format as options". Real MVC can't be a genuine Stereo Format entry (it's
+    a second-pass FRIMEncode re-encode of an already-finished Full SBS file, not
+    something the main render step outputs directly -- see
+    on_changed_chk_convert_to_mvc's own comment), so "MVC (Blu-ray)" is a pure
+    shortcut: selecting it snaps the real format to Full SBS and checks "Convert to
+    3D Blu-ray MVC after conversion" for you, exactly what Quick Convert's
+    hdr->mvc route already does from a different screen. Confirms it's never the
+    real persisted value -- parse_args()/get_cli_command() must see plain Full SBS,
+    not a fake "MVC (Blu-ray)" format."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert "MVC (Blu-ray)" in frame.cbo_stereo_format.GetStrings()
+        tip = frame.cbo_stereo_format.GetToolTip().GetTip()
+        assert "MVC (Blu-ray)" in tip and "shortcut" in tip.lower(), tip
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        assert frame.chk_convert_to_mvc.GetValue() is False
+        frame.cbo_stereo_format.SetStringSelection("MVC (Blu-ray)")
+        frame.on_selected_index_changed_cbo_stereo_format(wx.CommandEvent())
+
+        # the shortcut never persists as the real value -- it resolves immediately
+        assert frame.cbo_stereo_format.GetValue() == "Full SBS", \
+            f"must snap back to Full SBS, got: {frame.cbo_stereo_format.GetValue()}"
+        assert frame.chk_convert_to_mvc.GetValue() is True
+
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convert_to_mvc is True
+        assert not args.half_sbs and not args.tb and not args.half_tb, \
+            "must resolve to plain Full SBS, not some other packed format"
+
+        command = frame.get_cli_command()
+        assert "--convert-to-mvc" in command, command
+        assert "MVC (Blu-ray)" not in command, \
+            "the fake dropdown label must never leak into the real CLI command"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_stereo_format_mvc_shortcut: PASS")
+
+
+def _self_test_mvc_hdr_preflight_prompt():
+    """ADR-281: real end-user report, relayed by decker (a screenshot of the
+    post-job "3D Blu-ray MVC: audio/subtitle notes" dialog showing "HDR video is
+    not supported for 3D Blu-ray here") -- an HDR source with "Convert to 3D
+    Blu-ray MVC" checked but "Convert HDR/DV to SDR first" left off ran the ENTIRE
+    main conversion only to fail at the very last step. parse_args() now probes
+    the real source for HDR before Start and offers to fix it automatically,
+    instead of letting the whole job run first. Covers: skipped when MVC isn't
+    requested, skipped when the SDR checkbox (either the MVC-specific one or the
+    main pipeline's own) is already on, skipped for a genuinely SDR source, and
+    both real Yes/No outcomes when a real HDR source is detected."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = path.join(tmpdir, "movie.mkv")
+            open(src, "wb").close()
+            frame.pnl_file.set_input_path(src)
+            frame.pnl_file.set_output_path(tmpdir)
+
+            # (a) Convert to MVC not requested -- never probes, never prompts.
+            frame.chk_convert_to_mvc.SetValue(False)
+            with mock.patch.object(iw3_utils, "_detect_pq_or_hlg") as detect, \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            detect.assert_not_called()
+            msgbox.assert_not_called()
+
+            frame.chk_convert_to_mvc.SetValue(True)
+
+            # (b) the MVC-specific SDR checkbox is already on -- nothing to ask.
+            frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(True)
+            with mock.patch.object(iw3_utils, "_detect_pq_or_hlg") as detect, \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            detect.assert_not_called()
+            msgbox.assert_not_called()
+            frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
+
+            # (c) the main pipeline's own separate "Convert HDR to SDR" is already
+            # on -- the file feeding into MVC would already be SDR, so asking
+            # would be a false alarm.
+            frame.chk_hdr_to_sdr.SetValue(True)
+            with mock.patch.object(iw3_utils, "_detect_pq_or_hlg") as detect, \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            detect.assert_not_called()
+            msgbox.assert_not_called()
+            frame.chk_hdr_to_sdr.SetValue(False)
+
+            # (d) a genuinely SDR source -- probed, but no prompt since nothing
+            # would actually fail.
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False) as detect, \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            detect.assert_called_once()
+            msgbox.assert_not_called()
+
+            # (e) a real HDR source, user says Yes -- auto-enables the checkbox
+            # and the job starts.
+            assert frame.chk_convert_to_mvc_hdr_to_sdr.GetValue() is False
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=True), \
+                 mock.patch.object(wx, "MessageBox", return_value=wx.YES) as msgbox:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None, "Yes must let the job start"
+            assert args.mvc_convert_hdr_to_sdr is True
+            assert frame.chk_convert_to_mvc_hdr_to_sdr.GetValue() is True
+            msgbox.assert_called_once()
+            frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
+
+            # (f) a real HDR source, user says No -- Start is cancelled (None),
+            # and the checkbox is left exactly as the user had it.
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=True), \
+                 mock.patch.object(wx, "MessageBox", return_value=wx.NO):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is None, "No must cancel Start, not proceed to a job that will fail"
+            assert frame.chk_convert_to_mvc_hdr_to_sdr.GetValue() is False
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mvc_hdr_preflight_prompt: PASS")
+
+
 def _self_test_max_negative_parallax_field():
     """ADR-179: Max Negative Parallax (GUI label "Max Pop-Out Limit"), a safety cap
     on pop-out that's independent from the Convergence Plane slider -- Convergence
@@ -23886,6 +24093,8 @@ def _run_self_tests():
         _self_test_da3_giant_variants_gated,
         _self_test_restore_audio_subtitles_checkbox,
         _self_test_convert_to_mvc_checkbox,
+        _self_test_stereo_format_mvc_shortcut,
+        _self_test_mvc_hdr_preflight_prompt,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_bluray_import_panel,

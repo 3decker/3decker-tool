@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (4)
+## Latest Update — September 26, 2026 (5)
+
+**New: "MVC (Blu-ray)" is now a direct choice in the Stereo Format dropdown.** Real user question: can converting to 3D Blu-ray MVC be picked right from the main Stereo Format list, instead of only from its own checkbox further down the page? Picking it sets everything up for you in one click — the real format underneath becomes Full SBS (what MVC needs to work from) and "Convert to 3D Blu-ray MVC after conversion" gets checked automatically. Same end result as picking Full SBS and checking that box yourself, just faster to find.
+
+**Fixed: converting an HDR movie straight to 3D Blu-ray MVC could run the entire conversion, then fail at the very last step.** A real user hit this: hours of conversion, then a failure message saying HDR isn't supported for 3D Blu-ray and needs converting to SDR first — a setting that was sitting right there the whole time, just easy to miss before starting. Now, if your source is HDR and you have "Convert to 3D Blu-ray MVC" checked without "Convert HDR/DV to SDR first," the app asks you before the job even starts: convert to SDR automatically and continue, or stop so you can adjust settings yourself. No more discovering the problem hours in.
+
+## Update — September 26, 2026 (5)
 
 **New: batch/folder conversions now give every movie its own separate log file, instead of one combined log for the whole run.** Requested directly: "i do batches or folder sometimes, so i will like to keep each log separate for each movie if possible." Before this, converting a whole folder of movies in one go only ever produced one shared log covering everything. Now, with "Write a Log File for This Job" checked, each movie in a batch gets its own real log next to its own output — same as converting one movie at a time already worked. (Still covers movies only for now, not a folder made up entirely of images.)
 

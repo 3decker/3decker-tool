@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (9)
+## Latest Update — September 26, 2026 (10)
+
+**Investigating: some real converted MVC movies play with the picture doubled on screen (side-by-side or stacked), not real 3D.** A real user reported this on several real full-length movies played on an actual 3D TV. Ran extensive real testing to track it down: checked the raw video data byte-by-byte (correctly built), and rebuilt the exact same movie settings on several short real test clips — all of those came out completely correct. That means the bug isn't in the general settings or the usual code path; the leading real suspect now is something that only shows up over a full-length movie (90+ minutes), which a short test clip never reaches. Sent the user a short real test file built with their exact settings to try on their actual TV, to narrow this down further. Not resolved yet — this entry will be updated once the real cause is found.
+
+**Fixed: when "Direct to 3D Blu-ray MVC" failed, the error message only said "Broken pipe" — now it shows the real reason.** A real crash on a real job showed a generic error with no useful detail. The underlying real error-reporting code already existed for one failure path but was missing from this one — fixed so any future failure here shows FRIM's/ffmpeg's actual real error text instead of a bare technical message. The original crash's real cause is still unknown; this fix means the next time it happens, the real answer will actually show up in the error dialog.
+
+## Update — September 26, 2026 (9)
 
 **Fixed: real MVC 3D Blu-ray files weren't telling players they were 3D at all.** A real user reported their TV played a converted MVC file flat/wrong ("like TAB") and that the file itself showed no 3D tag. Checked a Gemini AI suggestion sent in alongside the report against the actual code — most of its guesses didn't hold up, but one real gap was confirmed: the app's MVC files never told the container "this is a stereo 3D video." Fixed by tagging every MVC `.mkv` this app makes with the same real marker (`StereoMode`) that MakeMKV — the standard tool for ripping real 3D Blu-rays — already uses, so compatible players can recognize it properly. Verified the fix is really in the file with a real conversion. Important honesty note: this fixes a real, confirmed gap, but we don't yet know for certain it resolves that specific user's TV issue — some TVs and players simply can't play real dual-track MVC 3D at all, tag or no tag, so we're waiting on them to re-test.
 

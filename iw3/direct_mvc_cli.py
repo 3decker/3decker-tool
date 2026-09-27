@@ -108,10 +108,47 @@ class _DirectMvcPipe:
         try:
             self.ff.stdin.write(raw_bytes)
         except (BrokenPipeError, OSError) as e:
+            # Real gap found from a live user crash (2026-09-26): a bare "Broken pipe" told the
+            # user nothing about WHY FRIM/ffmpeg actually died -- give the same real diagnostic
+            # (FRIM's own tail output + ffmpeg's log) that finish() already builds on its own
+            # failure path, instead of just the OS-level symptom.
+            detail = self._diagnose_failure(wait_seconds=1.0)
             raise RuntimeError(
                 f"the MVC encode pipe closed unexpectedly while writing frame {self.frame_count + 1} "
-                f"(FRIMEncode likely crashed or refused): {e}") from e
+                f"(FRIMEncode likely crashed or refused): {e}"
+                + (f"\n{detail}" if detail else "")) from e
         self.frame_count += 1
+
+    def _diagnose_failure(self, wait_seconds=0.0):
+        """Best-effort real diagnostic: FRIM's own last output lines plus ffmpeg's log tail,
+        the same shape finish() already surfaces on its own failure path. Never raises --
+        called from an exception handler, so a second failure here must not mask the first."""
+        try:
+            if self.fr is not None:
+                try:
+                    self.fr.wait(timeout=wait_seconds)
+                except subprocess.TimeoutExpired:
+                    pass
+                if self._reader is not None:
+                    self._reader.join(timeout=1.0)
+            frim_msg = "\n".join(self._tail[-8:]) if self._tail else \
+                "(FRIMEncode produced no output at all before exiting)"
+            ff_msg = ""
+            if self._ff_log is not None:
+                try:
+                    self._ff_log.flush()
+                except Exception:
+                    pass
+            if self._ffmpeg_log_path and path.exists(self._ffmpeg_log_path):
+                with open(self._ffmpeg_log_path, "rb") as f:
+                    ff_msg = f.read()[-600:].decode(errors="replace")
+            parts = [f"FRIMEncode output: {frim_msg}"]
+            if ff_msg.strip():
+                parts.append(f"ffmpeg (likely just a downstream symptom of FRIM's pipe closing, "
+                             f"not ffmpeg's own problem): {ff_msg}")
+            return "\n".join(parts)
+        except Exception:
+            return ""
 
     def _start(self, width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range):
         # Same ffmpeg eye-split/scale chain sbs_to_mvc_cli.convert() already uses
@@ -193,14 +230,9 @@ class _DirectMvcPipe:
 
         if self.fr.returncode != 0 or not (path.exists(self._base_es) and path.getsize(self._base_es) > 0
                                             and path.exists(self._dep_es) and path.getsize(self._dep_es) > 0):
-            with open(self._ffmpeg_log_path, "rb") as f:
-                ff_msg = f.read()[-600:].decode(errors="replace")
-            frim_msg = "\n".join(self._tail[-8:]) if self._tail else \
-                "(FRIMEncode produced no output at all before exiting)"
             raise RuntimeError(
-                f"the MVC encode failed (FRIMEncode exit code {self.fr.returncode}):\n{frim_msg}"
-                + (f"\nffmpeg (likely just a downstream symptom of FRIM's pipe closing, not "
-                   f"ffmpeg's own problem): {ff_msg}" if ff_msg.strip() else ""))
+                f"the MVC encode failed (FRIMEncode exit code {self.fr.returncode}):\n"
+                + self._diagnose_failure())
 
     def kill(self):
         for p in (self.ff, self.fr):

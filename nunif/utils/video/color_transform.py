@@ -950,7 +950,19 @@ def setup_color_transform(
         is_nvidia_gpu(device)
         and config.video_codec in {"h264_nvenc", "hevc_nvenc"}
         and config.pix_fmt in {"nv12", "p010le"}
+        and getattr(config, "raw_frame_sink", None) is None
     ):
+        # Real crash found live (2026-09-26, ADR-286): with hevc_nvenc + a CUDA device + this
+        # pix_fmt, a real cuda_context keeps every reformatted frame GPU-resident (format.name
+        # literally "cuda") so it can go straight into NVENC with no CPU round-trip -- a real,
+        # worthwhile optimization for the normal encode path, but raw_sink_mode never touches
+        # NVENC or video_output_stream at all (see the `if raw_sink_mode:` branch above), and its
+        # only consumer is `.to_ndarray().tobytes()` -- which needs real CPU pixel data. Handing
+        # it a still-on-GPU "cuda" frame made `raw_frame_sink` pass pix_fmt="cuda" straight to
+        # ffmpeg's rawvideo demuxer, which rejected it outright ("Error opening input: Invalid
+        # argument") before a single byte was read -- surfacing downstream as FRIMEncode getting
+        # zero frames and the pipe breaking on frame 1. Confirmed by reproducing ffmpeg's exact
+        # error text with pix_fmt="cuda" via a real subprocess test, not assumed.
         device_id = 0
         if device is not None and isinstance(device.index, int):
             device_id = device.index
@@ -1041,6 +1053,7 @@ def _test_configure() -> None:
             colorspace: str = "auto",
             pix_fmt: str = "yuv420p",
             video_codec: str = "libx264",
+            raw_frame_sink=None,
         ) -> None:
             self.colorspace = colorspace
             self.pix_fmt = pix_fmt
@@ -1050,6 +1063,7 @@ def _test_configure() -> None:
             self.output_color_trc = 2
             self.source_color_range = 2
             self.state_updated = lambda c: print("Config updated callback triggered")
+            self.raw_frame_sink = raw_frame_sink
 
     class MockSWFormat(VideoMetadata):
         def __init__(
@@ -1115,6 +1129,29 @@ def _test_configure() -> None:
         configure_video_codec(cfg_12)
         assert cfg_12.pix_fmt == "p016le", f"{codec}: expected p016le, got {cfg_12.pix_fmt}"
     print("OK")
+
+    # ADR-286: real crash found live -- hevc_nvenc + a real CUDA device + pix_fmt nv12/p010le
+    # normally keeps every reformatted frame GPU-resident (a real, worthwhile optimization when
+    # the frame is headed straight into NVENC), but raw_sink_mode's only consumer is
+    # `.to_ndarray().tobytes()`, which needs real CPU pixel data -- a GPU-resident frame's
+    # format.name came through as literally "cuda", which ffmpeg's rawvideo demuxer flatly
+    # rejected ("Error opening input: Invalid argument") before reading a single byte, confirmed
+    # by reproducing ffmpeg's exact error text with pix_fmt="cuda" via a real subprocess test.
+    if torch.cuda.is_available():
+        print("Testing setup_color_transform (raw_sink_mode suppresses the CUDA-resident path)...")
+        real_cuda_device = torch.device("cuda", 0)
+        cfg_gpu_encode = MockConfig(pix_fmt="nv12", video_codec="hevc_nvenc")
+        _, reformatter_gpu_encode = setup_color_transform(sw_hd, cfg_gpu_encode, device=real_cuda_device)
+        assert reformatter_gpu_encode.cuda_context is not None, \
+            "the normal (non-raw-sink) hevc_nvenc+nv12 path must still stay GPU-resident"
+
+        cfg_raw_sink = MockConfig(pix_fmt="nv12", video_codec="hevc_nvenc", raw_frame_sink=lambda *a: None)
+        _, reformatter_raw_sink = setup_color_transform(sw_hd, cfg_raw_sink, device=real_cuda_device)
+        assert reformatter_raw_sink.cuda_context is None, \
+            "raw_sink_mode must never get a GPU-resident (cuda) frame -- its only consumer needs real CPU bytes"
+        print("OK")
+    else:
+        print("Skipping CUDA-resident raw_sink_mode test -- no CUDA device on this machine")
     print("--- End configure tests ---")
 
 

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 26, 2026 (10)
+## Latest Update — September 27, 2026 (1)
+
+**Fixed: "Direct to 3D Blu-ray MVC" could crash right at the start of a real job with "Broken pipe."** Tracked down using the real crash log sent in by a user: the actual cause was that this feature could receive video frames still sitting on the GPU instead of ready-to-use picture data, when the "Video Codec" setting was NVIDIA's own hardware encoder (this app's own recommended default) — a real, worthwhile speed optimization for regular conversions that this new single-pass MVC feature wasn't accounting for. Fixed so this feature always gets real, usable frame data regardless of which video codec is selected. Verified with a real conversion using the exact settings that crashed before — now completes and produces a valid, correctly-tagged 3D file.
+
+## Update — September 26, 2026 (10)
 
 **Investigating: some real converted MVC movies play with the picture doubled on screen (side-by-side or stacked), not real 3D.** A real user reported this on several real full-length movies played on an actual 3D TV. Ran extensive real testing to track it down: checked the raw video data byte-by-byte (correctly built), and rebuilt the exact same movie settings on several short real test clips — all of those came out completely correct. That means the bug isn't in the general settings or the usual code path; the leading real suspect now is something that only shows up over a full-length movie (90+ minutes), which a short test clip never reaches. Sent the user a short real test file built with their exact settings to try on their actual TV, to narrow this down further. Not resolved yet — this entry will be updated once the real cause is found.
 

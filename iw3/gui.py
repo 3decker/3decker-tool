@@ -4101,8 +4101,8 @@ class MainFrame(wx.Frame):
               "format an actual 3D Blu-ray disc uses) automatically -- a plain 2D movie in, one real "
               "MVC file out, with no separate manual step through the standalone 'SBS to 3D Blu-ray "
               "MVC' tool.\n"
-              "How it's safe: written to its own separate '<name>_MVC.iso'/'<name>_MVC.mkv' file -- "
-              "the plain converted output is always left untouched either way.\n"
+              "How it's safe: written to its own separate '<name>_MVC.iso'/'<name>_MVC.mkv'/"
+              "'<name>_MVC.m2ts' file -- the plain converted output is always left untouched either way.\n"
               "Con: MVC encoding is real extra processing time after the main conversion already "
               "finished -- it re-encodes the video through a separate program (FRIMEncode), CPU-only, "
               "not a quick remux like Restore Audio & Subtitles.\n"
@@ -4125,6 +4125,7 @@ class MainFrame(wx.Frame):
         self.cbo_mvc_output_type.SetEditable(False)
         self.cbo_mvc_output_type.Append(T("3D Blu-ray ISO"), "iso")
         self.cbo_mvc_output_type.Append(T("Plain MKV (direct MVC, no disc)"), "mkv")
+        self.cbo_mvc_output_type.Append(T("Bare M2TS clip (real Blu-ray stream, no disc)"), "m2ts")
         self.cbo_mvc_output_type.SetSelection(0)
         self.cbo_mvc_output_type.SetToolTip(
             T("3D Blu-ray ISO: a real disc image with menus/chapters, playable on a 3D Blu-ray player "
@@ -4132,6 +4133,13 @@ class MainFrame(wx.Frame):
               "Plain MKV: the same real MVC video written directly into a plain .mkv instead, no disc "
               "structure -- for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
               "rips) rather than a disc image (ADR-245).\n"
+              "Bare M2TS (ADR-289): the exact same real Blu-ray-legal muxing as the ISO option (same "
+              "tsMuxeR bitstream fixups, correct PCR placement, BD-style audio), just as one plain clip "
+              "file instead of a full disc structure -- for a standalone hardware player/box that needs "
+              "a real Blu-ray-native stream but can't or won't mount/burn a disc image (e.g. played "
+              "directly off a USB drive or NAS). Real end-user precedent: a real standalone Blu-ray "
+              "player accepted content muxed exactly this way over USB when the same content packaged "
+              "as a plain .mkv was not recognized as 3D at all.\n"
               "Real, confirmed benefit either way, even for a homemade AI conversion like this one (not "
               "just a real studio disc rip): a real end user pointed out, and this project directly "
               "confirmed by decoding a real MVC file with a completely ordinary player engine, that the "
@@ -4143,8 +4151,10 @@ class MainFrame(wx.Frame):
               "hardware 3D Blu-ray/UHD players), instead of keeping separate 2D and 3D copies of the "
               "same movie -- worthwhile even if this specific conversion is a re-encode rather than the "
               "original studio quality of a genuine disc rip.\n"
-              "Neither plays as 3D in VLC, MPC-HC or most everyday TVs -- both still need a real "
-              "MVC-capable player specifically for the 3D side."))
+              "None of the three play as 3D in VLC, MPC-HC or most everyday TVs -- all still need a real "
+              "MVC-capable player specifically for the 3D side. If your standalone hardware plays a real "
+              "3D Blu-ray .iso fine but rejected a Plain MKV as 3D, try Bare M2TS before assuming your "
+              "hardware can't do it at all."))
         self.txt_mvc_bitrate = EditableComboBox(self.grp_postprocess, choices=["10", "20", "30", "40"],
                                                 name="txt_mvc_bitrate")
         self.txt_mvc_bitrate.SetValue("20")
@@ -4210,8 +4220,10 @@ class MainFrame(wx.Frame):
             T("What it's for: the same real MVC output as 'Convert to 3D Blu-ray MVC' above, but as a "
               "single pass -- the main conversion encodes straight into the MVC pipe, so no finished SBS/TB "
               "file is ever written to disk at all. There is no separate plain-converted file this "
-              "time -- the MVC file (.iso/.mkv, same Output Type/Bitrate settings above) IS this job's "
-              "only output.\n"
+              "time -- the MVC file (.iso/.mkv/.m2ts, same Output Type/Bitrate settings above) IS this "
+              "job's only output. The Output field above must itself end in .iso, .mkv or .m2ts for this "
+              "mode -- Output Type here is only auto-applied to the separate file 'Convert to 3D Blu-ray "
+              "MVC' produces, not to this single-pass mode's own Output field.\n"
               "How it's faster: skips writing, then re-reading, an entire finished video file between "
               "the two stages -- real time and real disk space saved, worthwhile for a movie you only "
               "ever want as an MVC file.\n"
@@ -6315,6 +6327,9 @@ class MainFrame(wx.Frame):
               "no disc structure, for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
               "rips) rather than a disc image -- one step from a 2D movie converted by this program all "
               "the way to a real MVC file, no separate re-ripping tool needed.\n"
+              "'.m2ts' (ADR-289) writes the same real Blu-ray-legal muxing as '.iso', as one bare clip "
+              "file with no disc structure -- for a standalone hardware player/box that needs a real "
+              "Blu-ray-native stream but can't or won't mount/burn a disc image.\n"
               "Real, confirmed benefit for exactly this homemade-conversion case: a real end user pointed "
               "out, and this project directly confirmed by decoding a real MVC file with a completely "
               "ordinary player engine, that the video plays as ordinary 2D on ANY normal player -- one "
@@ -6341,6 +6356,7 @@ class MainFrame(wx.Frame):
         self.cbo_sbs2mvc_output_type.SetEditable(False)
         self.cbo_sbs2mvc_output_type.Append(T("3D Blu-ray ISO"), "iso")
         self.cbo_sbs2mvc_output_type.Append(T("Plain MKV (direct MVC, no disc)"), "mkv")
+        self.cbo_sbs2mvc_output_type.Append(T("Bare M2TS clip (real Blu-ray stream, no disc)"), "m2ts")
         self.cbo_sbs2mvc_output_type.SetSelection(0)
         self.cbo_sbs2mvc_output_type.SetToolTip(
             T("3D Blu-ray ISO: a real disc image with menus/chapters, playable on a 3D Blu-ray player "
@@ -6348,6 +6364,12 @@ class MainFrame(wx.Frame):
               "Plain MKV: the same real MVC video written directly into a plain .mkv instead, no disc "
               "structure -- for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
               "rips) rather than a disc image (ADR-245).\n"
+              "Bare M2TS (ADR-289): the exact same real Blu-ray-legal muxing as the ISO option, just as "
+              "one plain clip file instead of a full disc structure -- for a standalone hardware player/ "
+              "box that needs a real Blu-ray-native stream but can't or won't mount/burn a disc image "
+              "(e.g. played directly off a USB drive or NAS). Real end-user precedent: a real standalone "
+              "Blu-ray player accepted content muxed exactly this way over USB when the same content "
+              "packaged as a plain .mkv was not recognized as 3D at all.\n"
               "Real, confirmed benefit either way, even for a homemade AI conversion like this one (not "
               "just a real studio disc rip): a real end user pointed out, and this project directly "
               "confirmed by decoding a real MVC file with a completely ordinary player engine, that the "
@@ -6358,8 +6380,10 @@ class MainFrame(wx.Frame):
               "real MVC-capable player -- Kodi/OSMC/LibreELEC, several Android streaming boxes, some "
               "hardware 3D Blu-ray/UHD players), instead of keeping separate 2D and 3D copies of the "
               "same movie.\n"
-              "Neither plays as 3D in VLC, MPC-HC or most everyday TVs -- both still need a real "
-              "MVC-capable player specifically for the 3D side.\n"
+              "None of the three play as 3D in VLC, MPC-HC or most everyday TVs -- all still need a real "
+              "MVC-capable player specifically for the 3D side. If your standalone hardware plays a real "
+              "3D Blu-ray .iso fine but rejected a Plain MKV as 3D, try Bare M2TS before assuming your "
+              "hardware can't do it at all.\n"
               "Changing this also updates the Output File extension above, if you already have a path "
               "typed in."))
 
@@ -14057,11 +14081,12 @@ class MainFrame(wx.Frame):
             pass
 
     def on_click_btn_sbs2mvc_output(self, event):
-        is_mkv = self.cbo_sbs2mvc_output_type.GetClientData(
-            self.cbo_sbs2mvc_output_type.GetSelection()) == "mkv"
-        message = T("Save MVC .mkv File As") if is_mkv else T("Save 3D Blu-ray Disc Image As")
-        wildcard = ("MKV files (*.mkv)|*.mkv|All files (*.*)|*.*" if is_mkv
-                    else "Disc images (*.iso)|*.iso|All files (*.*)|*.*")
+        out_type = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+        message = {"mkv": T("Save MVC .mkv File As"), "m2ts": T("Save MVC .m2ts Clip As")}.get(
+            out_type, T("Save 3D Blu-ray Disc Image As"))
+        wildcard = {"mkv": "MKV files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                    "m2ts": "M2TS files (*.m2ts)|*.m2ts|All files (*.*)|*.*"}.get(
+            out_type, "Disc images (*.iso)|*.iso|All files (*.*)|*.*")
         with wx.FileDialog(self, message=message, wildcard=wildcard,
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
             if self.txt_sbs2mvc_output.GetValue():
@@ -14080,7 +14105,7 @@ class MainFrame(wx.Frame):
             return
         out_ext = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
         base, ext = path.splitext(current)
-        if ext.lower() in (".iso", ".mkv"):
+        if ext.lower() in (".iso", ".mkv", ".m2ts"):
             self.txt_sbs2mvc_output.SetValue(f"{base}.{out_ext}")
 
     def _update_sbs2mvc_progress(self, stage, done, total):
@@ -14091,8 +14116,9 @@ class MainFrame(wx.Frame):
         # labels), which made this stage's own always-CPU behavior a reasonable thing to
         # wonder about rather than assume. FRIM (the only free MVC/3D-Blu-ray encoder this
         # tool has) has no working hardware mode on current graphics cards.
-        is_mkv_out = path.splitext(self.txt_sbs2mvc_output.GetValue().strip())[1].lower() == ".mkv"
-        mux_label = T("Writing the MVC .mkv") if is_mkv_out else T("Building the disc")
+        out_ext = path.splitext(self.txt_sbs2mvc_output.GetValue().strip())[1].lower()
+        mux_label = {".mkv": T("Writing the MVC .mkv"), ".m2ts": T("Writing the MVC .m2ts clip")}.get(
+            out_ext, T("Building the disc"))
         names = {"encode": T("Encoding 3D (CPU/software)"), "mux": mux_label,
                  "autocrop": T("Looking for black bars"),
                  "retime": T("Fixing the frame rate (re-timing picture, sound and subtitles)"),
@@ -14214,8 +14240,8 @@ class MainFrame(wx.Frame):
             return None, T("Select a valid 3D video file first.")
         if not output_path:
             return None, T("Set an Output ISO path first.")
-        if path.splitext(output_path)[1].lower() not in (".iso", ".mkv"):
-            return None, T("Output must end in .iso or .mkv.")
+        if path.splitext(output_path)[1].lower() not in (".iso", ".mkv", ".m2ts"):
+            return None, T("Output must end in .iso, .mkv or .m2ts.")
         if path.abspath(output_path) == path.abspath(input_path):
             return None, T("Output must be different from the input video.")
         if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, 40, allow_empty=False):
@@ -19884,6 +19910,12 @@ def _self_test_convert_to_mvc_checkbox():
         assert args_mkv.mvc_output_type == "mkv"
         command_mkv = frame.get_cli_command()
         assert "--mvc-output-type mkv" in command_mkv, command_mkv
+        # ADR-289
+        frame.cbo_mvc_output_type.SetSelection(items.index("m2ts"))
+        args_m2ts = frame.parse_args(skip_set_state=True)
+        assert args_m2ts.mvc_output_type == "m2ts"
+        command_m2ts = frame.get_cli_command()
+        assert "--mvc-output-type m2ts" in command_m2ts, command_m2ts
         frame.cbo_mvc_output_type.SetSelection(items.index("iso"))
 
         # ADR-247: Half SBS/Full TB/Half TB are all genuine, valid MVC inputs now --
@@ -21653,6 +21685,13 @@ def _self_test_mvc_conversion_step():
         assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
     cmd = run_mvc.call_args[0][0]
     assert cmd[cmd.index("-o") + 1] == "C:/out/movie_MVC.mkv", cmd
+
+    # ADR-289: mvc_output_type="m2ts" reaches the output path's extension too
+    args = base_args(mvc_output_type="m2ts")
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    cmd = run_mvc.call_args[0][0]
+    assert cmd[cmd.index("-o") + 1] == "C:/out/movie_MVC.m2ts", cmd
 
     # the original file is never modified/replaced -- this is a side effect, not a chain link
     args = base_args()

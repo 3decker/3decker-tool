@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — September 27, 2026 (3)
+## Latest Update — September 27, 2026 (4)
+
+**Solved: the mystery of MVC movies playing "doubled" on a real 3D TV (from September 26).** Working with the same real user who reported it, tracked this down to something structural rather than a bug in the video itself: real standalone 3D Blu-ray hardware generally can't recognize MVC 3D content when it's packaged in a plain .mkv file, no matter how correctly it's built inside — that class of hardware is built to expect a real Blu-ray disc structure specifically. The good news: the same user found that his actual 3D Blu-ray disc image (.iso) DOES play correctly on his TV, which pointed straight at the real fix.
+
+**New: a third MVC output option, "Bare M2TS clip," for hardware that plays a 3D Blu-ray disc image but not a plain .mkv.** Available anywhere you could already choose "3D Blu-ray ISO" or "Plain MKV" (the main conversion's MVC options, the standalone "SBS to 3D Blu-ray MVC" tool, and "Direct to 3D Blu-ray MVC"). This writes the exact same real, Blu-ray-legal video as the ISO option, but as one plain file with no disc structure around it — meant for a standalone player, streaming box, or NAS that needs a genuine Blu-ray-style video stream but can't or won't mount or burn a disc image (for example, playing directly off a USB drive). If your hardware plays a real 3D Blu-ray .iso fine but didn't recognize a Plain MKV as 3D, try this before assuming your hardware simply can't do it.
+
+## Update — September 27, 2026 (3)
 
 **Fixed: on a native 4K HDR source, the GPU could sit almost idle while the CPU maxed out.** A real user with a top-tier GPU and CPU found their GPU barely being used at all. The cause: the "HWAccel" setting (which controls whether your GPU or your CPU reads the video file) defaulted to CPU-only, even when a real, supported GPU was detected — so a heavy 4K HDR source was fully decoded on the CPU before the GPU ever got a frame to work on. It now automatically picks your GPU by default, matching what this app's own tooltip already recommended. Also clarified: "Depth Batch Size" has nothing to do with this — it only affects how many already-loaded frames get processed together, not how fast the video gets read in the first place.
 

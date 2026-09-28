@@ -743,11 +743,25 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     .mkv (interleave_mvc() + mkvmerge, the same technique ADR-241 already proved for
     mvc_extract_cli.py) -- for a source that started as an ordinary 2D movie (AI-converted to
     SBS by this project's own main tool) and needs to end as one real MKV-MVC file, with no
-    separate MakeMKV/CloneBD re-rip step and no intermediate disc image ever created."""
+    separate MakeMKV/CloneBD re-rip step and no intermediate disc image ever created.
+
+    output_iso ending in .m2ts (ADR-289) is a third option: the exact same tsMuxeR muxing the
+    .iso path uses (real Blu-ray-legal bitstream fixups -- insertSEI/contSPS -- correct PCR-on-
+    video-PID placement, BD-style audio PES) but as one bare clip file, skipping the BDMV/
+    playlist/SSIF disc structure entirely. Real end-user report (Steve, 2026-09-27): his TV
+    can't recognize the direct .mkv as 3D at all, but plays a real .iso fine once mounted/
+    burned -- and a real precedent exists (AVS Forum) of a standalone hardware player accepting
+    a plain .m2ts, muxed the same way, played directly off USB with no disc image needed. .mkv
+    is a fundamentally different container family that standalone Blu-ray/MVC hardware decoders
+    generally were never built to parse (confirmed against community reports), so this isn't a
+    fixable gap in the .mkv path -- .m2ts gives users a real, testable path to hardware
+    playback without the awkwardness of mounting/burning a full disc image."""
     frim = find_frim()
     tsmuxer = _find_tsmuxer()
     ffmpeg = _get_ffmpeg_bin()
-    is_mkv_output = path.splitext(output_iso)[1].lower() == ".mkv"
+    ext = path.splitext(output_iso)[1].lower()
+    is_mkv_output = ext == ".mkv"
+    is_m2ts_output = ext == ".m2ts"
     if frim is None:
         raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
     if tsmuxer is None and not is_mkv_output:
@@ -756,8 +770,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         raise RuntimeError("ffmpeg not found")
     if not path.exists(input_path):
         raise RuntimeError(f"input file not found: {input_path}")
-    if not is_mkv_output and path.splitext(output_iso)[1].lower() != ".iso":
-        raise ValueError("the output must be an .iso or .mkv file")
+    if not is_mkv_output and not is_m2ts_output and ext != ".iso":
+        raise ValueError("the output must be an .iso, .m2ts or .mkv file")
     if not 2 <= bitrate_mbps <= 40:
         raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
 
@@ -987,7 +1001,15 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
             print(f"[sbs2mvc] note: {n}", file=sys.stderr)
 
         fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
-        meta = [f"MUXOPT --blu-ray --auto-chapters=10",
+        # ADR-289: --blu-ray builds a full BDMV/playlist/SSIF disc structure (or a real .iso of
+        # one); a plain .m2ts skips all of that and just needs a bare clip. --new-audio-pes is
+        # normally implied by --blu-ray but has to be requested explicitly without it, since the
+        # audio tracks below are still real BD-legal AC-3/DTS (via _plan_audio_subs()) that need
+        # the BD PES stream id (0xfd) to be read correctly. PCR intentionally stays on the video
+        # PID (tsMuxeR's default) rather than a separate one, matching real BD-ROM M2TS clips --
+        # do not add --no-pcr-on-video-pid here.
+        muxopt = "MUXOPT --blu-ray --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
+        meta = [muxopt,
                 f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                 f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines
         with open(meta_path, "w", encoding="utf-8", newline="\n") as f:  # no BOM: tsMuxeR rejects one
@@ -1040,9 +1062,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", "-i", required=True, help="the 3D video (side-by-side or top-bottom)")
     parser.add_argument("--output", "-o", required=True,
-                        help="the 3D Blu-ray .iso to write, or (ADR-245) a plain .mkv holding the real MVC "
+                        help="the 3D Blu-ray .iso to write, (ADR-245) a plain .mkv holding the real MVC "
                              "video directly (no disc structure, no re-encode) -- for a library built around "
-                             "real MVC files rather than a disc image")
+                             "real MVC files rather than a disc image -- or (ADR-289) a bare .m2ts clip: the "
+                             "same real Blu-ray-legal muxing as .iso, without the disc/playlist structure, "
+                             "for standalone hardware players that need a real Blu-ray-native stream but "
+                             "can't or won't mount/burn a disc image")
     parser.add_argument("--layout", choices=LAYOUTS, default=None,
                         help="how the eyes are stored in the input (default: guessed from its size)")
     parser.add_argument("--bitrate", type=float, default=20.0,

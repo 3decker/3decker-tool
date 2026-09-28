@@ -268,9 +268,11 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
                          "Full TB, or Half TB.")
 
     output_path = str(output_path)
-    is_mkv_output = path.splitext(output_path)[1].lower() == ".mkv"
-    if not is_mkv_output and path.splitext(output_path)[1].lower() != ".iso":
-        raise ValueError("the output must end in .iso or .mkv")
+    ext = path.splitext(output_path)[1].lower()
+    is_mkv_output = ext == ".mkv"
+    is_m2ts_output = ext == ".m2ts"
+    if not is_mkv_output and not is_m2ts_output and ext != ".iso":
+        raise ValueError("the output must end in .iso, .m2ts or .mkv")
 
     frim = find_frim()
     if frim is None:
@@ -366,7 +368,13 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
             if state is not None and notes:
                 state.setdefault("mvc_notes", []).extend(notes)
             fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
-            meta = [f"MUXOPT --blu-ray --auto-chapters=10",
+            # ADR-289: see sbs_to_mvc_cli.py's convert() for the full reasoning -- a bare .m2ts
+            # skips the BDMV/playlist/SSIF disc structure --blu-ray builds, but still needs
+            # --new-audio-pes explicitly (normally implied by --blu-ray) for the real BD-legal
+            # AC-3/DTS audio tracks below. PCR intentionally stays on the video PID (tsMuxeR's
+            # default), matching real BD-ROM M2TS clips.
+            muxopt = "MUXOPT --blu-ray --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
+            meta = [muxopt,
                     f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                     f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines
             meta_path = path.join(work_dir, "mux.meta")

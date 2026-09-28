@@ -24668,6 +24668,53 @@ def _with_ext(args):
     return args
 
 
+def _self_test_direct_mvc_output_folder_resolution():
+    """ADR-296: real, confirmed bug from a real user (screenshot: "Step 3/5:
+    Converting to 3D Blu-ray MVC" ended in "E:\\3d Movies already exists and is not
+    empty -- choose an empty/new folder"). iw3_main()'s direct_mvc branch used to
+    pass args.output straight into convert_direct() completely unresolved -- when
+    Output is a bare folder (the GUI's normal usage), BD Folder mode tried to build
+    a disc structure directly into the user's whole movies folder, and
+    iso_to_bd_folder()'s own non-empty-destination refusal caught it. Same bug class
+    already fixed once for the job-log path (ADR-278,
+    _resolve_single_file_log_path()) -- _resolve_direct_mvc_output_path() applies
+    the identical real-filename resolution here."""
+    import tempfile
+    from . import utils as U
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video = path.join(tmpdir, "movie.mkv")
+        open(video, "wb").close()
+        out_dir = path.join(tmpdir, "output")
+        os.makedirs(out_dir)
+
+        # BD Folder: real per-movie subfolder inside the output dir, NOT the bare
+        # output dir itself, and no extension at all
+        args = _with_ext(U.create_parser(required_true=False).parse_args(
+            ["-i", video, "-o", out_dir, "--direct-mvc", "--mvc-output-type", "folder",
+             "--metadata", "filename"]))
+        resolved = U._resolve_direct_mvc_output_path(args)
+        assert resolved != out_dir, "must never be the bare output folder itself"
+        assert path.dirname(resolved) == out_dir, resolved
+        assert path.splitext(resolved)[1] == "", f"BD Folder must have no extension: {resolved}"
+
+        # Plain MKV: same real per-movie name, now with .mkv
+        args_mkv = _with_ext(U.create_parser(required_true=False).parse_args(
+            ["-i", video, "-o", out_dir, "--direct-mvc", "--mvc-output-type", "mkv",
+             "--metadata", "filename"]))
+        resolved_mkv = U._resolve_direct_mvc_output_path(args_mkv)
+        assert resolved_mkv.endswith(".mkv"), resolved_mkv
+        assert path.dirname(resolved_mkv) == out_dir, resolved_mkv
+
+        # An explicit file path (not a bare folder) must be left completely alone
+        explicit = path.join(tmpdir, "exact_name.mkv")
+        args_explicit = U.create_parser(required_true=False).parse_args(
+            ["-i", video, "-o", explicit, "--direct-mvc", "--mvc-output-type", "mkv"])
+        assert U._resolve_direct_mvc_output_path(args_explicit) == explicit
+
+    print("_self_test_direct_mvc_output_folder_resolution: PASS")
+
+
 def _self_test_convergence_overlay_inpaint_alignment():
     """ADR-237: real user-found crash (live-confirmed: toggling this exact checkbox off
     made a real crash disappear). Root cause, confirmed by reading the code: inpaint
@@ -25050,6 +25097,7 @@ def _run_self_tests():
         _self_test_convergence_scene_hold_gui_and_metadata,
         _self_test_convergence_overlay,
         _self_test_make_output_filename_length_cap,
+        _self_test_direct_mvc_output_folder_resolution,
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,

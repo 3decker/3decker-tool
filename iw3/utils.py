@@ -7683,8 +7683,21 @@ def iw3_main(args):
             # post-conversion chain (waifu2x/RIFE/Restore AV/two-stage MVC subprocess)
             # entirely -- convert_direct() IS the whole job, there is no intermediate
             # "plain converted output" file for any of those steps to act on.
+            #
+            # ADR-296: real, confirmed bug -- when args.output is a bare OUTPUT FOLDER
+            # (the GUI's normal usage, e.g. "E:\3d Movies"), convert_direct() used to
+            # get that raw folder passed straight through as its own output target,
+            # never resolved into a real per-movie filename the way every other output
+            # path in this app already is (same bug class already fixed once for the
+            # job-log path -- see _resolve_single_file_log_path()'s own docstring,
+            # ADR-278). For BD Folder output specifically, this meant trying to build a
+            # disc structure directly INTO the user's whole movies folder -- caught by
+            # iso_to_bd_folder()'s own "destination already exists and is not empty"
+            # safety check, which was masking this deeper bug rather than the folder
+            # genuinely being the wrong choice. Resolve a real, uniquely-tagged filename
+            # first, exactly the same way process_video()/make_output_filename() do.
             from .direct_mvc_cli import convert_direct
-            convert_direct(args.input, args.output, args, depth_model, side_model)
+            convert_direct(args.input, _resolve_direct_mvc_output_path(args), args, depth_model, side_model)
         else:
             process_video(args.input, args.output, args, depth_model, side_model)
     elif is_image(args.input):
@@ -7744,6 +7757,35 @@ class _TeeStream:
             self._log_file.flush()
         except Exception:
             pass
+
+
+def _resolve_direct_mvc_output_path(args):
+    """Real per-movie output path for Direct-to-MVC (ADR-283's convert_direct()),
+    resolved exactly the same way process_video()/make_output_filename() (and
+    _resolve_single_file_log_path() below, for the job-log path) already resolve a
+    bare OUTPUT FOLDER into a real filename -- same bug class, same fix.
+
+    Real, confirmed bug (2026-09-28, ADR-296): convert_direct() used to receive
+    args.output completely unresolved. When the GUI's normal usage leaves Output as
+    a bare folder (e.g. "E:\\3d Movies"), that raw folder was passed straight
+    through as the actual MVC output target -- for BD Folder mode specifically,
+    this meant trying to build a real disc structure directly INTO the user's whole
+    movies folder. iso_to_bd_folder()'s own "destination already exists and is not
+    empty" safety check caught this before anything was actually written, but that
+    refusal was masking this deeper resolution bug, not a case of the folder
+    genuinely being the wrong choice.
+
+    Builds the real, uniquely-tagged filename the same way make_output_filename()
+    always does, then swaps its extension for the one the chosen MVC Output Type
+    actually needs (mirrors the identical mapping in _run_mvc_conversion(), the
+    two-stage flow's equivalent)."""
+    output = str(args.output)
+    if not is_output_dir(output):
+        return output
+    tagged_base, _ = path.splitext(make_output_filename(args.input, args, video=True))
+    mvc_ext = {"mkv": ".mkv", "m2ts": ".m2ts", "folder": ""}.get(
+        getattr(args, "mvc_output_type", "iso"), ".iso")
+    return path.join(output, f"{tagged_base}{mvc_ext}")
 
 
 def _resolve_single_file_log_path(args, input_path, output_path):

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 28, 2026 (5)
+## Latest Update — September 28, 2026 (6)
+
+**Fixed: "Direct to 3D Blu-ray MVC" (the single-pass option) could fail with "already exists and is not empty" the very first time you used it.** A real user hit this: the conversion ran fine, but the final step failed trying to save into their whole Output folder (which of course already had other movies in it) instead of creating its own properly named file inside that folder. The cause: this single-pass option skips a step every other part of the app already does automatically — turning your chosen Output folder plus the movie's own settings into one real, uniquely named file (or BD Folder) before saving. Fixed so it now builds that real per-movie name first, exactly like the rest of the app does. If you hit this error before, "Direct to 3D Blu-ray MVC" should now save correctly into your existing Output folder without conflicting with anything already there.
+
+## Update — September 28, 2026 (5)
 
 **Fixed: "BD Folder" output could fail with a confusing error on certain movies, depending on the settings used.** A real user hit this on a movie converted with Foreground Scale set to 0 — the job finished the video fine, but the final step (turning it into a real 3D Blu-ray folder) failed with an error about the output needing to be a disc image, video file, or folder, even though a folder was exactly what was being made. The cause: some of this app's own settings get written into the output filename (for your own reference), and one of them can include a decimal point — the part of the code that decides "is this a file or a folder" was getting confused by that decimal point, mistaking it for a file extension. Fixed so it correctly recognizes a folder destination no matter what's in the filename. If you hit this before, this exact conversion should now complete the BD Folder step successfully.
 

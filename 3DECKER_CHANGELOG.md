@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 28, 2026 (2)
+## Latest Update — September 28, 2026 (3)
+
+**Fixed: a fresh install on a newer NVIDIA graphics card (RTX 50-series) could fail to auto-detect the right setup, needing a manual workaround to install correctly.** A real user with a new GPU found the installer couldn't find a file it needed to detect their graphics card during a truly fresh, from-scratch install — it only showed up after a later step that hadn't run yet. Fixed by reordering the setup steps so the detection step runs after the file it needs actually exists. If you hit this before and manually added `-TorchVariant cu130` to work around it, that's no longer necessary — auto-detect should work correctly on a fresh install now.
+
+## Update — September 28, 2026 (2)
 
 **Fixed: a real, if hard-to-describe, picture problem specific to 3DECKER's own direct "Plain MKV"/"Bare M2TS" output — found by directly comparing it against a real user's independently-confirmed-working file.** The user had a working recipe (rip 3DECKER's own disc image with the free tool MakeMKV, then combine with the original audio) that always played correctly, while asking 3DECKER to build the MKV directly on its own came out looking wrong — often described as a cropping issue. Tracked down a real, concrete difference: the video encoder this app uses (FRIM) tags each 3D frame's second-eye data with a marker that isn't an officially standard part of the video format. MakeMKV's own tool quietly cleans this up when it rips a disc; 3DECKER's own direct-to-MKV path never did. That stray marker is a plausible, real explanation for exactly the kind of picture misalignment reported. Fixed so 3DECKER's own direct output now matches the real, working file's structure exactly, confirmed byte-for-byte. The "3D Blu-ray ISO" and "BD Folder" options were never affected by this — this was specific to "Plain MKV" and "Bare M2TS" output.
 

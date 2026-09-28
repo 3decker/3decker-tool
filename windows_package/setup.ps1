@@ -74,25 +74,6 @@ function Get-File($url, $destination) {
 try {
 
 # ---------------------------------------------------------------------------
-Write-Step "Torch variant"
-
-if (-not $TorchVariant) {
-    # Auto-detect via the shared detect_torch_variant.ps1 -- the SAME script the
-    # update.bat/update-3decker.bat/update-nagadomi.bat entry points call, so a
-    # fresh install (this script) and an existing install being updated (those)
-    # can never drift apart on which GPU generation needs which build. See that
-    # script's own header comment for the real bug this centralization fixes.
-    $TorchVariant = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "detect_torch_variant.ps1")).Trim()
-    if ($TorchVariant -eq "cu130") {
-        Write-Host "  Detected a Blackwell-class GPU (compute capability >= 12.0) -> using cu130."
-    } else {
-        Write-Host "  Using cu126 (default -- either an older/non-NVIDIA GPU, or none detected). If you have an AMD or Intel GPU, re-run with -TorchVariant rocm or -TorchVariant xpu instead."
-    }
-} else {
-    Write-Host "  Using explicitly requested -TorchVariant $TorchVariant."
-}
-
-# ---------------------------------------------------------------------------
 Write-Step "Embedded Python 3.12.10"
 
 if (Test-Path (Join-Path $pythonDir "python.exe")) {
@@ -193,6 +174,34 @@ if (Test-Path (Join-Path $nunifDir ".git")) {
     & $gitExe clone -b my-customizations "https://github.com/3decker/3decker-tool.git" $nunifDir
     if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE)" }
     Write-Host "  Cloned to $nunifDir."
+}
+
+# ---------------------------------------------------------------------------
+Write-Step "Torch variant"
+
+# Real user report (fresh install, RTX 50-series GPU): auto-detect failed because
+# this step used to run BEFORE the clone above, looking for detect_torch_variant.ps1
+# in $root -- but that script only exists inside the freshly-cloned nunif\ tree
+# (nunif\windows_package\detect_torch_variant.ps1), and setup.bat's own header
+# explicitly tells a fresh user to save ONLY setup.bat + setup.ps1 into an empty
+# folder before running it, so $root never has that file until the clone above has
+# already happened. Moved to run after the clone (this step never needed to run any
+# earlier -- $TorchVariant's only real consumer is the "Python packages" step,
+# much further below) and pointed at the real, now-guaranteed-to-exist path.
+if (-not $TorchVariant) {
+    # Auto-detect via the shared detect_torch_variant.ps1 -- the SAME script the
+    # update.bat/update-3decker.bat/update-nagadomi.bat entry points call, so a
+    # fresh install (this script) and an existing install being updated (those)
+    # can never drift apart on which GPU generation needs which build. See that
+    # script's own header comment for the real bug this centralization fixes.
+    $TorchVariant = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $nunifDir "windows_package\detect_torch_variant.ps1")).Trim()
+    if ($TorchVariant -eq "cu130") {
+        Write-Host "  Detected a Blackwell-class GPU (compute capability >= 12.0) -> using cu130."
+    } else {
+        Write-Host "  Using cu126 (default -- either an older/non-NVIDIA GPU, or none detected). If you have an AMD or Intel GPU, re-run with -TorchVariant rocm or -TorchVariant xpu instead."
+    }
+} else {
+    Write-Host "  Using explicitly requested -TorchVariant $TorchVariant."
 }
 
 # ---------------------------------------------------------------------------
@@ -338,7 +347,7 @@ Write-Step "Python packages (this can take a while)"
 
 $torchReq = Join-Path $nunifDir "requirements-torch-$TorchVariant.txt"
 if (-not (Test-Path $torchReq)) {
-    throw "No requirements-torch-$TorchVariant.txt found in nunif\ -- valid -TorchVariant values are whatever requirements-torch-*.txt files exist there (cu126, rocm, xpu)."
+    throw "No requirements-torch-$TorchVariant.txt found in nunif\ -- valid -TorchVariant values are whatever requirements-torch-*.txt files exist there (cu126, cu130, rocm, xpu)."
 }
 
 Invoke-PipInstall @("--upgrade", "pip")

@@ -136,9 +136,26 @@ class VideoEncodingBox():
                                             name=f"{prefix}cbo_bitrate")
         self.cbo_bitrate.SetSelection(4)
         self.cbo_bitrate.SetToolTip(
-            T("Only used by libopenh264, which doesn't support CRF. Sets a fixed data rate for the video "
-              "(M = megabits/second) — higher = better quality and bigger file. Recommended: 8M-16M for "
-              "1080p, higher for 4K."))
+            T("For libopenh264 (which doesn't support CRF): a fixed data rate for the video (M = "
+              "megabits/second) — higher = better quality and bigger file. Recommended: 8M-16M for 1080p, "
+              "higher for 4K.\n"
+              "For hevc_nvenc/h264_nvenc with \"Limit Bitrate\" checked below: the average data rate the "
+              "encoder is capped to, regardless of content."))
+
+        self.chk_limit_bitrate = wx.CheckBox(self.grp_video, label=T("Limit Bitrate"),
+                                             name=f"{prefix}chk_limit_bitrate")
+        self.chk_limit_bitrate.SetValue(False)
+        self.chk_limit_bitrate.SetToolTip(
+            T("hevc_nvenc/h264_nvenc only. What it's for: CRF alone has no size ceiling — the encoder "
+              "spends as many bits as it takes to hit that quality level, which is usually fine but can "
+              "make grainy/dark/noisy footage come out 2x+ larger than a cleaner movie at the identical "
+              "CRF. Checking this adds a real bitrate cap (the Bitrate field above) on top of CRF: the "
+              "encoder still aims for CRF quality on easy scenes, but is capped from running away on hard "
+              "ones. Pros: predictable, bounded file size. Cons: hard/grainy scenes may look slightly "
+              "softer than an uncapped CRF encode would, since detail gets sacrificed once the cap is hit. "
+              "Recommended: leave unchecked normally; turn on (with a Bitrate around 1.5-2x what you'd "
+              "normally expect the file to average) only for movies you know are heavily grainy/dark and "
+              "you want to keep the size in check."))
 
         self.lbl_profile_level = wx.StaticText(self.grp_video, label=T("Level"))
         self.cbo_profile_level = EditableComboBox(self.grp_video, choices=LEVEL_ALL, name=f"{prefix}cbo_profile_level")
@@ -205,21 +222,23 @@ class VideoEncodingBox():
         layout.Add(self.cbo_crf, (5, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_bitrate, (6, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_bitrate, (6, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_profile_level, (7, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_profile_level, (7, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_limit_bitrate, (7, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_profile_level, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_profile_level, (8, 1), flag=wx.EXPAND)
 
-        layout.Add(self.lbl_preset, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_preset, (8, 1), flag=wx.EXPAND)
-        layout.Add(self.lbl_tune, (9, 0), flag=wx.ALIGN_CENTER_VERTICAL)
-        layout.Add(self.cbo_tune, (9, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_tune_fastdecode, (10, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_tune_zerolatency, (11, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_preset, (9, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_preset, (9, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_tune, (10, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_tune, (10, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_tune_fastdecode, (11, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_tune_zerolatency, (12, 1), flag=wx.EXPAND)
 
         self.box_sizer = wx.StaticBoxSizer(self.grp_video, wx.VERTICAL)
         self.box_sizer.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
         self.cbo_video_format.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_video_format)
         self.cbo_video_codec.Bind(wx.EVT_TEXT, self.on_selected_index_changed_cbo_video_codec)
+        self.chk_limit_bitrate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_limit_bitrate)
 
     def update_controls(self):
         self.update_video_format()
@@ -266,6 +285,10 @@ class VideoEncodingBox():
         return self.cbo_bitrate.GetValue()
 
     @property
+    def limit_bitrate(self):
+        return self.chk_limit_bitrate.GetValue() and self.chk_limit_bitrate.IsEnabled()
+
+    @property
     def profile_level(self):
         level = self.cbo_profile_level.GetValue()
         if not level or level == "auto":
@@ -294,6 +317,9 @@ class VideoEncodingBox():
     def on_selected_index_changed_cbo_video_codec(self, event):
         self.update_video_codec()
 
+    def on_changed_chk_limit_bitrate(self, event):
+        self.update_bitrate_cap_visibility()
+
     def update_video_format(self):
         name = self.cbo_video_format.GetValue()
         if name == "avi":
@@ -303,6 +329,7 @@ class VideoEncodingBox():
             self.cbo_tune.Disable()
             self.chk_tune_fastdecode.Disable()
             self.chk_tune_zerolatency.Disable()
+            self.chk_limit_bitrate.Disable()
         else:
             self.cbo_profile_level.Enable()
             self.cbo_crf.Enable()
@@ -310,6 +337,7 @@ class VideoEncodingBox():
             self.cbo_tune.Enable()
             self.chk_tune_fastdecode.Enable()
             self.chk_tune_zerolatency.Enable()
+            self.chk_limit_bitrate.Enable()
 
         # codec
         if name == "avi":
@@ -350,6 +378,7 @@ class VideoEncodingBox():
             self.cbo_tune.Disable()
             self.chk_tune_fastdecode.Disable()
             self.chk_tune_zerolatency.Disable()
+            self.chk_limit_bitrate.Disable()
         else:
             self.cbo_profile_level.Enable()
             self.cbo_crf.Enable()
@@ -357,18 +386,30 @@ class VideoEncodingBox():
             self.cbo_tune.Enable()
             self.chk_tune_fastdecode.Enable()
             self.chk_tune_zerolatency.Enable()
+            self.chk_limit_bitrate.Enable()
 
-        # crf
+        # crf / bitrate cap
         if codec == "libopenh264":
             self.lbl_bitrate.Show()
             self.cbo_bitrate.Show()
             self.lbl_crf.Hide()
             self.cbo_crf.Hide()
+            self.chk_limit_bitrate.SetValue(False)
+            self.chk_limit_bitrate.Hide()
+        elif codec in {"hevc_nvenc", "h264_nvenc"}:
+            self.lbl_crf.Show()
+            self.cbo_crf.Show()
+            self.chk_limit_bitrate.Show()
+            self.chk_limit_bitrate.Enable()
         else:
             self.lbl_bitrate.Hide()
             self.cbo_bitrate.Hide()
             self.lbl_crf.Show()
             self.cbo_crf.Show()
+            self.chk_limit_bitrate.SetValue(False)
+            self.chk_limit_bitrate.Hide()
+
+        self.update_bitrate_cap_visibility()
 
         # pix_fmt
         user_pix_fmt = self.cbo_pix_fmt.GetValue()
@@ -479,4 +520,14 @@ class VideoEncodingBox():
                 self.cbo_profile_level.Disable()
 
         # update Layout
+        self.sizer.Layout()
+
+    def update_bitrate_cap_visibility(self):
+        codec = self.cbo_video_codec.GetValue()
+        if codec in {"hevc_nvenc", "h264_nvenc"} and self.chk_limit_bitrate.GetValue():
+            self.lbl_bitrate.Show()
+            self.cbo_bitrate.Show()
+        elif codec != "libopenh264":
+            self.lbl_bitrate.Hide()
+            self.cbo_bitrate.Hide()
         self.sizer.Layout()

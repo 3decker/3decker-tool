@@ -2955,6 +2955,21 @@ def _progress_title(basename, args):
         return basename
 
 
+def _scale_bitrate_str(value, factor):
+    """"8M" * 1.5 -> "12M", "500k" * 2 -> "1000k". Keeps the original K/M/G suffix
+    (or none) and formats as an int when the scaled result is a whole number, since
+    ffmpeg's own bitrate option parser accepts both and an int looks cleaner in the
+    command line the job log records."""
+    m = re.match(r"^\s*([0-9.]+)\s*([kKmMgG]?)\s*$", value)
+    if not m:
+        return value
+    num = float(m.group(1)) * factor
+    suffix = m.group(2)
+    if num == int(num):
+        return f"{int(num)}{suffix}"
+    return f"{num:.2f}{suffix}"
+
+
 def make_video_codec_option(args, input_path=None):
     if args.video_codec in {"libx264", "libx265", "hevc_nvenc", "h264_nvenc"}:
         options = {"preset": args.preset, "crf": str(args.crf)}
@@ -2993,8 +3008,22 @@ def make_video_codec_option(args, input_path=None):
             elif args.half_tb:
                 options["x264-params"] = "frame-packing=4"
         elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
-            options["rc"] = "constqp"
-            options["qp"] = str(args.crf)
+            if getattr(args, "limit_bitrate", False):
+                # Real bug found via a user report (The Craft 1996, a dark/grainy source):
+                # constqp below has no size ceiling at all -- it spends whatever bits it
+                # takes to hit --crf's quality target, which can make grainy/dark/noisy
+                # content come out 2x+ larger than a cleaner movie at the identical CRF.
+                # vbr+cq keeps aiming for the same CRF-equivalent quality on easy scenes,
+                # but caps out at --video-bitrate (average) / 1.5x (peak) once content
+                # gets hard, instead of running away unbounded.
+                options["rc"] = "vbr"
+                options["cq"] = str(args.crf)
+                options["b"] = args.video_bitrate
+                options["maxrate"] = _scale_bitrate_str(args.video_bitrate, 1.5)
+                options["bufsize"] = _scale_bitrate_str(args.video_bitrate, 2.0)
+            else:
+                options["rc"] = "constqp"
+                options["qp"] = str(args.crf)
             if torch.cuda.is_available() and args.gpu[0] >= 0:
                 options["gpu"] = str(args.gpu[0])
     elif args.video_codec in {"h264_qsv", "hevc_qsv"}:
@@ -6521,7 +6550,13 @@ def create_parser(required_true=True):
     parser.add_argument("--crf", type=int, default=20,
                         help="constant quality value for video. smaller value is higher quality")
     parser.add_argument("--video-bitrate", type=str, default="8M",
-                        help="bitrate option for libopenh264")
+                        help="bitrate option for libopenh264. also the bitrate cap for hevc_nvenc/h264_nvenc "
+                             "when --limit-bitrate is set")
+    parser.add_argument("--limit-bitrate", action="store_true",
+                        help="hevc_nvenc/h264_nvenc only: cap the encoder's bitrate at --video-bitrate on top "
+                             "of --crf, instead of the default unlimited-quality mode. Prevents grainy/dark/"
+                             "noisy content from producing a much larger file than expected, at some cost to "
+                             "quality on the hardest scenes once the cap is hit.")
     parser.add_argument("--preset", type=str, default="medium",
                         choices=["ultrafast", "superfast", "veryfast", "faster", "fast",
                                  "medium", "slow", "slower", "veryslow", "placebo",

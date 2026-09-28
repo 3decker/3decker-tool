@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 28, 2026 (3)
+## Latest Update — September 28, 2026 (4)
+
+**New: an optional way to stop a dark or grainy movie from producing a much bigger file than expected.** A real user reported a 3D conversion that came out nearly double the size of the source, even though nothing else about the settings was unusual. The cause: your GPU's video encoder (NVENC) normally targets a fixed quality level with no upper limit on file size — most movies handle that fine, but a dark, grainy movie can genuinely need twice the data (or more) to hit the same quality level as a clean, bright one, since there's more fine detail/noise to preserve every single frame. This isn't a bug in the sense of something being broken — the encoder is doing exactly what it's told — but there was no way to put a ceiling on it before. New "Limit Bitrate" checkbox (next to Bitrate, shown when using hevc_nvenc/h264_nvenc): turn it on to cap the file size while still keeping the same quality target on easier scenes — only the hardest, grainiest moments get capped instead of ballooning the whole file. Off by default; every existing conversion setup keeps working exactly as before unless you turn this on.
+
+## Update — September 28, 2026 (3)
 
 **Fixed: a fresh install on a newer NVIDIA graphics card (RTX 50-series) could fail to auto-detect the right setup, needing a manual workaround to install correctly.** A real user with a new GPU found the installer couldn't find a file it needed to detect their graphics card during a truly fresh, from-scratch install — it only showed up after a later step that hadn't run yet. Fixed by reordering the setup steps so the detection step runs after the file it needs actually exists. If you hit this before and manually added `-TorchVariant cu130` to work around it, that's no longer necessary — auto-detect should work correctly on a fresh install now.
 

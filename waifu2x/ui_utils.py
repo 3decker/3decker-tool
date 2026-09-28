@@ -1,5 +1,6 @@
 import os
 from os import path
+import re
 import warnings
 import torch
 from PIL import Image
@@ -107,6 +108,19 @@ def process_images(ctx, files, output_dir, args, title=None):
         pbar.close()
 
 
+def _scale_bitrate_str(value, factor):
+    """"8M" * 1.5 -> "12M". See the identical helper in iw3/utils.py for why this
+    exists (bitrate-cap NVENC mode, ADR-294)."""
+    m = re.match(r"^\s*([0-9.]+)\s*([kKmMgG]?)\s*$", value)
+    if not m:
+        return value
+    num = float(m.group(1)) * factor
+    suffix = m.group(2)
+    if num == int(num):
+        return f"{int(num)}{suffix}"
+    return f"{num:.2f}{suffix}"
+
+
 def process_video(ctx, input_filename, output_path, args):
     if args.compile:
         ctx.compile()
@@ -134,8 +148,18 @@ def process_video(ctx, input_filename, output_path, args):
                     x265_params.append(f"level-idc={int(float(args.profile_level) * 10)}")
                 options["x265-params"] = ":".join(x265_params)
             elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
-                options["rc"] = "constqp"
-                options["qp"] = str(args.crf)
+                if getattr(args, "limit_bitrate", False):
+                    # See the identical branch in iw3/utils.py's make_video_codec_option()
+                    # (ADR-294) for why: constqp has no size ceiling and can make grainy/
+                    # dark/noisy content come out much larger than expected at the same CRF.
+                    options["rc"] = "vbr"
+                    options["cq"] = str(args.crf)
+                    options["b"] = args.video_bitrate
+                    options["maxrate"] = _scale_bitrate_str(args.video_bitrate, 1.5)
+                    options["bufsize"] = _scale_bitrate_str(args.video_bitrate, 2.0)
+                else:
+                    options["rc"] = "constqp"
+                    options["qp"] = str(args.crf)
                 if torch.cuda.is_available() and args.gpu[0] >= 0:
                     options["gpu"] = str(args.gpu[0])
         elif args.video_codec in {"h264_qsv", "hevc_qsv"}:
@@ -302,7 +326,11 @@ def create_parser(required_true=True):
     parser.add_argument("--crf", type=int, default=20,
                         help="constant quality value. smaller value is higher quality (video only)")
     parser.add_argument("--video-bitrate", type=str, default="8M",
-                        help="bitrate option for libopenh264")
+                        help="bitrate option for libopenh264. also the bitrate cap for hevc_nvenc/h264_nvenc "
+                             "when --limit-bitrate is set")
+    parser.add_argument("--limit-bitrate", action="store_true",
+                        help="hevc_nvenc/h264_nvenc only: cap the encoder's bitrate at --video-bitrate on top "
+                             "of --crf, instead of the default unlimited-quality mode")
     parser.add_argument("--preset", type=str, default="medium",
                         choices=["ultrafast", "superfast", "veryfast", "faster", "fast",
                                  "medium", "slow", "slower", "veryslow", "placebo",

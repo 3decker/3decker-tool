@@ -10145,6 +10145,7 @@ class MainFrame(wx.Frame):
             video_codec=self.grp_video.video_codec,
             crf=self.grp_video.crf,
             video_bitrate=self.grp_video.bitrate,
+            limit_bitrate=self.grp_video.limit_bitrate,
             profile_level=self.grp_video.profile_level,
             preset=self.grp_video.preset,
             tune=self.grp_video.tune,
@@ -11456,6 +11457,8 @@ class MainFrame(wx.Frame):
         _apply_combo_value(grp.cbo_colorspace, args.colorspace)
         _apply_combo_value(grp.cbo_crf, args.crf)
         _apply_combo_value(grp.cbo_bitrate, args.video_bitrate)
+        grp.chk_limit_bitrate.SetValue(getattr(args, "limit_bitrate", False))
+        grp.update_bitrate_cap_visibility()
         _apply_combo_value(grp.cbo_profile_level, args.profile_level or "auto")
         _apply_combo_value(grp.cbo_preset, args.preset)
         tune = list(args.tune or [])
@@ -20469,6 +20472,52 @@ def _self_test_frame_packing_sei():
     print("_self_test_frame_packing_sei: PASS")
 
 
+def _self_test_nvenc_bitrate_cap():
+    """ADR-294: a real user report (The Craft 1996, a dark/grainy 4K source) found
+    that hevc_nvenc's default rate control (constqp) has no size ceiling at all -- it
+    can make grainy/dark content come out 2x+ larger than a cleaner movie at the
+    identical --crf, since CRF/constqp only targets a quality level, never a size.
+    --limit-bitrate switches to vbr+cq (same quality target, but capped) instead.
+    Off by default -- existing jobs are completely unaffected unless explicitly
+    opted in."""
+    import types
+    import iw3.utils as iw3_utils
+
+    def _args(**kw):
+        base = dict(video_codec="hevc_nvenc", preset="medium", crf=15, tune=[], profile_level=None,
+                    half_sbs=False, half_tb=False, tb=False, gpu=[-1], video_bitrate="20M",
+                    limit_bitrate=False)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    # default (unset): unchanged constqp behaviour, no size ceiling
+    off = iw3_utils.make_video_codec_option(_args())
+    assert off["rc"] == "constqp" and off["qp"] == "15"
+    assert "b" not in off and "maxrate" not in off and "bufsize" not in off
+
+    # opted in: vbr+cq with a real cap derived from --video-bitrate
+    on = iw3_utils.make_video_codec_option(_args(limit_bitrate=True))
+    assert on["rc"] == "vbr" and on["cq"] == "15"
+    assert on["b"] == "20M"
+    assert on["maxrate"] == "30M"  # 1.5x
+    assert on["bufsize"] == "40M"  # 2.0x
+
+    # h264_nvenc gets the same treatment
+    on_h264 = iw3_utils.make_video_codec_option(_args(video_codec="h264_nvenc", limit_bitrate=True,
+                                                       video_bitrate="8M"))
+    assert on_h264["rc"] == "vbr" and on_h264["b"] == "8M" and on_h264["maxrate"] == "12M"
+
+    # libx264/libx265 and libopenh264 never see rc/cq/limit-bitrate logic at all
+    x264 = iw3_utils.make_video_codec_option(_args(video_codec="libx264", limit_bitrate=True))
+    assert "rc" not in x264 and "cq" not in x264
+
+    assert iw3_utils._scale_bitrate_str("8M", 1.5) == "12M"
+    assert iw3_utils._scale_bitrate_str("500k", 2.0) == "1000k"
+    assert iw3_utils._scale_bitrate_str("garbage", 1.5) == "garbage"
+
+    print("_self_test_nvenc_bitrate_cap: PASS")
+
+
 def _self_test_bluray_import_panel():
     """3D Blu-ray Import standalone tool (ADR-182): the widgets exist with the right
     defaults, the command it builds carries exactly what was chosen (and refuses bad
@@ -24875,6 +24924,7 @@ def _run_self_tests():
         _self_test_direct_mvc_checkbox,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
+        _self_test_nvenc_bitrate_cap,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
         _self_test_quick_convert_panel,

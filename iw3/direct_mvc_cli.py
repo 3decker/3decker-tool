@@ -268,13 +268,16 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
                          "Full TB, or Half TB.")
 
     output_path = str(output_path)
-    ext = path.splitext(output_path)[1].lower()
-    is_mkv_output = ext == ".mkv"
-    is_m2ts_output = ext == ".m2ts"
-    # ADR-291: see sbs_to_mvc_cli.py's convert() docstring for the full reasoning.
-    is_folder_output = ext == ""
-    if not is_mkv_output and not is_m2ts_output and not is_folder_output and ext != ".iso":
-        raise ValueError("the output must end in .iso, .m2ts, .mkv, or be a folder path")
+    # ADR-295: see sbs_to_mvc_cli.py's convert() docstring for the full reasoning --
+    # path.splitext() incorrectly picks up a mid-string '.' from this app's own
+    # filename tags (e.g. "fs0.0") as if it were the real extension once the true
+    # trailing extension is stripped, breaking folder-mode detection. Checking the
+    # known suffixes directly instead sidesteps this.
+    lower_output = output_path.lower()
+    is_mkv_output = lower_output.endswith(".mkv")
+    is_m2ts_output = lower_output.endswith(".m2ts")
+    is_iso_output = lower_output.endswith(".iso")
+    is_folder_output = not (is_mkv_output or is_m2ts_output or is_iso_output)
 
     frim = find_frim()
     if frim is None:

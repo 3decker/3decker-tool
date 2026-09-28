@@ -773,15 +773,23 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     frim = find_frim()
     tsmuxer = _find_tsmuxer()
     ffmpeg = _get_ffmpeg_bin()
-    ext = path.splitext(output_iso)[1].lower()
-    is_mkv_output = ext == ".mkv"
-    is_m2ts_output = ext == ".m2ts"
-    # ADR-291: a folder output (no extension at all -- a real folder path can't have
-    # one) gets the exact real BDMV/PLAYLIST/CLIPINF/STREAM/SSIF structure the .iso
-    # path already builds, just copied out as plain files instead of left inside a
-    # disc image -- see iso_to_bd_folder()'s own docstring for why this needs the
-    # real .iso built first rather than a folder tsMuxeR is asked to build directly.
-    is_folder_output = ext == ""
+    # ADR-295: real bug, confirmed by direct reproduction -- path.splitext() finds the
+    # LAST '.' anywhere in the string, not necessarily a real trailing extension. A
+    # finished movie's own filename can legitimately contain a mid-string '.' from one
+    # of this app's own numeric setting tags (e.g. "fs0.0" for Foreground Scale 0.0);
+    # once the real ".mkv" is stripped off by the caller (folder mode appends no
+    # extension at all), splitext() on what's left incorrectly picked up that mid-string
+    # dot as if it were the real extension (e.g. ext became ".0_ipd0_..._alldub_mvc"),
+    # which failed the check below on every movie whose filename happened to contain
+    # one -- a real, reported BD Folder failure. Checking the known suffixes directly
+    # sidesteps this: anything that isn't literally .mkv/.m2ts/.iso is unambiguously a
+    # folder path, since those are the only extensions _run_mvc_conversion()/
+    # build_sbs2mvc_command() ever append (folder mode always appends none).
+    lower_output = str(output_iso).lower()
+    is_mkv_output = lower_output.endswith(".mkv")
+    is_m2ts_output = lower_output.endswith(".m2ts")
+    is_iso_output = lower_output.endswith(".iso")
+    is_folder_output = not (is_mkv_output or is_m2ts_output or is_iso_output)
     if frim is None:
         raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
     if tsmuxer is None and not is_mkv_output:
@@ -790,8 +798,6 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         raise RuntimeError("ffmpeg not found")
     if not path.exists(input_path):
         raise RuntimeError(f"input file not found: {input_path}")
-    if not is_mkv_output and not is_m2ts_output and not is_folder_output and ext != ".iso":
-        raise ValueError("the output must be an .iso, .m2ts, .mkv file, or a folder path")
     if not 2 <= bitrate_mbps <= 40:
         raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
 

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 28, 2026 (4)
+## Latest Update — September 28, 2026 (5)
+
+**Fixed: "BD Folder" output could fail with a confusing error on certain movies, depending on the settings used.** A real user hit this on a movie converted with Foreground Scale set to 0 — the job finished the video fine, but the final step (turning it into a real 3D Blu-ray folder) failed with an error about the output needing to be a disc image, video file, or folder, even though a folder was exactly what was being made. The cause: some of this app's own settings get written into the output filename (for your own reference), and one of them can include a decimal point — the part of the code that decides "is this a file or a folder" was getting confused by that decimal point, mistaking it for a file extension. Fixed so it correctly recognizes a folder destination no matter what's in the filename. If you hit this before, this exact conversion should now complete the BD Folder step successfully.
+
+## Update — September 28, 2026 (4)
 
 **New: an optional way to stop a dark or grainy movie from producing a much bigger file than expected.** A real user reported a 3D conversion that came out nearly double the size of the source, even though nothing else about the settings was unusual. The cause: your GPU's video encoder (NVENC) normally targets a fixed quality level with no upper limit on file size — most movies handle that fine, but a dark, grainy movie can genuinely need twice the data (or more) to hit the same quality level as a clean, bright one, since there's more fine detail/noise to preserve every single frame. This isn't a bug in the sense of something being broken — the encoder is doing exactly what it's told — but there was no way to put a ceiling on it before. New "Limit Bitrate" checkbox (next to Bitrate, shown when using hevc_nvenc/h264_nvenc): turn it on to cap the file size while still keeping the same quality target on easier scenes — only the hardest, grainiest moments get capped instead of ballooning the whole file. Off by default; every existing conversion setup keeps working exactly as before unless you turn this on.
 

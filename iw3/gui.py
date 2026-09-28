@@ -14277,8 +14277,14 @@ class MainFrame(wx.Frame):
             return None, T("Select a valid 3D video file first.")
         if not output_path:
             return None, T("Set an Output ISO path first.")
-        if path.splitext(output_path)[1].lower() not in (".iso", ".mkv", ".m2ts", ""):
-            return None, T("Output must end in .iso, .mkv or .m2ts, or be a folder path with no extension.")
+        # ADR-295: no extension-format validation here anymore -- it used to reject
+        # anything path.splitext() didn't recognize as .iso/.mkv/.m2ts/"", but
+        # splitext() picks up a mid-string '.' from this app's own filename tags (e.g.
+        # "fs0.0") as if it were the real extension once the real one is stripped,
+        # which incorrectly rejected legitimate BD Folder paths. sbs_to_mvc_cli.py's
+        # own convert() now treats anything not literally ending in .iso/.mkv/.m2ts as
+        # a folder path (its own real, robust check), so there's nothing left to
+        # validate this side -- every string is a valid choice one way or the other.
         if path.abspath(output_path) == path.abspath(input_path):
             return None, T("Output must be different from the input video.")
         if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, 40, allow_empty=False):
@@ -20785,9 +20791,15 @@ def _self_test_sbs2mvc_panel():
             frame.txt_sbs2mvc_input.SetValue(video)
             cmd, err = frame.build_sbs2mvc_command()
             assert cmd is None and err, "empty output must be refused"
-            frame.txt_sbs2mvc_output.SetValue(path.join(tmpdir, "movie.mp4"))
+            # ADR-295: an extension that's neither .iso/.mkv/.m2ts is no longer refused --
+            # it's treated as a folder destination (sbs_to_mvc_cli.py's own convert()
+            # does the same), since path.splitext()-based rejection incorrectly caught
+            # real BD Folder paths whose filename happened to contain an earlier '.'
+            # from one of this app's own numeric setting tags (e.g. "fs0.0").
+            weird_but_valid = path.join(tmpdir, "movie.mp4")
+            frame.txt_sbs2mvc_output.SetValue(weird_but_valid)
             cmd, err = frame.build_sbs2mvc_command()
-            assert cmd is None and err, "an extension that's neither .iso nor .mkv must be refused"
+            assert err is None and cmd[cmd.index("--output") + 1] == weird_but_valid, (cmd, err)
             out = path.join(tmpdir, "movie_MVC.iso")
             frame.txt_sbs2mvc_output.SetValue(out)
             frame.txt_sbs2mvc_bitrate.SetValue("99")
@@ -24168,6 +24180,64 @@ def _self_test_sbs2mvc_fix_frame_rate():
     print("_self_test_sbs2mvc_fix_frame_rate: PASS")
 
 
+def _self_test_sbs2mvc_folder_detection_ignores_stray_dots():
+    """ADR-295: real, confirmed bug -- a finished movie's own filename can legitimately
+    contain a mid-string '.' from one of this app's own numeric setting tags (e.g. "fs0.0"
+    for Foreground Scale 0.0, seen verbatim in a real user's job log). BD Folder output
+    appends no extension at all, so path.splitext() on a path like "...fs0.0_alldub_MVC"
+    used to pick up that mid-string dot as if it were the real extension and wrongly
+    raised "the output must be an .iso, .m2ts, .mkv file, or a folder path" on an
+    otherwise perfectly correctly configured job. Fixed in both sbs_to_mvc_cli.convert()
+    and direct_mvc_cli.convert_direct() by checking known suffixes directly instead of
+    relying on splitext(). This proves the fix by reaching a LATER, unrelated failure
+    point (the even-width check) instead of the old bogus extension error -- if the old
+    bug were still present, this would raise the wrong ValueError before even getting
+    there."""
+    import tempfile
+    import types
+    import contextlib
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+    from . import direct_mvc_cli as D
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video = path.join(tmpdir, "movie.mkv")
+        open(video, "wb").close()
+        # the exact real pattern from the job log this bug was found in: a stray '.' from
+        # a filename tag ("fs0.0"), no real trailing extension (BD Folder mode)
+        folder_out = path.join(tmpdir, "movie_fs0.0_ipd0_ema_alldub_MVC")
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(S, "find_frim", return_value="frim.exe"))
+            stack.enter_context(mock.patch.object(S, "_find_tsmuxer", return_value="tsmuxer.exe"))
+            stack.enter_context(mock.patch.object(S, "_get_ffmpeg_bin", return_value="ffmpeg.exe"))
+            # odd width -> a predictable, later failure, proving folder detection above
+            # didn't already raise the old (wrong) "output must be..." error first
+            stack.enter_context(mock.patch.object(S, "probe_video",
+                                                    return_value=(1, 1080, "24/1", 2.0, False)))
+            try:
+                S.convert(video, folder_out, layout="full_sbs")
+                assert False, "should have failed the even-width check"
+            except ValueError as e:
+                assert "even width" in str(e), f"wrong error -- folder detection likely broken again: {e}"
+
+        # same real scenario through the Direct-to-MVC sibling (direct_mvc_cli.py)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(D, "find_frim", return_value="frim.exe"))
+            stack.enter_context(mock.patch.object(D, "_find_tsmuxer", return_value="tsmuxer.exe"))
+            stack.enter_context(mock.patch.object(D, "_get_ffmpeg_bin", return_value="ffmpeg.exe"))
+            stack.enter_context(mock.patch.object(D, "probe_video",
+                                                    return_value=(1920, 1080, "24/1", 2.0, False)))
+            args = types.SimpleNamespace(half_sbs=False, tb=False, half_tb=False, mvc_bitrate=99.0)
+            try:
+                D.convert_direct(video, folder_out, args, None, None)
+                assert False, "should have failed the bitrate range check"
+            except ValueError as e:
+                assert "bitrate" in str(e).lower(), f"wrong error -- folder detection likely broken again: {e}"
+
+    print("_self_test_sbs2mvc_folder_detection_ignores_stray_dots: PASS")
+
+
 def _self_test_sbs2mvc_convert_hdr_to_sdr():
     """An HDR source to sbs_to_mvc_cli.convert(): by default still refused (3D Blu-ray/MVC
     cannot carry HDR or Dolby Vision at all -- there is no combination of that format with
@@ -24945,6 +25015,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_extract_all_av_for_mkv,
         _self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg,
         _self_test_sbs2mvc_fix_frame_rate,
+        _self_test_sbs2mvc_folder_detection_ignores_stray_dots,
         _self_test_sbs2mvc_convert_hdr_to_sdr,
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,

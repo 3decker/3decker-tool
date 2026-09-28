@@ -13,7 +13,12 @@ diskcache
 psutil
 pyyaml
 platformdirs
-# opencv-python
+# opencv-python==4.10.0.84 pinned below: face_detect convergence mode loads a bundled
+# Haar cascade XML file (iw3/face_convergence_estimator.py) via cv2.data.haarcascades --
+# real user report confirmed opencv-python 5.0.0.93 (the unpinned default at the time)
+# ships without those data files at all, silently breaking face_detect. 4.10.0.84 is the
+# user's own confirmed-working version, not a guess.
+opencv-python==4.10.0.84
 packaging
 filelock
 

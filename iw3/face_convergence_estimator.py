@@ -2,14 +2,24 @@ import torch
 
 from .convergence_tracker import SceneHoldTracker
 
+_CV2_IMPORT_ERROR = None
+_CV2_CASCADE_MISSING = False
 try:
     import cv2
     _cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     _face_cascade = cv2.CascadeClassifier(_cascade_path)
     _CV2_AVAILABLE = not _face_cascade.empty()
-except Exception:
+    if not _CV2_AVAILABLE:
+        # Real user report: opencv-python 5.0.0.93 (an unpinned pip install's default at
+        # the time) imports fine but ships without its Haar cascade data files at all, so
+        # this load silently fails -- CascadeClassifier.empty() is the only signal. Telling
+        # the user to "pip install opencv-python" again (the generic message below) would
+        # just reinstall the same broken version, so this case gets its own real diagnosis.
+        _CV2_CASCADE_MISSING = True
+except Exception as e:
     _CV2_AVAILABLE = False
     _face_cascade = None
+    _CV2_IMPORT_ERROR = e
 
 
 class FaceConvergenceEstimator():
@@ -21,9 +31,18 @@ class FaceConvergenceEstimator():
 
     def __init__(self, enable_ema=False, decay=0.9, scene_hold=False):
         if not _CV2_AVAILABLE:
+            if _CV2_CASCADE_MISSING:
+                raise ImportError(
+                    "OpenCV (cv2) is installed, but this version is missing its face "
+                    "detection data file (a known packaging issue in some opencv-python "
+                    "releases, including 5.0.0.93).\n"
+                    "Run in nunif-prompt.bat: pip install opencv-python==4.10.0.84"
+                )
             raise ImportError(
                 "OpenCV (cv2) is required for face_detect convergence mode.\n"
-                "Run in nunif-prompt.bat: pip install opencv-python"
+                f"Run in nunif-prompt.bat: pip install opencv-python==4.10.0.84"
+                + (f"\n({_CV2_IMPORT_ERROR.__class__.__name__}: {_CV2_IMPORT_ERROR})"
+                   if _CV2_IMPORT_ERROR is not None else "")
             )
         self.enable_ema = enable_ema
         self.decay = decay

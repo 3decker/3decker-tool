@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — September 27, 2026 (1)
+## Latest Update — September 27, 2026 (2)
+
+**Fixed: if the app failed to start up, it failed completely silently — no error, no popup, nothing.** A real user hit this tracking down a missing dependency for the "face_detect" convergence option and had almost nothing to go on. Now, if the app ever fails to start for any reason, you'll get a real, plain error popup explaining what happened, plus a log file with the full details — covering all four of this app's windows (main, waifu2x, desktop, and player), not just one.
+
+**Fixed: the "face_detect" convergence option could silently stop working because of a broken OpenCV update.** The same user found that a specific version of one of this app's dependencies (OpenCV) quietly ships without the face-detection data file it needs, even though it installs without any error. Pinned to a version confirmed to work correctly, and the error message (if it ever happens again) now explains the real problem and the real fix instead of a generic "reinstall it" message that wouldn't actually have helped.
+
+## Update — September 27, 2026 (1)
 
 **Fixed: "Direct to 3D Blu-ray MVC" could crash right at the start of a real job with "Broken pipe."** Tracked down using the real crash log sent in by a user: the actual cause was that this feature could receive video frames still sitting on the GPU instead of ready-to-use picture data, when the "Video Codec" setting was NVIDIA's own hardware encoder (this app's own recommended default) — a real, worthwhile speed optimization for regular conversions that this new single-pass MVC feature wasn't accounting for. Fixed so this feature always gets real, usable frame data regardless of which video codec is selected. Verified with a real conversion using the exact settings that crashed before — now completes and produces a valid, correctly-tagged 3D file.
 

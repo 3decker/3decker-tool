@@ -13,11 +13,17 @@ it matters.
 
 ---
 
-## Latest Update — September 27, 2026 (4)
+## Latest Update — September 28, 2026
+
+**New: "BD Folder," a real fix for hardware that couldn't recognize the Bare M2TS option from yesterday as 3D.** Real-world testing the same day found that a bare M2TS clip — while technically valid Blu-ray-format video — isn't actually enough for most real 3D Blu-ray hardware to recognize as 3D at all. The real reason: a genuine 3D Blu-ray disc's left-eye/right-eye pairing isn't signaled by the video file itself — it's declared by the disc's own playlist file, which a bare single-file clip doesn't have. BD Folder is the real fix: the exact same real disc structure as the ISO option (including that playlist), just copied out as a plain folder of files instead of wrapped in a disc image — drop it straight onto a USB drive or NAS, no mounting or burning needed. Available anywhere "3D Blu-ray ISO" already was (the main conversion's MVC options, the standalone "SBS to 3D Blu-ray MVC" tool, and "Direct to 3D Blu-ray MVC"). The Bare M2TS option from yesterday is still there for a player that specifically wants a bare clip, but BD Folder is now the recommended choice for hardware that can't use a disc image directly.
+
+**Fixed: a real, if rare, bug where the very last moment of a "Plain MKV" or "Lossless MVC .mkv" 3D file could lose its 3D for that one frame.** Found while double-checking an earlier open question about this feature. The right-eye picture for the movie's true final frame could get silently dropped during muxing — every other frame in the whole movie was unaffected. Fixed so the last frame's 3D comes through correctly too.
+
+## Update — September 27, 2026 (4)
 
 **Solved: the mystery of MVC movies playing "doubled" on a real 3D TV (from September 26).** Working with the same real user who reported it, tracked this down to something structural rather than a bug in the video itself: real standalone 3D Blu-ray hardware generally can't recognize MVC 3D content when it's packaged in a plain .mkv file, no matter how correctly it's built inside — that class of hardware is built to expect a real Blu-ray disc structure specifically. The good news: the same user found that his actual 3D Blu-ray disc image (.iso) DOES play correctly on his TV, which pointed straight at the real fix.
 
-**New: a third MVC output option, "Bare M2TS clip," for hardware that plays a 3D Blu-ray disc image but not a plain .mkv.** Available anywhere you could already choose "3D Blu-ray ISO" or "Plain MKV" (the main conversion's MVC options, the standalone "SBS to 3D Blu-ray MVC" tool, and "Direct to 3D Blu-ray MVC"). This writes the exact same real, Blu-ray-legal video as the ISO option, but as one plain file with no disc structure around it — meant for a standalone player, streaming box, or NAS that needs a genuine Blu-ray-style video stream but can't or won't mount or burn a disc image (for example, playing directly off a USB drive). If your hardware plays a real 3D Blu-ray .iso fine but didn't recognize a Plain MKV as 3D, try this before assuming your hardware simply can't do it.
+**New: a third MVC output option, "Bare M2TS clip," for hardware that plays a 3D Blu-ray disc image but not a plain .mkv.** Available anywhere you could already choose "3D Blu-ray ISO" or "Plain MKV" (the main conversion's MVC options, the standalone "SBS to 3D Blu-ray MVC" tool, and "Direct to 3D Blu-ray MVC"). This writes the exact same real, Blu-ray-legal video as the ISO option, but as one plain file with no disc structure around it — meant for a standalone player, streaming box, or NAS that needs a genuine Blu-ray-style video stream but can't or won't mount or burn a disc image (for example, playing directly off a USB drive). Update from the next day: real-world testing showed this option isn't actually recognized as 3D by most real hardware after all — see "BD Folder" above for the real fix.
 
 ## Update — September 27, 2026 (3)
 

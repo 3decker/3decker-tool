@@ -42,7 +42,8 @@ from os import path
 # (or in mvc_extract_cli, imported just below) actually executes.
 import nunif.gui.subprocess_patch  # noqa
 
-from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc, _remove_stale_temp
+from .mvc_extract_cli import (AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc, iso_to_bd_folder,
+                              _remove_stale_temp)
 from .utils import _find_tsmuxer, _get_ffmpeg_bin, _find_mkvmerge
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
@@ -747,21 +748,40 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 
     output_iso ending in .m2ts (ADR-289) is a third option: the exact same tsMuxeR muxing the
     .iso path uses (real Blu-ray-legal bitstream fixups -- insertSEI/contSPS -- correct PCR-on-
-    video-PID placement, BD-style audio PES) but as one bare clip file, skipping the BDMV/
-    playlist/SSIF disc structure entirely. Real end-user report (Steve, 2026-09-27): his TV
-    can't recognize the direct .mkv as 3D at all, but plays a real .iso fine once mounted/
-    burned -- and a real precedent exists (AVS Forum) of a standalone hardware player accepting
-    a plain .m2ts, muxed the same way, played directly off USB with no disc image needed. .mkv
-    is a fundamentally different container family that standalone Blu-ray/MVC hardware decoders
-    generally were never built to parse (confirmed against community reports), so this isn't a
-    fixable gap in the .mkv path -- .m2ts gives users a real, testable path to hardware
-    playback without the awkwardness of mounting/burning a full disc image."""
+    video-PID placement, BD-style audio PES, and the real registered MVC PMT stream_type 0x20
+    on the dependent view -- confirmed byte-for-byte) but as one bare clip file, skipping the
+    BDMV/playlist/SSIF disc structure entirely.
+
+    SUPERSEDED, kept only for players that specifically ask for a bare clip: real end-user
+    testing (Steve, 2026-09-28) confirmed a .m2ts built this way is NOT recognized as 3D --
+    neither by his real hardware nor by MediaInfo (which showed "2 video streams: AVC / AVC",
+    never the combined "Stereo High" profile a real MVC pair gets). Root cause, confirmed by
+    comparing this file's own PMT against the real, working .iso's internal files: a real 3D
+    Blu-ray disc's base+dependent pairing is NOT signaled per-file at all -- even the .iso's own
+    .ssif only declares its own stream_type (0x20) in ITS OWN PMT, nothing about the base view --
+    the pairing is declared entirely by the disc's .mpls PLAYLIST, which a bare M2TS has no
+    equivalent of. Use the folder or .iso options below for anything that needs to actually be
+    recognized as 3D by real hardware.
+
+    output_iso with NO extension at all (ADR-291) is a real folder path: the exact same real
+    BDMV/PLAYLIST/CLIPINF/STREAM/SSIF structure the .iso option builds (this IS the fix -- see
+    iso_to_bd_folder()'s own docstring for why the .iso has to be built first, then copied out,
+    rather than asking tsMuxeR to build a folder directly), just as plain files instead of
+    wrapped in a disc image -- for dropping straight onto a USB drive/NAS with no mounting or
+    burning needed on either end, while still carrying the real playlist-level signal hardware
+    needs to recognize it as 3D."""
     frim = find_frim()
     tsmuxer = _find_tsmuxer()
     ffmpeg = _get_ffmpeg_bin()
     ext = path.splitext(output_iso)[1].lower()
     is_mkv_output = ext == ".mkv"
     is_m2ts_output = ext == ".m2ts"
+    # ADR-291: a folder output (no extension at all -- a real folder path can't have
+    # one) gets the exact real BDMV/PLAYLIST/CLIPINF/STREAM/SSIF structure the .iso
+    # path already builds, just copied out as plain files instead of left inside a
+    # disc image -- see iso_to_bd_folder()'s own docstring for why this needs the
+    # real .iso built first rather than a folder tsMuxeR is asked to build directly.
+    is_folder_output = ext == ""
     if frim is None:
         raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
     if tsmuxer is None and not is_mkv_output:
@@ -770,8 +790,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         raise RuntimeError("ffmpeg not found")
     if not path.exists(input_path):
         raise RuntimeError(f"input file not found: {input_path}")
-    if not is_mkv_output and not is_m2ts_output and ext != ".iso":
-        raise ValueError("the output must be an .iso, .m2ts or .mkv file")
+    if not is_mkv_output and not is_m2ts_output and not is_folder_output and ext != ".iso":
+        raise ValueError("the output must be an .iso, .m2ts, .mkv file, or a folder path")
     if not 2 <= bitrate_mbps <= 40:
         raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
 
@@ -1015,9 +1035,15 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         with open(meta_path, "w", encoding="utf-8", newline="\n") as f:  # no BOM: tsMuxeR rejects one
             f.write("\n".join(meta) + "\n")
 
+        # ADR-291: folder output builds the real .iso into a temp path first (tsMuxeR
+        # itself cannot build a real 3D BDMV folder directly -- see iso_to_bd_folder()'s
+        # own docstring), then copies its contents out.
+        temp_iso_for_folder = path.join(work_dir, "_bd_temp.iso") if is_folder_output else None
+        mux_target = temp_iso_for_folder if is_folder_output else output_iso
+
         if progress_cb:
             progress_cb("mux", 0, 100)
-        mux = subprocess.Popen([tsmuxer, meta_path, output_iso], stdout=subprocess.PIPE,
+        mux = subprocess.Popen([tsmuxer, meta_path, mux_target], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
         procs.append(mux)
         mux_tail = []
@@ -1033,6 +1059,14 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         mux.wait()
         if mux.returncode != 0:
             raise RuntimeError("tsMuxeR failed:\n" + "\n".join(mux_tail))
+
+        if is_folder_output:
+            if progress_cb:
+                progress_cb("folder", 0, 1)
+            iso_to_bd_folder(temp_iso_for_folder, output_iso, stop_event=stop_event)
+            if progress_cb:
+                progress_cb("folder", 1, 1)
+
         ok = True
         return total_frames
     finally:
@@ -1040,15 +1074,19 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
             if p.poll() is None:
                 p.kill()
         if not ok:
-            try:
-                os.remove(output_iso)
-            except OSError:
-                pass
+            if is_folder_output:
+                shutil.rmtree(output_iso, ignore_errors=True)
+            else:
+                try:
+                    os.remove(output_iso)
+                except OSError:
+                    pass
         if not keep_temp:
             if created_work:
                 shutil.rmtree(work_dir, ignore_errors=True)
             else:
                 for leftover in (base_es, dep_es, meta_path, ffmpeg_log, retimed_path, tonemapped_path,
+                                 temp_iso_for_folder,
                                  combined_es, *av_files):
                     if leftover is None:
                         continue
@@ -1064,10 +1102,12 @@ def main():
     parser.add_argument("--output", "-o", required=True,
                         help="the 3D Blu-ray .iso to write, (ADR-245) a plain .mkv holding the real MVC "
                              "video directly (no disc structure, no re-encode) -- for a library built around "
-                             "real MVC files rather than a disc image -- or (ADR-289) a bare .m2ts clip: the "
-                             "same real Blu-ray-legal muxing as .iso, without the disc/playlist structure, "
-                             "for standalone hardware players that need a real Blu-ray-native stream but "
-                             "can't or won't mount/burn a disc image")
+                             "real MVC files rather than a disc image -- (ADR-289) a bare .m2ts clip, NOT "
+                             "recognized as 3D by real hardware (confirmed) -- kept only for players that "
+                             "specifically want a bare clip -- or (ADR-291) a folder path with NO extension: "
+                             "the real BDMV disc structure (same as .iso) as plain files, no mounting/burning "
+                             "needed, the recommended option for a standalone player/box that can't use a "
+                             ".iso directly")
     parser.add_argument("--layout", choices=LAYOUTS, default=None,
                         help="how the eyes are stored in the input (default: guessed from its size)")
     parser.add_argument("--bitrate", type=float, default=20.0,

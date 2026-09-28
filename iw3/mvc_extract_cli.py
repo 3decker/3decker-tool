@@ -36,6 +36,7 @@ streams -- see docs/ai/AI_DECISIONS.md ADR-182):
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -141,7 +142,32 @@ def interleave_mvc(base_path, dependent_path, out_path):
     Bounded memory (see _find_au_boundaries' own docstring for why): reads
     and writes exactly one access unit's worth of data (typically well under
     1MB, confirmed against real extracted streams) at a time via seek+read,
-    never the whole file."""
+    never the whole file.
+
+    Real, confirmed bug (found investigating the "does mkvmerge really carry the
+    MVC NALs through untouched" question mux_lossless_mvc_mkv() used to flag as
+    unconfirmed): mkvmerge's raw-AVC-elementary-stream reader determines where one
+    access unit ends by seeing the start of the NEXT real slice NAL (type 1/5) --
+    it doesn't understand MVC's own extension NAL types (15/20/24) as picture
+    boundaries at all, so with nothing recognizable after the true last access
+    unit's own bytes, its trailing content (the dependent/right-eye view, which
+    always comes second within each AU here) never gets closed out and is silently
+    dropped. Verified directly against the real bundled mkvmerge: fed a real
+    interleaved MVC stream through it, extracted the video back out, and confirmed
+    the base view came through 100% intact (every frame) while the dependent view
+    was missing exactly its last access unit -- nothing else. Also verified: a
+    trailing dummy Access Unit Delimiter (NAL type 9) is NOT enough by itself --
+    mkvmerge's reader ignores it and still drops the last AU; only a real slice NAL
+    (type 1/5) triggers the flush.
+
+    Fix: re-write the real LAST base-view access unit's own bytes again, once, as a
+    trailer -- not fabricated NAL content. This gives mkvmerge a real, valid slice
+    NAL to trigger closing out the true final AU. If this trailer itself also ends
+    up preserved in the output (mkvmerge/mkvextract round-trip testing showed it
+    does), the result is a byte-for-byte, spec-valid repeat of the movie's own last
+    base-view frame appended once at the very end -- a real but minor/benign
+    artifact (an extra held frame), not corrupted or garbage data, and never
+    touches the dependent view (only a base-view AU is duplicated)."""
     base_bounds = _find_au_boundaries(base_path, delimiter_types={9})
     dep_bounds = _find_au_boundaries(dependent_path, delimiter_types={24, 9})
 
@@ -154,6 +180,10 @@ def interleave_mvc(base_path, dependent_path, out_path):
             out.write(bf.read(be - bs))
             df.seek(ds)
             out.write(df.read(de - ds))
+        if n > 0:
+            last_bs, last_be = base_bounds[n - 1]
+            bf.seek(last_bs)
+            out.write(bf.read(last_be - last_bs))
 
     return len(base_bounds), len(dep_bounds), n
 
@@ -1171,6 +1201,38 @@ def dismount_iso(iso_path):
         _powershell(f"Dismount-DiskImage -ImagePath '{p}' | Out-Null")
     except Exception as e:
         print(f"[mvc-extract] WARNING: could not dismount {iso_path}: {e}", file=sys.stderr)
+
+
+def iso_to_bd_folder(iso_path, dest_folder, stop_event=None):
+    """ADR-291: real, confirmed finding -- a real 3D Blu-ray disc's MVC pairing is not
+    signaled per-file at all; it's declared by the disc's own .mpls PLAYLIST (which
+    tells a player "open the .ssif for this title, and its MVC stream is the 3D
+    partner of the base view"). Verified directly: tsMuxeR's own --blu-ray mode, when
+    given a plain FOLDER instead of a .iso filename, explicitly does NOT create the
+    .ssif at all (confirmed against its own --help text: "SSIF files for BD3D discs
+    are not created in this case") -- there is no way to make tsMuxeR build a real 3D
+    folder structure directly. This works around that by building the real, already-
+    proven-correct .iso first, then mounting it (Windows' own built-in UDF support,
+    same mount_iso() this module already uses for the read direction) and copying its
+    entire BDMV/CERTIFICATE tree out as plain files -- a pure copy, no re-mux, so the
+    real .ssif (and its PMT stream_type=0x20 tagging, confirmed byte-for-byte
+    unchanged) comes through exactly as built. Gives a real disc structure a user can
+    drop straight onto a USB drive/NAS without ever mounting or burning anything
+    themselves, while still carrying the actual signal real hardware needs -- unlike
+    a bare .m2ts (ADR-289), which real-world testing (Steve, 2026-09-28) showed is
+    NOT recognized as 3D by real hardware or MediaInfo, since it has no playlist at
+    all to declare the pairing."""
+    if path.exists(dest_folder) and os.listdir(dest_folder):
+        raise RuntimeError(f"{dest_folder} already exists and is not empty -- choose an empty/new folder")
+    os.makedirs(dest_folder, exist_ok=True)
+    drive_root, mounted_by_us = mount_iso(iso_path)
+    try:
+        if stop_event is not None and stop_event.is_set():
+            raise Cancelled()
+        shutil.copytree(drive_root, dest_folder, dirs_exist_ok=True)
+    finally:
+        if mounted_by_us:
+            dismount_iso(iso_path)
 
 
 def find_disc_ssif(root):

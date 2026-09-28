@@ -4101,8 +4101,9 @@ class MainFrame(wx.Frame):
               "format an actual 3D Blu-ray disc uses) automatically -- a plain 2D movie in, one real "
               "MVC file out, with no separate manual step through the standalone 'SBS to 3D Blu-ray "
               "MVC' tool.\n"
-              "How it's safe: written to its own separate '<name>_MVC.iso'/'<name>_MVC.mkv'/"
-              "'<name>_MVC.m2ts' file -- the plain converted output is always left untouched either way.\n"
+              "How it's safe: written to its own separate '<name>_MVC.iso'/'<name>_MVC'(BD Folder)/"
+              "'<name>_MVC.mkv'/'<name>_MVC.m2ts' -- the plain converted output is always left "
+              "untouched either way.\n"
               "Con: MVC encoding is real extra processing time after the main conversion already "
               "finished -- it re-encodes the video through a separate program (FRIMEncode), CPU-only, "
               "not a quick remux like Restore Audio & Subtitles.\n"
@@ -4124,37 +4125,40 @@ class MainFrame(wx.Frame):
         self.cbo_mvc_output_type = wx.ComboBox(self.grp_postprocess, name="cbo_mvc_output_type")
         self.cbo_mvc_output_type.SetEditable(False)
         self.cbo_mvc_output_type.Append(T("3D Blu-ray ISO"), "iso")
+        self.cbo_mvc_output_type.Append(T("BD Folder (real disc structure, no disc image)"), "folder")
         self.cbo_mvc_output_type.Append(T("Plain MKV (direct MVC, no disc)"), "mkv")
-        self.cbo_mvc_output_type.Append(T("Bare M2TS clip (real Blu-ray stream, no disc)"), "m2ts")
+        self.cbo_mvc_output_type.Append(T("Bare M2TS clip (not recognized by real hardware)"), "m2ts")
         self.cbo_mvc_output_type.SetSelection(0)
         self.cbo_mvc_output_type.SetToolTip(
             T("3D Blu-ray ISO: a real disc image with menus/chapters, playable on a 3D Blu-ray player "
-              "or PowerDVD, or burnable to a BD-R. The proven, more widely tested option.\n"
+              "or PowerDVD, or burnable to a BD-R. The proven, most widely tested option.\n"
+              "BD Folder (ADR-291): the exact same real disc structure as the ISO option, just copied out "
+              "as plain files in a folder instead of wrapped in a disc image -- for a standalone player/box "
+              "that needs the real thing but can't or won't mount/burn a disc image (e.g. dropped straight "
+              "onto a USB drive or NAS). Real, confirmed finding: a 3D Blu-ray's base/dependent-view "
+              "pairing is declared entirely by the disc's own playlist file, not by anything in the video "
+              "itself -- this option is the real disc structure (including that playlist), so it carries "
+              "the same signal real hardware needs. Recommended over Bare M2TS below for exactly this "
+              "situation.\n"
               "Plain MKV: the same real MVC video written directly into a plain .mkv instead, no disc "
               "structure -- for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
               "rips) rather than a disc image (ADR-245).\n"
-              "Bare M2TS (ADR-289): the exact same real Blu-ray-legal muxing as the ISO option (same "
-              "tsMuxeR bitstream fixups, correct PCR placement, BD-style audio), just as one plain clip "
-              "file instead of a full disc structure -- for a standalone hardware player/box that needs "
-              "a real Blu-ray-native stream but can't or won't mount/burn a disc image (e.g. played "
-              "directly off a USB drive or NAS). Real end-user precedent: a real standalone Blu-ray "
-              "player accepted content muxed exactly this way over USB when the same content packaged "
-              "as a plain .mkv was not recognized as 3D at all.\n"
-              "Real, confirmed benefit either way, even for a homemade AI conversion like this one (not "
-              "just a real studio disc rip): a real end user pointed out, and this project directly "
-              "confirmed by decoding a real MVC file with a completely ordinary player engine, that the "
-              "MVC video plays as ordinary 2D on ANY normal player -- VLC, MPC-HC, a TV's own USB "
+              "Bare M2TS (ADR-289): the same real Blu-ray-legal muxing as ISO/BD Folder, as one plain clip "
+              "file with no disc structure at all. Real end-user testing (2026-09-28) confirmed this is "
+              "NOT recognized as 3D by real hardware, nor by MediaInfo -- there's no playlist in a bare "
+              "clip to declare the stereo pairing, the same real gap Plain MKV has. Kept only for a player "
+              "that specifically documents wanting a bare Blu-ray-format clip; use BD Folder instead for "
+              "the 'no disc image, but still real hardware compatible' case.\n"
+              "Real, confirmed benefit for MKV/M2TS either way, even for a homemade AI conversion like "
+              "this one (not just a real studio disc rip): a real end user pointed out, and this project "
+              "directly confirmed by decoding a real MVC file with a completely ordinary player engine, "
+              "that the MVC video plays as ordinary 2D on ANY normal player -- VLC, MPC-HC, a TV's own USB "
               "player, etc. -- since the base picture is a fully standard, backward-compatible video "
               "track on its own; the extra 3D data is simply ignored by anything that doesn't "
-              "understand it. That means one MVC file covers both a 2D watch and a real 3D watch (on a "
-              "real MVC-capable player -- Kodi/OSMC/LibreELEC, several Android streaming boxes, some "
-              "hardware 3D Blu-ray/UHD players), instead of keeping separate 2D and 3D copies of the "
-              "same movie -- worthwhile even if this specific conversion is a re-encode rather than the "
-              "original studio quality of a genuine disc rip.\n"
-              "None of the three play as 3D in VLC, MPC-HC or most everyday TVs -- all still need a real "
-              "MVC-capable player specifically for the 3D side. If your standalone hardware plays a real "
-              "3D Blu-ray .iso fine but rejected a Plain MKV as 3D, try Bare M2TS before assuming your "
-              "hardware can't do it at all."))
+              "understand it. That means one file covers both a 2D watch and (on hardware that recognizes "
+              "it) a real 3D watch, instead of keeping separate 2D and 3D copies of the same movie.\n"
+              "None of these four play as 3D in VLC, MPC-HC or most everyday TVs -- all still need a real "
+              "MVC-capable player specifically for the 3D side."))
         self.txt_mvc_bitrate = EditableComboBox(self.grp_postprocess, choices=["10", "20", "30", "40"],
                                                 name="txt_mvc_bitrate")
         self.txt_mvc_bitrate.SetValue("20")
@@ -4220,10 +4224,11 @@ class MainFrame(wx.Frame):
             T("What it's for: the same real MVC output as 'Convert to 3D Blu-ray MVC' above, but as a "
               "single pass -- the main conversion encodes straight into the MVC pipe, so no finished SBS/TB "
               "file is ever written to disk at all. There is no separate plain-converted file this "
-              "time -- the MVC file (.iso/.mkv/.m2ts, same Output Type/Bitrate settings above) IS this "
-              "job's only output. The Output field above must itself end in .iso, .mkv or .m2ts for this "
-              "mode -- Output Type here is only auto-applied to the separate file 'Convert to 3D Blu-ray "
-              "MVC' produces, not to this single-pass mode's own Output field.\n"
+              "time -- the MVC file/folder (same Bitrate setting above) IS this job's only output. The "
+              "Output field above must itself end in .iso, .mkv or .m2ts, or be a folder path with no "
+              "extension (BD Folder, ADR-291), for this mode -- Output Type above is only auto-applied to "
+              "the separate file 'Convert to 3D Blu-ray MVC' produces, not to this single-pass mode's own "
+              "Output field.\n"
               "How it's faster: skips writing, then re-reading, an entire finished video file between "
               "the two stages -- real time and real disk space saved, worthwhile for a movie you only "
               "ever want as an MVC file.\n"
@@ -6320,28 +6325,35 @@ class MainFrame(wx.Frame):
         self.lbl_sbs2mvc_output = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Output File"))
         self.txt_sbs2mvc_output = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), name="txt_sbs2mvc_output")
         self.txt_sbs2mvc_output.SetToolTip(
-            T("Where to write the result. The file extension you type picks the mode:\n"
+            T("Where to write the result. The file extension you type picks the mode (or leave it off "
+              "entirely for a folder):\n"
               "'.iso' writes a real 3D Blu-ray disc image (with menus/chapters), playable on a 3D Blu-ray "
               "player or PowerDVD, or burnable to a BD-R.\n"
+              "No extension (ADR-291) writes the same real disc structure as '.iso' into a plain folder "
+              "instead -- for a standalone player/box that needs the real thing but can't or won't mount/ "
+              "burn a disc image. Recommended over '.m2ts' below for that case: a real 3D Blu-ray's "
+              "base/dependent-view pairing is declared by the disc's own playlist file, not by anything in "
+              "the video itself, so this carries the real signal hardware needs -- confirmed a bare '.m2ts' "
+              "does not.\n"
               "'.mkv' (ADR-245) writes the same real MVC video directly into a plain .mkv file instead -- "
               "no disc structure, for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
               "rips) rather than a disc image -- one step from a 2D movie converted by this program all "
               "the way to a real MVC file, no separate re-ripping tool needed.\n"
               "'.m2ts' (ADR-289) writes the same real Blu-ray-legal muxing as '.iso', as one bare clip "
-              "file with no disc structure -- for a standalone hardware player/box that needs a real "
-              "Blu-ray-native stream but can't or won't mount/burn a disc image.\n"
-              "Real, confirmed benefit for exactly this homemade-conversion case: a real end user pointed "
-              "out, and this project directly confirmed by decoding a real MVC file with a completely "
-              "ordinary player engine, that the video plays as ordinary 2D on ANY normal player -- one "
-              "MVC file covers both a 2D watch and a real 3D watch (on a real MVC-capable player -- Kodi/"
-              "OSMC/LibreELEC, several Android streaming boxes, some hardware 3D Blu-ray/UHD players), "
-              "instead of keeping separate 2D and 3D copies of the same movie you converted here. Worth "
-              "it even though a homemade AI conversion isn't the same as a genuine studio disc rip's own "
-              "original quality.\n"
+              "file with no disc structure. Real end-user testing (2026-09-28) confirmed this is NOT "
+              "recognized as 3D by real hardware or MediaInfo -- no playlist to declare the pairing. Kept "
+              "only for a player that specifically wants a bare clip; use no extension (BD Folder) above "
+              "instead for real hardware compatibility without a disc image.\n"
+              "Real, confirmed benefit for MKV/M2TS either way, even for exactly this homemade-conversion "
+              "case: a real end user pointed out, and this project directly confirmed by decoding a real "
+              "MVC file with a completely ordinary player engine, that the video plays as ordinary 2D on "
+              "ANY normal player -- one file covers both a 2D watch and (on hardware that recognizes it) "
+              "a real 3D watch, instead of keeping separate 2D and 3D copies of the same movie you "
+              "converted here.\n"
               "Auto-filled with '<video name>_MVC.iso' next to the input once you pick a source.\n"
               "Con: the job also needs a temporary folder (created next to this file, deleted when done) "
-              "-- roughly 3x the finished file's size for the .iso mode, a bit less for .mkv. The tool "
-              "refuses to start if there isn't enough free space."))
+              "-- roughly 3x the finished file's size for the .iso/folder modes, a bit less for .mkv/"
+              ".m2ts. The tool refuses to start if there isn't enough free space."))
         self.btn_sbs2mvc_output = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("..."))
 
         # ADR-273: real end-user suggestion ("What if you opt to skip the ISO
@@ -6355,37 +6367,38 @@ class MainFrame(wx.Frame):
         self.cbo_sbs2mvc_output_type = wx.ComboBox(self.cpn_sbs2mvc.GetPane(), name="cbo_sbs2mvc_output_type")
         self.cbo_sbs2mvc_output_type.SetEditable(False)
         self.cbo_sbs2mvc_output_type.Append(T("3D Blu-ray ISO"), "iso")
+        self.cbo_sbs2mvc_output_type.Append(T("BD Folder (real disc structure, no disc image)"), "folder")
         self.cbo_sbs2mvc_output_type.Append(T("Plain MKV (direct MVC, no disc)"), "mkv")
-        self.cbo_sbs2mvc_output_type.Append(T("Bare M2TS clip (real Blu-ray stream, no disc)"), "m2ts")
+        self.cbo_sbs2mvc_output_type.Append(T("Bare M2TS clip (not recognized by real hardware)"), "m2ts")
         self.cbo_sbs2mvc_output_type.SetSelection(0)
         self.cbo_sbs2mvc_output_type.SetToolTip(
             T("3D Blu-ray ISO: a real disc image with menus/chapters, playable on a 3D Blu-ray player "
-              "or PowerDVD, or burnable to a BD-R. The proven, more widely tested option.\n"
+              "or PowerDVD, or burnable to a BD-R. The proven, most widely tested option.\n"
+              "BD Folder (ADR-291): the exact same real disc structure as the ISO option, copied out as "
+              "plain files in a folder instead of wrapped in a disc image -- for a standalone player/box "
+              "that needs the real thing but can't or won't mount/burn a disc image. Real, confirmed "
+              "finding: a 3D Blu-ray's base/dependent-view pairing is declared entirely by the disc's own "
+              "playlist file, not by anything in the video itself -- this carries that same signal, unlike "
+              "Bare M2TS below. Recommended for that situation.\n"
               "Plain MKV: the same real MVC video written directly into a plain .mkv instead, no disc "
               "structure -- for a library built around real MVC files (e.g. MakeMKV/CloneBD-style "
               "rips) rather than a disc image (ADR-245).\n"
-              "Bare M2TS (ADR-289): the exact same real Blu-ray-legal muxing as the ISO option, just as "
-              "one plain clip file instead of a full disc structure -- for a standalone hardware player/ "
-              "box that needs a real Blu-ray-native stream but can't or won't mount/burn a disc image "
-              "(e.g. played directly off a USB drive or NAS). Real end-user precedent: a real standalone "
-              "Blu-ray player accepted content muxed exactly this way over USB when the same content "
-              "packaged as a plain .mkv was not recognized as 3D at all.\n"
-              "Real, confirmed benefit either way, even for a homemade AI conversion like this one (not "
-              "just a real studio disc rip): a real end user pointed out, and this project directly "
-              "confirmed by decoding a real MVC file with a completely ordinary player engine, that the "
-              "MVC video plays as ordinary 2D on ANY normal player -- VLC, MPC-HC, a TV's own USB "
+              "Bare M2TS (ADR-289): the same real Blu-ray-legal muxing as ISO/BD Folder, as one plain clip "
+              "file with no disc structure at all. Real end-user testing (2026-09-28) confirmed this is "
+              "NOT recognized as 3D by real hardware or MediaInfo -- there's no playlist in a bare clip to "
+              "declare the pairing, the same real gap Plain MKV has. Use BD Folder instead for real "
+              "hardware compatibility without a disc image.\n"
+              "Real, confirmed benefit for MKV/M2TS either way, even for a homemade AI conversion like "
+              "this one (not just a real studio disc rip): a real end user pointed out, and this project "
+              "directly confirmed by decoding a real MVC file with a completely ordinary player engine, "
+              "that the MVC video plays as ordinary 2D on ANY normal player -- VLC, MPC-HC, a TV's own USB "
               "player, etc. -- since the base picture is a fully standard, backward-compatible video "
               "track on its own; the extra 3D data is simply ignored by anything that doesn't "
-              "understand it. That means one MVC file covers both a 2D watch and a real 3D watch (on a "
-              "real MVC-capable player -- Kodi/OSMC/LibreELEC, several Android streaming boxes, some "
-              "hardware 3D Blu-ray/UHD players), instead of keeping separate 2D and 3D copies of the "
-              "same movie.\n"
-              "None of the three play as 3D in VLC, MPC-HC or most everyday TVs -- all still need a real "
-              "MVC-capable player specifically for the 3D side. If your standalone hardware plays a real "
-              "3D Blu-ray .iso fine but rejected a Plain MKV as 3D, try Bare M2TS before assuming your "
-              "hardware can't do it at all.\n"
-              "Changing this also updates the Output File extension above, if you already have a path "
-              "typed in."))
+              "understand it. That means one file covers both a 2D watch and (on hardware that recognizes "
+              "it) a real 3D watch, instead of keeping separate 2D and 3D copies of the same movie.\n"
+              "None of these four play as 3D in VLC, MPC-HC or most everyday TVs -- all still need a real "
+              "MVC-capable player specifically for the 3D side.\n"
+              "Changing this also updates the Output File path above, if you already have one typed in."))
 
         self.lbl_sbs2mvc_layout = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Input Layout"))
         self.cbo_sbs2mvc_layout = wx.ComboBox(self.cpn_sbs2mvc.GetPane(), name="cbo_sbs2mvc_layout")
@@ -14059,8 +14072,9 @@ class MainFrame(wx.Frame):
             input_path = dlg.GetPath()
         self.txt_sbs2mvc_input.SetValue(input_path)
         if not self.txt_sbs2mvc_output.GetValue():
-            out_ext = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
-            self.txt_sbs2mvc_output.SetValue(f"{path.splitext(input_path)[0]}_MVC.{out_ext}")
+            out_type = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+            suffix = "_MVC" if out_type == "folder" else f"_MVC.{out_type}"
+            self.txt_sbs2mvc_output.SetValue(f"{path.splitext(input_path)[0]}{suffix}")
         try:
             from .sbs_to_mvc_cli import probe_video, guess_layout
             width, height = probe_video(input_path)[:2]
@@ -14082,6 +14096,15 @@ class MainFrame(wx.Frame):
 
     def on_click_btn_sbs2mvc_output(self, event):
         out_type = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+        if out_type == "folder":
+            # ADR-291: a folder output needs a directory picker, not a save-file dialog --
+            # there is no filename/extension to choose, just where the BDMV structure goes.
+            with wx.DirDialog(self, message=T("Select BD Folder Destination")) as dlg:
+                if self.txt_sbs2mvc_output.GetValue():
+                    dlg.SetPath(self.txt_sbs2mvc_output.GetValue())
+                if dlg.ShowModal() == wx.ID_OK:
+                    self.txt_sbs2mvc_output.SetValue(dlg.GetPath())
+            return
         message = {"mkv": T("Save MVC .mkv File As"), "m2ts": T("Save MVC .m2ts Clip As")}.get(
             out_type, T("Save 3D Blu-ray Disc Image As"))
         wildcard = {"mkv": "MKV files (*.mkv)|*.mkv|All files (*.*)|*.*",
@@ -14099,14 +14122,22 @@ class MainFrame(wx.Frame):
         # is_mkv_output = extension check in sbs_to_mvc_cli.py) a real, explicit,
         # discoverable UI choice instead of something only reachable by knowing
         # to type ".mkv" yourself. A harmless no-op if the output field is still
-        # empty, or already has neither a real .iso nor .mkv extension typed.
+        # empty, or already has neither a real .iso/.mkv/.m2ts extension nor a
+        # folder-shaped (no extension) path typed in -- ADR-291 extends this to
+        # strip/add the extension when switching to/from the folder option.
         current = self.txt_sbs2mvc_output.GetValue().strip()
         if not current:
             return
-        out_ext = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+        out_type = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
         base, ext = path.splitext(current)
-        if ext.lower() in (".iso", ".mkv", ".m2ts"):
-            self.txt_sbs2mvc_output.SetValue(f"{base}.{out_ext}")
+        was_recognized_ext = ext.lower() in (".iso", ".mkv", ".m2ts")
+        was_folder_shaped = ext == "" and base
+        if not (was_recognized_ext or was_folder_shaped):
+            return
+        if out_type == "folder":
+            self.txt_sbs2mvc_output.SetValue(base if was_recognized_ext else current)
+        else:
+            self.txt_sbs2mvc_output.SetValue(f"{base if was_recognized_ext else current}.{out_type}")
 
     def _update_sbs2mvc_progress(self, stage, done, total):
         # Called via wx.CallAfter from run_sbs2mvc's background thread.
@@ -14122,7 +14153,10 @@ class MainFrame(wx.Frame):
         names = {"encode": T("Encoding 3D (CPU/software)"), "mux": mux_label,
                  "autocrop": T("Looking for black bars"),
                  "retime": T("Fixing the frame rate (re-timing picture, sound and subtitles)"),
-                 "tonemap": T("Converting HDR to SDR")}
+                 "tonemap": T("Converting HDR to SDR"),
+                 # ADR-291: BD Folder's own extra step after the real disc image is built --
+                 # mounting it and copying its contents out (iso_to_bd_folder()).
+                 "folder": T("Copying the disc structure to the folder")}
         name = names.get(stage, stage)
         if total > 0:
             self.gauge_sbs2mvc.SetRange(int(total))
@@ -14240,8 +14274,8 @@ class MainFrame(wx.Frame):
             return None, T("Select a valid 3D video file first.")
         if not output_path:
             return None, T("Set an Output ISO path first.")
-        if path.splitext(output_path)[1].lower() not in (".iso", ".mkv", ".m2ts"):
-            return None, T("Output must end in .iso, .mkv or .m2ts.")
+        if path.splitext(output_path)[1].lower() not in (".iso", ".mkv", ".m2ts", ""):
+            return None, T("Output must end in .iso, .mkv or .m2ts, or be a folder path with no extension.")
         if path.abspath(output_path) == path.abspath(input_path):
             return None, T("Output must be different from the input video.")
         if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, 40, allow_empty=False):
@@ -19916,6 +19950,12 @@ def _self_test_convert_to_mvc_checkbox():
         assert args_m2ts.mvc_output_type == "m2ts"
         command_m2ts = frame.get_cli_command()
         assert "--mvc-output-type m2ts" in command_m2ts, command_m2ts
+        # ADR-291
+        frame.cbo_mvc_output_type.SetSelection(items.index("folder"))
+        args_folder = frame.parse_args(skip_set_state=True)
+        assert args_folder.mvc_output_type == "folder"
+        command_folder = frame.get_cli_command()
+        assert "--mvc-output-type folder" in command_folder, command_folder
         frame.cbo_mvc_output_type.SetSelection(items.index("iso"))
 
         # ADR-247: Half SBS/Full TB/Half TB are all genuine, valid MVC inputs now --
@@ -20751,6 +20791,29 @@ def _self_test_sbs2mvc_panel():
             frame.txt_sbs2mvc_output.SetValue(weird)
             frame.on_changed_sbs2mvc_output_type(None)
             assert frame.txt_sbs2mvc_output.GetValue() == weird, "an unrelated extension must be left alone"
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("iso"))
+            frame.txt_sbs2mvc_output.SetValue(out)
+
+            # ADR-291: BD Folder round-trips too -- .iso -> folder strips the extension,
+            # folder -> .iso adds it back.
+            out_folder = path.join(tmpdir, "movie_MVC")
+            frame.txt_sbs2mvc_output.SetValue(out)  # "movie_MVC.iso"
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("folder"))
+            frame.on_changed_sbs2mvc_output_type(None)
+            assert frame.txt_sbs2mvc_output.GetValue() == out_folder, frame.txt_sbs2mvc_output.GetValue()
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("iso"))
+            frame.on_changed_sbs2mvc_output_type(None)
+            assert frame.txt_sbs2mvc_output.GetValue() == out, frame.txt_sbs2mvc_output.GetValue()
+
+            # picking BD Folder shows a real directory picker, not a save-file dialog
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index("folder"))
+            with patch("wx.DirDialog") as mock_dir_dlg:
+                instance = mock_dir_dlg.return_value.__enter__.return_value
+                instance.ShowModal.return_value = wx.ID_OK
+                instance.GetPath.return_value = out_folder
+                frame.on_click_btn_sbs2mvc_output(None)
+            mock_dir_dlg.assert_called_once()
+            assert frame.txt_sbs2mvc_output.GetValue() == out_folder
             frame.cbo_sbs2mvc_output_type.SetSelection(items.index("iso"))
             frame.txt_sbs2mvc_output.SetValue(out)
 
@@ -21692,6 +21755,13 @@ def _self_test_mvc_conversion_step():
         assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
     cmd = run_mvc.call_args[0][0]
     assert cmd[cmd.index("-o") + 1] == "C:/out/movie_MVC.m2ts", cmd
+
+    # ADR-291: mvc_output_type="folder" gets no extension at all -- a real folder path
+    args = base_args(mvc_output_type="folder")
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    cmd = run_mvc.call_args[0][0]
+    assert cmd[cmd.index("-o") + 1] == "C:/out/movie_MVC", cmd
 
     # the original file is never modified/replaced -- this is a side effect, not a chain link
     args = base_args()
@@ -23686,6 +23756,144 @@ def _self_test_mvc_extract_remove_stale_temp():
     print("_self_test_mvc_extract_remove_stale_temp: PASS")
 
 
+def _self_test_interleave_mvc_trailing_nal():
+    """ADR-290: real, confirmed bug found while closing mux_lossless_mvc_mkv()'s own
+    flagged-as-unconfirmed question ("does mkvmerge really carry the MVC NALs
+    through untouched?"). Verified directly against the real bundled mkvmerge: fed a
+    real interleaved MVC stream through it, extracted the video back out, and found
+    the base view 100% intact but the dependent view missing exactly its LAST access
+    unit -- mkvmerge's raw-AVC reader only recognizes a real slice NAL (type 1/5) as
+    the start of a new access unit (not MVC's own extension NAL types, and not a
+    bare AUD either -- tried that first, confirmed by hand it does NOT fix this),
+    so nothing tells it to close out the true last AU. interleave_mvc() now
+    re-writes the real last base-view AU's own bytes again, once, as a trailer --
+    real, valid content (not fabricated), so if it also ends up preserved in the
+    final output, the worst case is one exact repeated final base-view frame, never
+    touching the dependent view.
+
+    This test verifies interleave_mvc()'s own output directly (fast, no real
+    mkvmerge/mkvextract round trip needed to prove the fix is present and doesn't
+    corrupt real AU byte content) -- the real mkvmerge round trip itself was
+    verified by hand against real captured MVC streams while finding and fixing
+    this bug, documented in ADR-290."""
+    from . import mvc_extract_cli as M
+
+    def au(delim_byte, payload):
+        return bytes([0, 0, 1, delim_byte]) + payload
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base_path = path.join(tmp, "base.264")
+        dep_path = path.join(tmp, "dep.264")
+        out_path = path.join(tmp, "combined.264")
+
+        # 3 fake access units per view -- base AUs start with a type-9 (0x09) AUD,
+        # dependent AUs start with a type-24 (0x18) delimiter, matching the real
+        # convention _find_au_boundaries() already documents.
+        base_aus = [au(0x09, b"BASE_AU_0"), au(0x09, b"BASE_AU_1"), au(0x09, b"BASE_AU_2_LAST")]
+        dep_aus = [au(0x18, b"DEP_AU_0"), au(0x18, b"DEP_AU_1"), au(0x18, b"DEP_AU_2_LAST")]
+        with open(base_path, "wb") as f:
+            f.write(b"".join(base_aus))
+        with open(dep_path, "wb") as f:
+            f.write(b"".join(dep_aus))
+
+        base_n, dep_n, n = M.interleave_mvc(base_path, dep_path, out_path)
+        assert (base_n, dep_n, n) == (3, 3, 3), (base_n, dep_n, n)
+
+        with open(out_path, "rb") as f:
+            combined = f.read()
+
+        # every real AU's own bytes must still be present, in order, untouched
+        expected_body = b"".join(b for pair in zip(base_aus, dep_aus) for b in pair)
+        assert combined.startswith(expected_body), "real AU content must be byte-identical, just concatenated"
+
+        # the fix: exactly one trailing copy of the real last base AU's own bytes,
+        # not appended between real AUs, and the dependent view is never touched
+        trailing = combined[len(expected_body):]
+        assert trailing == base_aus[-1], f"expected exactly one trailing copy of the last base AU, got {trailing!r}"
+        assert combined.count(b"DEP_AU_2_LAST") == 1, "the real last dependent AU's content must be untouched"
+        assert combined.count(b"BASE_AU_2_LAST") == 2, "the last base AU's real bytes appear once more, as the trailer"
+
+        # an empty pair (n == 0) must never write a trailer with nothing real before it
+        empty_base, empty_dep, empty_out = path.join(tmp, "e_base.264"), path.join(tmp, "e_dep.264"), \
+            path.join(tmp, "e_out.264")
+        open(empty_base, "wb").close()
+        open(empty_dep, "wb").close()
+        base_n0, dep_n0, n0 = M.interleave_mvc(empty_base, empty_dep, empty_out)
+        assert (base_n0, dep_n0, n0) == (0, 0, 0), (base_n0, dep_n0, n0)
+        assert path.getsize(empty_out) == 0, "nothing real written means nothing at all, not a bare trailer"
+
+    print("_self_test_interleave_mvc_trailing_nal: PASS")
+
+
+def _self_test_iso_to_bd_folder():
+    """ADR-291: real, confirmed fix for the ADR-289/ADR-285 saga -- a bare .m2ts is NOT
+    recognized as 3D by real hardware or MediaInfo (verified 2026-09-28: a real 3D Blu-ray's
+    base/dependent-view pairing is declared entirely by the disc's own .mpls PLAYLIST, not
+    by anything in the video stream itself -- confirmed directly by comparing this
+    project's own working .iso's internal PMT structure against a bare .m2ts's). tsMuxeR
+    itself cannot build a real 3D folder structure directly (confirmed against its own
+    --help text: "SSIF files for BD3D discs are not created" in folder-output mode) -- so
+    iso_to_bd_folder() builds the real .iso first (unchanged, already-proven-correct code
+    path), then mounts and copies it out. This test mocks mount_iso/dismount_iso (real
+    Windows disk-image mounting, not something to exercise in an automated suite) but uses
+    a REAL shutil.copytree against real files, so the actual copy behavior (including the
+    non-empty-destination refusal) is genuinely verified, not just the control flow."""
+    from unittest import mock
+    from . import mvc_extract_cli as M
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # a fake "mounted drive" -- real files, standing in for what a real ISO's own
+        # mounted UDF volume would expose
+        fake_drive = path.join(tmp, "fake_mounted_drive")
+        os.makedirs(path.join(fake_drive, "BDMV", "STREAM", "SSIF"))
+        with open(path.join(fake_drive, "BDMV", "STREAM", "SSIF", "00000.ssif"), "wb") as f:
+            f.write(b"fake real ssif content")
+        with open(path.join(fake_drive, "BDMV", "index.bdmv"), "wb") as f:
+            f.write(b"fake index")
+
+        dest = path.join(tmp, "bd_folder_out")
+        fake_iso_path = path.join(tmp, "fake.iso")
+        open(fake_iso_path, "wb").close()
+
+        with mock.patch.object(M, "mount_iso", return_value=(fake_drive, True)) as mount_mock, \
+                mock.patch.object(M, "dismount_iso") as dismount_mock:
+            M.iso_to_bd_folder(fake_iso_path, dest)
+
+        mount_mock.assert_called_once_with(fake_iso_path)
+        dismount_mock.assert_called_once_with(fake_iso_path)  # only dismounted since WE mounted it (mounted_by_us=True)
+        assert path.exists(path.join(dest, "BDMV", "STREAM", "SSIF", "00000.ssif")), \
+            "the real copied structure must include the real .ssif, not just top-level files"
+        with open(path.join(dest, "BDMV", "STREAM", "SSIF", "00000.ssif"), "rb") as f:
+            assert f.read() == b"fake real ssif content", "copied content must be byte-identical, no re-mux"
+
+        # an ISO the caller already had mounted (mounted_by_us=False) must never be
+        # dismounted by this function -- that would rip the volume out from under
+        # whatever the caller/user was already doing with it
+        dest2 = path.join(tmp, "bd_folder_out2")
+        with mock.patch.object(M, "mount_iso", return_value=(fake_drive, False)), \
+                mock.patch.object(M, "dismount_iso") as dismount_mock2:
+            M.iso_to_bd_folder(fake_iso_path, dest2)
+        dismount_mock2.assert_not_called()
+
+        # a real, non-empty existing destination must be refused, not silently
+        # overwritten/merged -- the real disc structure a user already has there could
+        # be something else entirely
+        os.makedirs(path.join(tmp, "already_has_stuff"))
+        with open(path.join(tmp, "already_has_stuff", "something.txt"), "wb") as f:
+            f.write(b"real pre-existing user content")
+        raised = False
+        with mock.patch.object(M, "mount_iso", return_value=(fake_drive, True)), \
+                mock.patch.object(M, "dismount_iso"):
+            try:
+                M.iso_to_bd_folder(fake_iso_path, path.join(tmp, "already_has_stuff"))
+            except RuntimeError as e:
+                raised = True
+                assert "already exists" in str(e)
+        assert raised, "a non-empty destination folder must be refused, never silently overwritten"
+
+    print("_self_test_iso_to_bd_folder: PASS")
+
+
 def _self_test_sbs2mvc_extract_all_av_for_mkv():
     """ADR-245: the direct-to-.mkv output for "SBS to 3D Blu-ray MVC" has no Blu-ray-legal-
     codec restriction at all (unlike the .iso path, which needed ADR-243's TrueHD fix
@@ -24617,6 +24825,8 @@ def _run_self_tests():
         _self_test_sbs2mvc_truehd_falls_through_to_ac3,
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
+        _self_test_interleave_mvc_trailing_nal,
+        _self_test_iso_to_bd_folder,
         _self_test_sbs2mvc_extract_all_av_for_mkv,
         _self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg,
         _self_test_sbs2mvc_fix_frame_rate,

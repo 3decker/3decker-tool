@@ -1047,11 +1047,14 @@ def _run_mvc_conversion(output_path, args):
 
     nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
     base, _ = path.splitext(str(output_path))
-    # ADR-289: "m2ts" is a third real option (see sbs_to_mvc_cli.py's convert() docstring) --
-    # the same real Blu-ray-legal tsMuxeR muxing as "iso", just without the disc/playlist
-    # structure, for standalone hardware players that need a real Blu-ray-native stream but
-    # can't mount/burn a disc image.
-    ext = {"mkv": ".mkv", "m2ts": ".m2ts"}.get(getattr(args, "mvc_output_type", "iso"), ".iso")
+    # ADR-289: "m2ts" is a real Blu-ray-legal muxing (same as "iso") without the disc/
+    # playlist structure -- confirmed 2026-09-28 NOT recognized as 3D by real hardware
+    # or MediaInfo (no playlist to declare the base/dependent pairing), kept only for
+    # players that specifically want a bare clip. ADR-291: "folder" is the real fix --
+    # the same structure as "iso", copied out as plain files instead of a disc image
+    # (see sbs_to_mvc_cli.py's convert() and iso_to_bd_folder()'s own docstrings).
+    mvc_output_type = getattr(args, "mvc_output_type", "iso")
+    ext = {"mkv": ".mkv", "m2ts": ".m2ts", "folder": ""}.get(mvc_output_type, ".iso")
     mvc_path = f"{base}_MVC{ext}"
     cmd = [sys.executable, "-m", "iw3.sbs_to_mvc_cli",
           "-i", str(output_path), "-o", mvc_path, "--layout", layout,
@@ -1072,7 +1075,7 @@ def _run_mvc_conversion(output_path, args):
         cmd += ["--autocrop", mvc_autocrop]
 
     _notify_stage(args, STAGE_CONVERT_MVC)
-    print(f"[iw3] Converting to 3D Blu-ray MVC ({ext})...", file=sys.stderr)
+    print(f"[iw3] Converting to 3D Blu-ray MVC ({ext or 'folder'})...", file=sys.stderr)
     # ADR-248: real user report -- MVC conversion finished, audio came through, subtitles
     # silently didn't, and "no errors at all... where would they even be for this type of
     # conversion?" was a completely fair question. sbs_to_mvc_cli.py already tracks exactly
@@ -6773,13 +6776,15 @@ def create_parser(required_true=True):
                               "SBS if anything else was "
                               "selected (Half SBS/TB throws away half the detail before MVC even starts; "
                               "MVC needs a real full-resolution frame). See --mvc-output-type/--mvc-bitrate."))
-    parser.add_argument("--mvc-output-type", type=str, default="iso", choices=["iso", "mkv", "m2ts"],
+    parser.add_argument("--mvc-output-type", type=str, default="iso", choices=["iso", "mkv", "m2ts", "folder"],
                         help=("only with --convert-to-mvc: 'iso' (default) writes a real 3D Blu-ray disc "
                               "image; 'mkv' writes the same real MVC video directly into a plain .mkv "
                               "instead, no disc structure (ADR-245); 'm2ts' (ADR-289) writes the same real "
-                              "Blu-ray-legal muxing as 'iso' as one bare clip file, no disc structure -- for "
-                              "standalone hardware players that need a real Blu-ray-native stream but can't "
-                              "mount/burn a disc image."))
+                              "Blu-ray-legal muxing as 'iso' as one bare clip file, no disc structure -- "
+                              "confirmed NOT recognized as 3D by real hardware, kept only for players that "
+                              "specifically want a bare clip; 'folder' (ADR-291, recommended for standalone "
+                              "hardware that can't use a .iso directly) writes the same real disc structure "
+                              "as 'iso' as plain files, no mounting/burning needed on either end."))
     parser.add_argument("--mvc-bitrate", type=float, default=20.0,
                         help="only with --convert-to-mvc: target Mbps per view (default 20; 3D Blu-ray "
                              "allows about 40 combined) -- same meaning as sbs_to_mvc_cli's own --bitrate.")

@@ -44,7 +44,7 @@ import threading
 from copy import copy
 from os import path
 
-from .mvc_extract_cli import Cancelled, interleave_mvc, _remove_stale_temp
+from .mvc_extract_cli import Cancelled, interleave_mvc, iso_to_bd_folder, _remove_stale_temp
 from .sbs_to_mvc_cli import bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs, _extract_all_av_for_mkv
 from .utils import (
     _find_tsmuxer, _find_mkvmerge, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage,
@@ -271,8 +271,10 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
     ext = path.splitext(output_path)[1].lower()
     is_mkv_output = ext == ".mkv"
     is_m2ts_output = ext == ".m2ts"
-    if not is_mkv_output and not is_m2ts_output and ext != ".iso":
-        raise ValueError("the output must end in .iso, .m2ts or .mkv")
+    # ADR-291: see sbs_to_mvc_cli.py's convert() docstring for the full reasoning.
+    is_folder_output = ext == ""
+    if not is_mkv_output and not is_m2ts_output and not is_folder_output and ext != ".iso":
+        raise ValueError("the output must end in .iso, .m2ts, .mkv, or be a folder path")
 
     frim = find_frim()
     if frim is None:
@@ -380,19 +382,29 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
             meta_path = path.join(work_dir, "mux.meta")
             with open(meta_path, "w", encoding="utf-8", newline="\n") as f:  # no BOM: tsMuxeR rejects one
                 f.write("\n".join(meta) + "\n")
-            result = subprocess.run([tsmuxer, meta_path, output_path], capture_output=True)
+            # ADR-291: folder output builds the real .iso into a temp path inside work_dir
+            # first (tsMuxeR cannot build a real 3D BDMV folder directly -- see
+            # iso_to_bd_folder()'s own docstring), then copies its contents out. The temp
+            # iso is cleaned up along with the rest of work_dir below, unconditionally.
+            mux_target = path.join(work_dir, "_bd_temp.iso") if is_folder_output else output_path
+            result = subprocess.run([tsmuxer, meta_path, mux_target], capture_output=True)
             if result.returncode != 0:
                 raise RuntimeError("tsMuxeR failed:\n" + result.stdout.decode(errors="replace")[-1200:])
+            if is_folder_output:
+                iso_to_bd_folder(mux_target, output_path, stop_event=stop_event)
         ok = True
         return output_path
     finally:
         pipe.kill()
         if not ok:
-            try:
-                if path.exists(output_path):
-                    os.remove(output_path)
-            except OSError:
-                pass
+            if is_folder_output:
+                shutil.rmtree(output_path, ignore_errors=True)
+            else:
+                try:
+                    if path.exists(output_path):
+                        os.remove(output_path)
+                except OSError:
+                    pass
         shutil.rmtree(work_dir, ignore_errors=True)
 
 

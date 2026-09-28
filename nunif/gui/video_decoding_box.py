@@ -22,7 +22,19 @@ class VideoDecodingBox():
         self.cbo_hwaccel = wx.ComboBox(self.grp_video_dec, choices=[""] + HW_DEVICES,
                                        name=f"{prefix}cbo_hwaccel")
         self.cbo_hwaccel.SetEditable(False)
-        self.cbo_hwaccel.SetSelection(0)
+        # Real user report: HWAccel defaulted to blank ("always use CPU decoding", per this
+        # control's own tooltip below) even when a real, supported GPU device was detected --
+        # a native 4K HDR source then decodes entirely on CPU before the GPU model ever sees a
+        # frame, bottlenecking even a fast CPU (confirmed: a 9800X3D maxed out, an RTX 5090 sat
+        # at 5-20% utilization) while Depth Batch Size (unrelated -- it only batches
+        # already-decoded frames for GPU inference, never touches decode) can't help at all.
+        # HW_DEVICES is this machine's own real, already-probed supported list (get_supported_
+        # hwdevices()), "cuda" first when present; get_compatible_hwaccel() already handles
+        # falling back to "cuda_hwdownload" per-file when the tensor path isn't actually usable,
+        # so defaulting to the first real entry here is safe -- it's exactly what the tooltip
+        # itself already recommends, just now the actual default instead of requiring the user
+        # to notice and pick it manually.
+        self.cbo_hwaccel.SetSelection(1 if HW_DEVICES else 0)
         self.cbo_hwaccel.SetToolTip(
             T("Use your GPU to decode (read) the source video instead of the CPU — much faster, and "
               "frees up CPU time for other work, with no quality difference. Leave blank to always use "

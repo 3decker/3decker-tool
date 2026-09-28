@@ -44,7 +44,7 @@ import threading
 from copy import copy
 from os import path
 
-from .mvc_extract_cli import Cancelled, interleave_mvc
+from .mvc_extract_cli import Cancelled, interleave_mvc, _remove_stale_temp
 from .sbs_to_mvc_cli import bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs, _extract_all_av_for_mkv
 from .utils import (
     _find_tsmuxer, _find_mkvmerge, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage,
@@ -295,6 +295,12 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
     base_es, dep_es = path.join(work_dir, "base.264"), path.join(work_dir, "dep.264")
     ffmpeg_log = path.join(work_dir, "ffmpeg.log")
     combined_es = path.join(work_dir, "combined_mvc.264")  # only written for .mkv output
+    # Same real, reproduced bug class as sbs_to_mvc_cli.py's own convert() (see its
+    # comment here): work_dir is named only from the output filename, so a retry after
+    # any failed/cancelled run silently reuses the same dirty folder and FRIM refuses to
+    # write base_es/dep_es because they already exist -- mvc_extract_cli.py's own
+    # _remove_stale_temp() already solves this; this tool never called it.
+    _remove_stale_temp(base_es, dep_es, combined_es, ffmpeg_log)
 
     stop_event = (getattr(args, "state", None) or {}).get("stop_event")
 

@@ -42,7 +42,7 @@ from os import path
 # (or in mvc_extract_cli, imported just below) actually executes.
 import nunif.gui.subprocess_patch  # noqa
 
-from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc
+from .mvc_extract_cli import AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc, _remove_stale_temp
 from .utils import _find_tsmuxer, _get_ffmpeg_bin, _find_mkvmerge
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
@@ -841,6 +841,17 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     meta_path = path.join(work_dir, "mux.meta")
     ffmpeg_log = path.join(work_dir, "ffmpeg.log")
     combined_es = path.join(work_dir, "combined_mvc.264")  # only written when is_mkv_output
+    # Real, reproduced user crash (two consecutive real failures, identical error, a few
+    # minutes apart): work_dir is named only from the output filename (not a timestamp or
+    # job settings, same as mvc_extract_cli.py's own work_dir), so a retry after any failed/
+    # cancelled attempt silently reuses the same dirty folder -- FRIM then refuses to write
+    # base_es/dep_es because they already exist from the previous attempt, surfacing as a
+    # generic-looking downstream ffmpeg pipe error ("File exists") that looks unrelated to
+    # the real cause. mvc_extract_cli.py already solved this exact class of problem for its
+    # own base_es/dep_es via _remove_stale_temp() (see its own docstring); this tool's
+    # convert() never called the equivalent cleanup at all. Real end-user retry after a real
+    # crash is exactly the scenario this closes.
+    _remove_stale_temp(base_es, dep_es, combined_es, meta_path, ffmpeg_log)
     av_files = []  # only populated when is_mkv_output and include_av
     procs, ok = [], False
     try:

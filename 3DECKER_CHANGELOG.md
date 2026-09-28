@@ -13,7 +13,15 @@ it matters.
 
 ---
 
-## Latest Update — September 27, 2026 (2)
+## Latest Update — September 27, 2026 (3)
+
+**Fixed: on a native 4K HDR source, the GPU could sit almost idle while the CPU maxed out.** A real user with a top-tier GPU and CPU found their GPU barely being used at all. The cause: the "HWAccel" setting (which controls whether your GPU or your CPU reads the video file) defaulted to CPU-only, even when a real, supported GPU was detected — so a heavy 4K HDR source was fully decoded on the CPU before the GPU ever got a frame to work on. It now automatically picks your GPU by default, matching what this app's own tooltip already recommended. Also clarified: "Depth Batch Size" has nothing to do with this — it only affects how many already-loaded frames get processed together, not how fast the video gets read in the first place.
+
+**Fixed: the Start button could silently do nothing, sometimes taking 5+ clicks before a job actually began.** Root cause: a real one-time setup step that runs when you click Start could fail silently (most likely on very new graphics cards) with zero visible sign anything went wrong — so nothing appeared to happen, and clicking again just kept retrying the same failing step until it happened to succeed. Now, if that step ever fails, you'll see a real, clear error message explaining what happened instead of a mysteriously unresponsive button.
+
+**Fixed: the standalone "SBS to 3D Blu-ray MVC" tool could fail with a confusing error after a previous attempt was cancelled or crashed.** A leftover file from an earlier failed attempt could block a fresh retry from starting, producing a technical-sounding error that gave no clue what was actually wrong. Now automatically cleans up any leftover files from a previous attempt before starting a new one.
+
+## Update — September 27, 2026 (2)
 
 **Fixed: if the app failed to start up, it failed completely silently — no error, no popup, nothing.** A real user hit this tracking down a missing dependency for the "face_detect" convergence option and had almost nothing to go on. Now, if the app ever fails to start for any reason, you'll get a real, plain error popup explaining what happened, plus a log file with the full details — covering all four of this app's windows (main, waifu2x, desktop, and player), not just one.
 

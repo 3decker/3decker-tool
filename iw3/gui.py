@@ -3737,9 +3737,12 @@ class MainFrame(wx.Frame):
                                           name="cbo_zoed_batch_size")
         self.cbo_batch_size.SetEditable(False)
         self.cbo_batch_size.SetToolTip(
-            T("Video Only. How many frames are sent to the depth model at once. Higher = faster overall "
-              "but uses more VRAM. Lower it if you run out of memory; raise it if you have VRAM to spare "
-              "and want faster processing."))
+            T("Video Only. How many already-decoded frames are sent to the depth model at once. "
+              "Higher = faster overall but uses more VRAM. Lower it if you run out of memory; raise it "
+              "if you have VRAM to spare and want faster processing.\n"
+              "Real user report: this does NOT speed up reading/decoding the source video itself — if "
+              "your GPU sits at low usage while the CPU is maxed out (common on native 4K HDR sources), "
+              "raising this won't help; check HWAccel below instead, which controls decode speed."))
         self.cbo_batch_size.SetSelection(12)  # "2"
         self.sld_processor_batch_size = _build_stereo_slider(self.grp_processor, self.cbo_batch_size, 1, 64, 1)
 
@@ -10260,6 +10263,66 @@ class MainFrame(wx.Frame):
             pyav_init_cuda_primary_context()
             self.cuda_context_initialized = True
 
+    def _ensure_cuda_context_safe(self):
+        """Same call as ensure_cuda_context(), but never lets a real failure (e.g. a
+        transient torch.cuda.init() error, plausible on a very new GPU -- this codebase
+        already has real precedent for exactly this class of first-call CUDA/driver
+        timing flakiness, see ADR-218/ADR-073) propagate silently out of a wx event
+        handler. Real user report, 2026-09-27: with the previous unguarded call, a
+        failure here left cuda_context_initialized False (so every subsequent click
+        re-ran the same probe from scratch) and produced ZERO visible output under
+        pythonw.exe -- Start simply did nothing, matching "takes about 5 attempts...
+        then all of a sudden the start button works" (a retry eventually succeeding on
+        its own, not Clear/reopen deterministically fixing anything). Returns True on
+        success; on failure, shows the same real error dialog + crash-log entry a job
+        crash already gets, and returns False so the caller can abort cleanly."""
+        try:
+            self.ensure_cuda_context()
+            return True
+        except Exception:
+            self._show_and_log_crash(*sys.exc_info())
+            return False
+
+    def _show_and_log_crash(self, e_type, e, tb):
+        """Shared by on_exit_worker's own job-crash handling (ADR-072 Amendment) and
+        ensure_cuda_context()'s callers (real user report, 2026-09-27): a wx event handler
+        exception does not reliably reach nunif/pythonw_fix.py's sys.excepthook (ADR-287) --
+        wx's own event dispatch can swallow it -- so anything that can fail inside an event
+        handler needs this same explicit handling, not just the ADR-287 startup-time hook.
+        Real symptom this specific caller closes: pyav_init_cuda_primary_context()'s own
+        torch.cuda.init() call (plausible to fail transiently on a very new GPU) raising here
+        previously left cuda_context_initialized False and produced zero visible output under
+        pythonw.exe -- Start just silently did nothing, and every subsequent click re-ran the
+        same probe from scratch, matching the real report ("takes about 5 attempts... then all
+        of a sudden the start button works")."""
+        message = getattr(e, "message", str(e))
+        traceback.print_tb(tb)
+        # ADR-072 Amendment: under the real GUI (pythonw.exe), nunif/pythonw_fix.py
+        # (imported at the top of this file) reopens sys.stdout/sys.stderr onto
+        # os.devnull -- a real, deliberate, long-standing fix for a separate,
+        # genuine problem (pythonw.exe crashes on any bare write to a console-less
+        # sys.stdout/stderr). A side effect nobody had accounted for: the
+        # traceback.print_tb(tb) call directly above, and every [WARN]/error
+        # print() throughout iw3/utils.py's real conversion pipeline (including
+        # the --preserve-dowi HDR extraction block), write into that same devnull
+        # sys.stderr and are silently discarded under the real GUI -- so a job
+        # crash here has only ever shown str(e) in the popup, never a real
+        # file/line traceback, no matter how many times it happens. This is the
+        # actual, confirmed reason no console log could ever be found for any of
+        # tonight's "Errno 129" reports. Writing the real traceback to a
+        # persistent file, independent of sys.stdout/sys.stderr, closes that gap
+        # for this and every future real conversion-job crash.
+        try:
+            crash_log_path = path.join(CONFIG_DIR, "iw3-gui-crash.log")
+            with open(crash_log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n---- {datetime.now().isoformat(timespec='seconds')} ----\n")
+                f.write("".join(traceback.format_exception(e_type, e, tb)))
+        except Exception:
+            crash_log_path = None
+        if crash_log_path is not None:
+            message = f"{message}\n\n(Full details saved to {crash_log_path})"
+        wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+
     def on_click_btn_start(self, event):
         # CRITICAL, DO NOT REORDER (ADR-218, 2026-09-22): ensure_cuda_context() must
         # run BEFORE parse_args(), never after. parse_args() builds
@@ -10277,7 +10340,8 @@ class MainFrame(wx.Frame):
         # investigation and why five earlier, more targeted fixes (ADR-068 through
         # ADR-075, ADR-123, ADR-129) did not close this specific case. Do not move
         # ensure_cuda_context() back after parse_args() without re-reading ADR-218.
-        self.ensure_cuda_context()
+        if not self._ensure_cuda_context_safe():
+            return
         try:
             args = self.parse_args()
         except ValueError as e:
@@ -10386,34 +10450,7 @@ class MainFrame(wx.Frame):
                 _release_pause_vram(args)
         except: # noqa
             self.SetStatusText(T("Error"))
-            e_type, e, tb = sys.exc_info()
-            message = getattr(e, "message", str(e))
-            traceback.print_tb(tb)
-            # ADR-072 Amendment: under the real GUI (pythonw.exe), nunif/pythonw_fix.py
-            # (imported at the top of this file) reopens sys.stdout/sys.stderr onto
-            # os.devnull -- a real, deliberate, long-standing fix for a separate,
-            # genuine problem (pythonw.exe crashes on any bare write to a console-less
-            # sys.stdout/stderr). A side effect nobody had accounted for: the
-            # traceback.print_tb(tb) call directly above, and every [WARN]/error
-            # print() throughout iw3/utils.py's real conversion pipeline (including
-            # the --preserve-dowi HDR extraction block), write into that same devnull
-            # sys.stderr and are silently discarded under the real GUI -- so a job
-            # crash here has only ever shown str(e) in the popup, never a real
-            # file/line traceback, no matter how many times it happens. This is the
-            # actual, confirmed reason no console log could ever be found for any of
-            # tonight's "Errno 129" reports. Writing the real traceback to a
-            # persistent file, independent of sys.stdout/sys.stderr, closes that gap
-            # for this and every future real conversion-job crash.
-            try:
-                crash_log_path = path.join(CONFIG_DIR, "iw3-gui-crash.log")
-                with open(crash_log_path, "a", encoding="utf-8") as f:
-                    f.write(f"\n---- {datetime.now().isoformat(timespec='seconds')} ----\n")
-                    f.write("".join(traceback.format_exception(e_type, e, tb)))
-            except Exception:
-                crash_log_path = None
-            if crash_log_path is not None:
-                message = f"{message}\n\n(Full details saved to {crash_log_path})"
-            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            self._show_and_log_crash(*sys.exc_info())
 
         self.processing = False
         self.btn_cancel.Disable()
@@ -11871,7 +11908,8 @@ class MainFrame(wx.Frame):
 
         # CRITICAL, DO NOT REORDER: see ADR-218 / on_click_btn_start()'s own comment
         # -- ensure_cuda_context() must run before parse_args(), not after.
-        self.ensure_cuda_context()
+        if not self._ensure_cuda_context_safe():
+            return
         args = self.parse_args()
         if args is None or not args.autocrop:
             return
@@ -11982,7 +12020,8 @@ class MainFrame(wx.Frame):
     def test_quick_preview(self):
         # CRITICAL, DO NOT REORDER: see ADR-218 / on_click_btn_start()'s own comment
         # -- ensure_cuda_context() must run before parse_args(), not after.
-        self.ensure_cuda_context()
+        if not self._ensure_cuda_context_safe():
+            return
         args = self.parse_args()
         if args is None:
             return
@@ -12253,7 +12292,8 @@ class MainFrame(wx.Frame):
 
         # CRITICAL, DO NOT REORDER: see ADR-218 / on_click_btn_start()'s own comment
         # -- ensure_cuda_context() must run before parse_args(), not after.
-        self.ensure_cuda_context()
+        if not self._ensure_cuda_context_safe():
+            return
         base_args = self.parse_args(skip_set_state=True)
         if base_args is None:
             return
@@ -14774,6 +14814,109 @@ def _self_test_ensure_cuda_context_before_parse_args():
             app.Destroy()
 
     print("_self_test_ensure_cuda_context_before_parse_args: PASS")
+
+
+def _self_test_ensure_cuda_context_safe_shows_real_error():
+    """Real user report, 2026-09-27: pyav_init_cuda_primary_context() failing (plausible
+    transient torch.cuda.init() error, e.g. on a very new GPU) previously propagated
+    straight out of on_click_btn_start/test_autocrop/test_quick_preview/
+    on_click_btn_compare_presets uncaught -- a wx event handler exception does not
+    reliably reach nunif/pythonw_fix.py's own sys.excepthook (ADR-287), so under
+    pythonw.exe this produced ZERO visible output: Start just silently did nothing, and
+    because cuda_context_initialized was never set True, every subsequent click re-ran
+    the same failing probe from scratch (matching "takes about 5 attempts... then all of
+    a sudden the start button works"). This test confirms _ensure_cuda_context_safe()
+    now catches that failure, shows a real error dialog, logs it, returns False instead
+    of raising, and leaves cuda_context_initialized False so a real retry is still
+    possible once whatever was transient clears up -- and that a successful call
+    (the common case) returns True with no dialog shown at all."""
+    import iw3.gui as gui_mod
+
+    app = None
+    frame = None
+    orig_pyav = gui_mod.pyav_init_cuda_primary_context
+    try:
+        app = wx.App()
+        frame = gui_mod.MainFrame()
+
+        shown = []
+        orig_message_box = wx.MessageBox
+        wx.MessageBox = lambda message, caption, style=0: shown.append((message, caption))
+
+        # Failure case: pyav_init raises -- must not propagate, must show a real error,
+        # must leave cuda_context_initialized False (so a retry can actually happen).
+        def _raising_pyav_init():
+            raise RuntimeError("synthetic self-test: transient CUDA init failure")
+
+        gui_mod.pyav_init_cuda_primary_context = _raising_pyav_init
+        frame.cuda_context_initialized = False
+        result = frame._ensure_cuda_context_safe()
+        assert result is False, "must return False on a real failure, not raise"
+        assert frame.cuda_context_initialized is False, \
+            "must stay False on failure so a later click can genuinely retry"
+        assert len(shown) == 1, f"must show exactly one real error dialog, got {shown}"
+        assert "synthetic self-test" in shown[0][0], f"dialog must include the real error text: {shown[0]}"
+
+        # Success case: must return True, no dialog, and the guard flips True (matching
+        # ensure_cuda_context()'s own existing idempotency contract).
+        shown.clear()
+        gui_mod.pyav_init_cuda_primary_context = lambda: None
+        frame.cuda_context_initialized = False
+        result = frame._ensure_cuda_context_safe()
+        assert result is True, "must return True on success"
+        assert frame.cuda_context_initialized is True, "success must set the guard True"
+        assert shown == [], f"must not show any dialog on success, got {shown}"
+
+        wx.MessageBox = orig_message_box
+    finally:
+        gui_mod.pyav_init_cuda_primary_context = orig_pyav
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_ensure_cuda_context_safe_shows_real_error: PASS")
+
+
+def _self_test_hwaccel_defaults_to_detected_gpu():
+    """Real user report, 2026-09-27: HWAccel defaulted to blank ("always use CPU
+    decoding", per its own tooltip) even on a machine with a real, supported GPU
+    device already detected -- a native 4K HDR source then decodes entirely on CPU,
+    bottlenecking even a fast CPU while the GPU model sits mostly idle waiting for
+    frames (confirmed real symptom: a 9800X3D maxed out, an RTX 5090 at 5-20%
+    utilization). HW_DEVICES is this machine's own real, already-probed list
+    (get_supported_hwdevices(), "cuda" first when present) -- this test confirms the
+    combobox now defaults to that first real entry instead of blank when at least one
+    is available, and still safely defaults to blank on a machine with none (no
+    silent crash / no fabricated device)."""
+    from nunif.gui.video_decoding_box import VideoDecodingBox
+    import nunif.gui.video_decoding_box as vdb_mod
+
+    app = None
+    frame = None
+    orig_hw_devices = vdb_mod.HW_DEVICES
+    try:
+        app = wx.App()
+        frame = wx.Frame(None)
+
+        vdb_mod.HW_DEVICES = ["cuda", "cuda_hwdownload"]
+        box = VideoDecodingBox(frame)
+        assert box.hwaccel == "cuda", f"must default to the first real detected device, got {box.hwaccel!r}"
+
+        vdb_mod.HW_DEVICES = []
+        box_none = VideoDecodingBox(frame, name_prefix="none_case")
+        assert box_none.hwaccel is None, \
+            f"must stay blank (None) when no real HW device was detected, got {box_none.hwaccel!r}"
+    finally:
+        vdb_mod.HW_DEVICES = orig_hw_devices
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_hwaccel_defaults_to_detected_gpu: PASS")
 
 
 def _self_test_device_dropdown_no_torch_cuda_touch():
@@ -24350,6 +24493,8 @@ def _run_self_tests():
     tests = [
         _self_test_no_eager_cuda_context,
         _self_test_ensure_cuda_context_before_parse_args,
+        _self_test_ensure_cuda_context_safe_shows_real_error,
+        _self_test_hwaccel_defaults_to_detected_gpu,
         _self_test_compile_probe_crash_handled,
         _self_test_compile_all_cuda_device_shows_message,
         _self_test_layout_modes,

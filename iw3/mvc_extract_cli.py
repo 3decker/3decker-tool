@@ -167,7 +167,30 @@ def interleave_mvc(base_path, dependent_path, out_path):
     does), the result is a byte-for-byte, spec-valid repeat of the movie's own last
     base-view frame appended once at the very end -- a real but minor/benign
     artifact (an extra held frame), not corrupted or garbage data, and never
-    touches the dependent view (only a base-view AU is duplicated)."""
+    touches the dependent view (only a base-view AU is duplicated).
+
+    Second real, confirmed difference (ADR-292, found comparing this project's own
+    direct .mkv output against a real end user's confirmed-WORKING MVC .mkv, made
+    via MakeMKV ripping this project's own real .iso): FRIM's own dependent-view
+    stream marks each access unit with a NAL type 24 delimiter -- not an officially
+    defined H.264 NAL type at all (the base spec reserves 24-31 as unspecified,
+    confirmed against the spec; this is FRIM's own convention, the same reason
+    _find_au_boundaries() below has to treat it as a real delimiter itself). Real
+    evidence this matters for a raw-elementary-stream destination: the real user's
+    working MKV (produced by MakeMKV's own real disc-to-MKV extraction, not this
+    function) has ZERO type-24 NALs anywhere in it -- MakeMKV's own real MVC
+    extraction logic evidently never carries this through. This project's own
+    .iso/BD-Folder path (tsMuxeR's real SSIF) still contains it untouched (verified
+    directly, by demuxing this project's own real .ssif) with no known ill effect
+    there -- plausibly because a real M2TS/PES structure establishes each access
+    unit's boundary independently of in-band NAL parsing, while a raw elementary
+    stream dropped straight into an MKV video track (this function's only real
+    callers -- .iso/BD-Folder never uses interleave_mvc() at all) relies on NAL-
+    level structure for exactly that, making an unrecognized NAL type there a real,
+    plausible source of misaligned decode. Fix: strip a dependent AU's own leading
+    type-24 delimiter (only that -- a real AUD, type 9, is left untouched) before
+    writing it out, matching what MakeMKV's own real, working pipeline already
+    effectively produces."""
     base_bounds = _find_au_boundaries(base_path, delimiter_types={9})
     dep_bounds = _find_au_boundaries(dependent_path, delimiter_types={24, 9})
 
@@ -179,13 +202,30 @@ def interleave_mvc(base_path, dependent_path, out_path):
             bf.seek(bs)
             out.write(bf.read(be - bs))
             df.seek(ds)
-            out.write(df.read(de - ds))
+            out.write(_strip_leading_type24_delimiter(df.read(de - ds)))
         if n > 0:
             last_bs, last_be = base_bounds[n - 1]
             bf.seek(last_bs)
             out.write(bf.read(last_be - last_bs))
 
     return len(base_bounds), len(dep_bounds), n
+
+
+def _strip_leading_type24_delimiter(au_bytes):
+    """See interleave_mvc()'s own docstring (ADR-292) for the real evidence this is
+    needed. `au_bytes` is one dependent-view access unit, always starting exactly at
+    a real NAL start code (the same 3-byte `00 00 01` convention
+    _find_au_boundaries() above already uses -- a NAL beginning with the 4-byte
+    `00 00 00 01` variant still matches this, since the extra leading zero is simply
+    the previous NAL's own trailing byte). Only strips a leading NAL type 24 (FRIM's
+    own non-standard delimiter); a real AUD (type 9) or any other leading NAL is
+    left completely untouched."""
+    if len(au_bytes) < 4 or au_bytes[0:3] != b"\x00\x00\x01":
+        return au_bytes
+    if (au_bytes[3] & 0x1F) != 24:
+        return au_bytes
+    next_start = au_bytes.find(b"\x00\x00\x01", 3)
+    return au_bytes[next_start:] if next_start != -1 else b""
 
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb",

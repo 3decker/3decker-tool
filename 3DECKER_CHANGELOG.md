@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 28, 2026
+## Latest Update — September 28, 2026 (2)
+
+**Fixed: a real, if hard-to-describe, picture problem specific to 3DECKER's own direct "Plain MKV"/"Bare M2TS" output — found by directly comparing it against a real user's independently-confirmed-working file.** The user had a working recipe (rip 3DECKER's own disc image with the free tool MakeMKV, then combine with the original audio) that always played correctly, while asking 3DECKER to build the MKV directly on its own came out looking wrong — often described as a cropping issue. Tracked down a real, concrete difference: the video encoder this app uses (FRIM) tags each 3D frame's second-eye data with a marker that isn't an officially standard part of the video format. MakeMKV's own tool quietly cleans this up when it rips a disc; 3DECKER's own direct-to-MKV path never did. That stray marker is a plausible, real explanation for exactly the kind of picture misalignment reported. Fixed so 3DECKER's own direct output now matches the real, working file's structure exactly, confirmed byte-for-byte. The "3D Blu-ray ISO" and "BD Folder" options were never affected by this — this was specific to "Plain MKV" and "Bare M2TS" output.
+
+## Update — September 28, 2026 (1)
 
 **New: "BD Folder," a real fix for hardware that couldn't recognize the Bare M2TS option from yesterday as 3D.** Real-world testing the same day found that a bare M2TS clip — while technically valid Blu-ray-format video — isn't actually enough for most real 3D Blu-ray hardware to recognize as 3D at all. The real reason: a genuine 3D Blu-ray disc's left-eye/right-eye pairing isn't signaled by the video file itself — it's declared by the disc's own playlist file, which a bare single-file clip doesn't have. BD Folder is the real fix: the exact same real disc structure as the ISO option (including that playlist), just copied out as a plain folder of files instead of wrapped in a disc image — drop it straight onto a USB drive or NAS, no mounting or burning needed. Available anywhere "3D Blu-ray ISO" already was (the main conversion's MVC options, the standalone "SBS to 3D Blu-ray MVC" tool, and "Direct to 3D Blu-ray MVC"). The Bare M2TS option from yesterday is still there for a player that specifically wants a bare clip, but BD Folder is now the recommended choice for hardware that can't use a disc image directly.
 

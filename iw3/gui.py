@@ -23786,11 +23786,14 @@ def _self_test_interleave_mvc_trailing_nal():
         dep_path = path.join(tmp, "dep.264")
         out_path = path.join(tmp, "combined.264")
 
-        # 3 fake access units per view -- base AUs start with a type-9 (0x09) AUD,
-        # dependent AUs start with a type-24 (0x18) delimiter, matching the real
-        # convention _find_au_boundaries() already documents.
+        # 3 fake access units per view -- base AUs start with a type-9 (0x09) AUD;
+        # dependent AUs ALSO start with a real type-9 AUD here (not FRIM's own
+        # type-24 delimiter) specifically to stay OUT of ADR-292's own
+        # type-24-stripping fix (that fix has its own dedicated test below, using
+        # type-24) -- _find_au_boundaries()'s dependent delimiter_types={24, 9}
+        # accepts either, and this test is about the trailing-AU behavior only.
         base_aus = [au(0x09, b"BASE_AU_0"), au(0x09, b"BASE_AU_1"), au(0x09, b"BASE_AU_2_LAST")]
-        dep_aus = [au(0x18, b"DEP_AU_0"), au(0x18, b"DEP_AU_1"), au(0x18, b"DEP_AU_2_LAST")]
+        dep_aus = [au(0x09, b"DEP_AU_0"), au(0x09, b"DEP_AU_1"), au(0x09, b"DEP_AU_2_LAST")]
         with open(base_path, "wb") as f:
             f.write(b"".join(base_aus))
         with open(dep_path, "wb") as f:
@@ -23823,6 +23826,67 @@ def _self_test_interleave_mvc_trailing_nal():
         assert path.getsize(empty_out) == 0, "nothing real written means nothing at all, not a bare trailer"
 
     print("_self_test_interleave_mvc_trailing_nal: PASS")
+
+
+def _self_test_interleave_mvc_strips_frim_delimiter():
+    """ADR-292: real, confirmed structural difference found comparing this
+    project's own direct .mkv output against a real end user's confirmed-WORKING
+    MVC .mkv (made by ripping this project's own real .iso with MakeMKV, not
+    through interleave_mvc() at all). FRIM's own dependent-view stream marks each
+    access unit with a NAL type 24 delimiter -- not an officially defined H.264 NAL
+    type (24-31 is reserved/unspecified in the base spec); it's FRIM's own
+    convention, the same reason _find_au_boundaries() already has to treat it as a
+    real delimiter. The real user's working file (produced by MakeMKV's own real
+    disc-to-MKV extraction) has ZERO type-24 NALs anywhere -- MakeMKV's own
+    extraction logic evidently never carries it through. This project's own
+    .iso/BD-Folder path still has it (verified directly by demuxing this project's
+    own real .ssif) with no known ill effect there, plausibly because a real
+    M2TS/PES structure establishes AU boundaries independently of in-band NAL
+    parsing -- but a raw elementary stream dropped straight into an MKV video track
+    (interleave_mvc()'s only real callers) relies on NAL-level structure for
+    exactly that, making an unrecognized NAL type there a real, plausible source of
+    misaligned decode. Fix: strip a dependent AU's own leading type-24 delimiter
+    specifically (only that -- a real AUD, type 9, is left untouched), matching
+    what MakeMKV's own real, working pipeline already effectively produces."""
+    from . import mvc_extract_cli as M
+
+    def au(delim_byte, payload):
+        return bytes([0, 0, 1, delim_byte]) + payload
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base_path = path.join(tmp, "base.264")
+        dep_path = path.join(tmp, "dep.264")
+        out_path = path.join(tmp, "combined.264")
+
+        base_aus = [au(0x09, b"BASE_AU_0"), au(0x09, b"BASE_AU_1")]
+        # AU 0's dependent view uses FRIM's own real type-24 (0x18) delimiter,
+        # immediately followed by its real content as its own separate NAL (a bare
+        # type-24 delimiter carries no payload of its own in real FRIM output --
+        # the next real NAL, e.g. subset SPS, starts right after it); AU 1 uses a
+        # real AUD (type 9) instead, to prove ONLY type-24 gets stripped.
+        dep_aus = [au(0x18, b"") + au(0x0F, b"DEP_AU_0_PAYLOAD"), au(0x09, b"DEP_AU_1_PAYLOAD")]
+        with open(base_path, "wb") as f:
+            f.write(b"".join(base_aus))
+        with open(dep_path, "wb") as f:
+            f.write(b"".join(dep_aus))
+
+        base_n, dep_n, n = M.interleave_mvc(base_path, dep_path, out_path)
+        assert (base_n, dep_n, n) == (2, 2, 2), (base_n, dep_n, n)
+
+        with open(out_path, "rb") as f:
+            combined = f.read()
+
+        # AU 0: the type-24 delimiter itself must be gone, but the real NAL that
+        # followed it (everything after the delimiter) must survive untouched
+        assert b"\x00\x00\x01\x18" not in combined, "FRIM's own type-24 delimiter must be stripped"
+        assert b"\x00\x00\x01\x0FDEP_AU_0_PAYLOAD" in combined, \
+            "the real NAL after a stripped type-24 delimiter must survive completely untouched"
+
+        # AU 1: a real AUD (type 9) delimiter must be left completely alone
+        assert b"\x00\x00\x01\x09DEP_AU_1_PAYLOAD" in combined, \
+            "a real AUD delimiter on a dependent AU must never be stripped, only type-24"
+
+    print("_self_test_interleave_mvc_strips_frim_delimiter: PASS")
 
 
 def _self_test_iso_to_bd_folder():
@@ -24826,6 +24890,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
         _self_test_interleave_mvc_trailing_nal,
+        _self_test_interleave_mvc_strips_frim_delimiter,
         _self_test_iso_to_bd_folder,
         _self_test_sbs2mvc_extract_all_av_for_mkv,
         _self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg,

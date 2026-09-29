@@ -23,6 +23,7 @@ from .utils import (
     create_parser, set_state_args, iw3_main, run_iw3_main_with_job_log,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
     _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram, build_cli_command_from_args,
+    analyze_source_video, format_source_analysis,
     STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
     STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
     STAGE_RESTORE_AV,
@@ -7322,6 +7323,19 @@ class MainFrame(wx.Frame):
         self.btn_quick_preview.SetToolTip(
             T("Process a short 45 second clip (or a single frame for images) with the "
               "current settings to quickly check the result"))
+        self.btn_analyze_source = wx.Button(self.pnl_process, label=T("Analyze Source"))
+        self.btn_analyze_source.SetToolTip(
+            T("What it's for: shows real, measured facts about the current Input video -- "
+              "resolution, codec, its actual average bitrate, and (only when detectable) the "
+              "CRF it was originally encoded with -- so you have a real reference point when "
+              "choosing your own CRF/Bitrate/Limit Bitrate settings instead of guessing blind.\n"
+              "Why CRF often shows \"not available\": that number is only readable when the "
+              "source was encoded with the free x264/x265 encoders, which embed it as a hidden "
+              "note in the file. Most commercial Blu-ray/streaming releases use a different, "
+              "proprietary encoder that never writes this at all -- that's expected, not an "
+              "error.\n"
+              "Recommended: run this once on a new source before picking your own "
+              "encoding settings, especially if you plan to use Limit Bitrate."))
         self.btn_start = wx.Button(self.pnl_process, label=T("Start"))
         self.btn_suspend = wx.Button(self.pnl_process, label=T("Suspend"))
         self.btn_cancel = wx.Button(self.pnl_process, label=T("Cancel"))
@@ -7336,6 +7350,7 @@ class MainFrame(wx.Frame):
         # zero zero-size/invisible buttons at any width, before this was written.
         self._process_button_items_list = [
             (self.btn_quick_preview, wx.ALL, 4),
+            (self.btn_analyze_source, wx.ALL, 4),
             (self.btn_start, wx.ALL, 4),
             (self.btn_suspend, wx.ALL, 4),
             (self.btn_cancel, wx.ALL, 4),
@@ -7462,6 +7477,7 @@ class MainFrame(wx.Frame):
         self.btn_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_cancel)
         self.btn_suspend.Bind(wx.EVT_BUTTON, self.on_click_btn_suspend)
         self.btn_quick_preview.Bind(wx.EVT_BUTTON, self.on_click_btn_quick_preview)
+        self.btn_analyze_source.Bind(wx.EVT_BUTTON, self.on_click_btn_analyze_source)
 
         self.Bind(EVT_TQDM, self.on_tqdm)
         self.Bind(EVT_IW3_STAGE, self.on_stage_change)
@@ -12141,6 +12157,31 @@ class MainFrame(wx.Frame):
             message = getattr(e, "message", str(e))
             traceback.print_tb(tb)
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_analyze_source(self, event):
+        """ADR-297: real, measured facts about the current Input video (resolution, codec,
+        actual average bitrate, and best-effort source CRF) so the user has a real reference
+        point before picking CRF/Bitrate/Limit Bitrate -- see analyze_source_video()'s own
+        docstring (iw3/utils.py) for exactly what is and isn't determinable and why."""
+        input_path = self.pnl_file.input_path
+        if not input_path or not (is_video(input_path) or is_image(input_path)):
+            wx.MessageBox(T("Select a single video or image file in Input first."),
+                          T("Analyze Source"), wx.OK | wx.ICON_INFORMATION)
+            return
+        self.btn_analyze_source.Disable()
+        self.SetStatusText(T("Analyzing source..."))
+        try:
+            with wx.BusyCursor():
+                wx.Yield()
+                info = analyze_source_video(input_path)
+            self.SetStatusText(T("Ready"))
+            wx.MessageBox(format_source_analysis(info), T("Analyze Source") + f" -- {path.basename(input_path)}",
+                          wx.OK | wx.ICON_INFORMATION)
+        except Exception as e:
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(str(e), f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+        finally:
+            self.btn_analyze_source.Enable()
 
     COMPARE_CLIP_SECONDS_DEFAULT = "15"
 
@@ -20524,6 +20565,68 @@ def _self_test_nvenc_bitrate_cap():
     print("_self_test_nvenc_bitrate_cap: PASS")
 
 
+def _self_test_analyze_source_video():
+    """ADR-297: real, measured source facts (resolution/codec/bitrate/HDR, plus best-effort
+    CRF detection for x264/x265 sources) so a user picking Limit Bitrate/CRF has a real
+    reference point instead of guessing. Covers: full real-shaped ffprobe JSON parsing, the
+    CRF regex finding a real x264-style SEI settings dump, the negative case (a source with
+    no such marker -- e.g. every real commercial Blu-ray remux -- correctly returns None,
+    not a guess), and a non-h264/hevc codec skipping CRF detection entirely (only those two
+    codecs can carry this marker at all)."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    ffprobe_json = (
+        '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,"height":1080,'
+        '"pix_fmt":"yuv420p","r_frame_rate":"24000/1001","bit_rate":"5000000"},'
+        '{"codec_type":"audio","codec_name":"aac"}],'
+        '"format":{"duration":"120.5","bit_rate":"5500000"}}'
+    )
+
+    def fake_probe_run(cmd, **kw):
+        return types.SimpleNamespace(returncode=0, stdout=ffprobe_json, stderr="")
+
+    # real x264 SEI-style settings dump text, exactly as x264 itself writes it
+    x264_sei = (b"x264 - core 164 r3095 baee400 - H.264/MPEG-4 AVC codec - options: "
+                b"cabac=1 ref=3 deblock=1:0:0 analyse=0x3:0x113 me=hex subme=7 rc=crf "
+                b"mbtree=1 crf=18.0 qcomp=0.60 qpmin=0 qpmax=69")
+
+    def fake_extract_run(cmd, **kw):
+        return types.SimpleNamespace(returncode=0, stdout=x264_sei, stderr=b"")
+
+    with mock.patch("subprocess.run", side_effect=[fake_probe_run(None), fake_probe_run(None),
+                                                     fake_probe_run(None), fake_extract_run(None)]):
+        info = U.analyze_source_video("fake.mp4", ffprobe_bin="ffprobe", ffmpeg_bin="ffmpeg")
+    assert info["width"] == 1920 and info["height"] == 1080
+    assert info["fps"] == round(24000 / 1001, 3)
+    assert info["video_codec"] == "h264"
+    assert abs(info["duration"] - 120.5) < 0.01
+    assert abs(info["video_bitrate_mbps"] - 5.0) < 0.01
+    assert info["detected_encoder"] == "x264" and info["detected_crf"] == 18.0
+
+    summary = U.format_source_analysis(info)
+    assert "1920x1080" in summary and "Detected source CRF: 18" in summary
+
+    # negative case: no x264/x265 marker anywhere (the real, common case for a commercial
+    # Blu-ray remux) -- must report "not available", never a guessed number
+    def fake_extract_no_marker(cmd, **kw):
+        return types.SimpleNamespace(returncode=0, stdout=b"not an encoder settings dump at all", stderr=b"")
+
+    with mock.patch("subprocess.run", side_effect=[fake_probe_run(None), fake_probe_run(None),
+                                                     fake_probe_run(None), fake_extract_no_marker(None)]):
+        info_no_crf = U.analyze_source_video("fake2.mp4", ffprobe_bin="ffprobe", ffmpeg_bin="ffmpeg")
+    assert info_no_crf["detected_crf"] is None and info_no_crf["detected_encoder"] is None
+    assert "not available" in U.format_source_analysis(info_no_crf)
+
+    # a codec that can never carry this marker (e.g. a hardware/proprietary encode reported
+    # as something other than h264/hevc) must skip the extraction subprocess entirely
+    encoder, crf = U._detect_source_crf("fake3.mp4", "ffmpeg", "mpeg2video")
+    assert encoder is None and crf is None
+
+    print("_self_test_analyze_source_video: PASS")
+
+
 def _self_test_bluray_import_panel():
     """3D Blu-ray Import standalone tool (ADR-182): the widgets exist with the right
     defaults, the command it builds carries exactly what was chosen (and refuses bad
@@ -25042,6 +25145,7 @@ def _run_self_tests():
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_nvenc_bitrate_cap,
+        _self_test_analyze_source_video,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
         _self_test_quick_convert_panel,

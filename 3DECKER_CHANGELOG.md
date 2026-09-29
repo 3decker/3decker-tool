@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 28, 2026 (6)
+## Latest Update — September 28, 2026 (7)
+
+**New: "Analyze Source" button — see your source movie's real resolution, codec, and bitrate before picking your own encoding settings.** Sits right next to Quick Preview. Click it and it shows you real, measured facts about whatever's in Input: resolution, video codec, how long it is, and its actual average bitrate — useful as a reference point when deciding on a CRF or Limit Bitrate setting of your own, instead of guessing. It'll also try to show you the exact CRF the source was originally encoded with, but that only works sometimes — it's only readable when the source was made with the free x264/x265 encoders, which leave that info behind; most commercial Blu-ray and streaming releases use a different, private encoder that doesn't, so seeing "not available" there is normal, not a bug.
+
+## Update — September 28, 2026 (6)
 
 **Fixed: "Direct to 3D Blu-ray MVC" (the single-pass option) could fail with "already exists and is not empty" the very first time you used it.** A real user hit this: the conversion ran fine, but the final step failed trying to save into their whole Output folder (which of course already had other movies in it) instead of creating its own properly named file inside that folder. The cause: this single-pass option skips a step every other part of the app already does automatically — turning your chosen Output folder plus the movie's own settings into one real, uniquely named file (or BD Folder) before saving. Fixed so it now builds that real per-movie name first, exactly like the rest of the app does. If you hit this error before, "Direct to 3D Blu-ray MVC" should now save correctly into your existing Output folder without conflicting with anything already there.
 

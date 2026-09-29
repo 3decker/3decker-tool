@@ -1725,6 +1725,148 @@ def _hdr_to_sdr_high_bit_depth(input_path, ffprobe_bin):
     return any(tag in pix_fmt for tag in ("10le", "10be", "12le", "12be", "p010", "p012"))
 
 
+def _detect_source_crf(input_path, ffmpeg_bin, video_codec):
+    """ADR-297: best-effort only, real evidence or nothing -- x264/x265 (the free, open
+    encoders) write their own exact real settings, including the CRF value actually used,
+    as a plain human-readable text message embedded in the bitstream itself (a standard SEI
+    message). This extracts a few seconds of the raw video stream (stream copy, no decode,
+    fast regardless of file size) and searches for that literal text.
+
+    This is NOT a general "read any file's CRF" trick -- it only ever works when the source
+    was genuinely encoded with libx264/libx265 and that message survived. Most commercial
+    UHD Blu-ray/streaming releases use the studio's own proprietary encoder, which never
+    writes this at all -- for those (the common case for a real Blu-ray remux), this
+    correctly returns (None, None) rather than a guess.
+
+    Returns (encoder_name, crf) or (None, None)."""
+    if video_codec not in ("h264", "hevc"):
+        return None, None
+    fmt = "h264" if video_codec == "h264" else "hevc"
+    try:
+        proc = subprocess.run(
+            [ffmpeg_bin, "-y", "-v", "error", "-i", str(input_path),
+             "-map", "0:v:0", "-c", "copy", "-t", "3", "-f", fmt, "-"],
+            capture_output=True, timeout=60)
+    except Exception:
+        return None, None
+    if proc.returncode != 0 or not proc.stdout:
+        return None, None
+    data = proc.stdout
+    for marker, name in ((b"x265", "x265"), (b"x264", "x264")):
+        idx = data.find(marker)
+        if idx == -1:
+            continue
+        # the settings dump (with crf=) always follows the encoder name marker closely --
+        # a generous window keeps this robust to exact wording differences between versions
+        window = data[idx:idx + 4000]
+        m = re.search(rb"crf=([0-9]+\.?[0-9]*)", window)
+        if m:
+            try:
+                return name, float(m.group(1))
+            except ValueError:
+                continue
+    return None, None
+
+
+def analyze_source_video(input_path, ffprobe_bin=None, ffmpeg_bin=None):
+    """ADR-297: real, measured facts about a source video, so a user picking a Limit
+    Bitrate/CRF for a re-encode has an actual reference point instead of guessing blind.
+    Every field is either a real measured value or None if it genuinely couldn't be
+    determined -- never a guess dressed up as a fact. See _detect_source_crf() for why CRF
+    detection specifically only works sometimes."""
+    import json as _json
+    ffprobe_bin = ffprobe_bin or _find_ffprobe()
+    ffmpeg_bin = ffmpeg_bin or _get_ffmpeg_bin()
+    result = {
+        "width": None, "height": None, "fps": None, "duration": None,
+        "video_codec": None, "pix_fmt": None,
+        "container_bitrate_mbps": None, "video_bitrate_mbps": None,
+        "hdr": False, "hdr10plus": False,
+        "detected_encoder": None, "detected_crf": None,
+    }
+    try:
+        proc = subprocess.run(
+            [ffprobe_bin, "-v", "quiet", "-print_format", "json",
+             "-show_format", "-show_streams", str(input_path)],
+            capture_output=True, text=True, timeout=60)
+        data = _json.loads(proc.stdout)
+    except Exception:
+        return result
+
+    fmt = data.get("format", {})
+    try:
+        result["duration"] = float(fmt["duration"]) if fmt.get("duration") else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        result["container_bitrate_mbps"] = (
+            int(fmt["bit_rate"]) / 1_000_000 if fmt.get("bit_rate") else None)
+    except (TypeError, ValueError):
+        pass
+
+    video_stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+    if video_stream:
+        result["width"] = video_stream.get("width")
+        result["height"] = video_stream.get("height")
+        result["video_codec"] = video_stream.get("codec_name")
+        result["pix_fmt"] = video_stream.get("pix_fmt")
+        rate = video_stream.get("r_frame_rate") or ""
+        if "/" in rate:
+            n, d = rate.split("/")
+            try:
+                if float(d) > 0:
+                    result["fps"] = round(float(n) / float(d), 3)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        try:
+            result["video_bitrate_mbps"] = (
+                int(video_stream["bit_rate"]) / 1_000_000 if video_stream.get("bit_rate") else None)
+        except (TypeError, ValueError):
+            pass
+
+    hdr_info = _detect_hdr_types(input_path, ffprobe_bin)
+    result["hdr"] = hdr_info["dv"] or _detect_pq_or_hlg(input_path, ffprobe_bin)
+    result["hdr10plus"] = hdr_info["hdr10plus"]
+
+    encoder, crf = _detect_source_crf(input_path, ffmpeg_bin, result["video_codec"])
+    result["detected_encoder"] = encoder
+    result["detected_crf"] = crf
+    return result
+
+
+def format_source_analysis(info):
+    """Plain-language summary of analyze_source_video()'s result, for a message box or log
+    line -- no jargon beyond what a tooltip elsewhere in this app already uses."""
+    lines = []
+    if info["width"] and info["height"]:
+        res = f"{info['width']}x{info['height']}"
+        if info["fps"]:
+            res += f" @ {info['fps']}fps"
+        lines.append(f"Resolution: {res}")
+    if info["video_codec"]:
+        lines.append(f"Video codec: {info['video_codec']}")
+    if info["duration"]:
+        m, s = divmod(int(info["duration"]), 60)
+        h, m = divmod(m, 60)
+        lines.append(f"Duration: {h:d}:{m:02d}:{s:02d}")
+    # Prefer the video-only bitrate when the container reports one separately; otherwise
+    # the container figure includes audio too, and callers should treat it as such.
+    if info["video_bitrate_mbps"]:
+        lines.append(f"Source video bitrate: {info['video_bitrate_mbps']:.1f} Mbps")
+    elif info["container_bitrate_mbps"]:
+        lines.append(f"Source bitrate (video+audio combined): {info['container_bitrate_mbps']:.1f} Mbps")
+    else:
+        lines.append("Source bitrate: could not be determined")
+    if info["hdr"] or info["hdr10plus"]:
+        lines.append(f"HDR: yes{' (HDR10+)' if info['hdr10plus'] else ''}")
+    if info["detected_crf"] is not None:
+        lines.append(f"Detected source CRF: {info['detected_crf']:g} (encoded with {info['detected_encoder']})")
+    else:
+        lines.append("Detected source CRF: not available (only readable when the source was encoded with "
+                      "x264/x265 and kept that information -- most Blu-ray/streaming releases don't)")
+    return "\n".join(lines)
+
+
 def _tonemap_hdr_to_sdr(input_filename, args):
     """Pre-converts a PQ/HLG HDR source to a clean SDR 10-bit intermediate file using
     ffmpeg's zscale+tonemap filters. This can't be done inside iw3's own (PyAV-based)

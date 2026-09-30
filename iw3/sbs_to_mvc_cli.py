@@ -641,7 +641,8 @@ def _ac3_transcode(input_path, work_dir, ffmpeg_bin, audio_index, suffix=""):
 
 
 def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.976",
-                     width=1920, height=1080, disc_legal=True):
+                     width=1920, height=1080, disc_legal=True,
+                     allow_lossless_eac3_on_disc=False):
     """Returns (meta_lines, notes). Compatible audio goes in as-is, anything else is
     converted to AC-3 (a Blu-ray-legal format) first; PGS subtitles go in as-is; text subtitles
     (SRT/ASS/...) are extracted to .srt and rendered into Blu-ray subtitles by tsMuxeR (up to the disc's
@@ -658,12 +659,22 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
       compatibility core via tsMuxeR's own real `merge-ac3-file` mechanism (confirmed against the
       bundled tsMuxeR's own --help text, 2026-09-30) -- a real Blu-ray disc requires this core
       alongside TrueHD at the codec level. Falls back to the plain AC-3 downgrade if either half
-      can't be produced. E-AC-3/DD+ still downgrades to plain AC-3 here: a real Blu-ray disc's
-      DD+ track is authored as an extension bitstream layered on top of an actual AC-3 core frame
-      inside the SAME elementary stream (confirmed by real-world BD authoring references), and
-      tsMuxeR has no external merge mechanism for that shape (only merge-ac3-file/merge-ac3-track
-      for standalone TrueHD) -- synthesizing it from a plain extracted E-AC-3 stream is out of
-      scope here, so this one case keeps the existing downgrade."""
+      can't be produced. E-AC-3/DD+ downgrades to plain AC-3 here by default: a real Blu-ray
+      disc's DD+ track is authored as an extension bitstream layered on top of an actual AC-3 core
+      frame inside the SAME elementary stream (confirmed by real-world BD authoring references),
+      and a bare E-AC-3 stream with no embedded AC-3 core is not genuinely spec-legal -- real
+      hardware playback of it is inconsistent (works on some players/tsMuxeR versions, silently
+      loses audio entirely on others). tsMuxeR itself DOES accept a bare E-AC-3 stream without
+      complaint (confirmed by direct testing against the bundled tsMuxeR), so this is an opt-in,
+      not a hard limitation.
+
+    allow_lossless_eac3_on_disc: when True AND disc_legal is True, E-AC-3/DD+ is instead extracted
+    losslessly under the same real mechanism used for disc_legal=False (see
+    _LOSSLESS_NONDISC_AUDIO_TAG above) instead of being downgraded to AC-3. This trades guaranteed
+    disc-spec-legality/universal hardware compatibility for keeping the source's original audio
+    quality untouched -- callers should only set this from an explicit user opt-in. Has no effect
+    when disc_legal is False (that path is already lossless unconditionally) or when the source
+    has no E-AC-3 track."""
     lines, notes = [], []
     if not include_av:
         return lines, notes
@@ -709,7 +720,8 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
                         notes.append(f"audio track {audio_index + 1} ({codec}) converted to AC-3")
                     else:
                         notes.append(f"audio track {audio_index + 1} ({codec}) skipped: could not convert it")
-            elif codec in _LOSSLESS_NONDISC_AUDIO_TAG and not disc_legal:
+            elif codec in _LOSSLESS_NONDISC_AUDIO_TAG and (
+                    not disc_legal or (codec == "A_EAC3" and allow_lossless_eac3_on_disc)):
                 tag, ext = _LOSSLESS_NONDISC_AUDIO_TAG[codec]
                 out = path.join(work_dir, f"audio_{audio_index}.{ext}")
                 r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
@@ -778,7 +790,7 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
             stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False,
-            convert_hdr_to_sdr=False):
+            convert_hdr_to_sdr=False, allow_lossless_eac3_on_disc=False):
     """Full job. Returns the number of frames encoded. progress_cb(stage, done, total),
     stage in {"tonemap", "retime", "autocrop", "encode", "mux"}. fix_frame_rate: if the source
     isn't 23.976/24fps, re-time the whole movie (video+audio+subtitles) to the nearer one instead
@@ -786,6 +798,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     convert_hdr_to_sdr: if the source is HDR (HDR10/Dolby Vision/HLG), tone-map it to plain SDR
     instead of refusing -- opt-in only, since the HDR grade is genuinely gone afterward (3D
     Blu-ray/MVC cannot carry HDR at all, so there is no way to keep it either way).
+    allow_lossless_eac3_on_disc: see _plan_audio_subs()'s own docstring -- opt-in, off by
+    default, only affects disc-legal (.iso/BD-folder) output with an E-AC-3/DD+ source track.
 
     output_iso ending in .mkv (ADR-245) skips the Blu-ray disc structure entirely: the same
     real MVC video FRIMEncode produces either way is instead packaged directly into a plain
@@ -1025,7 +1039,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         av_lines, notes = ([], [])
         if include_av:
             av_lines, notes = _plan_audio_subs(input_path, work_dir, ffmpeg, True, fps_text=fps_text,
-                                               disc_legal=(is_iso_output or is_folder_output))
+                                               disc_legal=(is_iso_output or is_folder_output),
+                                               allow_lossless_eac3_on_disc=allow_lossless_eac3_on_disc)
         for n in notes:
             print(f"[sbs2mvc] note: {n}", file=sys.stderr)
 
@@ -1168,6 +1183,12 @@ def main():
                         help="if the source is HDR (HDR10/Dolby Vision/HLG), tone-map it to plain SDR "
                              "instead of refusing -- 3D Blu-ray cannot carry HDR at all, so this is a real, "
                              "one-way loss of the HDR grade, so it is opt-in, never automatic")
+    parser.add_argument("--allow-lossless-eac3-on-disc", action="store_true",
+                        help="for disc-legal (.iso/BD-folder) output with an E-AC-3/Dolby Digital Plus "
+                             "source track, keep it losslessly instead of downgrading it to plain AC-3 -- "
+                             "a bare E-AC-3 stream with no embedded AC-3 core is not genuinely Blu-ray-spec-"
+                             "legal and real hardware playback of it is inconsistent (silent on some "
+                             "players), so this is opt-in, never automatic")
     parser.add_argument("--cut-seconds", type=float, default=None, help="only convert the first N seconds")
     parser.add_argument("--work-dir", default=None)
     parser.add_argument("--keep-temp", action="store_true")
@@ -1191,7 +1212,8 @@ def main():
                          swap_eyes=args.swap_eyes, include_av=not args.no_audio_subs,
                          work_dir=args.work_dir, cut_seconds=args.cut_seconds, keep_temp=args.keep_temp,
                          progress_cb=show, autocrop=args.autocrop, fix_frame_rate=args.fix_frame_rate,
-                         convert_hdr_to_sdr=args.convert_hdr_to_sdr)
+                         convert_hdr_to_sdr=args.convert_hdr_to_sdr,
+                         allow_lossless_eac3_on_disc=args.allow_lossless_eac3_on_disc)
     except Cancelled:
         print("\n[sbs2mvc] cancelled", file=sys.stderr)
         return 1

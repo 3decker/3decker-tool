@@ -1186,6 +1186,11 @@ def _run_mvc_conversion(output_path, args):
     mvc_autocrop = getattr(args, "mvc_autocrop", None)
     if mvc_autocrop:
         cmd += ["--autocrop", mvc_autocrop]
+    # Real re-investigation this session: see sbs_to_mvc_cli.py's _plan_audio_subs() docstring
+    # for the full reasoning -- off by default, only meaningful for disc-legal (.iso/BD-folder)
+    # output; a genuine no-op passthrough otherwise.
+    if getattr(args, "mvc_allow_lossless_eac3_on_disc", False):
+        cmd.append("--allow-lossless-eac3-on-disc")
 
     _notify_stage(args, STAGE_CONVERT_MVC)
     print(f"[iw3] Converting to 3D Blu-ray MVC ({ext or 'folder'})...", file=sys.stderr)

@@ -4158,6 +4158,7 @@ class MainFrame(wx.Frame):
         self.cbo_mvc_output_type.Append(T("Plain MKV (direct MVC, no disc)"), "mkv")
         self.cbo_mvc_output_type.Append(T("Bare M2TS clip (not recognized by real hardware)"), "m2ts")
         self.cbo_mvc_output_type.SetSelection(0)
+        self.cbo_mvc_output_type.Bind(wx.EVT_COMBOBOX, self.on_changed_mvc_output_type)
         self.cbo_mvc_output_type.SetToolTip(
             T("3D Blu-ray ISO: a real disc image with menus/chapters, playable on a 3D Blu-ray player "
               "or PowerDVD, or burnable to a BD-R. The proven, most widely tested option.\n"
@@ -4238,6 +4239,36 @@ class MainFrame(wx.Frame):
               "Recommended: on for a movie with real black bars, matching whichever side(s) they're "
               "actually on -- off (default) leaves the video exactly as the source has it."))
 
+        # Real re-investigation this session: tsMuxeR itself accepts a bare E-AC-3/DD+ stream on a
+        # disc-legal (.iso/BD-folder) target without complaint (confirmed by direct testing against
+        # the bundled tsMuxeR, twice), but a bare E-AC-3 track with no embedded AC-3 compatibility
+        # core is not genuinely Blu-ray-spec-legal, and real hardware playback of it is inconsistent
+        # (silent on some real players even though it muxes fine) -- see _plan_audio_subs()'s own
+        # docstring in sbs_to_mvc_cli.py for the full reasoning. Off by default (the existing AC-3
+        # downgrade stays the safe default); this is a real, explicit opt-in for someone who has
+        # confirmed their own player handles it and wants the source audio untouched.
+        self.chk_mvc_allow_lossless_eac3 = wx.CheckBox(
+            self.grp_postprocess,
+            label=T("Keep Dolby Digital Plus (E-AC-3) lossless on disc output (advanced)"),
+            name="chk_mvc_allow_lossless_eac3")
+        self.chk_mvc_allow_lossless_eac3.SetValue(False)
+        self.chk_mvc_allow_lossless_eac3.SetToolTip(
+            T("What it's for: for 3D Blu-ray ISO/BD Folder output only, keeps a Dolby Digital Plus "
+              "(E-AC-3) audio track at its full original quality instead of converting it to plain "
+              "AC-3.\n"
+              "Why it matters: the AC-3 downgrade (the default) re-encodes the audio, a real, if "
+              "usually minor, quality loss -- this keeps the source's original DD+ track byte-for-byte.\n"
+              "Con: a bare E-AC-3 track with no embedded AC-3 compatibility core is not officially "
+              "Blu-ray-spec-legal. It plays fine on most software players (VLC, PowerDVD, MPC-HC) and "
+              "many real hardware 3D Blu-ray players, but this project's own real hardware testing "
+              "found inconsistent results -- some stricter hardware players play the disc with no "
+              "sound at all, and at least one real player refused the disc outright.\n"
+              "Values: off (default) always downgrades DD+ to plain AC-3 for disc output, the safe "
+              "choice. On keeps it lossless.\n"
+              "Recommended: leave this off unless you've specifically confirmed your own player "
+              "handles a bare E-AC-3 track -- when in doubt, use the default. Has no effect on Plain "
+              "MKV/Bare M2TS output above, which already keeps DD+ lossless unconditionally."))
+
         # ADR-283: real user request -- could the two-stage "convert to a finished SBS
         # file, then feed that file into 'SBS to 3D Blu-ray MVC'" process instead happen
         # as one continuous pass, with no finished SBS file ever written at all? This is
@@ -4279,6 +4310,7 @@ class MainFrame(wx.Frame):
               "Resume/RIFE for this particular job."))
         self.chk_direct_mvc.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_direct_mvc)
         self.update_direct_mvc()
+        self.update_mvc_allow_lossless_eac3()
 
         # ADR-256: real user request -- "have it write a log file for each job into the
         # output folder so you can always see what happened with each job... maybe even
@@ -4339,6 +4371,8 @@ class MainFrame(wx.Frame):
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.lbl_mvc_autocrop, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_mvc_autocrop, (j, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_mvc_allow_lossless_eac3, (j := j + 1, 0), (0, 3),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.chk_direct_mvc, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
 
         layout.Add((0, 6), (j := j + 1, 0))
@@ -6543,6 +6577,30 @@ class MainFrame(wx.Frame):
               "instead, which offers 10-bit output.\n"
               "Recommended: off normally; turn on only if the log says your video is HDR and Run refuses."))
 
+        # Real re-investigation this session: see chk_mvc_allow_lossless_eac3's own comment on the
+        # main tab for the full reasoning -- same option, mirrored here for this standalone tool.
+        self.chk_sbs2mvc_allow_lossless_eac3 = wx.CheckBox(
+            self.cpn_sbs2mvc.GetPane(),
+            label=T("Keep Dolby Digital Plus (E-AC-3) lossless on disc output (advanced)"),
+            name="chk_sbs2mvc_allow_lossless_eac3")
+        self.chk_sbs2mvc_allow_lossless_eac3.SetValue(False)
+        self.chk_sbs2mvc_allow_lossless_eac3.SetToolTip(
+            T("What it's for: for 3D Blu-ray ISO/BD Folder output only, keeps a Dolby Digital Plus "
+              "(E-AC-3) audio track at its full original quality instead of converting it to plain "
+              "AC-3.\n"
+              "Why it matters: the AC-3 downgrade (the default) re-encodes the audio, a real, if "
+              "usually minor, quality loss -- this keeps the source's original DD+ track byte-for-byte.\n"
+              "Con: a bare E-AC-3 track with no embedded AC-3 compatibility core is not officially "
+              "Blu-ray-spec-legal. It plays fine on most software players (VLC, PowerDVD, MPC-HC) and "
+              "many real hardware 3D Blu-ray players, but this project's own real hardware testing "
+              "found inconsistent results -- some stricter hardware players play the disc with no "
+              "sound at all, and at least one real player refused the disc outright.\n"
+              "Values: off (default) always downgrades DD+ to plain AC-3 for disc output, the safe "
+              "choice. On keeps it lossless.\n"
+              "Recommended: leave this off unless you've specifically confirmed your own player "
+              "handles a bare E-AC-3 track -- when in doubt, use the default. Has no effect on Plain "
+              "MKV/Bare M2TS output above, which already keeps DD+ lossless unconditionally."))
+
         self.btn_sbs2mvc_run = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Run"))
         self.btn_sbs2mvc_run.SetToolTip(
             T("What it's for: starts the conversion as a separate background process (python -m "
@@ -6603,6 +6661,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_sbs2mvc_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_sbs2mvc_fix_frame_rate, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_sbs2mvc_convert_hdr_to_sdr, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_sbs2mvc_allow_lossless_eac3, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_sbs2mvc_run, (h := h + 1, 2), flag=wx.EXPAND)
         layout.Add(self.btn_sbs2mvc_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_sbs2mvc, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
@@ -9585,6 +9644,19 @@ class MainFrame(wx.Frame):
             self.on_selected_index_changed_cbo_stereo_format(None)
         event.Skip()
 
+    def update_mvc_allow_lossless_eac3(self):
+        """Keep Dolby Digital Plus lossless on disc output only means anything for a real
+        disc-structured target (3D Blu-ray ISO/BD Folder) -- Plain MKV/Bare M2TS already keep
+        DD+ lossless unconditionally (see _plan_audio_subs() in sbs_to_mvc_cli.py), so this is a
+        no-op there. Greyed out (not hidden) for a non-disc-legal Output Type, same convention
+        as update_direct_mvc()'s own Enable(not on) toggling just below."""
+        output_type = self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection())
+        self.chk_mvc_allow_lossless_eac3.Enable(output_type in ("iso", "folder"))
+
+    def on_changed_mvc_output_type(self, event):
+        self.update_mvc_allow_lossless_eac3()
+        event.Skip()
+
     def update_direct_mvc(self):
         """Enables/disables the controls Direct to MVC is incompatible with, matching
         whether it's currently checked -- the real correctness guarantee is the
@@ -10195,6 +10267,7 @@ class MainFrame(wx.Frame):
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
             mvc_convert_hdr_to_sdr=self.chk_convert_to_mvc_hdr_to_sdr.GetValue(),
             mvc_autocrop=self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection()) or None,
+            mvc_allow_lossless_eac3_on_disc=self.chk_mvc_allow_lossless_eac3.GetValue(),
             write_job_log=self.chk_write_job_log.GetValue(),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
@@ -11512,8 +11585,10 @@ class MainFrame(wx.Frame):
                 break
         else:
             self.cbo_mvc_autocrop.SetSelection(0)
+        self.chk_mvc_allow_lossless_eac3.SetValue(bool(getattr(args, "mvc_allow_lossless_eac3_on_disc", False)))
         self.chk_direct_mvc.SetValue(bool(getattr(args, "direct_mvc", False)))
         self.update_direct_mvc()
+        self.update_mvc_allow_lossless_eac3()
         self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
@@ -14231,10 +14306,13 @@ class MainFrame(wx.Frame):
         # empty, or already has neither a real .iso/.mkv/.m2ts extension nor a
         # folder-shaped (no extension) path typed in -- ADR-291 extends this to
         # strip/add the extension when switching to/from the folder option.
+        out_type = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+        # "Keep DD+ lossless on disc output" only means anything for a real disc-structured
+        # target (ISO/BD Folder) -- Plain MKV/Bare M2TS already keep it lossless unconditionally.
+        self.chk_sbs2mvc_allow_lossless_eac3.Enable(out_type in ("iso", "folder"))
         current = self.txt_sbs2mvc_output.GetValue().strip()
         if not current:
             return
-        out_type = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
         base, ext = path.splitext(current)
         was_recognized_ext = ext.lower() in (".iso", ".mkv", ".m2ts")
         was_folder_shaped = ext == "" and base
@@ -14406,6 +14484,8 @@ class MainFrame(wx.Frame):
             cmd.append("--fix-frame-rate")
         if self.chk_sbs2mvc_convert_hdr_to_sdr.GetValue():
             cmd.append("--convert-hdr-to-sdr")
+        if self.chk_sbs2mvc_allow_lossless_eac3.GetValue():
+            cmd.append("--allow-lossless-eac3-on-disc")
         return cmd, None
 
     def on_click_btn_sbs2mvc_run(self, event):
@@ -20444,6 +20524,102 @@ def _self_test_direct_mvc_checkbox():
     print("_self_test_direct_mvc_checkbox: PASS")
 
 
+def _self_test_mvc_allow_lossless_eac3_checkbox():
+    """Real re-investigation this session: exposes the choice to keep a Dolby Digital Plus
+    (E-AC-3) audio track losslessly on disc-legal (.iso/BD-folder) 3D Blu-ray MVC output,
+    instead of the app always silently downgrading it to AC-3 -- default OFF, opt-in only (see
+    chk_mvc_allow_lossless_eac3's own tooltip / _plan_audio_subs()'s docstring in
+    sbs_to_mvc_cli.py for the full reasoning). Covers: both the main-tab checkbox (shared by
+    'Convert to 3D Blu-ray MVC' and 'Direct to 3D Blu-ray MVC') and the standalone 'SBS to 3D
+    Blu-ray MVC' tool's own copy, default unchecked, tooltip content, greyed out for a
+    non-disc-legal Output Type (Plain MKV/Bare M2TS, where it's a real no-op) and enabled for a
+    disc-legal one (3D Blu-ray ISO/BD Folder) -- matching update_direct_mvc()'s own
+    Enable(not on) convention -- and a real round trip through parse_args()/
+    apply_parsed_args_to_gui()."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # Default state, both panels.
+        assert frame.chk_mvc_allow_lossless_eac3.GetValue() is False, "must default off -- opt-in only"
+        assert frame.chk_sbs2mvc_allow_lossless_eac3.GetValue() is False, "must default off -- opt-in only"
+        for tip_ctrl in (frame.chk_mvc_allow_lossless_eac3, frame.chk_sbs2mvc_allow_lossless_eac3):
+            tip = tip_ctrl.GetToolTip().GetTip()
+            for phrase in ("Dolby Digital Plus", "AC-3", "spec-legal", "no sound at all",
+                           "leave this off"):
+                assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
+
+        # Main tab: cbo_mvc_output_type defaults to "iso" (disc-legal) -- checkbox must start
+        # enabled; switching to a non-disc-legal type greys it out, switching back re-enables it.
+        assert frame.cbo_mvc_output_type.GetClientData(frame.cbo_mvc_output_type.GetSelection()) == "iso"
+        assert frame.chk_mvc_allow_lossless_eac3.IsEnabled()
+        mvc_items = [frame.cbo_mvc_output_type.GetClientData(i) for i in range(frame.cbo_mvc_output_type.GetCount())]
+        frame.cbo_mvc_output_type.SetSelection(mvc_items.index("mkv"))
+        frame.on_changed_mvc_output_type(wx.CommandEvent())
+        assert not frame.chk_mvc_allow_lossless_eac3.IsEnabled(), "must grey out for Plain MKV (already lossless)"
+        frame.cbo_mvc_output_type.SetSelection(mvc_items.index("m2ts"))
+        frame.on_changed_mvc_output_type(wx.CommandEvent())
+        assert not frame.chk_mvc_allow_lossless_eac3.IsEnabled(), "must grey out for Bare M2TS (already lossless)"
+        frame.cbo_mvc_output_type.SetSelection(mvc_items.index("folder"))
+        frame.on_changed_mvc_output_type(wx.CommandEvent())
+        assert frame.chk_mvc_allow_lossless_eac3.IsEnabled(), "must re-enable for BD Folder (disc-legal)"
+        frame.cbo_mvc_output_type.SetSelection(mvc_items.index("iso"))
+        frame.on_changed_mvc_output_type(wx.CommandEvent())
+        assert frame.chk_mvc_allow_lossless_eac3.IsEnabled(), "must re-enable for 3D Blu-ray ISO (disc-legal)"
+
+        # Standalone tool: same real greying-out logic, driven through the same real
+        # on_changed_sbs2mvc_output_type handler this panel already uses for its extension rule.
+        sbs_items = [frame.cbo_sbs2mvc_output_type.GetClientData(i)
+                    for i in range(frame.cbo_sbs2mvc_output_type.GetCount())]
+        assert frame.chk_sbs2mvc_allow_lossless_eac3.IsEnabled(), "iso is disc-legal, must start enabled"
+        frame.cbo_sbs2mvc_output_type.SetSelection(sbs_items.index("mkv"))
+        frame.on_changed_sbs2mvc_output_type(wx.CommandEvent())
+        assert not frame.chk_sbs2mvc_allow_lossless_eac3.IsEnabled()
+        frame.cbo_sbs2mvc_output_type.SetSelection(sbs_items.index("folder"))
+        frame.on_changed_sbs2mvc_output_type(wx.CommandEvent())
+        assert frame.chk_sbs2mvc_allow_lossless_eac3.IsEnabled()
+        frame.cbo_sbs2mvc_output_type.SetSelection(sbs_items.index("iso"))
+        frame.on_changed_sbs2mvc_output_type(wx.CommandEvent())
+
+        # Real round trip: checking it on the main tab reaches parse_args() as the real CLI-
+        # facing attribute, and apply_parsed_args_to_gui() restores both the value and the
+        # correct enabled state from a loaded preset/config.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = path.join(tmpdir, "movie.mkv")
+            open(src, "wb").close()
+            frame.pnl_file.set_input_path(src)
+            frame.pnl_file.set_output_path(path.join(tmpdir, "movie_out.mkv"))
+            frame.chk_mvc_allow_lossless_eac3.SetValue(True)
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            assert args.mvc_allow_lossless_eac3_on_disc is True
+
+            frame.chk_mvc_allow_lossless_eac3.SetValue(False)
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.chk_mvc_allow_lossless_eac3.GetValue() is True
+            assert frame.chk_mvc_allow_lossless_eac3.IsEnabled(), "iso (from args) is disc-legal"
+
+            args.mvc_allow_lossless_eac3_on_disc = False
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.chk_mvc_allow_lossless_eac3.GetValue() is False
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mvc_allow_lossless_eac3_checkbox: PASS")
+
+
 def _self_test_max_negative_parallax_field():
     """ADR-179: Max Negative Parallax (GUI label "Max Pop-Out Limit"), a safety cap
     on pop-out that's independent from the Convergence Plane slider -- Convergence
@@ -22085,6 +22261,21 @@ def _self_test_mvc_conversion_step():
         assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
     cmd = run_mvc.call_args[0][0]
     assert cmd[cmd.index("--autocrop") + 1] == "BLACK_TB", cmd
+
+    # Real re-investigation this session: --allow-lossless-eac3-on-disc only reaches the
+    # subprocess when the new checkbox is on -- must not silently opt a job into a
+    # not-fully-spec-legal disc audio track it never asked for.
+    args = base_args()
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert "--allow-lossless-eac3-on-disc" not in run_mvc.call_args[0][0]
+
+    args = base_args(mvc_allow_lossless_eac3_on_disc=True)
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert "--allow-lossless-eac3-on-disc" in run_mvc.call_args[0][0]
 
     # a format MVC conversion can't use at all is refused cleanly, no subprocess attempt
     for incompatible in ("vr180", "cross_eyed", "rgbd", "half_rgbd", "export", "export_disparity", "debug_depth"):
@@ -24060,6 +24251,77 @@ def _self_test_sbs2mvc_truehd_eac3_audio_handling():
     print("_self_test_sbs2mvc_truehd_eac3_audio_handling: PASS")
 
 
+def _self_test_sbs2mvc_allow_lossless_eac3_on_disc():
+    """Real re-investigation this session: tsMuxeR itself accepts a bare E-AC-3/DD+ stream on a
+    disc-legal (.iso/BD-folder) target without complaint (confirmed by direct testing against the
+    bundled tsMuxeR, twice), but a bare E-AC-3 track with no embedded AC-3 compatibility core is
+    not genuinely Blu-ray-spec-legal, and real hardware playback of it is inconsistent (works on
+    some players/tsMuxeR versions, silently loses audio entirely on others). _plan_audio_subs()'s
+    new `allow_lossless_eac3_on_disc` parameter exposes this as an explicit, off-by-default opt-in
+    (see its own docstring in sbs_to_mvc_cli.py). Covers all three real branches: flag off on a
+    disc-legal target (must be unchanged from the existing AC-3 downgrade), flag on on a
+    disc-legal target (must switch to the same real lossless extraction non-disc-legal output
+    already uses), and flag on for a non-disc-legal target (must be a pure no-op -- that path is
+    already lossless unconditionally)."""
+    import types
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    def make_fake_run(calls):
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            out = cmd[-1]
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("fake audio data")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return fake_run
+
+    eac3_tracks = [
+        {"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
+        {"id": 0, "codec": "A_EAC3", "lang": "eng"},
+    ]
+
+    # Flag off (the default), disc-legal target: unchanged from ADR-270 -- still downgrades to
+    # plain AC-3, proving the default path is untouched by this new parameter's mere existence.
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=eac3_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls)):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True, disc_legal=True)
+        assert lines[0].startswith("A_AC3, "), lines
+        assert any("converted to AC-3" in n for n in notes), notes
+        assert "copy" not in calls[0] and "ac3" in calls[0], calls[0]
+
+    # Flag on, disc-legal target: kept lossless under its real tsMuxeR tag (A_AC3) with the
+    # ".eac3" bare-extraction extension, extracted via a plain "-c:a copy" -- the exact same
+    # mechanism disc_legal=False already uses, reused rather than duplicated.
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=eac3_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls)):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True, disc_legal=True,
+                                              allow_lossless_eac3_on_disc=True)
+        assert lines[0].startswith("A_AC3, ") and lines[0].endswith(".eac3, lang=eng"), lines
+        assert "copy" in calls[0], calls[0]
+
+    # Flag on, non-disc-legal target: a pure no-op -- disc_legal=False already extracts E-AC-3
+    # losslessly unconditionally, so the result must be identical either way.
+    with tempfile.TemporaryDirectory() as tmp:
+        calls_without, calls_with = [], []
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=eac3_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls_without)):
+            lines_without, notes_without = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True,
+                                                               disc_legal=False)
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=eac3_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls_with)):
+            lines_with, notes_with = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True,
+                                                         disc_legal=False, allow_lossless_eac3_on_disc=True)
+        assert lines_without == lines_with, (lines_without, lines_with)
+        assert notes_without == notes_with, (notes_without, notes_with)
+
+    print("_self_test_sbs2mvc_allow_lossless_eac3_on_disc: PASS")
+
+
 def _self_test_sbs2mvc_ffprobe_track_detection():
     """ADR-239: real user report -- a source SBS file confirmed to have an audio track came out of
     'SBS to 3D Blu-ray MVC' with none. Root cause: track detection asked tsMuxeR itself to list
@@ -25496,6 +25758,7 @@ def _run_self_tests():
         _self_test_stereo_format_mvc_shortcut,
         _self_test_mvc_hdr_preflight_prompt,
         _self_test_direct_mvc_checkbox,
+        _self_test_mvc_allow_lossless_eac3_checkbox,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_nvenc_bitrate_cap,
@@ -25514,6 +25777,7 @@ def _run_self_tests():
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_truehd_eac3_audio_handling,
+        _self_test_sbs2mvc_allow_lossless_eac3_on_disc,
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
         _self_test_mvc_tools_version_aware_install,

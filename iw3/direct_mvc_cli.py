@@ -350,7 +350,8 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
             raise Cancelled()
 
         _notify_stage(args, STAGE_CONVERT_MVC)
-        av_lines, notes = _plan_audio_subs(original_source_path, work_dir, ffmpeg, True, fps_text=fps_text)
+        av_lines, notes = _plan_audio_subs(original_source_path, work_dir, ffmpeg, True, fps_text=fps_text,
+                                           disc_legal=(is_iso_output or is_folder_output))
         state = getattr(args, "state", None)
         if state is not None and notes:
             state.setdefault("mvc_notes", []).extend(notes)

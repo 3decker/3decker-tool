@@ -23961,49 +23961,103 @@ def _self_test_sbs2mvc_text_subtitles():
     print("_self_test_sbs2mvc_text_subtitles: PASS")
 
 
-def _self_test_sbs2mvc_truehd_falls_through_to_ac3():
-    """ADR-243: real user report -- converting a source with TrueHD audio through
-    "SBS to 3D Blu-ray MVC" crashed the whole job with tsMuxeR's own
-    'Unsupported codec A_TRUEHD' and produced NO output at all. TrueHD was
-    originally in _BD_AUDIO (the "extract the bare elementary stream as-is, no
-    re-encode" set) on the unverified assumption that ffmpeg's plain `-c:a copy`
-    extraction of it was as safe as it is for AC-3/E-AC-3/DTS -- it wasn't: a real
-    tsMuxeR build (v2.7.0) flatly refuses to read a bare-extracted .thd file, even
-    though it reads TrueHD fine from within a real source container (confirmed by
-    mvc_extract_cli.py's mux_bd3d_iso(), which references tracks directly from the
-    original .ssif and was never affected by this). TrueHD now falls through to
-    the same AC-3 conversion path LPCM/MLP already used -- not bit-for-bit
-    lossless, but tsMuxeR can always mux the result, so a source with TrueHD audio
-    can never again produce zero output."""
+def _self_test_sbs2mvc_truehd_eac3_audio_handling():
+    """ADR-243/ADR-270 (2026-09-23/25) originally downgraded TrueHD and E-AC-3/Dolby Digital Plus
+    to plain AC-3 for EVERY output type after a real user's tsMuxeR hard-refused a bare-extracted
+    .thd/.eac3 file with "Unsupported codec A_TRUEHD"/"Unsupported codec A_EAC3". A later
+    real investigation (2026-09-30) found that diagnosis was wrong: "A_TRUEHD" and "A_EAC3" have
+    never been valid tsMuxeR codec tags at all, in any version -- the real tags are A_MLP
+    (TrueHD) and A_AC3 (which also carries E-AC-3/DD+). Confirmed directly against the bundled
+    tsMuxeR (2.18.14, via its own --help text): a bare-extracted .thd/.eac3 file muxes losslessly
+    under its real tag for plain .mkv/.m2ts output. For real disc-legal (.iso/BD-folder,
+    --blu-ray) output, TrueHD genuinely needs an AC-3 compatibility core merged in (confirmed real
+    Blu-ray spec requirement, and tsMuxeR's own documented `merge-ac3-file` mechanism for exactly
+    this) -- E-AC-3 does not have an equivalent external merge mechanism in tsMuxeR (its real BD
+    form embeds the core inside the same elementary stream at encode time, which this pipeline's
+    tools cannot synthesize from a plain extracted stream), so disc-legal E-AC-3 still downgrades
+    to plain AC-3, unchanged from ADR-270."""
     import types
     from unittest import mock
     from . import sbs_to_mvc_cli as S
 
-    tracks = [
+    def make_fake_run(calls, fail_predicate=None):
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if fail_predicate and fail_predicate(cmd):
+                return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+            out = cmd[-1]
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("fake audio data")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return fake_run
+
+    truehd_tracks = [
         {"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
         {"id": 0, "codec": "A_TRUEHD", "lang": "eng"},
     ]
-    calls = []
+    eac3_tracks = [
+        {"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
+        {"id": 0, "codec": "A_EAC3", "lang": "eng"},
+    ]
 
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        out = cmd[-1]
-        with open(out, "w", encoding="utf-8") as f:
-            f.write("fake audio data")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(S, "_ffprobe_list_tracks", return_value=tracks), \
-            mock.patch.object(S.subprocess, "run", fake_run):
-        lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True)
+    # disc_legal=True (default, the real --blu-ray/.iso/BD-folder path) + TrueHD: lossless
+    # extraction merged with a transcoded AC-3 compatibility core via tsMuxeR's real
+    # merge-ac3-file, not a plain downgrade.
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=truehd_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls)):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True)
         assert "A_TRUEHD" not in S._BD_AUDIO, "TrueHD must not be in the extract-as-is set"
-        assert lines[0].startswith("A_AC3, "), \
-            f"TrueHD must fall through to AC-3 conversion, not extraction: {lines}"
-        assert any("converted to AC-3" in n for n in notes), notes
-        # the conversion path uses -c:a ac3 (transcode), never -c:a copy (bare extraction)
-        assert all("copy" not in c for c in calls[0]), calls[0]
-        assert "ac3" in calls[0]
+        assert lines[0].startswith("A_MLP, ") and ".thd" in lines[0], lines
+        assert 'merge-ac3-file="' in lines[0] and '_core.ac3", lang=eng' in lines[0], lines
+        assert any("merged AC-3 compatibility core" in n for n in notes), notes
+        # first call extracts the lossless .thd via -c:a copy; second transcodes the AC-3 core
+        assert "copy" in calls[0] and calls[0][-1].endswith(".thd"), calls[0]
+        assert "ac3" in calls[1] and calls[1][-1].endswith(".ac3"), calls[1]
 
-    print("_self_test_sbs2mvc_truehd_falls_through_to_ac3: PASS")
+    # disc_legal=True + TrueHD, but the lossless .thd extraction itself fails: must still fall
+    # back to the plain AC-3 downgrade (ADR-243's original zero-output safety net), not error out.
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        fail_thd = lambda cmd: cmd[-1].endswith(".thd")  # noqa: E731
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=truehd_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls, fail_thd)):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True)
+        assert lines[0].startswith("A_AC3, "), f"must fall back to AC-3 conversion: {lines}"
+        assert any("converted to AC-3" in n for n in notes), notes
+
+    # disc_legal=False (.mkv/.m2ts): TrueHD extracted losslessly under its real tag, no core needed.
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=truehd_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls)):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True, disc_legal=False)
+        assert lines[0].startswith("A_MLP, ") and lines[0].endswith(".thd, lang=eng"), lines
+        assert "merge-ac3-file" not in lines[0], lines
+        assert len(calls) == 1 and "copy" in calls[0], calls
+
+    # disc_legal=False (.mkv/.m2ts): E-AC-3/DD+ extracted losslessly under A_AC3 (its real tag).
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=eac3_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls)):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True, disc_legal=False)
+        assert lines[0].startswith("A_AC3, ") and lines[0].endswith(".eac3, lang=eng"), lines
+        assert "copy" in calls[0], calls
+
+    # disc_legal=True: E-AC-3/DD+ still downgrades to plain AC-3, unchanged from ADR-270 -- no
+    # real external core-merge mechanism exists in tsMuxeR for this codec.
+    with tempfile.TemporaryDirectory() as tmp:
+        calls = []
+        with mock.patch.object(S, "_ffprobe_list_tracks", return_value=eac3_tracks), \
+                mock.patch.object(S.subprocess, "run", make_fake_run(calls)):
+            lines, notes = S._plan_audio_subs("movie.mkv", tmp, "ffmpeg", True, disc_legal=True)
+        assert lines[0].startswith("A_AC3, "), lines
+        assert any("converted to AC-3" in n for n in notes), notes
+        assert "copy" not in calls[0] and "ac3" in calls[0], calls[0]
+
+    print("_self_test_sbs2mvc_truehd_eac3_audio_handling: PASS")
 
 
 def _self_test_sbs2mvc_ffprobe_track_detection():
@@ -25459,7 +25513,7 @@ def _run_self_tests():
         _self_test_utils_hdr_to_sdr_gpu_decode,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
-        _self_test_sbs2mvc_truehd_falls_through_to_ac3,
+        _self_test_sbs2mvc_truehd_eac3_audio_handling,
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
         _self_test_mvc_tools_version_aware_install,

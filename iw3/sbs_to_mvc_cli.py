@@ -53,21 +53,35 @@ _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
 # each needs a specific container/header ffmpeg's plain stream copy to a bare file isn't
 # guaranteed to produce correctly. TrueHD was originally included here on the (wrong) assumption
 # that its extraction was equally safe -- ADR-243: a real user's tsMuxeR (v2.7.0) hard-refused a
-# bare-extracted .thd file with "Unsupported codec A_TRUEHD" and the whole job produced no output
-# at all. E-AC-3 hit the identical real failure mode (ADR-270, 2026-09-25): a real user's job
-# failed with "Unsupported codec A_EAC3" -- reproduced directly against this same bundled tsMuxeR
-# binary (a synthetic bare .eac3 file, fed through the exact real meta-file shape this module
-# builds), while a bare .dts file muxed successfully under the same test -- confirming this is an
-# E-AC-3-specific gap in this tsMuxeR version, not a general bare-audio-extraction problem (DTS
-# stays in the safe set below). tsMuxeR reads TrueHD/E-AC-3 fine from within a real source
-# container (mvc_extract_cli.py's own mux_bd3d_iso() references tracks directly from the original
-# .ssif, never extracts a bare file, and is unaffected by this) -- the bare single-stream
-# extraction this module does is specifically what breaks it. A source using any of these now
-# falls through to the AC-3 conversion path below instead -- same as any other codec that isn't
-# directly Blu-ray-legal -- which is always correct, just not bit-for-bit lossless for these
-# specific, uncommon-in-practice cases.
+# bare-extracted .thd file with "Unsupported codec A_TRUEHD". E-AC-3 hit the identical real
+# failure mode (ADR-270, 2026-09-25): "Unsupported codec A_EAC3", reproduced directly against
+# this same bundled tsMuxeR binary.
+#
+# CORRECTED (this session, 2026-09-30): ADR-243/ADR-270 misdiagnosed the root cause. Both
+# failures were never a real tsMuxeR capability limit -- "A_TRUEHD" and "A_EAC3" have simply
+# never been valid tsMuxeR codec tags, in any version. The real tags are A_MLP (TrueHD) and
+# A_AC3 (which tsMuxeR auto-detects as carrying E-AC-3/DD+ content too); a bare-extracted
+# .thd/.eac3 file fed to tsMuxeR under ITS real tag muxes losslessly (verified directly
+# against the bundled tsMuxeR 2.18.14: ffprobe on the resulting .mkv showed the original
+# codec/channel layout/bitrate fully intact, no re-encoding). _plan_audio_subs() now extracts
+# TrueHD/E-AC-3 losslessly under their real tags for plain .mkv/.m2ts output (see
+# _LOSSLESS_NONDISC_AUDIO_TAG below).
+#
+# The AC-3 downgrade below is still genuinely needed for disc-legal (.iso/BD-folder, --blu-ray)
+# output, though: a real Blu-ray disc's spec requires an AC-3 compatibility core muxed alongside
+# TrueHD/DD+ (tsMuxeR itself warns bare TrueHD "will not play in a Blu-ray player" on that path),
+# and this pipeline doesn't build that compatibility core -- building it is out of scope for this
+# pass, so disc-legal output keeps downgrading TrueHD/E-AC-3 to AC-3 exactly as before.
 _BD_AUDIO = {"A_AC3", "A_DTS"}
 _BD_AUDIO_EXT = {"A_AC3": "ac3", "A_DTS": "dts"}
+# Real tsMuxeR tag + bare-extraction extension for each codec that can be muxed losslessly into
+# non-disc-legal (.mkv/.m2ts) output instead of being downgraded to AC-3 -- see the correction
+# above. A_EAC3 has never been a real tsMuxeR tag; tsMuxeR reads E-AC-3/DD+ content fine under
+# the plain A_AC3 tag -- but the EXTRACTION extension must stay ".eac3", not ".ac3": confirmed by
+# direct testing (this session) that ffmpeg's own raw ac3 muxer refuses to write E-AC-3 data
+# ("ac3 muxer supports only codec ac3 for type audio") even though tsMuxeR itself only cares about
+# the meta-file tag, not the extension.
+_LOSSLESS_NONDISC_AUDIO_TAG = {"A_TRUEHD": ("A_MLP", "thd"), "A_EAC3": ("A_AC3", "eac3")}
 FRIM_URL = "https://drive.google.com/uc?export=download&id=1lumXLd74U-E2k195bzfETbHgFcHcT4sH"
 FRIM_SHA256 = "76689784495D53B34889F0EA67C9DB6B9750925DB9D1147F8FD9159E111C0778"
 FRIM_VERSION = "1.31"
@@ -610,15 +624,50 @@ def _dedupe_dual_eye_subs(ass_path, srt_path):
     deduped.save(srt_path)
 
 
+def _ac3_transcode(input_path, work_dir, ffmpeg_bin, audio_index, suffix=""):
+    """Transcodes stream 0:a:<audio_index> to a Blu-ray-legal AC-3 file (640kbps, retried at 5.1
+    if the source has more channels e.g. 7.1). Returns the output path on success, None on
+    failure. Shared by the general codec-downgrade path and the TrueHD compatibility-core path
+    in _plan_audio_subs() below -- both need the exact same AC-3 core, just under a different
+    output filename (suffix)."""
+    out = path.join(work_dir, f"audio_{audio_index}{suffix}.ac3")
+    for extra in ([], ["-ac", "6"]):
+        r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                            f"0:a:{audio_index}", "-vn", "-c:a", "ac3", "-b:a", "640k"] + extra + [out],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and path.exists(out):
+            return out
+    return None
+
+
 def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.976",
-                     width=1920, height=1080):
+                     width=1920, height=1080, disc_legal=True):
     """Returns (meta_lines, notes). Compatible audio goes in as-is, anything else is
     converted to AC-3 (a Blu-ray-legal format) first; PGS subtitles go in as-is; text subtitles
     (SRT/ASS/...) are extracted to .srt and rendered into Blu-ray subtitles by tsMuxeR (up to the disc's
-    limit of 32); only bitmap formats a Blu-ray cannot hold (e.g. VobSub) are skipped, with a note."""
+    limit of 32); only bitmap formats a Blu-ray cannot hold (e.g. VobSub) are skipped, with a note.
+
+    disc_legal: True for a real disc-structured target (.iso/BD-folder, tsMuxeR's --blu-ray path),
+    False for a plain .mkv/.m2ts target. Controls how TrueHD and E-AC-3/Dolby Digital Plus are
+    handled -- see the correction note above _LOSSLESS_NONDISC_AUDIO_TAG for the full history:
+
+    - disc_legal=False: both are extracted losslessly under their real tsMuxeR tags (A_MLP for
+      TrueHD, A_AC3 for E-AC-3) instead of being downgraded to plain AC-3 -- there is no real
+      Blu-ray-disc codec restriction for this target, so nothing needs downgrading.
+    - disc_legal=True: TrueHD is still kept lossless, merged with a freshly transcoded AC-3
+      compatibility core via tsMuxeR's own real `merge-ac3-file` mechanism (confirmed against the
+      bundled tsMuxeR's own --help text, 2026-09-30) -- a real Blu-ray disc requires this core
+      alongside TrueHD at the codec level. Falls back to the plain AC-3 downgrade if either half
+      can't be produced. E-AC-3/DD+ still downgrades to plain AC-3 here: a real Blu-ray disc's
+      DD+ track is authored as an extension bitstream layered on top of an actual AC-3 core frame
+      inside the SAME elementary stream (confirmed by real-world BD authoring references), and
+      tsMuxeR has no external merge mechanism for that shape (only merge-ac3-file/merge-ac3-track
+      for standalone TrueHD) -- synthesizing it from a plain extracted E-AC-3 stream is out of
+      scope here, so this one case keeps the existing downgrade."""
     lines, notes = [], []
     if not include_av:
         return lines, notes
+    fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
     audio_index = 0
     subtitle_index = 0          # position among ALL subtitle streams, same order ffmpeg's 0:s:N uses
     subtitle_count = 0
@@ -639,22 +688,41 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
                                     f"0:a:{audio_index}", "-vn", "-c:a", "copy", out],
                                    capture_output=True, text=True)
                 if r.returncode == 0 and path.exists(out):
-                    lines.append(f"{codec}, {out.replace(chr(92), '/')}{lang}")
+                    lines.append(f"{codec}, {fwd(out)}{lang}")
+                else:
+                    notes.append(f"audio track {audio_index + 1} ({codec}) skipped: could not extract it")
+            elif codec == "A_TRUEHD" and disc_legal:
+                thd_out = path.join(work_dir, f"audio_{audio_index}.thd")
+                r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                                    f"0:a:{audio_index}", "-vn", "-c:a", "copy", thd_out],
+                                   capture_output=True, text=True)
+                core_out = (_ac3_transcode(input_path, work_dir, ffmpeg_bin, audio_index, suffix="_core")
+                            if r.returncode == 0 and path.exists(thd_out) else None)
+                if core_out:
+                    lines.append(f'A_MLP, {fwd(thd_out)}, merge-ac3-file="{fwd(core_out)}"{lang}')
+                    notes.append(f"audio track {audio_index + 1} ({codec}) kept lossless with a "
+                                 f"merged AC-3 compatibility core")
+                else:
+                    out = _ac3_transcode(input_path, work_dir, ffmpeg_bin, audio_index)
+                    if out:
+                        lines.append(f"A_AC3, {fwd(out)}{lang}")
+                        notes.append(f"audio track {audio_index + 1} ({codec}) converted to AC-3")
+                    else:
+                        notes.append(f"audio track {audio_index + 1} ({codec}) skipped: could not convert it")
+            elif codec in _LOSSLESS_NONDISC_AUDIO_TAG and not disc_legal:
+                tag, ext = _LOSSLESS_NONDISC_AUDIO_TAG[codec]
+                out = path.join(work_dir, f"audio_{audio_index}.{ext}")
+                r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
+                                    f"0:a:{audio_index}", "-vn", "-c:a", "copy", out],
+                                   capture_output=True, text=True)
+                if r.returncode == 0 and path.exists(out):
+                    lines.append(f"{tag}, {fwd(out)}{lang}")
                 else:
                     notes.append(f"audio track {audio_index + 1} ({codec}) skipped: could not extract it")
             else:
-                out = path.join(work_dir, f"audio_{audio_index}.ac3")
-                converted = False
-                # AC-3 holds up to 5.1 channels; retry as 5.1 if the source has more (7.1)
-                for extra in ([], ["-ac", "6"]):
-                    r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
-                                        f"0:a:{audio_index}", "-vn", "-c:a", "ac3", "-b:a", "640k"] + extra + [out],
-                                       capture_output=True, text=True)
-                    if r.returncode == 0 and path.exists(out):
-                        converted = True
-                        break
-                if converted:
-                    lines.append(f"A_AC3, {out.replace(chr(92), '/')}{lang}")
+                out = _ac3_transcode(input_path, work_dir, ffmpeg_bin, audio_index)
+                if out:
+                    lines.append(f"A_AC3, {fwd(out)}{lang}")
                     notes.append(f"audio track {audio_index + 1} ({codec}) converted to AC-3")
                 else:
                     notes.append(f"audio track {audio_index + 1} ({codec}) skipped: could not convert it")
@@ -956,7 +1024,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 
         av_lines, notes = ([], [])
         if include_av:
-            av_lines, notes = _plan_audio_subs(input_path, work_dir, ffmpeg, True, fps_text=fps_text)
+            av_lines, notes = _plan_audio_subs(input_path, work_dir, ffmpeg, True, fps_text=fps_text,
+                                               disc_legal=(is_iso_output or is_folder_output))
         for n in notes:
             print(f"[sbs2mvc] note: {n}", file=sys.stderr)
 

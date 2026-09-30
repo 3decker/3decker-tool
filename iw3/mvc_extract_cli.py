@@ -51,7 +51,7 @@ from os import path
 # imported before now.
 import nunif.gui.subprocess_patch  # noqa
 
-from .utils import _find_tsmuxer, _find_edge264_mvc, _get_ffmpeg_bin, _find_mkvmerge
+from .utils import _find_tsmuxer, _find_edge264_mvc, _get_ffmpeg_bin, _find_mkvmerge, log_subprocess_cmd
 
 
 def _find_video_track(mpls_or_m2ts_path, tsmuxer_bin):
@@ -569,6 +569,7 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
 
         if progress_cb:
             progress_cb("demux", 0, 1)
+        log_subprocess_cmd("mvc-extract:tsmuxer-demux", [tsmuxer_bin, meta_path, work_dir])
         demux = subprocess.Popen([tsmuxer_bin, meta_path, work_dir],
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         procs.append(demux)
@@ -603,6 +604,8 @@ def extract_and_decode(ssif_path, avc_track, mvc_track, cut_start, cut_end, work
 
         # edge264 reads "-" (stdin) and writes Y4M to stdout; ffmpeg reads that pipe.
         # The parent closes its copy of edge264's stdout so a dead ffmpeg is noticed.
+        log_subprocess_cmd("mvc-extract:edge264", [edge264_bin, "-", "-O", "-k", "-y"])
+        log_subprocess_cmd("mvc-extract:ffmpeg", ffmpeg_args)
         with open(edge_log, "wb") as edge_err:
             edge264_proc = subprocess.Popen([edge264_bin, "-", "-O", "-k", "-y"],
                                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=edge_err)
@@ -763,6 +766,9 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
     proc = None
     ok = False
     try:
+        print(f"[mvc-extract:tsmuxer-build] meta file ({meta_path}):\n" + "\n".join(f"  {line}" for line in lines),
+              file=sys.stderr)
+        log_subprocess_cmd("mvc-extract:tsmuxer-build", [tsmuxer_bin, meta_path, out_iso])
         proc = subprocess.Popen([tsmuxer_bin, meta_path, out_iso], stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
         tail = []
@@ -873,6 +879,7 @@ def mux_lossless_mvc_mkv(ssif_path, avc_track, mvc_track, out_mkv, include_av=Tr
 
         if progress_cb:
             progress_cb("demux", 0, 1)
+        log_subprocess_cmd("mvc-extract:tsmuxer-demux", [tsmuxer_bin, meta_path, work_dir])
         demux = subprocess.Popen([tsmuxer_bin, meta_path, work_dir],
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         procs.append(demux)
@@ -902,6 +909,8 @@ def mux_lossless_mvc_mkv(ssif_path, avc_track, mvc_track, out_mkv, include_av=Tr
 
         if progress_cb:
             progress_cb("mux", 0, 1)
+        log_subprocess_cmd("mvc-extract:mkvmerge",
+                           [mkvmerge_bin, "-o", video_only, "--default-duration", f"0:{fps_str}", combined_es])
         mux = subprocess.Popen([mkvmerge_bin, "-o", video_only, "--default-duration", f"0:{fps_str}", combined_es],
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         procs.append(mux)
@@ -1075,6 +1084,7 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
 
         if progress_cb:
             progress_cb("demux", 0, 1)
+        log_subprocess_cmd("mvc-extract:tsmuxer-demux", [tsmuxer_bin, meta_path, work_dir])
         demux = subprocess.Popen([tsmuxer_bin, meta_path, work_dir],
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         procs.append(demux)
@@ -1113,6 +1123,9 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
 
         if progress_cb:
             progress_cb("encode", 0, n)
+        log_subprocess_cmd("mvc-extract:edge264", [edge264_bin, "-", "-O", "-k", "-y"])
+        log_subprocess_cmd("mvc-extract:ffmpeg", ff_cmd)
+        log_subprocess_cmd("mvc-extract:frim", frim_cmd)
         with open(edge_log, "wb") as edge_err:
             edge264_proc = subprocess.Popen([edge264_bin, "-", "-O", "-k", "-y"],
                                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=edge_err)
@@ -1198,6 +1211,8 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
 
         if progress_cb:
             progress_cb("mux", 0, 1)
+        log_subprocess_cmd("mvc-extract:mkvmerge",
+                           [mkvmerge_bin, "-o", video_only, "--default-duration", f"0:{mkv_fps_str}", combined_es])
         mux = subprocess.Popen([mkvmerge_bin, "-o", video_only, "--default-duration", f"0:{mkv_fps_str}",
                                combined_es], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         procs.append(mux)

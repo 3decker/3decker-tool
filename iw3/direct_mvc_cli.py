@@ -44,11 +44,11 @@ import threading
 from copy import copy
 from os import path
 
-from .mvc_extract_cli import Cancelled, interleave_mvc, iso_to_bd_folder, _remove_stale_temp
-from .sbs_to_mvc_cli import bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs, _extract_all_av_for_mkv
+from .mvc_extract_cli import Cancelled, iso_to_bd_folder, _remove_stale_temp
+from .sbs_to_mvc_cli import bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs
 from .utils import (
-    _find_tsmuxer, _find_mkvmerge, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage,
-    process_video_full, STAGE_CONVERT_MVC, STAGE_DEPTH_STEREO,
+    _find_tsmuxer, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage,
+    process_video_full, STAGE_CONVERT_MVC, STAGE_DEPTH_STEREO, log_subprocess_cmd,
 )
 
 _MVC_LAYOUT_INCOMPATIBLE_FLAGS = (
@@ -178,6 +178,8 @@ class _DirectMvcPipe:
         if self._swap_eyes:
             frim_cmd.append("-swaplr")
 
+        log_subprocess_cmd("direct-mvc:ffmpeg", ff_cmd)
+        log_subprocess_cmd("direct-mvc:frim", frim_cmd)
         self._ff_log = open(self._ffmpeg_log_path, "wb")
         self.ff = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._ff_log)
         self.fr = subprocess.Popen(frim_cmd, stdin=self.ff.stdout, stdout=subprocess.PIPE,
@@ -249,8 +251,8 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
     """The whole direct-to-MVC job: probes `original_source_path`, runs the main iw3
     conversion straight into an ffmpeg|FRIM pipe (no SBS file ever written), then muxes
     FRIM's output plus audio/subtitles pulled from `original_source_path` itself into
-    `output_path` (.iso via tsMuxeR, or .mkv directly via mkvmerge, same choice
-    sbs_to_mvc_cli.convert() offers). Returns output_path on success; raises
+    `output_path` (.iso/.m2ts/.mkv/folder, all built through tsMuxeR's own native
+    multi-format output -- ADR-303). Returns output_path on success; raises
     RuntimeError/ValueError (with a real, specific reason) on any failure or refusal,
     or mvc_extract_cli.Cancelled if args.state's stop_event fired mid-job."""
     width, height, rate, duration, hdr = probe_video(original_source_path)
@@ -286,7 +288,7 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
     if ffmpeg is None:
         raise RuntimeError("ffmpeg not found")
     tsmuxer = _find_tsmuxer()
-    if tsmuxer is None and not is_mkv_output:
+    if tsmuxer is None:
         raise RuntimeError("tsMuxeR not found -- run `python -m iw3.install_mvc_tools`")
 
     bitrate_mbps = float(getattr(args, "mvc_bitrate", 20.0) or 20.0)
@@ -301,13 +303,12 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
 
     base_es, dep_es = path.join(work_dir, "base.264"), path.join(work_dir, "dep.264")
     ffmpeg_log = path.join(work_dir, "ffmpeg.log")
-    combined_es = path.join(work_dir, "combined_mvc.264")  # only written for .mkv output
     # Same real, reproduced bug class as sbs_to_mvc_cli.py's own convert() (see its
     # comment here): work_dir is named only from the output filename, so a retry after
     # any failed/cancelled run silently reuses the same dirty folder and FRIM refuses to
     # write base_es/dep_es because they already exist -- mvc_extract_cli.py's own
     # _remove_stale_temp() already solves this; this tool never called it.
-    _remove_stale_temp(base_es, dep_es, combined_es, ffmpeg_log)
+    _remove_stale_temp(base_es, dep_es, ffmpeg_log)
 
     stop_event = (getattr(args, "state", None) or {}).get("stop_event")
 
@@ -349,64 +350,61 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
             raise Cancelled()
 
         _notify_stage(args, STAGE_CONVERT_MVC)
-        if is_mkv_output:
-            # ADR-245's own technique, reused unchanged: FRIM's separated base/dependent
-            # elementary streams are the exact shape interleave_mvc() already expects.
-            interleave_mvc(base_es, dep_es, combined_es)
-            av_files = _extract_all_av_for_mkv(original_source_path, work_dir, ffmpeg)
-            mkvmerge_bin = _find_mkvmerge()
-            if mkvmerge_bin is None:
-                raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
-            # ADR-284: same real fix as sbs_to_mvc_cli.py's own .mkv path -- see its
-            # comment for the full real-world research (MakeMKV's own established
-            # StereoMode 13/14 convention for real MVC content).
-            stereo_mode_value = "14" if swap_eyes else "13"
-            mux_cmd = [mkvmerge_bin, "-o", output_path, "--default-duration", f"0:{fps_frac}fps",
-                      "--stereo-mode", f"0:{stereo_mode_value}",
-                      combined_es] + av_files
-            result = subprocess.run(mux_cmd, capture_output=True)
-            if result.returncode != 0:
-                raise RuntimeError("mkvmerge failed:\n" + result.stdout.decode(errors="replace")[-1200:])
-        else:
-            av_lines, notes = _plan_audio_subs(original_source_path, work_dir, ffmpeg, True, fps_text=fps_text)
-            state = getattr(args, "state", None)
-            if state is not None and notes:
-                state.setdefault("mvc_notes", []).extend(notes)
-            fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
-            # ADR-289: see sbs_to_mvc_cli.py's convert() for the full reasoning -- a bare .m2ts
-            # skips the BDMV/playlist/SSIF disc structure --blu-ray builds.
-            #
-            # ADR-299: --new-audio-pes must be requested explicitly on the --blu-ray branch too,
-            # not just here on the m2ts one -- "normally implied by --blu-ray" is confirmed FALSE
-            # for this bundled tsMuxeR by direct real testing (see sbs_to_mvc_cli.py's own ADR-299
-            # comment for the full evidence). Without it, audio silently gets the legacy 0xBD PES
-            # stream id instead of the real Blu-ray-standard 0xFD, and MakeMKV drops the whole
-            # audio track over just that one byte despite every other declaration being correct.
-            #
-            # ADR-300: --maxbitrate=48000 caps the disc's declared read rate at the real BD-ROM
-            # drive spec (48 Mbit/s) -- see sbs_to_mvc_cli.py's own ADR-300 comment for the full
-            # real, evidence-based testing (typical content never approaches the limit; GOP-peak
-            # bursts on demanding content genuinely can; the flag never failed or corrupted output
-            # in any tested case, including one deliberately averaging above the limit). Added
-            # unconditionally, same as the other two --blu-ray MUXOPT lines.
-            muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
-                      if not is_m2ts_output else "MUXOPT --new-audio-pes")
-            meta = [muxopt,
-                    f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
-                    f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines
-            meta_path = path.join(work_dir, "mux.meta")
-            with open(meta_path, "w", encoding="utf-8", newline="\n") as f:  # no BOM: tsMuxeR rejects one
-                f.write("\n".join(meta) + "\n")
-            # ADR-291: folder output builds the real .iso into a temp path inside work_dir
-            # first (tsMuxeR cannot build a real 3D BDMV folder directly -- see
-            # iso_to_bd_folder()'s own docstring), then copies its contents out. The temp
-            # iso is cleaned up along with the rest of work_dir below, unconditionally.
-            mux_target = path.join(work_dir, "_bd_temp.iso") if is_folder_output else output_path
-            result = subprocess.run([tsmuxer, meta_path, mux_target], capture_output=True)
-            if result.returncode != 0:
-                raise RuntimeError("tsMuxeR failed:\n" + result.stdout.decode(errors="replace")[-1200:])
-            if is_folder_output:
-                iso_to_bd_folder(mux_target, output_path, stop_event=stop_event)
+        av_lines, notes = _plan_audio_subs(original_source_path, work_dir, ffmpeg, True, fps_text=fps_text)
+        state = getattr(args, "state", None)
+        if state is not None and notes:
+            state.setdefault("mvc_notes", []).extend(notes)
+        fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
+        # ADR-289: --blu-ray builds a full BDMV/playlist/SSIF disc structure -- a bare
+        # .m2ts or .mkv skips that and just needs a bare clip.
+        #
+        # ADR-299: --new-audio-pes must be requested explicitly on the --blu-ray branch too,
+        # not just on the bare-clip one -- "normally implied by --blu-ray" is confirmed FALSE
+        # for this bundled tsMuxeR by direct real testing (see sbs_to_mvc_cli.py's own ADR-299
+        # comment for the full evidence). Without it, audio silently gets the legacy 0xBD PES
+        # stream id instead of the real Blu-ray-standard 0xFD, and MakeMKV drops the whole
+        # audio track over just that one byte despite every other declaration being correct.
+        #
+        # ADR-300: --maxbitrate=48000 caps the disc's declared read rate at the real BD-ROM
+        # drive spec (48 Mbit/s) -- see sbs_to_mvc_cli.py's own ADR-300 comment for the full
+        # real, evidence-based testing. Added unconditionally, same as the other two
+        # --blu-ray MUXOPT lines.
+        #
+        # ADR-303: real, confirmed bug (Steve, relayed by decker, verified on real Zidoo
+        # hardware) -- this .mkv branch used to build its own combined MVC stream via
+        # mvc_extract_cli.interleave_mvc() and hand it to mkvmerge directly. That combined
+        # stream decoded correctly with a standards-compliant software MVC decoder
+        # (edge264-mvc) -- proving the underlying video data itself was valid -- but showed
+        # real, visible doubled/overlapping corruption on Zidoo, a real hardware 3D player
+        # that plays this project's own tsMuxeR-built ISOs correctly. tsMuxeR's own native
+        # Matroska output (same tool, same internal interleaving logic, that already builds
+        # working ISOs) fixed it, confirmed directly on the same hardware after switching --
+        # tsMuxeR explicitly reports "3D: N dependent view frames merged into the base video
+        # track" during the mux and embeds a real attachment with 3D framing metadata that
+        # neither mkvmerge nor interleave_mvc() ever produced. interleave_mvc()/mkvmerge are
+        # no longer used by this function at all -- tsMuxeR now builds every output type
+        # (.iso/.m2ts/.mkv/folder) through this one same path.
+        muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
+                  if (is_iso_output or is_folder_output) else "MUXOPT --new-audio-pes")
+        meta = [muxopt,
+                f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
+                f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines
+        meta_path = path.join(work_dir, "mux.meta")
+        with open(meta_path, "w", encoding="utf-8", newline="\n") as f:  # no BOM: tsMuxeR rejects one
+            f.write("\n".join(meta) + "\n")
+        # ADR-291: folder output builds the real .iso into a temp path inside work_dir
+        # first (tsMuxeR cannot build a real 3D BDMV folder directly -- see
+        # iso_to_bd_folder()'s own docstring), then copies its contents out. The temp
+        # iso is cleaned up along with the rest of work_dir below, unconditionally.
+        mux_target = path.join(work_dir, "_bd_temp.iso") if is_folder_output else output_path
+        print(f"[direct-mvc:tsmuxer] meta file ({meta_path}):\n" + "\n".join(f"  {line}" for line in meta),
+              file=sys.stderr)
+        log_subprocess_cmd("direct-mvc:tsmuxer", [tsmuxer, meta_path, mux_target])
+        result = subprocess.run([tsmuxer, meta_path, mux_target], capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError("tsMuxeR failed:\n" + result.stdout.decode(errors="replace")[-1200:])
+        if is_folder_output:
+            iso_to_bd_folder(mux_target, output_path, stop_event=stop_event)
         ok = True
         return output_path
     finally:

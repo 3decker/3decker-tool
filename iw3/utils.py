@@ -1331,6 +1331,25 @@ def _find_tsmuxer():
     return None
 
 
+def log_subprocess_cmd(stage, cmd):
+    """Real user report (Steve, via decker, 2026-09-30): debugging a real 3D Blu-ray
+    MVC problem needed knowing exactly which external tool (ffmpeg/FRIM/tsMuxeR/
+    mkvmerge/edge264-mvc) ran with which arguments for the actual video-muxing steps
+    -- the job log (_job_log_scope() in this module) already captures everything
+    printed to stderr during a job, but nothing in sbs_to_mvc_cli.py, direct_mvc_cli.py,
+    or mvc_extract_cli.py ever printed its own real subprocess command lines, so a
+    user's log had iw3's own settings/command but a blank spot for everything after.
+
+    Printed to stderr (not stdout) to match this codebase's own convention for
+    diagnostic/progress lines (see every "[sbs2mvc]"/"[mvc-extract]"-prefixed print
+    already in those files) -- _job_log_scope()'s tee picks this up automatically,
+    no other job-log change needed. `subprocess.list2cmdline()` (stdlib) renders the
+    real argument list as one properly-quoted, copy-pasteable command line, same
+    quoting Windows' own CreateProcess/cmd.exe expects -- useful for a user (or a
+    future debugging session) to literally re-run the exact command by hand."""
+    print(f"[{stage}] running: {subprocess.list2cmdline(cmd)}", file=sys.stderr)
+
+
 def _find_mkvpropedit():
     """Same resolution strategy as _find_mkvmerge() -- mkvpropedit ships alongside
     mkvmerge in the same bundled MKVToolNix folder (verified present at

@@ -44,7 +44,7 @@ import nunif.gui.subprocess_patch  # noqa
 
 from .mvc_extract_cli import (AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc, iso_to_bd_folder,
                               _remove_stale_temp)
-from .utils import _find_tsmuxer, _get_ffmpeg_bin, _find_mkvmerge
+from .utils import _find_tsmuxer, _get_ffmpeg_bin, _find_mkvmerge, log_subprocess_cmd
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
 _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
@@ -917,6 +917,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         if swap_eyes:
             frim_cmd.append("-swaplr")
 
+        log_subprocess_cmd("sbs2mvc:ffmpeg", ff_cmd)
+        log_subprocess_cmd("sbs2mvc:frim", frim_cmd)
         with open(ffmpeg_log, "wb") as ff_err:
             ff = subprocess.Popen(ff_cmd, stdout=subprocess.PIPE, stderr=ff_err)
             procs.append(ff)
@@ -1011,6 +1013,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
             mux_cmd = [mkvmerge_bin, "-o", output_iso, "--default-duration", f"0:{fps_frac}fps",
                       "--stereo-mode", f"0:{stereo_mode_value}",
                       combined_es] + av_files
+            log_subprocess_cmd("sbs2mvc:mkvmerge", mux_cmd)
             mux = subprocess.Popen(mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             procs.append(mux)
             mux_tail = []
@@ -1083,6 +1086,13 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 
         if progress_cb:
             progress_cb("mux", 0, 100)
+        # The real, interesting content for this step is the meta file tsMuxeR reads
+        # (codec/track lines, MUXOPT flags) -- log it alongside the command itself,
+        # not just the command, since "tsMuxeR mux.meta out.iso" alone tells a reader
+        # nothing about what was actually muxed.
+        print(f"[sbs2mvc:tsmuxer] meta file ({meta_path}):\n" + "\n".join(f"  {line}" for line in meta),
+              file=sys.stderr)
+        log_subprocess_cmd("sbs2mvc:tsmuxer", [tsmuxer, meta_path, mux_target])
         mux = subprocess.Popen([tsmuxer, meta_path, mux_target], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
         procs.append(mux)

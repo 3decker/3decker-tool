@@ -1028,13 +1028,21 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 
         fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
         # ADR-289: --blu-ray builds a full BDMV/playlist/SSIF disc structure (or a real .iso of
-        # one); a plain .m2ts skips all of that and just needs a bare clip. --new-audio-pes is
-        # normally implied by --blu-ray but has to be requested explicitly without it, since the
-        # audio tracks below are still real BD-legal AC-3/DTS (via _plan_audio_subs()) that need
-        # the BD PES stream id (0xfd) to be read correctly. PCR intentionally stays on the video
-        # PID (tsMuxeR's default) rather than a separate one, matching real BD-ROM M2TS clips --
-        # do not add --no-pcr-on-video-pid here.
-        muxopt = "MUXOPT --blu-ray --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
+        # one); a plain .m2ts skips all of that and just needs a bare clip.
+        #
+        # ADR-299: --new-audio-pes is documented as "activated automatically for BD muxing" --
+        # confirmed FALSE for this bundled tsMuxeR (2.7.0) by direct, real testing: a --blu-ray
+        # build without it silently writes AC-3/DTS/DTS-HD audio using the legacy 0xBD
+        # (private_stream_1) PES stream id instead of the real Blu-ray-standard 0xFD -- correctly
+        # declared everywhere else (CLPI stream_coding_type, PMT, MPLS STN_table all matched a
+        # genuine commercial disc byte-for-byte), but MakeMKV's strict parser silently drops the
+        # whole audio track over just this one byte, with no error. A real commercial disc (Shrek,
+        # zman's 2010 MVC rip) was used as the reference for every one of these checks. Confirmed
+        # fixed: adding --new-audio-pes explicitly makes the PES stream id 0xFD and the audio
+        # track appears correctly in MakeMKV. This is why --new-audio-pes must ALWAYS be
+        # requested explicitly now, never left to --blu-ray's "automatic" activation -- for both
+        # branches, not just the m2ts one.
+        muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
         meta = [muxopt,
                 f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                 f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines

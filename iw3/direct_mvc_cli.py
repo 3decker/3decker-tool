@@ -374,11 +374,15 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
                 state.setdefault("mvc_notes", []).extend(notes)
             fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
             # ADR-289: see sbs_to_mvc_cli.py's convert() for the full reasoning -- a bare .m2ts
-            # skips the BDMV/playlist/SSIF disc structure --blu-ray builds, but still needs
-            # --new-audio-pes explicitly (normally implied by --blu-ray) for the real BD-legal
-            # AC-3/DTS audio tracks below. PCR intentionally stays on the video PID (tsMuxeR's
-            # default), matching real BD-ROM M2TS clips.
-            muxopt = "MUXOPT --blu-ray --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
+            # skips the BDMV/playlist/SSIF disc structure --blu-ray builds.
+            #
+            # ADR-299: --new-audio-pes must be requested explicitly on the --blu-ray branch too,
+            # not just here on the m2ts one -- "normally implied by --blu-ray" is confirmed FALSE
+            # for this bundled tsMuxeR by direct real testing (see sbs_to_mvc_cli.py's own ADR-299
+            # comment for the full evidence). Without it, audio silently gets the legacy 0xBD PES
+            # stream id instead of the real Blu-ray-standard 0xFD, and MakeMKV drops the whole
+            # audio track over just that one byte despite every other declaration being correct.
+            muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
             meta = [muxopt,
                     f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                     f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines

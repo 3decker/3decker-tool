@@ -727,7 +727,15 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
              file=sys.stderr)
     ssif_meta = path.abspath(ssif_path).replace(chr(92), "/")
     cut = f" --cut-start=0s --cut-end={cut_end}" if cut_end else ""
-    lines = [f"MUXOPT --blu-ray --auto-chapters=10{cut}"]
+    # ADR-299: --new-audio-pes must be requested explicitly -- this --blu-ray re-authoring step
+    # REGENERATES the audio's own PES stream id from scratch (see ADR-262's own comment above:
+    # tsMuxeR's disc-authoring engine rebuilds a brand-new BDMV/CLPI structure), so it does not
+    # matter that the SOURCE disc's audio may already have used the correct 0xFD id -- without
+    # this flag, tsMuxeR silently re-writes it using the legacy 0xBD id instead, and MakeMKV
+    # drops the whole audio track over just that one byte despite every other declaration
+    # (CLPI/PMT/MPLS) coming out correct. Confirmed by direct real testing against a genuine
+    # commercial disc (see sbs_to_mvc_cli.py's own ADR-299 comment for the full evidence).
+    lines = [f"MUXOPT --blu-ray --new-audio-pes --auto-chapters=10{cut}"]
     for t in wanted:
         extra = f", lang={t['lang']}" if t["lang"] else ""
         if t.get("stream_type") == "TRUE-HD":

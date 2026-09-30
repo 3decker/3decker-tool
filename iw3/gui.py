@@ -20591,6 +20591,38 @@ def _self_test_nvenc_bitrate_cap():
     print("_self_test_nvenc_bitrate_cap: PASS")
 
 
+def _self_test_mvc_muxopt_new_audio_pes():
+    """ADR-299: real, confirmed bug -- a genuine commercial 3D Blu-ray disc (Shrek, zman's 2010
+    MVC rip) was used as a direct reference to find why 3DECKER-built MVC discs never showed
+    their audio track in MakeMKV, despite the audio being correctly declared in the CLPI
+    (stream_coding_type), the raw PMT, and the MPLS STN_table -- all three matched the real
+    disc byte-for-byte. The actual difference, found by inspecting the raw PES packets
+    themselves: real discs write BD-legal audio (AC-3/DTS/DTS-HD/TrueHD) using PES stream id
+    0xFD ("new audio PES"); our builds were writing the legacy 0xBD (private_stream_1) instead.
+    tsMuxeR's own documentation claims 0xFD is "activated automatically for BD muxing" -- proven
+    FALSE for this bundled build (2.7.0) by direct testing: a --blu-ray mux without
+    --new-audio-pes explicitly requested produced 0xBD; adding it explicitly produced 0xFD, and
+    only then did the audio track appear in MakeMKV. This is a real, silent-failure-prone
+    assumption (three separate files independently assumed "--blu-ray implies it", all three
+    wrong) -- this test is a permanent regression guard, at the source level, so the flag can
+    never silently disappear again from any of them without a test catching it immediately."""
+    checks = [
+        ("iw3/sbs_to_mvc_cli.py", 'muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10"'),
+        ("iw3/direct_mvc_cli.py", 'muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10"'),
+        ("iw3/mvc_extract_cli.py", 'lines = [f"MUXOPT --blu-ray --new-audio-pes --auto-chapters=10{cut}"]'),
+    ]
+    here = path.dirname(path.dirname(path.abspath(__file__)))
+    for rel_path, expected_substring in checks:
+        full_path = path.join(here, rel_path)
+        with open(full_path, "r", encoding="utf-8") as f:
+            src = f.read()
+        assert expected_substring in src, (
+            f"{rel_path}: missing --new-audio-pes on its --blu-ray MUXOPT line -- this is the "
+            f"real, confirmed ADR-299 audio-goes-missing-in-MakeMKV bug, not a style nit")
+
+    print("_self_test_mvc_muxopt_new_audio_pes: PASS")
+
+
 def _self_test_bitrate_cap_post_step():
     """ADR-298: _run_bitrate_cap() is the real, reliable Limit Bitrate implementation
     -- a genuine second pass that only re-encodes when the finished file's REAL
@@ -25231,6 +25263,7 @@ def _run_self_tests():
         _self_test_frame_packing_sei,
         _self_test_nvenc_bitrate_cap,
         _self_test_bitrate_cap_post_step,
+        _self_test_mvc_muxopt_new_audio_pes,
         _self_test_analyze_source_video,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,

@@ -24107,6 +24107,125 @@ def _self_test_mvc_extract_remove_stale_temp():
     print("_self_test_mvc_extract_remove_stale_temp: PASS")
 
 
+def _self_test_mvc_tools_version_aware_install():
+    """Real gap closed: install_mvc_tools.install_tsmuxer() and sbs_to_mvc_cli.install_frim()
+    used to be presence-aware only ("if the exe already exists, leave it alone forever"), so a
+    stale tsMuxeR/FRIM from an older install was never refreshed by a later
+    update-3decker.bat/update.bat run -- only a brand-new setup.ps1 run ever got the current
+    pinned version. Both are now version-aware: the installed exe's own --no-args version
+    banner is parsed and compared against an expected version, and a missing OR outdated
+    install triggers a real checksum-verified (re)install via a tmp-name + os.replace atomic
+    swap (CS-IO-001), same integrity pattern each already had for a first-time install.
+
+    Fully offline (no real network/GPU/tsMuxeR/FRIM binary needed): urllib.request.urlopen is
+    faked to return a small synthetic zip built in-memory (never the real multi-MB tsMuxeR
+    release), and its expected_sha256/expected_version are passed as explicit overrides so this
+    test never depends on (or has to keep in sync with) the real pinned production constants.
+    The version-check subprocess call is faked the same way a real corrupted/foreign/updated
+    exe's own stdout banner would look."""
+    import hashlib
+    import io
+    import types
+    import zipfile
+    from unittest import mock
+    from . import install_mvc_tools as I
+    from . import sbs_to_mvc_cli as S
+
+    class _FakeResponse:
+        def __init__(self, data):
+            self._data = data
+
+        def read(self):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    # --- tsMuxeR ---
+    fake_zip_buf = io.BytesIO()
+    with zipfile.ZipFile(fake_zip_buf, "w") as z:
+        z.writestr("tsMuxeR.exe", b"FAKE_TSMUXER_EXE_CONTENT")
+    fake_zip_bytes = fake_zip_buf.getvalue()
+    fake_sha256 = hashlib.sha256(fake_zip_bytes).hexdigest()
+    download_calls = []
+
+    def fake_urlopen(url, timeout=None):
+        download_calls.append(url)
+        return _FakeResponse(fake_zip_bytes)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # missing -> real install (into tmp), real checksum verification against the
+        # synthetic zip's own hash
+        with mock.patch.object(I.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = I.install_tsmuxer(root=tmp, url="http://fake/tsmuxer.zip",
+                                        expected_sha256=fake_sha256, expected_version="9.9.9")
+        exe = path.join(tmp, "tsmuxer", "tsMuxeR.exe")
+        assert result == "installed (v9.9.9)", result
+        assert path.exists(exe)
+        assert len(download_calls) == 1, download_calls
+
+        # already current (faked version banner matches) -> must NOT re-download
+        fake_current = types.SimpleNamespace(
+            returncode=255, stdout="tsMuxeR version 9.9.9 (git-fake). github.com/fake/tsMuxer\n", stderr="")
+        with mock.patch.object(I.subprocess, "run", return_value=fake_current), \
+                mock.patch.object(I.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result2 = I.install_tsmuxer(root=tmp, url="http://fake/tsmuxer.zip",
+                                        expected_sha256=fake_sha256, expected_version="9.9.9")
+        assert result2 == "already installed (v9.9.9)", result2
+        assert len(download_calls) == 1, "already-current must not trigger a re-download"
+
+        # stale version (faked OLD version banner) -> must reinstall for real
+        fake_old = types.SimpleNamespace(
+            returncode=255, stdout="tsMuxeR version 1.0.0 (git-old). github.com/old/tsMuxer\n", stderr="")
+        with mock.patch.object(I.subprocess, "run", return_value=fake_old), \
+                mock.patch.object(I.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result3 = I.install_tsmuxer(root=tmp, url="http://fake/tsmuxer.zip",
+                                        expected_sha256=fake_sha256, expected_version="9.9.9")
+        assert result3 == "installed (v9.9.9)", result3
+        assert len(download_calls) == 2, "an outdated version must trigger a real re-download"
+
+        # a checksum mismatch must raise, never silently install a tampered/corrupt download
+        with mock.patch.object(I.urllib.request, "urlopen", side_effect=fake_urlopen):
+            try:
+                I.install_tsmuxer(root=tmp, url="http://fake/tsmuxer.zip",
+                                  expected_sha256="0" * 64, expected_version="9.9.9")
+                raise AssertionError("must raise on a checksum mismatch")
+            except RuntimeError as e:
+                assert "checksum" in str(e), e
+
+    # --- FRIM (local package_dir copy path -- the preferred, no-network install path) ---
+    with tempfile.TemporaryDirectory() as tmp:
+        package_dir = path.join(tmp, "pkg")
+        os.makedirs(package_dir)
+        for name in S._FRIM_FILES:
+            with open(path.join(package_dir, name), "wb") as f:
+                f.write(b"FAKE_FRIM_CONTENT_" + name.encode())
+
+        result = S.install_frim(root=tmp, package_dir=package_dir, expected_version="9.9")
+        dest_exe = path.join(tmp, "frim", "FRIMEncode64.exe")
+        assert result == "installed (v9.9)", result
+        assert path.exists(dest_exe)
+
+        # already current (faked version banner matches) -> no-op
+        fake_current = types.SimpleNamespace(
+            returncode=0, stdout="FRIM Encoder version 9.9 - Win64 (build: Jan  1 2026)\n", stderr="")
+        with mock.patch.object(S.subprocess, "run", return_value=fake_current):
+            result2 = S.install_frim(root=tmp, package_dir=package_dir, expected_version="9.9")
+        assert result2 == "already installed (v9.9)", result2
+
+        # stale version (faked OLD version banner) -> must reinstall
+        fake_old = types.SimpleNamespace(
+            returncode=0, stdout="FRIM Encoder version 1.0 - Win64 (build: Jan  1 2018)\n", stderr="")
+        with mock.patch.object(S.subprocess, "run", return_value=fake_old):
+            result3 = S.install_frim(root=tmp, package_dir=package_dir, expected_version="9.9")
+        assert result3 == "installed (v9.9)", result3
+
+    print("_self_test_mvc_tools_version_aware_install: PASS")
+
+
 def _self_test_interleave_mvc_trailing_nal():
     """ADR-290: real, confirmed bug found while closing mux_lossless_mvc_mkv()'s own
     flagged-as-unconfirmed question ("does mkvmerge really carry the MVC NALs
@@ -25343,6 +25462,7 @@ def _run_self_tests():
         _self_test_sbs2mvc_truehd_falls_through_to_ac3,
         _self_test_sbs2mvc_ffprobe_track_detection,
         _self_test_mvc_extract_remove_stale_temp,
+        _self_test_mvc_tools_version_aware_install,
         _self_test_interleave_mvc_trailing_nal,
         _self_test_interleave_mvc_strips_frim_delimiter,
         _self_test_iso_to_bd_folder,

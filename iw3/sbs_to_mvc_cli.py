@@ -70,6 +70,7 @@ _BD_AUDIO = {"A_AC3", "A_DTS"}
 _BD_AUDIO_EXT = {"A_AC3": "ac3", "A_DTS": "dts"}
 FRIM_URL = "https://drive.google.com/uc?export=download&id=1lumXLd74U-E2k195bzfETbHgFcHcT4sH"
 FRIM_SHA256 = "76689784495D53B34889F0EA67C9DB6B9750925DB9D1147F8FD9159E111C0778"
+FRIM_VERSION = "1.31"
 # Extra places to fetch the same file from if the author's link stops working. Empty on purpose:
 # FRIM has no explicit redistribution permission, so none is hosted by this project. Anything added
 # here (or set in the FRIM_MIRROR_URL environment variable) is still only accepted if its SHA-256
@@ -92,23 +93,52 @@ def find_frim():
 _FRIM_FILES = ("FRIMEncode64.exe", "libmfxsw64.dll")
 
 
-def install_frim(root=None, package_dir=None):
+def _frim_installed_version(exe):
+    """Returns the installed FRIMEncode's version (e.g. "1.31"), or None if it can't be
+    determined. Unlike tsMuxeR (see install_mvc_tools.py's own version-check helper),
+    FRIMEncode exits 0 and prints its version banner to stdout when run with no
+    arguments -- confirmed live."""
+    try:
+        out = subprocess.run([exe], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"FRIM Encoder version (\d+\.\d+)", out.stdout or "")
+    return m.group(1) if m else None
+
+
+def _install_frim_files(dest, src_dir, names=_FRIM_FILES):
+    """Copies each of `names` from src_dir into dest via a tmp-name + os.replace swap
+    (CS-IO-001) so an interrupted copy can never leave a half-written FRIM file behind
+    for a later run to mistake as installed."""
+    os.makedirs(dest, exist_ok=True)
+    for name in names:
+        tmp = path.join(dest, name + ".tmp")
+        shutil.copy2(path.join(src_dir, name), tmp)
+        os.replace(tmp, path.join(dest, name))
+
+
+def install_frim(root=None, package_dir=None, expected_version=FRIM_VERSION):
     """Installs the two files the software MVC encoder needs into <root>\\frim.
 
     Preferred: copy them from nunif\\windows_package\\frim\\ in this repo (hosted with the FRIM
     author's permission, so an install never depends on their download link surviving).
     Fallback if that folder is missing: download FRIM 1.31 from the author's page (or a mirror)
-    and accept it only if its SHA-256 matches FRIM_SHA256."""
+    and accept it only if its SHA-256 matches FRIM_SHA256.
+
+    Version-aware: both files already being present is left alone only when
+    the installed FRIMEncode64.exe's own --no-args version banner matches
+    expected_version -- a missing OR outdated install is (re)installed."""
     root = root or _root()
     dest = path.join(root, "frim")
+    exe = path.join(dest, "FRIMEncode64.exe")
     if all(path.exists(path.join(dest, n)) for n in _FRIM_FILES):
-        return "already installed"
+        installed = _frim_installed_version(exe)
+        if installed == expected_version:
+            return f"already installed (v{installed})"
     package_dir = package_dir or path.join(root, "nunif", "windows_package", "frim")
     if all(path.exists(path.join(package_dir, n)) for n in _FRIM_FILES):
-        os.makedirs(dest, exist_ok=True)
-        for name in _FRIM_FILES:
-            shutil.copy2(path.join(package_dir, name), path.join(dest, name))
-        return "installed"
+        _install_frim_files(dest, package_dir)
+        return f"installed (v{expected_version})"
     urls = [FRIM_URL] + list(FRIM_MIRRORS)
     if os.environ.get("FRIM_MIRROR_URL"):
         urls.append(os.environ["FRIM_MIRROR_URL"])
@@ -138,11 +168,9 @@ def install_frim(root=None, package_dir=None):
     src = path.join(tmp, "x64")
     if r.returncode != 0 or not path.exists(path.join(src, "FRIMEncode64.exe")):
         raise RuntimeError(f"could not unpack FRIM: {(r.stderr or r.stdout).strip()[-300:]}")
-    os.makedirs(dest, exist_ok=True)
-    for name in ("FRIMEncode64.exe", "libmfxsw64.dll"):
-        shutil.copy2(path.join(src, name), path.join(dest, name))
+    _install_frim_files(dest, src)
     shutil.rmtree(tmp, ignore_errors=True)
-    return "installed"
+    return f"installed (v{expected_version})"
 
 
 def _ffprobe_bin():

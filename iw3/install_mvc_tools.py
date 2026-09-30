@@ -13,11 +13,18 @@ into the 3DECKER root folder (ADR-182):
 
 Safe to run repeatedly: anything already installed is left alone, except that an
 edge264-mvc without the patch marker is replaced with the patched build.
+
+tsMuxeR and FRIM are now version-aware: a version already installed is checked
+against its own --no-args version banner rather than trusting "the exe exists" forever,
+so a stale copy from an older install gets refreshed by a later run of this module (e.g.
+via update-3decker.bat's "Install Update Now" or update.bat), not only a fresh setup.ps1.
 """
 import hashlib
 import io
 import os
+import re
 import shutil
+import subprocess
 import sys
 import urllib.request
 import zipfile
@@ -30,6 +37,7 @@ from os import path
 # check at all).
 TSMUXER_URL = "https://github.com/teaching-droid/tsMuxer/releases/download/v2.18.14/tsMuxeR-2.18.14-windows-x64.zip"
 TSMUXER_SHA256 = "366DE3B95442ADF6D272294565B62F20D780CE7697211B80332F1C7C6FB967E6"
+TSMUXER_VERSION = "2.18.14"
 PATCH_MARKER = ".3decker-patched-getfilesizeex"
 _EDGE264_FILES = ("edge264_test.exe", "edge264.1.dll", "libwinpthread-1.dll", "libgcc_s_seh-1.dll",
                   "LICENSE_BSD.txt", "README.txt")
@@ -54,16 +62,38 @@ def install_edge264(root=None, package_dir=None):
     return "installed"
 
 
-def install_tsmuxer(root=None, url=TSMUXER_URL, expected_sha256=TSMUXER_SHA256):
+def _tsmuxer_installed_version(exe):
+    """Returns the installed tsMuxeR's version (e.g. "2.18.14"), or None if it can't be
+    determined. tsMuxeR prints its version banner to stdout on its FIRST line even
+    though it exits with a non-zero code when run with no arguments (confirmed live --
+    it treats that as a usage error), so this deliberately does not check the return
+    code, only whether the banner is parseable."""
+    try:
+        out = subprocess.run([exe], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"tsMuxeR version (\d+\.\d+\.\d+)", out.stdout or "")
+    return m.group(1) if m else None
+
+
+def install_tsmuxer(root=None, url=TSMUXER_URL, expected_sha256=TSMUXER_SHA256,
+                     expected_version=TSMUXER_VERSION):
     """Downloads the tsMuxeR release zip and accepts it only if its SHA-256 matches
     expected_sha256 (ADR-300) -- same "verify before trusting a downloaded binary"
     pattern install_frim() uses below, since this file also lands directly in every
-    user's install and gets run as a subprocess."""
+    user's install and gets run as a subprocess.
+
+    Version-aware: an exe that's already there is left alone only when its
+    own --no-args version banner matches expected_version -- a missing OR outdated
+    exe is (re)installed, replacing it via a tmp-name + os.replace swap (CS-IO-001)
+    so an interrupted download/replace can never leave a half-written tsMuxeR.exe."""
     root = root or _root()
     dest = path.join(root, "tsmuxer")
     exe = path.join(dest, "tsMuxeR.exe")
     if path.exists(exe):
-        return "already installed"
+        installed = _tsmuxer_installed_version(exe)
+        if installed == expected_version:
+            return f"already installed (v{installed})"
     with urllib.request.urlopen(url, timeout=120) as resp:
         data = resp.read()
     if expected_sha256 and hashlib.sha256(data).hexdigest().upper() != expected_sha256.upper():
@@ -73,9 +103,11 @@ def install_tsmuxer(root=None, url=TSMUXER_URL, expected_sha256=TSMUXER_SHA256):
         if member is None:
             raise RuntimeError("tsMuxeR.exe not found inside the downloaded archive")
         os.makedirs(dest, exist_ok=True)
-        with z.open(member) as src, open(exe, "wb") as out:
+        tmp_exe = exe + ".tmp"
+        with z.open(member) as src, open(tmp_exe, "wb") as out:
             shutil.copyfileobj(src, out)
-    return "installed"
+        os.replace(tmp_exe, exe)
+    return f"installed (v{expected_version})"
 
 
 def main():

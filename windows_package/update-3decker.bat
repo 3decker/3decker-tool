@@ -90,10 +90,20 @@ if %ERRORLEVEL% neq 0 goto :on_error
 pushd "%NUNIF_DIR%" && python -m iw3.register_optional_inpaint_models && popd
 if %ERRORLEVEL% neq 0 goto :on_error
 
-@rem ADR-182: installs the 3D Blu-ray import tools (patched edge264-mvc decoder +
-@rem tsMuxeR) if missing. Deliberately NOT fatal -- only the optional 3D Blu-ray
-@rem import needs them, so a failed download must not fail the whole update.
+@rem ADR-182/300: installs (or, now that this is version-aware, refreshes if
+@rem outdated) the 3D Blu-ray import tools (patched edge264-mvc decoder + tsMuxeR +
+@rem FRIM). Deliberately NOT fatal -- only the optional 3D Blu-ray import needs
+@rem them, so a failed download must not fail the whole update.
 pushd "%NUNIF_DIR%" && python -m iw3.install_mvc_tools & popd
+
+@rem Keeps ffmpeg/ffprobe and MKVToolNix current on the UPDATE path too --
+@rem previously only setup.ps1 (fresh installs) ever touched these two. Same shared,
+@rem version-aware Install-Ffmpeg/Install-MkvToolNix logic setup.ps1 itself now calls
+@rem (install_media_tools.ps1), invoked here via `powershell -File`, the same pattern
+@rem already used for detect_torch_variant.ps1 above. Deliberately NOT fatal, same as
+@rem the install_mvc_tools call just above -- no ERRORLEVEL check follows this line,
+@rem so a flaky ffmpeg/MKVToolNix download can never fail the whole update.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%NUNIF_DIR%\windows_package\install_media_tools.ps1"
 
 
 @rem warmup, create pyc

@@ -898,6 +898,114 @@ def _run_rife_interpolation(output_path, args, force_hevc=False):
     return interpolated_path
 
 
+def _parse_bitrate_mbps(value):
+    """"60M" -> 60.0, "8000k" -> 8.0, "1G" -> 1000.0. Returns None if unparseable."""
+    m = re.match(r"^\s*([0-9.]+)\s*([kKmMgG]?)\s*$", str(value))
+    if not m:
+        return None
+    num = float(m.group(1))
+    suffix = m.group(2).lower()
+    if suffix == "k":
+        return num / 1000.0
+    elif suffix == "g":
+        return num * 1000.0
+    else:
+        return num
+
+
+def _run_bitrate_cap(video_path, args):
+    """ADR-298: the real, reliable implementation of "Limit Bitrate" -- a genuine
+    second pass, run only when actually needed. See make_video_codec_option()'s own
+    comment for why a single-pass NVENC mode can't do this reliably (confirmed by
+    direct, controlled real-hardware testing: `rc=vbr` with a bitrate ceiling
+    INFLATES size toward that ceiling even on easy content, the opposite of the
+    intended behavior -- every combination tried showed the same inflation).
+
+    This checks the REAL bitrate of the just-finished file and, only if it actually
+    exceeds the user's chosen limit, re-encodes with true CBR (confirmed hitting its
+    target to within ~0.04% on real hardware, unlike the broken vbr+maxrate
+    combination) to bring it down. Content that never exceeded the limit is left
+    completely untouched, at its original, better quality -- this never makes a file
+    bigger or worse than leaving Limit Bitrate off would.
+
+    Replaces the oversized file in place (os.replace(), the same pattern
+    _inject_dovi_rpu() already uses) rather than producing a new '_capped' file
+    alongside it -- unlike RIFE/upscale (which make a genuinely different artifact),
+    this step is fixing the SAME file to meet a real constraint the user asked for;
+    keeping both the giant original and a smaller copy around would defeat the whole
+    point of the feature (avoiding disk bloat). Returns video_path on a real
+    re-encode, or None if no-op / failed (original file always left intact either
+    way)."""
+    if not getattr(args, "limit_bitrate", False):
+        return None
+    if getattr(args, "video_codec", None) not in ("hevc_nvenc", "h264_nvenc"):
+        return None
+    target_mbps = _parse_bitrate_mbps(getattr(args, "video_bitrate", None))
+    if not target_mbps:
+        return None
+
+    import json as _json
+    ffprobe = _find_ffprobe()
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format",
+             "-select_streams", "v:0", "-show_entries", "stream=bit_rate", str(video_path)],
+            capture_output=True, text=True, timeout=60)
+        data = _json.loads(proc.stdout)
+        streams = data.get("streams", [])
+        real_bps = int(streams[0]["bit_rate"]) if streams and streams[0].get("bit_rate") else None
+        if not real_bps:
+            # Some containers (MKV in particular) don't tag a per-stream bitrate --
+            # fall back to the container's own overall figure, close enough for this
+            # check since audio is a small fraction of the total for a file this size.
+            real_bps = int(data.get("format", {}).get("bit_rate") or 0)
+    except Exception as e:
+        print(f"[iw3] Limit Bitrate: could not read the finished file's real bitrate, "
+              f"leaving it as-is: {e}", file=sys.stderr)
+        return None
+    if real_bps <= 0:
+        return None
+
+    target_bps = target_mbps * 1_000_000
+    # A small tolerance avoids a wasteful, barely-necessary re-encode when the real
+    # bitrate is only marginally over the limit.
+    if real_bps <= target_bps * 1.05:
+        return None
+
+    ffmpeg = _get_ffmpeg_bin()
+    base, ext = path.splitext(str(video_path))
+    tmp_path = f"{base}_capping_tmp{ext}"
+    print(f"[iw3] Limit Bitrate: finished file is {real_bps / 1_000_000:.1f} Mbps, above "
+          f"your {target_mbps:.0f} Mbps limit -- re-encoding to bring it down "
+          f"(quality-preserving content is left alone; this only affects what the "
+          f"limit actually caught)...", file=sys.stderr)
+    pix_fmt = _clamp_pix_fmt_for_codec(getattr(args, "pix_fmt", "yuv420p"), args.video_codec)
+    cmd = [ffmpeg, "-y", "-v", "error", "-i", str(video_path),
+           "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+           "-c:v", args.video_codec, "-rc", "cbr", "-b:v", str(args.video_bitrate),
+           "-pix_fmt", pix_fmt, "-c:a", "copy", "-c:s", "copy", tmp_path]
+    if torch.cuda.is_available() and args.gpu[0] >= 0:
+        cmd += ["-gpu", str(args.gpu[0])]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    except Exception as e:
+        print(f"[iw3] Limit Bitrate re-encode failed to start, keeping the original file: {e}",
+              file=sys.stderr)
+        return None
+    if r.returncode != 0 or not path.exists(tmp_path):
+        print(f"[iw3] Limit Bitrate re-encode failed, keeping the original (uncapped) file: "
+              f"{r.stderr.strip()[-400:]}", file=sys.stderr)
+        try:
+            if path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return None
+    os.replace(tmp_path, video_path)
+    print("[iw3] Limit Bitrate: re-encoded successfully.", file=sys.stderr)
+    return video_path
+
+
 def _run_post_conversion_steps(video_path, args, dv_source=None):
     """ADR-209: the steps that run after the conversion, CHAINED so each one works on the previous one's result:
     waifu2x upscale -> RIFE -> Dolby Vision re-attach (only when `dv_source` is given, i.e. RIFE + Preserve Dolby
@@ -924,6 +1032,11 @@ def _run_post_conversion_steps(video_path, args, dv_source=None):
     restored = _run_audio_subtitle_restore(current, args)
     if restored:
         current = restored
+    # ADR-298: checks/re-encodes the fully-assembled file (audio already restored, if
+    # that ran) so the real bitrate check reflects what the user will actually keep --
+    # an in-place fix (see _run_bitrate_cap()'s own docstring for why), so `current`
+    # doesn't change, just what's sitting at that same path.
+    _run_bitrate_cap(current, args)
     # ADR-246: MVC conversion is a side effect (its own separate file), not a chain link -- it
     # never changes `current`/the file this function returns as "the one to keep".
     _run_mvc_conversion(current, args)
@@ -3150,22 +3263,23 @@ def make_video_codec_option(args, input_path=None):
             elif args.half_tb:
                 options["x264-params"] = "frame-packing=4"
         elif args.video_codec in {"hevc_nvenc", "h264_nvenc"}:
-            if getattr(args, "limit_bitrate", False):
-                # Real bug found via a user report (The Craft 1996, a dark/grainy source):
-                # constqp below has no size ceiling at all -- it spends whatever bits it
-                # takes to hit --crf's quality target, which can make grainy/dark/noisy
-                # content come out 2x+ larger than a cleaner movie at the identical CRF.
-                # vbr+cq keeps aiming for the same CRF-equivalent quality on easy scenes,
-                # but caps out at --video-bitrate (average) / 1.5x (peak) once content
-                # gets hard, instead of running away unbounded.
-                options["rc"] = "vbr"
-                options["cq"] = str(args.crf)
-                options["b"] = args.video_bitrate
-                options["maxrate"] = _scale_bitrate_str(args.video_bitrate, 1.5)
-                options["bufsize"] = _scale_bitrate_str(args.video_bitrate, 2.0)
-            else:
-                options["rc"] = "constqp"
-                options["qp"] = str(args.crf)
+            # ADR-294/ADR-298: constqp is the only reliable single-pass mode here. An
+            # earlier version of this branch switched to `rc=vbr, cq=<crf>,
+            # b/maxrate/bufsize=<video-bitrate>` when Limit Bitrate was checked, intending
+            # a real size ceiling -- confirmed by direct, controlled real-hardware testing
+            # (ADR-298) that this INFLATES file size toward the cap even on easy content
+            # that constqp alone would encode far smaller (235MB -> 546MB on identical real
+            # footage at the same quality, more than double), the opposite of the intended
+            # behavior. Every combination tried (with/without -b:v, -b:v 0, vbr vs vbr_hq)
+            # showed the same inflation -- ffmpeg's hevc_nvenc simply doesn't offer a
+            # reliable single-pass "quality-driven but capped" mode. Limit Bitrate is now
+            # implemented as a real post-step instead (_run_bitrate_cap(), a genuine second
+            # pass with true CBR, which IS reliable -- confirmed hitting 60M requested to
+            # within ~0.04%) that only re-encodes when the finished file's real bitrate
+            # actually exceeds the chosen limit. This main-encode branch stays simple and
+            # correct for every case; do not reintroduce the vbr+maxrate mechanism here.
+            options["rc"] = "constqp"
+            options["qp"] = str(args.crf)
             if torch.cuda.is_available() and args.gpu[0] >= 0:
                 options["gpu"] = str(args.gpu[0])
     elif args.video_codec in {"h264_qsv", "hevc_qsv"}:

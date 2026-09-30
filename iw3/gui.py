@@ -20520,13 +20520,22 @@ def _self_test_frame_packing_sei():
 
 
 def _self_test_nvenc_bitrate_cap():
-    """ADR-294: a real user report (The Craft 1996, a dark/grainy 4K source) found
-    that hevc_nvenc's default rate control (constqp) has no size ceiling at all -- it
-    can make grainy/dark content come out 2x+ larger than a cleaner movie at the
-    identical --crf, since CRF/constqp only targets a quality level, never a size.
-    --limit-bitrate switches to vbr+cq (same quality target, but capped) instead.
-    Off by default -- existing jobs are completely unaffected unless explicitly
-    opted in."""
+    """ADR-294/ADR-298: a real user report (The Craft 1996, a dark/grainy 4K source)
+    found that hevc_nvenc's default rate control (constqp) has no size ceiling at all
+    -- it can make grainy/dark content come out 2x+ larger than a cleaner movie at
+    the identical --crf, since CRF/constqp only targets a quality level, never a
+    size.
+
+    ADR-294's first fix (switching to rc=vbr+cq+maxrate on the MAIN encode when
+    --limit-bitrate was set) was confirmed WRONG by direct, controlled real-hardware
+    testing (ADR-298): it INFLATES file size toward the cap even on easy content that
+    constqp alone would encode far smaller (235MB -> 546MB on identical real footage
+    at the same quality) -- the opposite of the intended behavior. This test now
+    covers the corrected design: the main encode ALWAYS uses plain constqp regardless
+    of --limit-bitrate (that risky branch is gone for good -- see
+    make_video_codec_option()'s own comment for why it must never come back), and the
+    real capping happens in _run_bitrate_cap(), a separate post-step covered by its
+    own test below."""
     import types
     import iw3.utils as iw3_utils
 
@@ -20537,32 +20546,81 @@ def _self_test_nvenc_bitrate_cap():
         base.update(kw)
         return types.SimpleNamespace(**base)
 
-    # default (unset): unchanged constqp behaviour, no size ceiling
-    off = iw3_utils.make_video_codec_option(_args())
-    assert off["rc"] == "constqp" and off["qp"] == "15"
-    assert "b" not in off and "maxrate" not in off and "bufsize" not in off
+    # Main encode is always plain constqp now, regardless of --limit-bitrate -- this
+    # is the whole point of the ADR-298 fix: the risky path is gone, not just hidden
+    # behind a flag.
+    for limit_bitrate in (False, True):
+        opt = iw3_utils.make_video_codec_option(_args(limit_bitrate=limit_bitrate))
+        assert opt["rc"] == "constqp" and opt["qp"] == "15", opt
+        assert "b" not in opt and "maxrate" not in opt and "bufsize" not in opt and "cq" not in opt, opt
 
-    # opted in: vbr+cq with a real cap derived from --video-bitrate
-    on = iw3_utils.make_video_codec_option(_args(limit_bitrate=True))
-    assert on["rc"] == "vbr" and on["cq"] == "15"
-    assert on["b"] == "20M"
-    assert on["maxrate"] == "30M"  # 1.5x
-    assert on["bufsize"] == "40M"  # 2.0x
+    opt_h264 = iw3_utils.make_video_codec_option(_args(video_codec="h264_nvenc", limit_bitrate=True))
+    assert opt_h264["rc"] == "constqp" and opt_h264["qp"] == "15"
 
-    # h264_nvenc gets the same treatment
-    on_h264 = iw3_utils.make_video_codec_option(_args(video_codec="h264_nvenc", limit_bitrate=True,
-                                                       video_bitrate="8M"))
-    assert on_h264["rc"] == "vbr" and on_h264["b"] == "8M" and on_h264["maxrate"] == "12M"
-
-    # libx264/libx265 and libopenh264 never see rc/cq/limit-bitrate logic at all
+    # libx264/libx265/libopenh264 never saw rc/cq logic either way
     x264 = iw3_utils.make_video_codec_option(_args(video_codec="libx264", limit_bitrate=True))
     assert "rc" not in x264 and "cq" not in x264
 
-    assert iw3_utils._scale_bitrate_str("8M", 1.5) == "12M"
-    assert iw3_utils._scale_bitrate_str("500k", 2.0) == "1000k"
-    assert iw3_utils._scale_bitrate_str("garbage", 1.5) == "garbage"
-
     print("_self_test_nvenc_bitrate_cap: PASS")
+
+
+def _self_test_bitrate_cap_post_step():
+    """ADR-298: _run_bitrate_cap() is the real, reliable Limit Bitrate implementation
+    -- a genuine second pass that only re-encodes when the finished file's REAL
+    bitrate actually exceeds the user's chosen limit, using true CBR (confirmed
+    hitting its target to within ~0.04% on real hardware in the investigation this
+    fix came out of). Covers: off by default, off for non-NVENC codecs, no-op when
+    already under budget (mocked ffprobe reporting a low bitrate -- must never touch
+    the file or shell out to ffmpeg), and triggering a real re-encode subprocess when
+    over budget, verified via the actual command built (rc=cbr, not vbr)."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def _args(**kw):
+        base = dict(limit_bitrate=True, video_codec="hevc_nvenc", video_bitrate="20M",
+                    pix_fmt="yuv420p", gpu=[-1])
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def fake_probe(bps):
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=f'{{"streams":[{{"bit_rate":"{bps}"}}],"format":{{}}}}',
+            stderr="")
+
+    # off by default
+    assert U._run_bitrate_cap("x.mkv", _args(limit_bitrate=False)) is None
+
+    # never applies to non-NVENC codecs
+    assert U._run_bitrate_cap("x.mkv", _args(video_codec="libx265")) is None
+
+    # already under the limit (well under the 5% tolerance) -- must be a complete
+    # no-op: no ffmpeg subprocess call at all, file never touched
+    with mock.patch("subprocess.run", return_value=fake_probe(15_000_000)) as m_run, \
+         mock.patch("os.path.exists", return_value=True):
+        result = U._run_bitrate_cap("x.mkv", _args())
+    assert result is None
+    assert m_run.call_count == 1, "must stop after the probe -- no re-encode subprocess when under budget"
+
+    # genuinely over the limit -- must trigger a real re-encode with true CBR (never
+    # the broken vbr+maxrate combination)
+    with mock.patch("subprocess.run", side_effect=[fake_probe(40_000_000),
+                                                    types.SimpleNamespace(returncode=0, stdout="", stderr="")]) as m_run, \
+         mock.patch("os.path.exists", return_value=True), \
+         mock.patch("os.replace") as m_replace:
+        result = U._run_bitrate_cap("x.mkv", _args())
+    assert result == "x.mkv"
+    assert m_run.call_count == 2, "must probe, then re-encode"
+    reencode_cmd = m_run.call_args_list[1][0][0]
+    assert "-rc" in reencode_cmd and reencode_cmd[reencode_cmd.index("-rc") + 1] == "cbr", reencode_cmd
+    assert "-b:v" in reencode_cmd and reencode_cmd[reencode_cmd.index("-b:v") + 1] == "20M", reencode_cmd
+    assert "vbr" not in reencode_cmd, "must never use the broken vbr+maxrate mechanism"
+    assert "-c:a" in reencode_cmd and reencode_cmd[reencode_cmd.index("-c:a") + 1] == "copy", \
+        "audio must be stream-copied, never re-encoded"
+    m_replace.assert_called_once()
+
+    print("_self_test_bitrate_cap_post_step: PASS")
 
 
 def _self_test_analyze_source_video():
@@ -25145,6 +25203,7 @@ def _run_self_tests():
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_nvenc_bitrate_cap,
+        _self_test_bitrate_cap_post_step,
         _self_test_analyze_source_video,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,

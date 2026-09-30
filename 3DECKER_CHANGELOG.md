@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — September 28, 2026 (7)
+## Latest Update — September 30, 2026
+
+**Fixed: "Limit Bitrate" could make a file BIGGER instead of capping it — the opposite of what it's supposed to do.** A real user hit this: a movie that normally comes out around 20 GB ballooned to 52.78 GB with Limit Bitrate turned on at 60 Mbps — bigger than leaving it off, and even bigger than the 60 Mbps limit itself. Real, confirmed cause: the way your graphics card's encoder combines "aim for this quality" with "but stay under this size" doesn't actually work as a ceiling the way it's supposed to — it was pushing the file size up *toward* the limit even on movies that never needed anywhere near that much data in the first place. Completely rebuilt how this feature works: your movie now always encodes normally first, at full quality, exactly like before this feature existed. Only *after* it's finished does the app check the real resulting file size — and only if it's actually over your limit does it re-encode to bring it down. If your movie was never going to be too big in the first place (the normal case), nothing extra happens at all, and quality is completely unaffected. This can no longer make a file bigger than leaving Limit Bitrate off. If you turned this on for any recent conversion, it's worth checking whether that file came out unexpectedly large — you may want to redo it now that this is fixed.
+
+## Update — September 28, 2026 (7)
 
 **New: "Analyze Source" button — see your source movie's real resolution, codec, and bitrate before picking your own encoding settings.** Sits right next to Quick Preview. Click it and it shows you real, measured facts about whatever's in Input: resolution, video codec, how long it is, and its actual average bitrate — useful as a reference point when deciding on a CRF or Limit Bitrate setting of your own, instead of guessing. It'll also try to show you the exact CRF the source was originally encoded with, but that only works sometimes — it's only readable when the source was made with the free x264/x265 encoders, which leave that info behind; most commercial Blu-ray and streaming releases use a different, private encoder that doesn't, so seeing "not available" there is normal, not a bug.
 

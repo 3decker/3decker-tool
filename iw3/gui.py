@@ -98,6 +98,34 @@ PRESET_DIR = path.join(CONFIG_DIR, "presets")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(PRESET_DIR, exist_ok=True)
 
+# Real user report (Steve, via decker, 2026-09-30): suspected that some inconsistent
+# test results earlier in his own testing came from forgetting to reload his named
+# Preset after restarting 3DECKER -- a real, plausible gap: load_preset() (below) has
+# always applied whatever preset was explicitly requested, but on every startup
+# MainFrame.__init__'s own bare self.load_preset() call (no name) restores CONFIG_PATH
+# -- the general, ad-hoc "whatever was last directly changed" settings file -- not
+# whichever NAMED preset the user had actually loaded. cbo_app_preset's own displayed
+# value was even being explicitly reset to "" on every startup (see load_preset()'s own
+# `preset = name` / final SetValue(preset), where a bare call always makes name=""),
+# so there was previously no way to tell from the UI alone that this had happened.
+# Persisted the same lightweight way as Theme/Layout/Zoom above/below: a dedicated
+# plain-text file holding just the preset's name, checked at startup in __init__ to
+# decide whether to auto re-apply that named preset (via the real load_preset(name)
+# path) instead of just the bare CONFIG_PATH restore.
+LAST_PRESET_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-last-preset.cfg")
+
+
+def _load_last_preset_name(config_path):
+    if path.exists(config_path):
+        with open(config_path, encoding="utf-8") as f:
+            return f.read().strip()
+    return ""
+
+
+def _save_last_preset_name(config_path, name):
+    with open(config_path, mode="w", encoding="utf-8") as f:
+        f.write(name or "")
+
 # GUI Layout preference (ADR-037, live-switching added by ADR-045): Tabbed (default,
 # ADR-036's wx.Notebook) vs Single Page (every category StaticBox visible at once).
 # Switching the dropdown (on_text_changed_cbo_layout) applies immediately in the
@@ -7506,7 +7534,26 @@ class MainFrame(wx.Frame):
         self.btn_cancel.Disable()
         self.btn_suspend.Disable()
 
-        self.load_preset()
+        # Real user report (Steve, 2026-09-30): a bare self.load_preset() here always
+        # restored CONFIG_PATH -- the general, ad-hoc "whatever was last directly
+        # changed" settings file -- never whichever NAMED preset the user had actually
+        # been using, even though cbo_app_preset might still show that preset's name
+        # from before a restart. If settings had drifted from that preset since it was
+        # last loaded (a likely real cause of some of his own inconsistent test
+        # results), the user would see the old preset name but get the drifted
+        # settings, with no obvious sign anything was off. Now checks the last
+        # EXPLICITLY loaded/saved preset (LAST_PRESET_CONFIG_PATH, see its own comment)
+        # and re-applies it fresh via the real load_preset(name) path if it still
+        # exists, instead of the bare CONFIG_PATH restore -- loading a named preset
+        # already restores every registered control the same way a bare load would
+        # (save_preset()/load_preset() use the identical registration logic for both
+        # CONFIG_PATH and a named preset file), so this is a straight substitution,
+        # not an addition to the bare call.
+        last_preset_name = _load_last_preset_name(LAST_PRESET_CONFIG_PATH)
+        if last_preset_name and last_preset_name in self.list_preset():
+            self.load_preset(last_preset_name)
+        else:
+            self.load_preset()
         # ADR-249: real user request -- load_preset() above restores every registered
         # control's value from last session's saved iw3-gui.cfg, and these Standalone
         # Tools log boxes get swept into that same generic mechanism with no exception
@@ -10889,12 +10936,27 @@ class MainFrame(wx.Frame):
     def on_click_btn_load_preset(self, event):
         self.load_preset(self.cbo_app_preset.GetValue(), exclude_names={self.GetName()})
         self.update_controls()
+        # Real user report (Steve, 2026-09-30): remember this as the preset to
+        # auto-reapply on the next startup, not just leave it showing in the dropdown
+        # until the next restart quietly reverts to CONFIG_PATH's own ad-hoc settings
+        # instead -- see LAST_PRESET_CONFIG_PATH's own comment for the real gap this
+        # closes. Read cbo_app_preset's value AFTER load_preset() (not the raw pre-click
+        # value) since that function's own sanitize_filename() may have changed it.
+        _save_last_preset_name(LAST_PRESET_CONFIG_PATH, self.cbo_app_preset.GetValue())
 
     def on_click_btn_save_preset(self, event):
         self.save_preset(self.cbo_app_preset.GetValue())
+        _save_last_preset_name(LAST_PRESET_CONFIG_PATH, self.cbo_app_preset.GetValue())
 
     def on_click_btn_delete_preset(self, event):
-        self.delete_preset(self.cbo_app_preset.GetValue())
+        deleted_name = self.cbo_app_preset.GetValue()
+        self.delete_preset(deleted_name)
+        # If the preset being remembered for next startup is the one just deleted,
+        # forget it too -- the startup auto-load check below is already defensive
+        # about a stale/missing name, but there is no reason to keep pointing at a
+        # preset that no longer exists.
+        if deleted_name and _load_last_preset_name(LAST_PRESET_CONFIG_PATH) == deleted_name:
+            _save_last_preset_name(LAST_PRESET_CONFIG_PATH, "")
         event.Skip()
 
     # ADR-157 amendment (ADR-169 adds Restore All Audio Tracks to the list):
@@ -24247,6 +24309,84 @@ def _self_test_iso_to_bd_folder():
     print("_self_test_iso_to_bd_folder: PASS")
 
 
+def _self_test_last_preset_auto_load():
+    """Real user report (Steve, 2026-09-30): suspected some of his own inconsistent
+    testing came from forgetting to reload his named Preset after restarting 3DECKER --
+    a bare self.load_preset() at startup always restored CONFIG_PATH's own ad-hoc
+    settings, never whichever named preset the user had actually been using, even
+    though cbo_app_preset might still show that name from before the restart. Covers
+    both real behaviors this fix adds: (1) explicitly loading or saving a named preset
+    now remembers it for next startup (LAST_PRESET_CONFIG_PATH), (2) a real, fresh
+    MainFrame() with a real, still-existing tracked preset on disk re-applies that
+    preset's own real settings on construction, not just CONFIG_PATH's -- proven by a
+    real, distinguishing value (Divergence) that only the preset file itself carries,
+    confirmed present on the freshly-constructed frame without any explicit Load click.
+    Also covers the defensive fallback: a tracked name that no longer exists on disk
+    (deleted, or from a different/older install) must not crash startup, and must fall
+    back to the normal bare CONFIG_PATH restore instead."""
+    import tempfile
+    from unittest import mock
+
+    with tempfile.TemporaryDirectory() as tmp_config_dir:
+        last_preset_path = path.join(tmp_config_dir, "last-preset.cfg")
+
+        # 1. Round-trip of the plain helper functions themselves.
+        assert _load_last_preset_name(last_preset_path) == "", "must default to empty, not crash, when missing"
+        _save_last_preset_name(last_preset_path, "MyRealPreset")
+        assert _load_last_preset_name(last_preset_path) == "MyRealPreset"
+        _save_last_preset_name(last_preset_path, "")
+        assert _load_last_preset_name(last_preset_path) == ""
+
+        # 2. A real preset file that actually exists on disk, with one real,
+        # distinguishing value (Divergence) different from whatever CONFIG_PATH/
+        # defaults would give -- proof the auto-load path is really applying THIS
+        # file's own settings, not just leaving whatever the widget defaulted to.
+        app = None
+        frame = None
+        try:
+            app = wx.App()
+            probe_frame = MainFrame()
+            probe_frame.cbo_divergence.SetValue("13.5")
+            probe_frame.save_preset("SelfTestAutoLoadPreset")
+            probe_frame.Destroy()
+            app.Destroy()
+
+            # 2a. A real, fresh MainFrame(), with the tracked name pointing at that
+            # real preset, must come up already showing its real value -- with no
+            # explicit Load click of any kind.
+            with mock.patch(f"{__name__}.LAST_PRESET_CONFIG_PATH", last_preset_path):
+                _save_last_preset_name(last_preset_path, "SelfTestAutoLoadPreset")
+                app = wx.App()
+                frame = MainFrame()
+                assert frame.cbo_app_preset.GetValue() == "SelfTestAutoLoadPreset", \
+                    f"expected the tracked preset auto-applied, got {frame.cbo_app_preset.GetValue()!r}"
+                assert frame.cbo_divergence.GetValue() == "13.5", \
+                    f"expected the preset's own real Divergence value, got {frame.cbo_divergence.GetValue()!r}"
+                frame.Destroy()
+                app.Destroy()
+
+            # 2b. A tracked name that does not exist on disk (deleted, or copied from
+            # a different install) must not crash startup, and must fall back to the
+            # normal bare load -- confirmed by cbo_app_preset coming up empty (the
+            # bare CONFIG_PATH path's own real rule), not the missing name.
+            with mock.patch(f"{__name__}.LAST_PRESET_CONFIG_PATH", last_preset_path):
+                _save_last_preset_name(last_preset_path, "ThisPresetWasDeletedOrNeverExisted")
+                app = wx.App()
+                frame = MainFrame()
+                assert frame.cbo_app_preset.GetValue() == "", \
+                    f"a missing tracked preset must fall back to the bare load, got {frame.cbo_app_preset.GetValue()!r}"
+                frame.Destroy()
+                app.Destroy()
+        finally:
+            preset_file = path.join(PRESET_DIR, "SelfTestAutoLoadPreset.cfg")
+            if path.exists(preset_file):
+                os.remove(preset_file)
+            app = None
+            frame = None
+
+    print("_self_test_last_preset_auto_load: PASS")
+
+
 def _self_test_sbs2mvc_fix_frame_rate():
     """A 25fps (or any non-23.976/24) input to sbs_to_mvc_cli.convert(): by default still
     refused (ADR-182's original 'never silently change your movie's speed' rule, untouched);
@@ -25206,6 +25346,7 @@ def _run_self_tests():
         _self_test_interleave_mvc_trailing_nal,
         _self_test_interleave_mvc_strips_frim_delimiter,
         _self_test_iso_to_bd_folder,
+        _self_test_last_preset_auto_load,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_folder_detection_ignores_stray_dots,
         _self_test_sbs2mvc_convert_hdr_to_sdr,

@@ -20600,16 +20600,24 @@ def _self_test_mvc_muxopt_new_audio_pes():
     themselves: real discs write BD-legal audio (AC-3/DTS/DTS-HD/TrueHD) using PES stream id
     0xFD ("new audio PES"); our builds were writing the legacy 0xBD (private_stream_1) instead.
     tsMuxeR's own documentation claims 0xFD is "activated automatically for BD muxing" -- proven
-    FALSE for this bundled build (2.7.0) by direct testing: a --blu-ray mux without
+    FALSE for this bundled build (2.7.0 at the time) by direct testing: a --blu-ray mux without
     --new-audio-pes explicitly requested produced 0xBD; adding it explicitly produced 0xFD, and
     only then did the audio track appear in MakeMKV. This is a real, silent-failure-prone
     assumption (three separate files independently assumed "--blu-ray implies it", all three
     wrong) -- this test is a permanent regression guard, at the source level, so the flag can
-    never silently disappear again from any of them without a test catching it immediately."""
+    never silently disappear again from any of them without a test catching it immediately.
+
+    ADR-300 extended this same guard to --maxbitrate=48000 (real BD-ROM drive read-rate cap,
+    also added unconditionally to all three --blu-ray MUXOPT lines, same reasoning: a flag a
+    future edit could silently drop without anyone noticing until a real hardware player
+    stutters on a disc that never warned anyone it might)."""
     checks = [
-        ("iw3/sbs_to_mvc_cli.py", 'muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10"'),
-        ("iw3/direct_mvc_cli.py", 'muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10"'),
-        ("iw3/mvc_extract_cli.py", 'lines = [f"MUXOPT --blu-ray --new-audio-pes --auto-chapters=10{cut}"]'),
+        ("iw3/sbs_to_mvc_cli.py",
+         'muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"'),
+        ("iw3/direct_mvc_cli.py",
+         'muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"'),
+        ("iw3/mvc_extract_cli.py",
+         'lines = [f"MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000{cut}"]'),
     ]
     here = path.dirname(path.dirname(path.abspath(__file__)))
     for rel_path, expected_substring in checks:
@@ -20617,8 +20625,8 @@ def _self_test_mvc_muxopt_new_audio_pes():
         with open(full_path, "r", encoding="utf-8") as f:
             src = f.read()
         assert expected_substring in src, (
-            f"{rel_path}: missing --new-audio-pes on its --blu-ray MUXOPT line -- this is the "
-            f"real, confirmed ADR-299 audio-goes-missing-in-MakeMKV bug, not a style nit")
+            f"{rel_path}: missing --new-audio-pes and/or --maxbitrate=48000 on its --blu-ray "
+            f"MUXOPT line -- this is the real, confirmed ADR-299/ADR-300 fix, not a style nit")
 
     print("_self_test_mvc_muxopt_new_audio_pes: PASS")
 

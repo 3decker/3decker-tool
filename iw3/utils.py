@@ -1305,9 +1305,10 @@ def _find_edge264_mvc():
 
 
 def _find_tsmuxer():
-    """ADR-182: locates the bundled tsMuxeR CLI (github.com/justdan96/tsMuxer,
+    """ADR-182: locates the bundled tsMuxeR CLI (github.com/teaching-droid/tsMuxer,
     Apache-2.0, a real, prebuilt-for-Windows release -- no local build needed, unlike
-    edge264-mvc above). Real 3D Blu-ray disc structure (an .mpls playlist referencing
+    edge264-mvc above; ADR-300: migrated off the archived justdan96/tsMuxer 2.7.0).
+    Real 3D Blu-ray disc structure (an .mpls playlist referencing
     one or more .m2ts clips, each carrying a COMBINED AVC+MVC video track) needs this
     -- confirmed directly that plain ffmpeg cannot even read a raw MVC elementary
     stream (errors immediately on the dependent-view SPS extension structure), so

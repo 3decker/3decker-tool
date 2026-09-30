@@ -382,7 +382,15 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
             # comment for the full evidence). Without it, audio silently gets the legacy 0xBD PES
             # stream id instead of the real Blu-ray-standard 0xFD, and MakeMKV drops the whole
             # audio track over just that one byte despite every other declaration being correct.
-            muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
+            #
+            # ADR-300: --maxbitrate=48000 caps the disc's declared read rate at the real BD-ROM
+            # drive spec (48 Mbit/s) -- see sbs_to_mvc_cli.py's own ADR-300 comment for the full
+            # real, evidence-based testing (typical content never approaches the limit; GOP-peak
+            # bursts on demanding content genuinely can; the flag never failed or corrupted output
+            # in any tested case, including one deliberately averaging above the limit). Added
+            # unconditionally, same as the other two --blu-ray MUXOPT lines.
+            muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
+                      if not is_m2ts_output else "MUXOPT --new-audio-pes")
             meta = [muxopt,
                     f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                     f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines

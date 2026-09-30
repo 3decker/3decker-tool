@@ -14,7 +14,8 @@ Real 3D Blu-ray discs store video in TWO places that are easy to confuse:
 
 Pipeline (each step verified against a real disc, not just synthetic test
 streams -- see docs/ai/AI_DECISIONS.md ADR-182):
-  1. tsMuxeR (bundled, github.com/justdan96/tsMuxer, Apache-2.0) demuxes the
+  1. tsMuxeR (bundled, github.com/teaching-droid/tsMuxer, Apache-2.0 -- ADR-300: migrated
+     off the archived justdan96/tsMuxer 2.7.0) demuxes the
      .ssif with --demux, once for each view's codec name (V_MPEG4/ISO/AVC for
      the base view, V_MPEG4/ISO/MVC for the dependent view), from the SAME
      track ID -- producing two separate elementary streams.
@@ -735,7 +736,12 @@ def mux_bd3d_iso(ssif_path, out_iso, include_av=True, stop_event=None, progress_
     # drops the whole audio track over just that one byte despite every other declaration
     # (CLPI/PMT/MPLS) coming out correct. Confirmed by direct real testing against a genuine
     # commercial disc (see sbs_to_mvc_cli.py's own ADR-299 comment for the full evidence).
-    lines = [f"MUXOPT --blu-ray --new-audio-pes --auto-chapters=10{cut}"]
+    #
+    # ADR-300: --maxbitrate=48000 caps the re-authored disc's declared read rate at the real
+    # BD-ROM drive spec (48 Mbit/s) -- see sbs_to_mvc_cli.py's own ADR-300 comment for the full
+    # real, evidence-based testing. Added unconditionally, same as the other two --blu-ray
+    # MUXOPT lines in this project.
+    lines = [f"MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000{cut}"]
     for t in wanted:
         extra = f", lang={t['lang']}" if t["lang"] else ""
         if t.get("stream_type") == "TRUE-HD":

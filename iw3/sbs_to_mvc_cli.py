@@ -473,7 +473,16 @@ _SUB_FONT_BY_LANG = {
     "ara": "Segoe UI", "heb": "Segoe UI", "per": "Segoe UI", "fas": "Segoe UI", "urd": "Segoe UI",
 }
 _MAX_BD_SUBTITLES = 32          # the Blu-ray limit for picture-subtitle streams
-_SUB_STYLE = "font-size=65, font-color=0xffffffff, bottom-offset=24, font-border=5, text-align=center"
+# ADR-300: text-align=center is no longer a recognized track parameter in the new bundled
+# tsMuxeR (2.18.14) -- confirmed by direct testing: it now prints "Warning: unknown track
+# parameter "text-align" ignored" (harmless -- the mux still completes with exit 0 -- but
+# log noise on every subtitle-bearing build). It's also absent from this build's own --help
+# text for SRT tracks, so it's a real removed/renamed option, not a mistake in our own flag
+# name. Dropped here rather than kept as dead weight that only prints a warning; this was
+# NOT re-verified for a resulting visual alignment change (no real subtitle-bearing disc was
+# played back on a screen during this session) -- flag if a real user ever reports subtitles
+# rendering off-center on a Blu-ray built with this version.
+_SUB_STYLE = "font-size=65, font-color=0xffffffff, bottom-offset=24, font-border=5"
 
 
 def _text_sub_meta(srt_path, lang, fps_text, width, height):
@@ -1042,7 +1051,24 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         # track appears correctly in MakeMKV. This is why --new-audio-pes must ALWAYS be
         # requested explicitly now, never left to --blu-ray's "automatic" activation -- for both
         # branches, not just the m2ts one.
-        muxopt = "MUXOPT --blu-ray --new-audio-pes --auto-chapters=10" if not is_m2ts_output else "MUXOPT --new-audio-pes"
+        #
+        # ADR-300: --maxbitrate=48000 caps the disc's own declared read rate at the real
+        # BD-ROM drive spec (48 Mbit/s). Confirmed by direct testing (synthetic worst-case
+        # content, both a real-motion clip and deliberately-incompressible noise, pushed
+        # through this same FRIM->tsMuxeR path at bitrates up to and beyond this project's
+        # own --bitrate ceiling): typical/real content never even approaches the limit, but
+        # GOP-driven peak bursts on demanding content can genuinely exceed it (tsMuxeR's own
+        # warning: "asks to be read at 274.4 Mbit/s at its fastest" was reproduced for real on
+        # a synthetic high-complexity clip whose time-averaged bitrate was only ~43 Mbps).
+        # Every tested case -- including one deliberately averaging ABOVE 48 Mbps, the
+        # pathological case tsMuxeR's own docs warn may not be fixable -- still muxed
+        # successfully with this flag added (never refused, never corrupted the output; the
+        # ISO's BDMV/CLPI/SSIF structure and both video tracks remained valid and ffprobe-
+        # readable throughout). This is standard, expected BD-authoring practice ("which is
+        # what a pressed disc does" per tsMuxeR's own warning text), so it is added
+        # unconditionally rather than gated behind a GUI setting.
+        muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
+                  if not is_m2ts_output else "MUXOPT --new-audio-pes")
         meta = [muxopt,
                 f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                 f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines

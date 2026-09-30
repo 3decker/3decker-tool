@@ -42,9 +42,9 @@ from os import path
 # (or in mvc_extract_cli, imported just below) actually executes.
 import nunif.gui.subprocess_patch  # noqa
 
-from .mvc_extract_cli import (AUTOCROP_MODES, Cancelled, detect_eye_crop, interleave_mvc, iso_to_bd_folder,
+from .mvc_extract_cli import (AUTOCROP_MODES, Cancelled, detect_eye_crop, iso_to_bd_folder,
                               _remove_stale_temp)
-from .utils import _find_tsmuxer, _get_ffmpeg_bin, _find_mkvmerge, log_subprocess_cmd
+from .utils import _find_tsmuxer, _get_ffmpeg_bin, log_subprocess_cmd
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
 _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
@@ -679,63 +679,6 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
     return lines, notes
 
 
-def _extract_all_av_for_mkv(input_path, work_dir, ffmpeg_bin):
-    """For the direct-to-.mkv output (ADR-245): extracts EVERY audio and subtitle track
-    as its own small Matroska file (.mka for audio, .mks for subtitles) via ffmpeg
-    stream copy, then returns their paths for mkvmerge to pull in alongside the video.
-
-    Deliberately NOT _plan_audio_subs() above: that function's whole design (convert
-    anything not Blu-ray-legal to AC-3, drop anything but PGS/text subtitles) exists
-    because a real 3D Blu-ray disc can only hold specific codecs -- a plain .mkv has no
-    such restriction at all, so filtering or converting anything here would be a real,
-    unforced loss of quality for no reason. Extracting into a small Matroska container
-    (rather than each codec's own bare elementary stream) also sidesteps ADR-243
-    entirely: mkvmerge already knows how to read its own container's tracks regardless
-    of which codec is inside, so there is no bare-stream-format guessing per codec, and
-    no risk of a specific codec (TrueHD, PGS, whatever) needing special-case handling
-    here the way the Blu-ray path needed for TrueHD."""
-    # ADR-251: real user report -- every text subtitle track was silently dropped from
-    # the direct-to-.mkv MVC output (audio came through fine). Root cause, confirmed
-    # by directly reproducing the exact command below against a real file: this
-    # bundled ffmpeg's muxer auto-detection does not recognize the ".mks" extension at
-    # all ("Unable to choose an output format for '...mks'") -- ".mka" happens to be
-    # recognized (which is why audio worked), but ".mks" isn't, so every subtitle
-    # extraction failed immediately, 100% reproducibly, regardless of subtitle codec.
-    # Fixed by telling ffmpeg the container explicitly (-f matroska) instead of
-    # relying on it guessing the muxer from the output filename's extension -- applied
-    # to both commands below, not just the one that was actually broken, since relying
-    # on extension-guessing for a non-standard extension (.mka/.mks) was fragile
-    # either way even where it happened to work.
-    tracks = _ffprobe_list_tracks(input_path, ffmpeg_bin)
-    extracted = []
-    audio_index = subtitle_index = 0
-    for t in tracks:
-        codec = t["codec"]
-        if codec.startswith("A_"):
-            out = path.join(work_dir, f"audio_{audio_index}.mka")
-            r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
-                                f"0:a:{audio_index}", "-vn", "-c:a", "copy", "-f", "matroska", out],
-                               capture_output=True, text=True)
-            if r.returncode == 0 and path.exists(out):
-                extracted.append(out)
-            else:
-                print(f"[sbs2mvc] note: audio track {audio_index + 1} ({codec}) skipped: could not extract it",
-                     file=sys.stderr)
-            audio_index += 1
-        elif codec.startswith("S_"):
-            out = path.join(work_dir, f"subtitle_{subtitle_index}.mks")
-            r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-i", input_path, "-map",
-                                f"0:s:{subtitle_index}", "-c:s", "copy", "-f", "matroska", out],
-                               capture_output=True, text=True)
-            if r.returncode == 0 and path.exists(out):
-                extracted.append(out)
-            else:
-                print(f"[sbs2mvc] note: subtitle track {subtitle_index + 1} ({codec}) skipped: could not extract it",
-                     file=sys.stderr)
-            subtitle_index += 1
-    return extracted
-
-
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
             stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False,
@@ -750,10 +693,15 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
 
     output_iso ending in .mkv (ADR-245) skips the Blu-ray disc structure entirely: the same
     real MVC video FRIMEncode produces either way is instead packaged directly into a plain
-    .mkv (interleave_mvc() + mkvmerge, the same technique ADR-241 already proved for
-    mvc_extract_cli.py) -- for a source that started as an ordinary 2D movie (AI-converted to
-    SBS by this project's own main tool) and needs to end as one real MKV-MVC file, with no
-    separate MakeMKV/CloneBD re-rip step and no intermediate disc image ever created.
+    .mkv -- for a source that started as an ordinary 2D movie (AI-converted to SBS by this
+    project's own main tool) and needs to end as one real MKV-MVC file, with no separate
+    MakeMKV/CloneBD re-rip step and no intermediate disc image ever created. ADR-303: this
+    used to build its own combined stream via interleave_mvc() + mkvmerge (ADR-241's
+    technique) -- real, confirmed bug (Steve, verified on real Zidoo hardware): that
+    combination decoded correctly with a standards-compliant software MVC decoder but showed
+    doubled/overlapping corruption on real hardware. Now built through tsMuxeR's own native
+    MKV output instead, the same tool and the same internal interleaving the .iso path
+    already uses -- see direct_mvc_cli.py's own ADR-303 comment for the full investigation.
 
     output_iso ending in .m2ts (ADR-289) is a third option: the exact same tsMuxeR muxing the
     .iso path uses (real Blu-ray-legal bitstream fixups -- insertSEI/contSPS -- correct PCR-on-
@@ -801,7 +749,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     is_folder_output = not (is_mkv_output or is_m2ts_output or is_iso_output)
     if frim is None:
         raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
-    if tsmuxer is None and not is_mkv_output:
+    if tsmuxer is None:
         raise RuntimeError("tsMuxeR not found -- run `python -m iw3.install_mvc_tools`")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg not found")
@@ -889,7 +837,6 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     base_es, dep_es = path.join(work_dir, "base.264"), path.join(work_dir, "dep.264")
     meta_path = path.join(work_dir, "mux.meta")
     ffmpeg_log = path.join(work_dir, "ffmpeg.log")
-    combined_es = path.join(work_dir, "combined_mvc.264")  # only written when is_mkv_output
     # Real, reproduced user crash (two consecutive real failures, identical error, a few
     # minutes apart): work_dir is named only from the output filename (not a timestamp or
     # job settings, same as mvc_extract_cli.py's own work_dir), so a retry after any failed/
@@ -900,8 +847,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     # own base_es/dep_es via _remove_stale_temp() (see its own docstring); this tool's
     # convert() never called the equivalent cleanup at all. Real end-user retry after a real
     # crash is exactly the scenario this closes.
-    _remove_stale_temp(base_es, dep_es, combined_es, meta_path, ffmpeg_log)
-    av_files = []  # only populated when is_mkv_output and include_av
+    _remove_stale_temp(base_es, dep_es, meta_path, ffmpeg_log)
     procs, ok = [], False
     try:
         vf = eye_filter(layout, width, height, crop)
@@ -977,60 +923,8 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
                 + (f"\nffmpeg (likely just a downstream symptom of FRIM's pipe closing, not "
                    f"ffmpeg's own problem): {ff_msg}" if ff_msg.strip() else ""))
 
-        if is_mkv_output:
-            # ADR-245: direct-to-.mkv -- the same real MVC video, packaged without ever
-            # building a disc structure. interleave_mvc() is the exact same function
-            # mvc_extract_cli.py uses to reconstruct a real MVC bitstream from a
-            # separately-demuxed base+dependent pair; FRIMEncode's own "-o:mvc base dep
-            # -viewoutput" output is that same separated shape, so it applies unchanged.
-            if progress_cb:
-                progress_cb("mux", 0, 1)
-            interleave_mvc(base_es, dep_es, combined_es)
-            if stop_event is not None and stop_event.is_set():
-                raise Cancelled()
-
-            av_files = []
-            if include_av:
-                av_files = _extract_all_av_for_mkv(input_path, work_dir, ffmpeg)
-
-            mkvmerge_bin = _find_mkvmerge()
-            if mkvmerge_bin is None:
-                raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
-            if progress_cb:
-                progress_cb("mux", 0, 100)
-            # ADR-284: real user report -- a real MVC .mkv played back on a real TV, but
-            # wasn't recognized as 3D at all (MediaInfo correctly showed "stereo" for the
-            # video stream itself, but no Matroska-level signal existed for a player to
-            # act on before even trying to decode it). Real-world precedent confirmed via
-            # research: MakeMKV -- the tool that established the practice of ripping real
-            # Blu-ray MVC discs to MKV -- uses exactly StereoMode 13 (both eyes, left eye
-            # first) / 14 (right eye first) for this, there being no dedicated Matroska
-            # enum value for "H.264 MVC" specifically. eye_filter()'s own crop order
-            # (left half cropped first, becoming FRIM's base/first view) makes the base
-            # view the left eye unless swap_eyes flips it -- matches this project's own
-            # already-established left-eye-first convention.
-            stereo_mode_value = "14" if swap_eyes else "13"
-            mux_cmd = [mkvmerge_bin, "-o", output_iso, "--default-duration", f"0:{fps_frac}fps",
-                      "--stereo-mode", f"0:{stereo_mode_value}",
-                      combined_es] + av_files
-            log_subprocess_cmd("sbs2mvc:mkvmerge", mux_cmd)
-            mux = subprocess.Popen(mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            procs.append(mux)
-            mux_tail = []
-            for line in mux.stdout:
-                mux_tail.append(line.rstrip())
-                del mux_tail[:-12]
-                m = re.search(r"Progress:\s*(\d+)%", line)
-                if m and progress_cb:
-                    progress_cb("mux", float(m.group(1)), 100)
-                if stop_event is not None and stop_event.is_set():
-                    mux.kill()
-                    raise Cancelled()
-            mux.wait()
-            if mux.returncode != 0:
-                raise RuntimeError("mkvmerge failed:\n" + "\n".join(mux_tail))
-            ok = True
-            return total_frames
+        if stop_event is not None and stop_event.is_set():
+            raise Cancelled()
 
         av_lines, notes = ([], [])
         if include_av:
@@ -1070,8 +964,11 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         # readable throughout). This is standard, expected BD-authoring practice ("which is
         # what a pressed disc does" per tsMuxeR's own warning text), so it is added
         # unconditionally rather than gated behind a GUI setting.
+        # ADR-303: .mkv now takes the same bare-clip MUXOPT as .m2ts (no --blu-ray disc
+        # structure, just --new-audio-pes) -- it's built through this same tsMuxeR path now
+        # too, not a separate mkvmerge step, so it needs the same distinction .m2ts always did.
         muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
-                  if not is_m2ts_output else "MUXOPT --new-audio-pes")
+                  if (is_iso_output or is_folder_output) else "MUXOPT --new-audio-pes")
         meta = [muxopt,
                 f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                 f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines
@@ -1136,8 +1033,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
                 shutil.rmtree(work_dir, ignore_errors=True)
             else:
                 for leftover in (base_es, dep_es, meta_path, ffmpeg_log, retimed_path, tonemapped_path,
-                                 temp_iso_for_folder,
-                                 combined_es, *av_files):
+                                 temp_iso_for_folder):
                     if leftover is None:
                         continue
                     try:

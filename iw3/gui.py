@@ -24247,90 +24247,6 @@ def _self_test_iso_to_bd_folder():
     print("_self_test_iso_to_bd_folder: PASS")
 
 
-def _self_test_sbs2mvc_extract_all_av_for_mkv():
-    """ADR-245: the direct-to-.mkv output for "SBS to 3D Blu-ray MVC" has no Blu-ray-legal-
-    codec restriction at all (unlike the .iso path, which needed ADR-243's TrueHD fix
-    specifically because of this) -- _extract_all_av_for_mkv() must pull out EVERY audio
-    and subtitle track as-is, including ones the .iso path would convert (TrueHD) or drop
-    entirely (a bitmap format like VobSub, which a real Blu-ray can't hold but a plain .mkv
-    can). Each track becomes its own small Matroska file (.mka audio / .mks subtitle) --
-    mkvmerge reads a Matroska container's own tracks regardless of the codec inside, so
-    there is no per-codec bare-elementary-stream extension guessing here at all, sidestepping
-    the whole class of bug ADR-243 had to fix for the .iso path."""
-    import types
-    from unittest import mock
-    from . import sbs_to_mvc_cli as S
-
-    tracks = [
-        {"id": 0, "codec": "V_MPEG4/ISO/AVC", "lang": ""},
-        {"id": 0, "codec": "A_TRUEHD", "lang": "eng"},
-        {"id": 1, "codec": "A_AC3", "lang": "jpn"},
-        {"id": 0, "codec": "S_HDMV/PGS", "lang": "eng"},
-        {"id": 1, "codec": "S_VOBSUB", "lang": "fre"},  # a .iso path would drop this entirely
-    ]
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        out = cmd[-1]
-        with open(out, "w", encoding="utf-8") as f:
-            f.write("fake data")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    with tempfile.TemporaryDirectory() as tmp, mock.patch.object(S, "_ffprobe_list_tracks", return_value=tracks), \
-            mock.patch.object(S.subprocess, "run", fake_run):
-        extracted = S._extract_all_av_for_mkv("movie.mkv", tmp, "ffmpeg")
-
-    assert len(extracted) == 4, extracted  # both audio + both subtitles, nothing dropped or converted
-    assert extracted[0].endswith("audio_0.mka") and extracted[1].endswith("audio_1.mka")
-    assert extracted[2].endswith("subtitle_0.mks") and extracted[3].endswith("subtitle_1.mks")
-    # every extraction is a stream copy (-c:a copy / -c:s copy), never a re-encode/conversion --
-    # TrueHD (which the .iso path must convert to AC-3, see ADR-243) is copied as-is here, and
-    # the VobSub track (which the .iso path drops entirely, no Blu-ray can hold it) is kept too.
-    assert all("copy" in c for c in calls), calls
-    maps = [c[c.index("-map") + 1] for c in calls]
-    assert maps == ["0:a:0", "0:a:1", "0:s:0", "0:s:1"], maps
-
-    print("_self_test_sbs2mvc_extract_all_av_for_mkv: PASS")
-
-
-def _self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg():
-    """ADR-251: real user report -- every text subtitle track was silently dropped from
-    the direct-to-.mkv MVC output; audio came through fine. Root cause: this bundled
-    ffmpeg's muxer auto-detection does not recognize the ".mks" extension at all
-    ("Unable to choose an output format"), confirmed by directly reproducing the exact
-    command against a real file -- ".mka" happens to be recognized (why audio worked),
-    ".mks" isn't. _self_test_sbs2mvc_extract_all_av_for_mkv above mocks subprocess.run
-    entirely, so it could never have caught this -- a real ffmpeg muxer failure needs a
-    real ffmpeg call to surface at all. This test makes that real call: builds a real
-    tiny MKV (a 1-frame video + a real subtitle track, via the bundled ffmpeg, no GPU
-    needed) and confirms _extract_all_av_for_mkv() actually pulls the subtitle out into
-    a real, non-empty file -- not mocked, not assumed."""
-    from . import sbs_to_mvc_cli as S
-    from .utils import _get_ffmpeg_bin
-
-    ffmpeg_bin = _get_ffmpeg_bin()
-    assert ffmpeg_bin is not None, "bundled ffmpeg must resolve for this test to be meaningful"
-
-    with tempfile.TemporaryDirectory() as tmp:
-        srt_path = path.join(tmp, "sub.srt")
-        with open(srt_path, "w", encoding="utf-8") as f:
-            f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
-        combined = path.join(tmp, "combined.mkv")
-        r = subprocess.run([ffmpeg_bin, "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1",
-                            "-i", srt_path, "-map", "0:v", "-map", "1:s", "-c:v", "libx264", "-c:s", "srt",
-                            combined], capture_output=True, text=True)
-        assert r.returncode == 0 and path.exists(combined), r.stderr
-
-        extracted = S._extract_all_av_for_mkv(combined, tmp, ffmpeg_bin)
-
-        subs = [p for p in extracted if p.endswith(".mks")]
-        assert len(subs) == 1, f"expected the one real subtitle track to be extracted, got {extracted}"
-        assert path.getsize(subs[0]) > 0, "the extracted .mks file must not be empty"
-
-    print("_self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg: PASS")
-
-
 def _self_test_sbs2mvc_fix_frame_rate():
     """A 25fps (or any non-23.976/24) input to sbs_to_mvc_cli.convert(): by default still
     refused (ADR-182's original 'never silently change your movie's speed' rule, untouched);
@@ -25290,8 +25206,6 @@ def _run_self_tests():
         _self_test_interleave_mvc_trailing_nal,
         _self_test_interleave_mvc_strips_frim_delimiter,
         _self_test_iso_to_bd_folder,
-        _self_test_sbs2mvc_extract_all_av_for_mkv,
-        _self_test_sbs2mvc_extract_all_av_for_mkv_real_ffmpeg,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_folder_detection_ignores_stray_dots,
         _self_test_sbs2mvc_convert_hdr_to_sdr,

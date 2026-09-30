@@ -19928,6 +19928,22 @@ def _self_test_convert_to_mvc_checkbox():
         app = wx.App()
         frame = MainFrame()
 
+        # ADR-298 follow-up (2026-09-30): a fresh MainFrame() restores whatever THIS
+        # install's own config has saved, not framework defaults -- confirmed via a
+        # real, reproducible failure on the "3decker new test" install, which (unlike
+        # a never-used dev install) has real leftover state from decker's own actual
+        # MVC/HDR-to-SDR/autocrop usage there. Reset every widget this test's
+        # "default state" assertions depend on to a known baseline first, same
+        # reasoning as _self_test_direct_mvc_checkbox's own reset block -- this test
+        # verifies the checkbox's coded default/tooltip/round-trip behavior starting
+        # from a known state, not "this install has never been touched."
+        frame.chk_convert_to_mvc.SetValue(False)
+        frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
+        frame.cbo_mvc_output_type.SetSelection(0)
+        _autocrop_items = [frame.cbo_mvc_autocrop.GetClientData(i) for i in range(frame.cbo_mvc_autocrop.GetCount())]
+        frame.cbo_mvc_autocrop.SetSelection(_autocrop_items.index(""))
+        frame.txt_mvc_bitrate.SetValue("20")
+
         assert frame.chk_convert_to_mvc.GetParent() is frame.grp_postprocess
         assert frame.chk_convert_to_mvc.GetValue() is False
         assert frame.cbo_mvc_output_type.GetClientData(frame.cbo_mvc_output_type.GetSelection()) == "iso"
@@ -20236,6 +20252,17 @@ def _self_test_direct_mvc_checkbox():
         # two-stage MVC checkbox already on as real user settings (confirmed live in
         # the "3decker new test" install, not hypothetical -- two separate real
         # failures here before this reset covered every relevant checkbox).
+        #
+        # ADR-298 follow-up (2026-09-30): a THIRD real failure on that same install,
+        # from the same root cause -- pnl_file.input_path also restores from that
+        # install's saved config (a real remembered movie folder, not blank), and
+        # part (a)'s "no input file chosen yet" comment below assumed blank
+        # unconditionally. update_input_option_state()'s directory/batch rule then
+        # correctly re-enables Resume for that real path, which is the RIGHT
+        # behavior for that input type, not a bug -- the test's assumption was
+        # wrong, not the feature. Reset here too, for the same reason as the
+        # checkboxes above.
+        frame.pnl_file.set_input_path("")
         frame.chk_resume.SetValue(False)
         frame.chk_auto_resume.SetValue(False)
         frame.chk_rife_interpolate.SetValue(False)

@@ -47,13 +47,26 @@ from os import path
 from .mvc_extract_cli import Cancelled, iso_to_bd_folder, _remove_stale_temp
 from .sbs_to_mvc_cli import bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs
 from .utils import (
-    _find_tsmuxer, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage,
+    _find_tsmuxer, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage, _StageBar,
     process_video_full, STAGE_CONVERT_MVC, STAGE_DEPTH_STEREO, log_subprocess_cmd,
 )
+from nunif.utils.video.metadata import parse_time
 
 _MVC_LAYOUT_INCOMPATIBLE_FLAGS = (
     "vr180", "cross_eyed", "rgbd", "half_rgbd", "anaglyph", "export", "export_disparity", "debug_depth",
 )
+
+# Real sub-stage breakdown found inside the single "Converting to 3D Blu-ray MVC" window
+# (ADR-283 Progress Reporting follow-up, relayed by decker): the real work after the main
+# depth/stereo loop finishes handing frames to the pipe is (1) FRIM draining its own
+# encode backlog (the ffmpeg eye-crop/scale leg has no progress signal of its own -- same
+# as sbs_to_mvc_cli.py's own "encode" stage, which already covers both under one real
+# frame-count signal read from FRIM's own stderr), then (2) tsMuxeR's real mux, then,
+# BD-Folder output only, (3) copying the finished .iso's contents out to a folder. Labels
+# match this project's existing "Converting to MVC: <sub-label>" style
+# (iw3/utils.py's _MVC_STAGE_LABELS) so the two MVC pipelines read the same way to a user.
+_DIRECT_MVC_STAGE_PREFIX = "Converting to 3D Blu-ray MVC: "
+_FRIM_FRAME_RE = re.compile(rb"Frame number:\s*(\d+)")
 
 
 def _layout_from_args(args):
@@ -100,6 +113,12 @@ class _DirectMvcPipe:
         self._tail = []
         self._reader = None
         self.frame_count = 0
+        # Real encode progress (not just frames handed off to the pipe -- ffmpeg/FRIM may
+        # still be draining a backlog well after the depth/stereo loop above has handed off
+        # its very last frame): parsed from FRIM's own stderr, same "Frame number: N" line
+        # and regex sbs_to_mvc_cli.py's own "encode" stage already proves out -- FRIM reads
+        # from stdin ("-i -") in BOTH pipelines, so its own output format is identical here.
+        self.frim_frame = 0
 
     def write(self, raw_bytes, width, height, pix_fmt, colorspace, color_primaries, color_trc, color_range):
         if self._stop_event is not None and self._stop_event.is_set():
@@ -201,15 +220,24 @@ class _DirectMvcPipe:
                     line, buf = buf[:m.start()], buf[m.end():]
                     self._tail.append(line.decode(errors="replace"))
                     del self._tail[:-20]
+                    fm = _FRIM_FRAME_RE.search(line)
+                    if fm:
+                        self.frim_frame = int(fm.group(1))
 
         self._reader = threading.Thread(target=_read, daemon=True)
         self._reader.start()
 
-    def finish(self):
+    def finish(self, on_progress=None):
         """Closes ffmpeg's stdin -- the real EOF signal down the pipe, same idiom
         sbs_to_mvc_cli.convert() uses (its own `ff.stdout.close()`) to end its side of
         an equivalent pipe cleanly -- then waits for both processes and raises with
-        the same real diagnostic shape convert() already uses on failure."""
+        the same real diagnostic shape convert() already uses on failure.
+
+        on_progress(frim_frame), if given, is called about every 0.5s while waiting for
+        FRIM to actually finish encoding (real backlog-draining time, which can run well
+        past the moment the depth/stereo loop above already handed off its last frame),
+        and once more right after -- same polling cadence this loop already used, just
+        also reporting what it already knows."""
         if self.ff is None:
             raise RuntimeError("no frames were produced -- nothing to encode (the source may be "
                                "empty, or the job was cancelled before the first frame)")
@@ -226,8 +254,12 @@ class _DirectMvcPipe:
                 self.fr.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
                 pass
+            if on_progress is not None:
+                on_progress(self.frim_frame)
         if self._reader is not None:
             self._reader.join()
+        if on_progress is not None:
+            on_progress(self.frim_frame)
         self.ff.wait()
         self._ff_log.close()
 
@@ -258,6 +290,16 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
     or mvc_extract_cli.Cancelled if args.state's stop_event fired mid-job."""
     width, height, rate, duration, hdr = probe_video(original_source_path)
     fps_text, fps_frac = bd_frame_rate(rate)  # raises ValueError naming the actual fps if illegal
+
+    # Upper-bound frame estimate for the "encoding the real 3D (MVC) video" progress bar
+    # below -- same args.start_time/args.end_time-against-probed-duration computation
+    # iw3.utils.process_video_with_resume() already uses for its own segment planning, so
+    # a trimmed (Start/End Time) run gets an accurate total instead of the whole source's.
+    effective_start = parse_time(args.start_time) if getattr(args, "start_time", None) else 0.0
+    effective_end = parse_time(args.end_time) if getattr(args, "end_time", None) else duration
+    if duration:
+        effective_end = min(effective_end, duration)
+    total_frames = max(1, int((effective_end - effective_start) * float(fps_text))) if duration else 1
 
     if hdr and not getattr(args, "hdr_to_sdr", False):
         raise RuntimeError(
@@ -346,12 +388,23 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
                 except OSError:
                     pass
 
-        pipe.finish()
+        # ADR-283 Progress Reporting follow-up: _notify_stage() now fires right as the real
+        # encode-backlog wait begins, not after it -- it used to fire only once pipe.finish()
+        # had already returned, so the (often lengthy, FRIM is CPU/software-only) backlog
+        # drain used to run silently under the previous stage's already-100%-complete bar
+        # with no stage transition and no pulse timer running at all, looking identical to a
+        # hang. This is a pure display-ordering fix: no processing/output changes.
+        _notify_stage(args, STAGE_CONVERT_MVC)
+        encode_bar = _StageBar(args, _DIRECT_MVC_STAGE_PREFIX + "encoding the real 3D (MVC) video",
+                               total_frames, "frames")
+        try:
+            pipe.finish(on_progress=encode_bar.set)
+        finally:
+            encode_bar.close(complete=(pipe.fr is not None and getattr(pipe.fr, "returncode", None) == 0))
 
         if stop_event is not None and stop_event.is_set():
             raise Cancelled()
 
-        _notify_stage(args, STAGE_CONVERT_MVC)
         av_lines, notes = _plan_audio_subs(original_source_path, work_dir, ffmpeg, True, fps_text=fps_text,
                                            disc_legal=(is_iso_output or is_folder_output),
                                            allow_lossless_eac3_on_disc=getattr(
@@ -405,11 +458,34 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
         print(f"[direct-mvc:tsmuxer] meta file ({meta_path}):\n" + "\n".join(f"  {line}" for line in meta),
               file=sys.stderr)
         log_subprocess_cmd("direct-mvc:tsmuxer", [tsmuxer, meta_path, mux_target])
-        result = subprocess.run([tsmuxer, meta_path, mux_target], capture_output=True)
-        if result.returncode != 0:
-            raise RuntimeError("tsMuxeR failed:\n" + result.stdout.decode(errors="replace")[-1200:])
+        # Real streaming percent progress -- same regex/precedent already proven in
+        # sbs_to_mvc_cli.py's own convert() ("mux" stage): tsMuxeR's own stdout prints
+        # incrementing "NN.N%" progress lines while it writes the disc/file, not just a
+        # single line at the end.
+        mux_bar = _StageBar(args, _DIRECT_MVC_STAGE_PREFIX + "writing the final file", 1000, "pct")
+        mux = subprocess.Popen([tsmuxer, meta_path, mux_target], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+        mux_tail = []
+        try:
+            for line in mux.stdout:
+                mux_tail.append(line.rstrip())
+                del mux_tail[:-12]
+                m = re.search(r"(\d+(?:\.\d+)?)%", line)
+                if m:
+                    mux_bar.set(int(min(1.0, float(m.group(1)) / 100.0) * 1000))
+                if stop_event is not None and stop_event.is_set():
+                    mux.kill()
+                    raise Cancelled()
+            mux.wait()
+        finally:
+            mux_bar.close(complete=(mux.returncode == 0))
+        if mux.returncode != 0:
+            raise RuntimeError("tsMuxeR failed:\n" + "\n".join(mux_tail))
         if is_folder_output:
+            folder_bar = _StageBar(args, _DIRECT_MVC_STAGE_PREFIX + "copying the disc structure to the folder",
+                                   1, "pct")
             iso_to_bd_folder(mux_target, output_path, stop_event=stop_event)
+            folder_bar.close(complete=True)
         ok = True
         return output_path
     finally:
@@ -515,10 +591,10 @@ def _self_test_mocked_end_to_end():
             return b""
 
     class _FakeProc:
-        def __init__(self, args, **kwargs):
+        def __init__(self, args, stdout=None, **kwargs):
             self.args = args
             self.stdin = _FakeStdin()
-            self.stdout = _FakeStdout()
+            self.stdout = stdout if stdout is not None else _FakeStdout()
             self.returncode = 0
             self._waited = False
 
@@ -536,14 +612,19 @@ def _self_test_mocked_end_to_end():
 
     def fake_popen(cmd, **kwargs):
         popen_cmds.append(cmd)
-        proc = _FakeProc(cmd)
         if "-o:mvc" in cmd:
             base_es, dep_es = cmd[cmd.index("-o:mvc") + 1], cmd[cmd.index("-o:mvc") + 2]
             with open(base_es, "wb") as f:
                 f.write(b"\x00\x00\x00\x01fake-base")
             with open(dep_es, "wb") as f:
                 f.write(b"\x00\x00\x00\x01fake-dep")
-        return proc
+            return _FakeProc(cmd)
+        if cmd and cmd[0] == "tsmuxer.exe":
+            # text=True is passed for this one (see convert_direct()'s own streaming mux
+            # loop) -- "for line in mux.stdout:" just needs a plain iterable of strings,
+            # no real lines needed here (progress is covered by its own dedicated test).
+            return _FakeProc(cmd, stdout=[])
+        return _FakeProc(cmd)
 
     def fake_process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
         for frame_args in frames:
@@ -585,6 +666,193 @@ def _self_test_mocked_end_to_end():
     print("_self_test_mocked_end_to_end: PASS")
 
 
+class _FakeTqdmBar:
+    """Mimics nunif.gui.common.TQDMGUI's interface -- what args.state["tqdm_fn"] is
+    really called as -- recording every (desc, total, unit-prefix) a bar is opened
+    with plus the full sequence of absolute positions .update() deltas resolve to, so
+    a test can assert real incremental behavior the same way the GUI's own on_tqdm()
+    would see it (see iw3/gui.py's on_tqdm())."""
+    def __init__(self, log, total, desc):
+        self.desc = desc
+        self.total = total
+        self.pos = 0
+        self.closed = False
+        self.positions = []
+        log.append(self)
+
+    def update(self, n=1):
+        self.pos += n
+        self.positions.append(self.pos)
+
+    def close(self):
+        self.closed = True
+
+
+def _self_test_encode_progress_matches_real_frim_output():
+    """_DirectMvcPipe._read() parses FRIM's real "Frame number: N" stderr lines (same
+    regex sbs_to_mvc_cli.py's own proven "encode" stage uses -- FRIM reads from stdin
+    in both pipelines, so its own output format is identical) into pipe.frim_frame,
+    and finish(on_progress=...) reports that value. Deterministic (joins the reader
+    thread instead of racing it on a timer) -- proves correctness of the new parsing/
+    wiring; real wall-clock incrementality during a real encode backlog drain was
+    confirmed separately against the real bundled ffmpeg/FRIM binaries (not something
+    a synthetic mock can honestly claim to reproduce -- same standard sbs_to_mvc_cli.py
+    itself is held to, see ADR-221)."""
+    class _FakeStdin:
+        def write(self, data):
+            pass
+
+        def close(self):
+            pass
+
+    class _FakeFrimStdout:
+        def __init__(self, frame_numbers):
+            self._buf = b"".join(f"Frame number: {n}\r\n".encode() for n in frame_numbers)
+            self._pos = 0
+
+        def close(self):
+            pass
+
+        def read(self, n):
+            chunk = self._buf[self._pos:self._pos + n]
+            self._pos += len(chunk)
+            return chunk
+
+    class _FakeProc:
+        def __init__(self, stdout=None):
+            self.stdin = _FakeStdin()
+            self.stdout = stdout if stdout is not None else _FakeFrimStdout([])
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    import tempfile
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base_es, dep_es = path.join(tmp_dir, "base.264"), path.join(tmp_dir, "dep.264")
+        for p in (base_es, dep_es):
+            with open(p, "wb") as f:
+                f.write(b"\x00\x00\x00\x01fake")
+
+        procs = [_FakeProc(), _FakeProc(_FakeFrimStdout([1, 2, 3, 10]))]  # ff, then fr
+
+        def fake_popen(cmd, **kwargs):
+            return procs.pop(0)
+
+        pipe = _DirectMvcPipe("ffmpeg.exe", "frim.exe", "full_sbs", "24/1", 20.0, False,
+                              base_es, dep_es, path.join(tmp_dir, "ffmpeg.log"), None, "fit")
+        with mock.patch("subprocess.Popen", side_effect=fake_popen):
+            pipe.write(b"\x00" * 100, 64, 32, "yuv420p", 1, 1, 1, 1)
+
+        seen = []
+        pipe.finish(on_progress=seen.append)
+
+        assert pipe.frim_frame == 10, f"expected the last real FRIM frame count parsed, got {pipe.frim_frame}"
+        assert seen[-1] == 10, f"finish()'s on_progress must report the real final frame count, got {seen}"
+        assert seen == sorted(seen), f"on_progress values must never go backwards, got {seen}"
+
+    print("_self_test_encode_progress_matches_real_frim_output: PASS")
+
+
+def _self_test_mux_progress_is_incremental():
+    """convert_direct()'s new tsMuxeR streaming mux loop reports real, incrementing
+    percent values parsed from tsMuxeR's own stdout as they arrive -- not one jump at
+    the very end -- same regex sbs_to_mvc_cli.py's own proven "mux" stage already uses.
+    Deterministic: the mux loop is synchronous (no background thread involved), so
+    feeding it several real-shaped "NN.N%" lines in order needs no timing games."""
+    import tempfile
+    from unittest import mock
+
+    frames = [(bytes([10]) * 100, 64, 32, "yuv420p", 1, 1, 1, 1)]
+    bars = []
+
+    def fake_tqdm_fn(**kwargs):
+        return _FakeTqdmBar(bars, kwargs["total"], kwargs.get("desc", ""))
+
+    class _FakeStdin:
+        def write(self, data):
+            pass
+
+        def close(self):
+            pass
+
+    class _FakeStdout:
+        def close(self):
+            pass
+
+        def read(self, n):
+            return b""
+
+    class _FakeProc:
+        def __init__(self, cmd, stdout=None):
+            self.cmd = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = stdout if stdout is not None else _FakeStdout()
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        if "-o:mvc" in cmd:
+            base_es, dep_es = cmd[cmd.index("-o:mvc") + 1], cmd[cmd.index("-o:mvc") + 2]
+            with open(base_es, "wb") as f:
+                f.write(b"\x00\x00\x00\x01fake-base")
+            with open(dep_es, "wb") as f:
+                f.write(b"\x00\x00\x00\x01fake-dep")
+            return _FakeProc(cmd)
+        if cmd and cmd[0] == "tsmuxer.exe":
+            # Real-shaped tsMuxeR progress output (same "NN.N%" convention
+            # sbs_to_mvc_cli.py's own proven mux-progress regex already parses),
+            # arriving as several distinct lines, not one before/after pair.
+            return _FakeProc(cmd, stdout=["Muxing: 0.0%\r\n", "Muxing: 12.5%\r\n",
+                                          "Muxing: 61.0%\r\n", "Muxing: 100.0%\r\n"])
+        return _FakeProc(cmd)
+
+    def fake_process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
+        for frame_args in frames:
+            raw_frame_sink(*frame_args)
+        return output_path
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_path = path.join(tmp_dir, "out.mkv")  # .mkv: skips BD-folder's own extra step
+        args = _fake_args()
+        args.state = {"tqdm_fn": fake_tqdm_fn}
+        with mock.patch.object(sys.modules[__name__], "probe_video",
+                               return_value=(1920, 1080, "24/1", 2.0, False)), \
+             mock.patch.object(sys.modules[__name__], "find_frim", return_value="frim.exe"), \
+             mock.patch.object(sys.modules[__name__], "_get_ffmpeg_bin", return_value="ffmpeg.exe"), \
+             mock.patch.object(sys.modules[__name__], "_find_tsmuxer", return_value="tsmuxer.exe"), \
+             mock.patch.object(sys.modules[__name__], "_plan_audio_subs", return_value=([], [])), \
+             mock.patch.object(sys.modules[__name__], "process_video_full", side_effect=fake_process_video_full), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen):
+            convert_direct("in.mp4", output_path, args, None, None)
+
+        mux_bars = [b for b in bars if "writing the final file" in b.desc]
+        assert len(mux_bars) == 1, f"expected exactly one mux progress bar, got {len(mux_bars)}"
+        positions = mux_bars[0].positions
+        assert len(positions) >= 3, f"expected several incremental mux updates, got {positions}"
+        assert positions == sorted(positions), f"mux progress must never go backwards, got {positions}"
+        assert len(set(positions)) > 1, f"mux progress must show more than one distinct value, got {positions}"
+        assert positions[-1] == mux_bars[0].total, f"mux progress must finish at 100%, got {positions}"
+        assert mux_bars[0].closed, "the mux progress bar must be closed once the mux finishes"
+
+    print("_self_test_mux_progress_is_incremental: PASS")
+
+
 def _fake_args():
     class _Args:
         pass
@@ -605,6 +873,8 @@ def main():
     _self_test_hdr_without_sdr_refusal()
     _self_test_incompatible_layout_refusal()
     _self_test_mocked_end_to_end()
+    _self_test_encode_progress_matches_real_frim_output()
+    _self_test_mux_progress_is_incremental()
     print("ALL PASS")
 
 

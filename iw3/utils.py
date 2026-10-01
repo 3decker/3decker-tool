@@ -2623,6 +2623,10 @@ def make_output_filename(input_filename, args, video=False):
                 convergence_cut_smooth = int(getattr(args, "convergence_cut_smooth", 0) or 0)
                 if convergence_cut_smooth > 0:
                     convergence_smoothing += f"_cutsm{convergence_cut_smooth}"
+            if args.convergence_mode == "sod_v1":
+                convergence_subject_lock = int(getattr(args, "convergence_subject_lock", 0) or 0)
+                if convergence_subject_lock > 0:
+                    convergence_smoothing += f"_subjlock{convergence_subject_lock}"
             if getattr(args, "convergence_overlay", False):
                 convergence_smoothing += "_dbg"
         else:
@@ -3015,6 +3019,8 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append("iw3_convergence_scene_hold=1")
             if getattr(args, "convergence_cut_smooth", 0):
                 comment_parts.append(f"iw3_convergence_cut_smooth={args.convergence_cut_smooth}")
+        if args.convergence_mode == "sod_v1" and getattr(args, "convergence_subject_lock", 0):
+            comment_parts.append(f"iw3_convergence_subject_lock={args.convergence_subject_lock}")
         if getattr(args, "convergence_overlay", False):
             comment_parts.append("iw3_convergence_overlay=1")
     if isinstance(args.edge_dilation, (list, tuple)):
@@ -6816,6 +6822,16 @@ def create_parser(required_true=True):
                         help=("Only affects --convergence-scene-hold: eases its cut-snap into a ramp over "
                               "this many frames instead of an instant jump. 0 (default) is the original "
                               "instant snap, unchanged."))
+    parser.add_argument("--convergence-subject-lock", type=int, default=0,
+                        help=("Only affects --convergence-mode sod_v1. Requires a new candidate subject "
+                              "region to keep winning for this many consecutive frames before the app "
+                              "actually switches away from whichever region it currently holds, instead "
+                              "of re-picking the subject from scratch every single frame. Fixes a real "
+                              "confirmed flicker (two similarly-salient regions trading off within one "
+                              "unbroken shot, with no scene cut involved) that --convergence-scene-hold/"
+                              "--convergence-cut-smooth cannot fix, since those only shape the value AFTER "
+                              "a subject region has already been picked. 0 (default) is the original "
+                              "per-frame pick, unchanged."))
     parser.add_argument("--convergence-overlay", action="store_true",
                         help=("ADR-233: debug -- writes the Convergence Plane value actually used into the "
                               "top-right corner of every frame (auto convergence modes only -- sod_v1/"
@@ -7658,7 +7674,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
                                                  decay=getattr(args, "convergence_smoothing", 0.9),
                                                  compile=args.compile,
                                                  scene_hold=getattr(args, "convergence_scene_hold", False),
-                                                 cut_smooth=getattr(args, "convergence_cut_smooth", 0))
+                                                 cut_smooth=getattr(args, "convergence_cut_smooth", 0),
+                                                 subject_lock=getattr(args, "convergence_subject_lock", 0))
     elif args.convergence_mode == "face_detect":
         try:
             convergence_model = FaceConvergenceEstimator(

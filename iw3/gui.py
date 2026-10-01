@@ -1521,6 +1521,36 @@ class MainFrame(wx.Frame):
               "better.\n"
               "Recommended: 0 unless you've actually seen a jarring jump at a cut."))
 
+        self.lbl_convergence_subject_lock = wx.StaticText(
+            self.grp_stereo, label=T("Subject Lock (frames)"))
+        self.cbo_convergence_subject_lock = EditableComboBox(
+            self.grp_stereo, choices=["0", "2", "3", "6", "12"], name="cbo_convergence_subject_lock")
+        self.cbo_convergence_subject_lock.SetValue("0")
+        self.cbo_convergence_subject_lock.SetToolTip(
+            T("Only affects sod_v1 Convergence Plane mode. Fixes a real, separate, confirmed flicker -- "
+              "two regions in the picture that are both borderline \"the main subject\" can trade off from "
+              "frame to frame on noisy real footage, entirely WITHIN one unbroken shot, with no scene cut "
+              "involved at all. Convergence Smoothing and Cut Transition Smoothing above can't fix this: "
+              "they only shape the VALUE after a subject region has already been picked, and this flicker "
+              "happens one stage earlier, at the picking itself.\n"
+              "How it works: every frame, the AI picks whichever region clears its saliency threshold and "
+              "uses it as \"the subject.\" By default (0) it re-decides this completely fresh every single "
+              "frame, with zero memory of what it picked last time. A nonzero value requires a new, "
+              "different region to keep winning for that many CONSECUTIVE frames before the app actually "
+              "switches away from whichever region it currently holds -- a brief flip-flop no longer has "
+              "time to take hold before the next frame reverts it.\n"
+              "Con: not free -- a higher value makes the app slower to follow a subject that's genuinely, "
+              "continuously moving or changing (someone walking across the frame, panning onto something "
+              "new), since a real new subject must also keep winning for several frames before it's "
+              "actually followed.\n"
+              "Values: 0 = off, today's original per-frame pick (default, unchanged). Small values (2-6) "
+              "require a short streak before switching. A specific recommended value for typical real "
+              "content has not been extensively tested across many sources -- same honesty as Cut "
+              "Transition Smoothing above.\n"
+              "Recommended: 0 unless you've actually seen this specific flicker (the picked subject "
+              "flipping mid-shot, with no cut happening) -- try a small value like 3 first and judge by "
+              "eye."))
+
         self.chk_convergence_overlay = wx.CheckBox(
             self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
         self.chk_convergence_overlay.SetValue(False)
@@ -3165,6 +3195,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_convergence_scene_hold, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_convergence_cut_smooth, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_cut_smooth, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_subject_lock, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_subject_lock, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_negative_parallax, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -9175,6 +9207,7 @@ class MainFrame(wx.Frame):
             self.cbo_nt_div_max,
             self.cbo_nt_cut_smooth,
             self.cbo_convergence_cut_smooth,
+            self.cbo_convergence_subject_lock,
             self.cbo_face_protect,
             self.cbo_resolution,
             self.cbo_stereo_width,
@@ -9508,6 +9541,7 @@ class MainFrame(wx.Frame):
             self.chk_convergence_scene_hold.Enable()
             self.chk_convergence_overlay.Enable()
         self.update_convergence_cut_smooth()
+        self.update_convergence_subject_lock()
 
     def on_changed_cbo_convergence_mode(self, event):
         self.update_convergence_mode()
@@ -9521,6 +9555,15 @@ class MainFrame(wx.Frame):
 
     def on_changed_chk_convergence_scene_hold(self, event):
         self.update_convergence_cut_smooth()
+
+    def update_convergence_subject_lock(self):
+        # Fixes a separate, earlier-stage flicker in the sod_v1 subject pick itself --
+        # unlike Cut Transition Smoothing, it has nothing to do with Hold Steady Per Scene
+        # being checked, so it's only gated on the mode (and only sod_v1, not face_detect,
+        # which doesn't use this saliency-mask mechanism at all).
+        on = self.cbo_convergence_mode.GetValue() == "sod_v1"
+        self.lbl_convergence_subject_lock.Enable(on)
+        self.cbo_convergence_subject_lock.Enable(on)
 
     def update_ema_normalize(self):
         if self.chk_ema_normalize.IsChecked():
@@ -9713,6 +9756,7 @@ class MainFrame(wx.Frame):
             self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
             self.chk_convergence_scene_hold, self.lbl_convergence_cut_smooth, self.cbo_convergence_cut_smooth,
+            self.lbl_convergence_subject_lock, self.cbo_convergence_subject_lock,
             self.chk_convergence_overlay,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
             self.lbl_face_protect, self.cbo_face_protect,
@@ -9973,6 +10017,9 @@ class MainFrame(wx.Frame):
             return None
         if not validate_number(self.cbo_convergence_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
+            return None
+        if not validate_number(self.cbo_convergence_subject_lock.GetValue(), 0, 30, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Subject Lock (frames)"), 0, 30)
             return None
         if not validate_number(self.cbo_nt_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
@@ -10334,6 +10381,7 @@ class MainFrame(wx.Frame):
             convergence_smoothing=float(self.cbo_convergence_smoothing.GetValue()),
             convergence_scene_hold=self.chk_convergence_scene_hold.GetValue(),
             convergence_cut_smooth=int(self.cbo_convergence_cut_smooth.GetValue()),
+            convergence_subject_lock=int(self.cbo_convergence_subject_lock.GetValue()),
             convergence_overlay=self.chk_convergence_overlay.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
@@ -11554,6 +11602,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_smoothing, args.convergence_smoothing)
         self.chk_convergence_scene_hold.SetValue(bool(getattr(args, "convergence_scene_hold", False)))
         _apply_combo_value(self.cbo_convergence_cut_smooth, getattr(args, "convergence_cut_smooth", 0))
+        _apply_combo_value(self.cbo_convergence_subject_lock, getattr(args, "convergence_subject_lock", 0))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
         # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- getattr defaults match create_parser()'s own
@@ -25665,6 +25714,196 @@ def _self_test_convergence_scene_hold_gui_and_metadata():
     print("_self_test_convergence_scene_hold_gui_and_metadata: PASS")
 
 
+def _self_test_convergence_subject_lock():
+    """Real confirmed bug, separate from ADR-231/232's scene-cut-snap fix: sod_v1's raw
+    per-frame saliency threshold (ConvergenceEstimator.depth_position_from_ratio) has zero
+    memory of what "the subject" was last frame, so on noisy real footage with two
+    similarly-salient regions, which one wins can flip from pure per-frame noise -- a
+    sustained, irregular flicker WITHIN one unbroken shot (no scene cut at all) that
+    SceneHoldTracker's own deadband/decay (one stage later, smoothing the resulting
+    scalar) cannot fully absorb. subject_lock fixes this one stage earlier, at
+    mask-selection time, by requiring a challenger region to keep winning for several
+    consecutive frames before it replaces the held region. Tests the real
+    ConvergenceEstimator class directly (stubbed SOD model, pure tensor math, no GPU/
+    download needed)."""
+    import random
+    import iw3.convergence_estimator as CE
+
+    def make_est(subject_lock):
+        est = CE.ConvergenceEstimator.__new__(CE.ConvergenceEstimator)
+        est.device = torch.device("cpu")
+        est.convergence = 0.5
+        est.enable_ema = False
+        est.decay = 0.9
+        est.scene_hold = False
+        est.cut_smooth = 0
+        est.subject_lock = subject_lock
+        est._lock_state = None
+        est.convergence_ema = None
+        return est
+
+    # Two disjoint 4x4 regions (16 px each) at clearly different depths, so whichever
+    # region wins is obvious in the output scalar.
+    H, W = 4, 8
+    region_a = torch.zeros(H, W, dtype=torch.bool)
+    region_a[:, :4] = True
+    region_b = ~region_a
+    depth = torch.zeros(1, 1, H, W)
+    depth[:, :, :, :4] = 0.2
+    depth[:, :, :, 4:] = 0.8
+
+    def saliency_for(winner):
+        sal = torch.zeros(1, 1, H, W)
+        if winner == "a":
+            sal[0, 0][region_a] = 0.9
+            sal[0, 0][region_b] = 0.3
+        else:
+            sal[0, 0][region_b] = 0.9
+            sal[0, 0][region_a] = 0.3
+        return sal
+
+    # ADR: real noisy saliency data is irregular/bursty, not a perfectly alternating
+    # 50/50 flip (a perfect alternation self-cancels through any averaging/majority
+    # mechanism and is NOT a valid test of this fix). Build a real bursty/irregular win
+    # sequence instead: mostly "a", with "b" intruding in short, irregularly-spaced,
+    # irregular-length bursts (1-3 frames) -- exactly the kind of brief near-threshold
+    # noise that keeps flipping the raw per-frame pick without ever being a real,
+    # sustained subject change.
+    rng = random.Random(12345)
+    win_sequence = []
+    while len(win_sequence) < 300:
+        run_len = rng.randint(6, 14)
+        win_sequence.extend(["a"] * run_len)
+        burst_len = rng.choice([1, 1, 2, 2, 3])
+        win_sequence.extend(["b"] * burst_len)
+    win_sequence = win_sequence[:300]
+    assert "a" in win_sequence and "b" in win_sequence
+    # confirm this is NOT a simple alternating pattern (the invalid negative control)
+    alternating = all(win_sequence[i] != win_sequence[i - 1] for i in range(1, len(win_sequence)))
+    assert not alternating, "test input must be real bursty/irregular noise, not a self-cancelling alternation"
+
+    def run(subject_lock):
+        est = make_est(subject_lock)
+        outputs = []
+        for winner in win_sequence:
+            sal = saliency_for(winner)
+            z = est.depth_position_from_ratio_with_subject_lock(sal, depth, est.convergence, [False])
+            outputs.append(z.item())
+        return outputs
+
+    out_off = run(0)
+    out_on = run(6)
+
+    # subject_lock=0 must reproduce today's exact original per-frame, zero-memory pick --
+    # every frame's output must match the stateless depth_position_from_ratio() applied to
+    # that SAME frame's own mask alone (no memory carried from the previous frame at all).
+    for i, winner in enumerate(win_sequence):
+        sal = saliency_for(winner)
+        expected = CE.ConvergenceEstimator.depth_position_from_ratio(sal, depth, 0.5).item()
+        assert abs(out_off[i] - expected) < 1e-6, \
+            f"subject_lock=0 must stay byte-identical to the original per-frame pick at frame {i}"
+
+    def switch_count(values):
+        return sum(1 for i in range(1, len(values)) if abs(values[i] - values[i - 1]) > 1e-6)
+
+    switches_off = switch_count(out_off)
+    switches_on = switch_count(out_on)
+    assert switches_on < switches_off, \
+        f"subject_lock must reduce the number of region-switches on real bursty noise: " \
+        f"off={switches_off} on={switches_on}"
+
+    # steady-state window (matching the investigation's own examined range, well past the
+    # initial pick): subject_lock must measurably flatten the swing, not just reduce
+    # raw switch count.
+    window_off = out_off[100:]
+    window_on = out_on[100:]
+    range_off = max(window_off) - min(window_off)
+    range_on = max(window_on) - min(window_on)
+    assert range_on < range_off, \
+        f"subject_lock must narrow the steady-state output range: off={range_off} on={range_on}"
+
+    # a real scene cut (reset_pts) must still clear the held state so a genuine new scene
+    # is free to re-pick immediately, not stay artificially locked onto the old scene.
+    # reset_pts[i]=True marks frame i as the LAST frame of the OLD scene (matching how
+    # reset_pts is used everywhere else in this class, e.g. the EMA path below) -- the
+    # reset itself takes effect starting the NEXT frame, which is the new scene's first.
+    est = make_est(subject_lock=6)
+    for winner in ["a"] * 10:
+        est.depth_position_from_ratio_with_subject_lock(saliency_for(winner), depth, 0.5, [False])
+    est.depth_position_from_ratio_with_subject_lock(saliency_for("a"), depth, 0.5, [True])
+    z_new_scene = est.depth_position_from_ratio_with_subject_lock(saliency_for("b"), depth, 0.5, [False])
+    assert abs(z_new_scene.item() - 0.8) < 1e-5, \
+        "the new scene's own first frame must win immediately, with no held-over lock delay"
+
+    print("_self_test_convergence_subject_lock: PASS")
+
+
+def _self_test_convergence_subject_lock_gui_and_metadata():
+    """Real confirmed fix for sod_v1-only subject-pick flicker (see
+    _self_test_convergence_subject_lock for the underlying mechanism). Covers the GUI
+    control (default off, gated on sod_v1 specifically -- NOT face_detect, which doesn't
+    use this saliency-mask mechanism at all), CLI round-trip, and filename/metadata tags."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.cbo_convergence_subject_lock.GetValue() == "0", "must default to off"
+        assert not frame.cbo_convergence_subject_lock.IsEnabled(), \
+            "must be disabled when Convergence Plane is constant (its own starting default)"
+
+        frame.cbo_convergence_mode.SetValue("face_detect")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_subject_lock.IsEnabled(), \
+            "must stay disabled on face_detect -- this fix is sod_v1-only"
+
+        frame.cbo_convergence_mode.SetValue("sod_v1")
+        frame.update_convergence_mode()
+        assert frame.cbo_convergence_subject_lock.IsEnabled(), "must enable once mode is sod_v1"
+
+        frame.cbo_convergence_subject_lock.SetValue("6")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_subject_lock == 6
+        assert "--convergence-subject-lock" in frame.get_cli_command()
+
+        frame.cbo_convergence_subject_lock.SetValue("0")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_convergence_subject_lock.GetValue() == "6", "restore must bring the value back"
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_subject_lock.IsEnabled(), "must disable again back on constant"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # filename/metadata tags -- only when subject_lock is nonzero AND mode is sod_v1 specifically
+    parser = U.create_parser(required_true=False)
+    on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                            "--convergence-mode", "sod_v1", "--convergence-subject-lock", "6"])
+    on.video_extension = ".mkv"
+    assert "_subjlock6" in U.make_output_filename("a.mp4", on, video=True)
+    assert "iw3_convergence_subject_lock=6" in U._build_iw3_comment_metadata(on, video=True)
+
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                             "--convergence-mode", "sod_v1"])
+    off.video_extension = ".mkv"
+    assert "subjlock" not in U.make_output_filename("a.mp4", off, video=True)
+    assert "convergence_subject_lock" not in U._build_iw3_comment_metadata(off, video=True)
+
+    # face_detect never shows the tag even if the raw flag is set -- the fix only applies to sod_v1
+    face_on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                 "--convergence-mode", "face_detect", "--convergence-subject-lock", "6"])
+    face_on.video_extension = ".mkv"
+    assert "subjlock" not in U.make_output_filename("a.mp4", face_on, video=True)
+    assert "convergence_subject_lock" not in U._build_iw3_comment_metadata(face_on, video=True)
+
+    print("_self_test_convergence_subject_lock_gui_and_metadata: PASS")
+
+
 def _self_test_convergence_overlay():
     """ADR-233: real user request -- a debug overlay for Convergence Plane, mirroring Auto 3D
     Strength's own "Show strength on video (debug)". Tests iw3.frame_overlay.stamp_values()
@@ -26249,6 +26488,8 @@ def _run_self_tests():
         _self_test_pop_feather,
         _self_test_convergence_scene_hold,
         _self_test_convergence_scene_hold_gui_and_metadata,
+        _self_test_convergence_subject_lock,
+        _self_test_convergence_subject_lock_gui_and_metadata,
         _self_test_convergence_overlay,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

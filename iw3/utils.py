@@ -1186,6 +1186,13 @@ def _run_mvc_conversion(output_path, args):
     mvc_autocrop = getattr(args, "mvc_autocrop", None)
     if mvc_autocrop:
         cmd += ["--autocrop", mvc_autocrop]
+    # Real user request (relayed by decker): once Auto-crop above has cut the black bars off,
+    # stretch the remaining picture to completely fill the 1920x1080 disc frame instead of the
+    # default fit-and-pad -- a real, explicit opt-in (see eye_filter()'s own docstring in
+    # sbs_to_mvc_cli.py for the real geometric-distortion trade-off). Off ("fit") by default.
+    mvc_fill_mode = getattr(args, "mvc_fill_mode", None)
+    if mvc_fill_mode and mvc_fill_mode != "fit":
+        cmd += ["--fill-mode", mvc_fill_mode]
     # Real re-investigation this session: see sbs_to_mvc_cli.py's _plan_audio_subs() docstring
     # for the full reasoning -- off by default, only meaningful for disc-legal (.iso/BD-folder)
     # output; a genuine no-op passthrough otherwise.

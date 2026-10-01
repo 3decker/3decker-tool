@@ -473,15 +473,28 @@ def eye_only_filter(layout):
     return "crop=iw/2:ih:0:0" if layout in ("full_sbs", "half_sbs") else "crop=iw:ih/2:0:0"
 
 
-def eye_filter(layout, width, height, crop=None):
+def eye_filter(layout, width, height, crop=None, fill_mode="fit"):
     """ffmpeg -vf chain: cut both eyes out of the input frame, scale each to fit
     1920x1080 keeping its true picture shape (half layouts store a squeezed picture),
     pad with black, and put them side by side (3840x1080 raw for FRIM's -sbs 2).
     With `crop` = (x, y, w, h) (in one eye's own pixels) the black bars are cut off each eye
     first. The disc frame is still 1920x1080, so the bars are put back around the fitted
-    picture -- auto-crop mainly tidies uneven or noisy edges, it cannot shrink a Blu-ray frame."""
+    picture -- auto-crop mainly tidies uneven or noisy edges, it cannot shrink a Blu-ray frame.
+
+    fill_mode="fit" (default): scale the (possibly cropped) eye picture to fit inside
+    1920x1080 WITHOUT changing its aspect ratio, padding any leftover space with black --
+    this is this function's original behaviour, unchanged.
+    fill_mode="stretch": after the same `crop` step, scale the eye picture to EXACTLY
+    1920x1080 using separate horizontal/vertical factors (no aspect-ratio lock), so no
+    padding is needed -- there is no black bar left anywhere. This is a real, visible
+    geometric distortion (circles become ovals, people look squished), proportional to how
+    far the (cropped) picture's own aspect ratio differs from 1920x1080's own 16:9 -- only
+    useful together with `crop` actually cutting off real letterbox/pillarbox bars first;
+    with no `crop` it just stretches whatever aspect the raw eye already has."""
     if layout not in LAYOUTS:
         raise ValueError(f"unknown layout {layout!r}; choose from {LAYOUTS}")
+    if fill_mode not in ("fit", "stretch"):
+        raise ValueError(f"unknown fill_mode {fill_mode!r}; choose from ('fit', 'stretch')")
     if layout in ("full_sbs", "half_sbs"):
         eye_w, eye_h = width // 2, height
         crop_l, crop_r = f"crop={eye_w}:{eye_h}:0:0", f"crop={eye_w}:{eye_h}:{eye_w}:0"
@@ -499,10 +512,13 @@ def eye_filter(layout, width, height, crop=None):
         disp_w, disp_h = eye_w, eye_h * 2
     else:
         disp_w, disp_h = eye_w, eye_h
-    scale = min(1920 / disp_w, 1080 / disp_h)
-    w = min(1920, max(2, round(disp_w * scale / 2) * 2))
-    h = min(1080, max(2, round(disp_h * scale / 2) * 2))
-    fit = f"scale={w}:{h}:flags=lanczos,pad=1920:1080:{(1920 - w) // 2}:{(1080 - h) // 2},setsar=1"
+    if fill_mode == "stretch":
+        fit = "scale=1920:1080:flags=lanczos,setsar=1"
+    else:
+        scale = min(1920 / disp_w, 1080 / disp_h)
+        w = min(1920, max(2, round(disp_w * scale / 2) * 2))
+        h = min(1080, max(2, round(disp_h * scale / 2) * 2))
+        fit = f"scale={w}:{h}:flags=lanczos,pad=1920:1080:{(1920 - w) // 2}:{(1080 - h) // 2},setsar=1"
     return f"split[a][b];[a]{crop_l},{fit}[l];[b]{crop_r},{fit}[r];[l][r]hstack"
 
 
@@ -790,7 +806,7 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
             stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False,
-            convert_hdr_to_sdr=False, allow_lossless_eac3_on_disc=False):
+            convert_hdr_to_sdr=False, allow_lossless_eac3_on_disc=False, fill_mode="fit"):
     """Full job. Returns the number of frames encoded. progress_cb(stage, done, total),
     stage in {"tonemap", "retime", "autocrop", "encode", "mux"}. fix_frame_rate: if the source
     isn't 23.976/24fps, re-time the whole movie (video+audio+subtitles) to the nearer one instead
@@ -800,6 +816,10 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     Blu-ray/MVC cannot carry HDR at all, so there is no way to keep it either way).
     allow_lossless_eac3_on_disc: see _plan_audio_subs()'s own docstring -- opt-in, off by
     default, only affects disc-legal (.iso/BD-folder) output with an E-AC-3/DD+ source track.
+    fill_mode: see eye_filter()'s own docstring -- "fit" (default) keeps the picture's true
+    proportions and may leave black bars; "stretch" fills the whole 1920x1080 frame with no
+    black bars left, at the cost of real geometric distortion. Off (fit) by default -- a pure
+    opt-in, only meaningful together with `autocrop` actually cutting bars off first.
 
     output_iso ending in .mkv (ADR-245) skips the Blu-ray disc structure entirely: the same
     real MVC video FRIMEncode produces either way is instead packaged directly into a plain
@@ -960,7 +980,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     _remove_stale_temp(base_es, dep_es, meta_path, ffmpeg_log)
     procs, ok = [], False
     try:
-        vf = eye_filter(layout, width, height, crop)
+        vf = eye_filter(layout, width, height, crop, fill_mode)
         ff_cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
         if cut_seconds:
             ff_cmd += ["-t", str(cut_seconds)]
@@ -1174,6 +1194,12 @@ def main():
     parser.add_argument("--autocrop", type=str.upper, default=None, choices=AUTOCROP_MODES,
                         help="remove black bars from each eye before fitting: BLACK = all sides, BLACK_TB = "
                              "top/bottom only (FLAT / FLAT_TB for flat-colour borders)")
+    parser.add_argument("--fill-mode", type=str.lower, default="fit", choices=("fit", "stretch"),
+                        help="how to fill the fixed 1920x1080 disc frame after --autocrop removes black "
+                             "bars: fit (default) keeps the picture's true proportions and may still pad "
+                             "with black; stretch fills the whole frame with no black bars at all, at the "
+                             "cost of real geometric distortion (circles become ovals, people look "
+                             "squished) -- only meaningful together with --autocrop")
     parser.add_argument("--no-audio-subs", action="store_true", help="video only")
     parser.add_argument("--fix-frame-rate", action="store_true",
                         help="if the source isn't 23.976/24fps, re-time the whole movie (picture, sound "
@@ -1213,7 +1239,8 @@ def main():
                          work_dir=args.work_dir, cut_seconds=args.cut_seconds, keep_temp=args.keep_temp,
                          progress_cb=show, autocrop=args.autocrop, fix_frame_rate=args.fix_frame_rate,
                          convert_hdr_to_sdr=args.convert_hdr_to_sdr,
-                         allow_lossless_eac3_on_disc=args.allow_lossless_eac3_on_disc)
+                         allow_lossless_eac3_on_disc=args.allow_lossless_eac3_on_disc,
+                         fill_mode=args.fill_mode)
     except Cancelled:
         print("\n[sbs2mvc] cancelled", file=sys.stderr)
         return 1

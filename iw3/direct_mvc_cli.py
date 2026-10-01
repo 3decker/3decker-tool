@@ -82,7 +82,7 @@ class _DirectMvcPipe:
     real dimensions before ever building its ffmpeg command)."""
 
     def __init__(self, ffmpeg_bin, frim_bin, layout, fps_frac, bitrate_mbps, swap_eyes,
-                 base_es, dep_es, ffmpeg_log_path, stop_event):
+                 base_es, dep_es, ffmpeg_log_path, stop_event, fill_mode="fit"):
         self._ffmpeg_bin = ffmpeg_bin
         self._frim_bin = frim_bin
         self._layout = layout
@@ -93,6 +93,7 @@ class _DirectMvcPipe:
         self._dep_es = dep_es
         self._ffmpeg_log_path = ffmpeg_log_path
         self._stop_event = stop_event
+        self._fill_mode = fill_mode
         self.ff = None
         self.fr = None
         self._ff_log = None
@@ -163,7 +164,7 @@ class _DirectMvcPipe:
         # the normal two-stage path with identical settings). The values are the real,
         # per-frame ones processor.py's output_reformatter already computed -- same
         # PyAV enum ints ffmpeg's own AVOption parser accepts directly.
-        vf = eye_filter(self._layout, width, height, None)
+        vf = eye_filter(self._layout, width, height, None, self._fill_mode)
         ff_cmd = [self._ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error",
                   "-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", f"{width}x{height}", "-r", self._fps_frac,
                   "-colorspace", str(colorspace), "-color_primaries", str(color_primaries),
@@ -330,8 +331,9 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
         processing_source, hdr_tmp_file = _tonemap_hdr_to_sdr(original_source_path, args)
 
     swap_eyes = getattr(args, "mvc_swap_eyes", False)
+    fill_mode = getattr(args, "mvc_fill_mode", None) or "fit"
     pipe = _DirectMvcPipe(ffmpeg, frim, layout, fps_frac, bitrate_mbps,
-                          swap_eyes, base_es, dep_es, ffmpeg_log, stop_event)
+                          swap_eyes, base_es, dep_es, ffmpeg_log, stop_event, fill_mode)
     ok = False
     try:
         try:

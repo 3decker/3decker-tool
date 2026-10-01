@@ -4283,6 +4283,38 @@ class MainFrame(wx.Frame):
               "converted output above is never touched.\n"
               "Recommended: on for a movie with real black bars, matching whichever side(s) they're "
               "actually on -- off (default) leaves the video exactly as the source has it."))
+        self.cbo_mvc_autocrop.Bind(wx.EVT_COMBOBOX, self.on_changed_mvc_autocrop)
+
+        # Real user request (relayed by decker): once Auto-crop (MVC) above has cut the black
+        # bars off, is there a way to stretch the remaining real picture so it completely fills
+        # the fixed 1920x1080 disc frame, instead of the default fit-and-pad (which can still
+        # leave black bars when the cropped picture's own shape isn't a 16:9 rectangle)? Built
+        # as a real, separate, explicitly-labeled opt-in -- decker was told plainly this
+        # introduces real geometric distortion and approved it as an alternative choice, not a
+        # default change. See eye_filter()'s own docstring in sbs_to_mvc_cli.py.
+        self.lbl_mvc_fill_mode = wx.StaticText(self.grp_postprocess, label=T("Crop Fill (MVC)"))
+        self.cbo_mvc_fill_mode = wx.ComboBox(self.grp_postprocess, name="cbo_mvc_fill_mode")
+        self.cbo_mvc_fill_mode.SetEditable(False)
+        self.cbo_mvc_fill_mode.Append(T("Fit Screen (keep shape, may show black bars)"), "fit")
+        self.cbo_mvc_fill_mode.Append(T("Fill Screen (stretch to fill, may distort picture)"), "stretch")
+        self.cbo_mvc_fill_mode.SetSelection(0)
+        self.cbo_mvc_fill_mode.SetToolTip(
+            T("What it's for: only matters once Auto-crop (MVC) above is actually set to one of the "
+              "'Remove black bars' choices -- decides what happens to the leftover space after those "
+              "bars are cut off, before the picture is fitted into the fixed 1920x1080 disc frame.\n"
+              "Why it matters: cropping removes the black bars themselves, but a 3D Blu-ray/MVC frame "
+              "is always exactly 1920x1080 -- if the cropped picture's own shape isn't already a 16:9 "
+              "widescreen rectangle, there's still leftover space to deal with one way or another.\n"
+              "Values: 'Fit Screen' (default) scales the cropped picture up or down WITHOUT changing "
+              "its shape, then pads any leftover space with black -- correct proportions, but black "
+              "bars can still show. 'Fill Screen' stretches the cropped picture so it fills the whole "
+              "1920x1080 frame, with no black bars left at all.\n"
+              "Con: 'Fill Screen' genuinely distorts the picture's true proportions -- circles become "
+              "ovals, people look squished -- the more the cropped picture's own aspect ratio differs "
+              "from 16:9, the more it shows.\n"
+              "Recommended: Fit Screen (the default) -- correct proportions matter more than a few "
+              "black bars for almost everyone. Pick Fill Screen only if you specifically prefer a "
+              "fully filled screen over geometric accuracy."))
 
         # Real re-investigation this session: tsMuxeR itself accepts a bare E-AC-3/DD+ stream on a
         # disc-legal (.iso/BD-folder) target without complaint (confirmed by direct testing against
@@ -4356,6 +4388,7 @@ class MainFrame(wx.Frame):
         self.chk_direct_mvc.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_direct_mvc)
         self.update_direct_mvc()
         self.update_mvc_allow_lossless_eac3()
+        self.update_mvc_fill_mode()
 
         # ADR-256: real user request -- "have it write a log file for each job into the
         # output folder so you can always see what happened with each job... maybe even
@@ -4416,6 +4449,8 @@ class MainFrame(wx.Frame):
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.lbl_mvc_autocrop, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_mvc_autocrop, (j, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_mvc_fill_mode, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.cbo_mvc_fill_mode, (j, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_mvc_allow_lossless_eac3, (j := j + 1, 0), (0, 3),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.chk_direct_mvc, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -6554,6 +6589,37 @@ class MainFrame(wx.Frame):
               "Con: adds a short analysis step; on a video with clean, centred bars the result is identical "
               "to leaving it off.\n"
               "Recommended: Off, unless the picture looks off-centre or its edges show a dark fringe."))
+        self.cbo_sbs2mvc_autocrop.Bind(wx.EVT_COMBOBOX, self.on_changed_sbs2mvc_autocrop)
+
+        # Real user request (relayed by decker): once Auto-crop above has cut the black bars
+        # off, is there a way to stretch the remaining real picture so it completely fills the
+        # fixed 1920x1080 disc frame, instead of the default fit-and-pad? Same real, separate,
+        # explicitly-labeled opt-in as the main tab's own copy -- see its tooltip/eye_filter()'s
+        # own docstring in sbs_to_mvc_cli.py for the real geometric-distortion trade-off.
+        self.lbl_sbs2mvc_fill_mode = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Crop Fill"))
+        self.cbo_sbs2mvc_fill_mode = wx.ComboBox(self.cpn_sbs2mvc.GetPane(), name="cbo_sbs2mvc_fill_mode")
+        self.cbo_sbs2mvc_fill_mode.SetEditable(False)
+        self.cbo_sbs2mvc_fill_mode.Append(T("Fit Screen (keep shape, may show black bars)"), "fit")
+        self.cbo_sbs2mvc_fill_mode.Append(T("Fill Screen (stretch to fill, may distort picture)"), "stretch")
+        self.cbo_sbs2mvc_fill_mode.SetSelection(0)
+        self.cbo_sbs2mvc_fill_mode.SetToolTip(
+            T("What it's for: only matters once Auto-crop above is actually set to one of the 'Remove "
+              "black bars' choices -- decides what happens to the leftover space after those bars are "
+              "cut off, before the picture is fitted into the fixed 1920x1080 disc frame.\n"
+              "Why it matters: cropping removes the black bars themselves, but a 3D Blu-ray/MVC frame "
+              "is always exactly 1920x1080 -- if the cropped picture's own shape isn't already a 16:9 "
+              "widescreen rectangle, there's still leftover space to deal with one way or another.\n"
+              "Values: 'Fit Screen' (default) scales the cropped picture up or down WITHOUT changing "
+              "its shape, then pads any leftover space with black -- correct proportions, but black "
+              "bars can still show. 'Fill Screen' stretches the cropped picture so it fills the whole "
+              "1920x1080 frame, with no black bars left at all.\n"
+              "Con: 'Fill Screen' genuinely distorts the picture's true proportions -- circles become "
+              "ovals, people look squished -- the more the cropped picture's own aspect ratio differs "
+              "from 16:9, the more it shows.\n"
+              "Recommended: Fit Screen (the default) -- correct proportions matter more than a few "
+              "black bars for almost everyone. Pick Fill Screen only if you specifically prefer a "
+              "fully filled screen over geometric accuracy."))
+        self.update_sbs2mvc_fill_mode()
 
         self.chk_sbs2mvc_swap = wx.CheckBox(self.cpn_sbs2mvc.GetPane(), label=T("Swap eyes"), name="chk_sbs2mvc_swap")
         self.chk_sbs2mvc_swap.SetToolTip(
@@ -6701,6 +6767,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_sbs2mvc_swap, (h, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_sbs2mvc_autocrop, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_sbs2mvc_autocrop, (h, 1), (0, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_sbs2mvc_fill_mode, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sbs2mvc_fill_mode, (h, 1), (0, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_sbs2mvc_bitrate, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_sbs2mvc_bitrate, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_sbs2mvc_restore_av, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -9718,6 +9786,22 @@ class MainFrame(wx.Frame):
         self.update_mvc_allow_lossless_eac3()
         event.Skip()
 
+    def update_mvc_fill_mode(self):
+        """Fill Screen vs. Fit Screen only means anything once Auto-crop (MVC) is actually
+        cropping bars -- greyed out (not hidden) when Auto-crop is Off, same convention as
+        update_mvc_allow_lossless_eac3()'s own Enable() toggling just above. Reading
+        cbo_mvc_autocrop's own IsEnabled() (not just chk_direct_mvc directly) means this
+        automatically stays greyed out whenever Direct to MVC has disabled Auto-crop too,
+        with no separate Direct-MVC check needed here."""
+        on = bool(self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection())) \
+            and self.cbo_mvc_autocrop.IsEnabled()
+        self.lbl_mvc_fill_mode.Enable(on)
+        self.cbo_mvc_fill_mode.Enable(on)
+
+    def on_changed_mvc_autocrop(self, event):
+        self.update_mvc_fill_mode()
+        event.Skip()
+
     def update_direct_mvc(self):
         """Enables/disables the controls Direct to MVC is incompatible with, matching
         whether it's currently checked -- the real correctness guarantee is the
@@ -9731,6 +9815,7 @@ class MainFrame(wx.Frame):
         self.chk_auto_resume.Enable(not on)
         self.chk_rife_interpolate.Enable(not on)
         self.cbo_mvc_autocrop.Enable(not on)
+        self.update_mvc_fill_mode()
         if not on:
             # Re-apply whatever Resume's own real rule (input type-dependent) says,
             # rather than leaving it force-enabled regardless of input type.
@@ -10336,6 +10421,7 @@ class MainFrame(wx.Frame):
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
             mvc_convert_hdr_to_sdr=self.chk_convert_to_mvc_hdr_to_sdr.GetValue(),
             mvc_autocrop=self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection()) or None,
+            mvc_fill_mode=self.cbo_mvc_fill_mode.GetClientData(self.cbo_mvc_fill_mode.GetSelection()) or "fit",
             mvc_allow_lossless_eac3_on_disc=self.chk_mvc_allow_lossless_eac3.GetValue(),
             write_job_log=self.chk_write_job_log.GetValue(),
             scene_detect=scene_detect,
@@ -11656,10 +11742,18 @@ class MainFrame(wx.Frame):
                 break
         else:
             self.cbo_mvc_autocrop.SetSelection(0)
+        mvc_fill_mode_value = getattr(args, "mvc_fill_mode", None) or "fit"
+        for i in range(self.cbo_mvc_fill_mode.GetCount()):
+            if self.cbo_mvc_fill_mode.GetClientData(i) == mvc_fill_mode_value:
+                self.cbo_mvc_fill_mode.SetSelection(i)
+                break
+        else:
+            self.cbo_mvc_fill_mode.SetSelection(0)
         self.chk_mvc_allow_lossless_eac3.SetValue(bool(getattr(args, "mvc_allow_lossless_eac3_on_disc", False)))
         self.chk_direct_mvc.SetValue(bool(getattr(args, "direct_mvc", False)))
         self.update_direct_mvc()
         self.update_mvc_allow_lossless_eac3()
+        self.update_mvc_fill_mode()
         self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
@@ -14314,6 +14408,18 @@ class MainFrame(wx.Frame):
 
     # --- SBS to 3D Blu-ray MVC (standalone tool, see ADR-182 UPDATE 6) ---
 
+    def update_sbs2mvc_fill_mode(self):
+        """Same real greying-out rule as the main tab's own update_mvc_fill_mode() -- Fill
+        Screen vs. Fit Screen only means anything once Auto-crop above is actually cropping
+        bars."""
+        on = bool(self.cbo_sbs2mvc_autocrop.GetClientData(self.cbo_sbs2mvc_autocrop.GetSelection()))
+        self.lbl_sbs2mvc_fill_mode.Enable(on)
+        self.cbo_sbs2mvc_fill_mode.Enable(on)
+
+    def on_changed_sbs2mvc_autocrop(self, event):
+        self.update_sbs2mvc_fill_mode()
+        event.Skip()
+
     def on_click_btn_sbs2mvc_input(self, event):
         with wx.FileDialog(self, message=T("Select 3D Video (SBS or Top-Bottom)"), wildcard=VIDEO_EXTENSIONS,
                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
@@ -14547,6 +14653,9 @@ class MainFrame(wx.Frame):
         autocrop = self.cbo_sbs2mvc_autocrop.GetClientData(self.cbo_sbs2mvc_autocrop.GetSelection())
         if autocrop:
             cmd += ["--autocrop", autocrop]
+        fill_mode = self.cbo_sbs2mvc_fill_mode.GetClientData(self.cbo_sbs2mvc_fill_mode.GetSelection())
+        if fill_mode and fill_mode != "fit":
+            cmd += ["--fill-mode", fill_mode]
         if self.chk_sbs2mvc_swap.GetValue():
             cmd.append("--swap-eyes")
         if not self.chk_sbs2mvc_restore_av.GetValue():
@@ -20691,6 +20800,134 @@ def _self_test_mvc_allow_lossless_eac3_checkbox():
     print("_self_test_mvc_allow_lossless_eac3_checkbox: PASS")
 
 
+def _self_test_mvc_fill_mode_control():
+    """Real user request (relayed by decker): for 3D Blu-ray MVC output, once Auto-crop has
+    cut black letterbox/pillarbox bars off, stretch the remaining real picture to completely
+    fill the fixed 1920x1080 disc frame instead of the default fit-and-pad (which can still
+    leave black bars) -- a real, separate, explicitly-labeled opt-in (see eye_filter()'s own
+    docstring in sbs_to_mvc_cli.py for the real geometric-distortion trade-off; decker was
+    told this plainly and approved it as an alternative, not a default change).
+
+    Covers: both the main-tab combo (shared by 'Convert to 3D Blu-ray MVC' and 'Direct to 3D
+    Blu-ray MVC') and the standalone 'SBS to 3D Blu-ray MVC' tool's own copy -- default 'fit',
+    tooltip content, greyed out while Auto-crop is 'Off' (matching
+    update_mvc_allow_lossless_eac3()'s own Enable() convention) and enabled once Auto-crop
+    picks a real crop mode, greyed out whenever Direct to MVC has also forced Auto-crop off,
+    a real round trip through parse_args()/apply_parsed_args_to_gui(), and the standalone
+    tool's own build_sbs2mvc_command() only adding --fill-mode for a genuine non-default
+    choice."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # Default state, both panels: "fit" selected, greyed out (Auto-crop defaults to Off).
+        assert frame.cbo_mvc_fill_mode.GetClientData(frame.cbo_mvc_fill_mode.GetSelection()) == "fit"
+        assert frame.cbo_sbs2mvc_fill_mode.GetClientData(frame.cbo_sbs2mvc_fill_mode.GetSelection()) == "fit"
+        assert not frame.cbo_mvc_fill_mode.IsEnabled(), "must start greyed out -- Auto-crop (MVC) defaults to Off"
+        assert not frame.cbo_sbs2mvc_fill_mode.IsEnabled(), "must start greyed out -- Auto-crop defaults to Off"
+        for tip_ctrl in (frame.cbo_mvc_fill_mode, frame.cbo_sbs2mvc_fill_mode):
+            tip = tip_ctrl.GetToolTip().GetTip()
+            for phrase in ("Fit Screen", "Fill Screen", "distorts the picture's true proportions",
+                           "circles become", "squished", "Recommended: Fit Screen"):
+                assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
+
+        # Main tab: picking a real Auto-crop (MVC) mode enables the combo; back to Off re-greys it.
+        mvc_autocrop_items = [frame.cbo_mvc_autocrop.GetClientData(i) for i in range(frame.cbo_mvc_autocrop.GetCount())]
+        frame.cbo_mvc_autocrop.SetSelection(mvc_autocrop_items.index("BLACK"))
+        frame.on_changed_mvc_autocrop(wx.CommandEvent())
+        assert frame.cbo_mvc_fill_mode.IsEnabled(), "must enable once Auto-crop (MVC) picks a real mode"
+        frame.cbo_mvc_autocrop.SetSelection(mvc_autocrop_items.index(""))
+        frame.on_changed_mvc_autocrop(wx.CommandEvent())
+        assert not frame.cbo_mvc_fill_mode.IsEnabled(), "must re-grey when Auto-crop (MVC) goes back to Off"
+
+        # Direct to MVC forces Auto-crop (MVC) off and disables it -- Fill Mode must follow,
+        # even if it was enabled (a real crop mode picked) right before Direct MVC was checked.
+        frame.cbo_mvc_autocrop.SetSelection(mvc_autocrop_items.index("BLACK"))
+        frame.on_changed_mvc_autocrop(wx.CommandEvent())
+        assert frame.cbo_mvc_fill_mode.IsEnabled()
+        frame.chk_direct_mvc.SetValue(True)
+        frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+        assert not frame.cbo_mvc_autocrop.IsEnabled(), "test assumption: Direct MVC disables Auto-crop (MVC)"
+        assert not frame.cbo_mvc_fill_mode.IsEnabled(), "must grey out whenever Auto-crop (MVC) itself is disabled"
+        frame.chk_direct_mvc.SetValue(False)
+        frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+
+        # Standalone tool: same real greying-out logic, driven through its own Auto-crop combo.
+        sbs_autocrop_items = [frame.cbo_sbs2mvc_autocrop.GetClientData(i)
+                              for i in range(frame.cbo_sbs2mvc_autocrop.GetCount())]
+        frame.cbo_sbs2mvc_autocrop.SetSelection(sbs_autocrop_items.index("BLACK_TB"))
+        frame.on_changed_sbs2mvc_autocrop(wx.CommandEvent())
+        assert frame.cbo_sbs2mvc_fill_mode.IsEnabled()
+        frame.cbo_sbs2mvc_autocrop.SetSelection(sbs_autocrop_items.index(""))
+        frame.on_changed_sbs2mvc_autocrop(wx.CommandEvent())
+        assert not frame.cbo_sbs2mvc_fill_mode.IsEnabled()
+
+        # Standalone tool's own command builder: "fit" (the default) must add no flag at all --
+        # today's output stays byte-identical unless a user explicitly opts into "stretch".
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = path.join(tmpdir, "movie_sbs.mkv")
+            open(video, "wb").close()
+            out = path.join(tmpdir, "movie_MVC.iso")
+            frame.txt_sbs2mvc_input.SetValue(video)
+            frame.txt_sbs2mvc_output.SetValue(out)
+            cmd, err = frame.build_sbs2mvc_command()
+            assert err is None and "--fill-mode" not in cmd, cmd
+            sbs_fill_items = [frame.cbo_sbs2mvc_fill_mode.GetClientData(i)
+                              for i in range(frame.cbo_sbs2mvc_fill_mode.GetCount())]
+            frame.cbo_sbs2mvc_fill_mode.SetSelection(sbs_fill_items.index("stretch"))
+            cmd, err = frame.build_sbs2mvc_command()
+            assert err is None and cmd[cmd.index("--fill-mode") + 1] == "stretch", cmd
+            frame.cbo_sbs2mvc_fill_mode.SetSelection(sbs_fill_items.index("fit"))
+
+        # Real round trip: picking "stretch" on the main tab reaches parse_args() as the real
+        # CLI-facing attribute, and apply_parsed_args_to_gui() restores both the value and the
+        # correct enabled state from a loaded preset/config.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = path.join(tmpdir, "movie.mkv")
+            open(src, "wb").close()
+            frame.pnl_file.set_input_path(src)
+            frame.pnl_file.set_output_path(path.join(tmpdir, "movie_out.mkv"))
+            mvc_fill_items = [frame.cbo_mvc_fill_mode.GetClientData(i)
+                              for i in range(frame.cbo_mvc_fill_mode.GetCount())]
+            frame.cbo_mvc_autocrop.SetSelection(mvc_autocrop_items.index("BLACK"))
+            frame.on_changed_mvc_autocrop(wx.CommandEvent())
+            frame.cbo_mvc_fill_mode.SetSelection(mvc_fill_items.index("stretch"))
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            assert args.mvc_fill_mode == "stretch", args.mvc_fill_mode
+
+            frame.cbo_mvc_fill_mode.SetSelection(mvc_fill_items.index("fit"))
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.cbo_mvc_fill_mode.GetClientData(frame.cbo_mvc_fill_mode.GetSelection()) == "stretch"
+            assert frame.cbo_mvc_fill_mode.IsEnabled(), "Auto-crop (MVC) restored to BLACK from args -- must re-enable"
+
+            args.mvc_fill_mode = "fit"
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.cbo_mvc_fill_mode.GetClientData(frame.cbo_mvc_fill_mode.GetSelection()) == "fit"
+
+            # A preset/config saved before this feature existed has no mvc_fill_mode attribute
+            # at all -- must default to "fit", never raise.
+            del args.mvc_fill_mode
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.cbo_mvc_fill_mode.GetClientData(frame.cbo_mvc_fill_mode.GetSelection()) == "fit"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mvc_fill_mode_control: PASS")
+
+
 def _self_test_max_negative_parallax_field():
     """ADR-179: Max Negative Parallax (GUI label "Max Pop-Out Limit"), a safety cap
     on pop-out that's independent from the Convergence Plane slider -- Convergence
@@ -22332,6 +22569,28 @@ def _self_test_mvc_conversion_step():
         assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
     cmd = run_mvc.call_args[0][0]
     assert cmd[cmd.index("--autocrop") + 1] == "BLACK_TB", cmd
+
+    # Real user request (relayed by decker): --fill-mode only reaches the subprocess when
+    # explicitly set to "stretch" -- "fit" (the default) and no value at all must both be a
+    # genuine no-op, today's output must stay byte-identical unless a user explicitly opts in.
+    args = base_args()
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert "--fill-mode" not in run_mvc.call_args[0][0], "unset mvc_fill_mode must add no flag"
+
+    args = base_args(mvc_fill_mode="fit")
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert "--fill-mode" not in run_mvc.call_args[0][0], "explicit 'fit' must add no flag either"
+
+    args = base_args(mvc_fill_mode="stretch")
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    cmd = run_mvc.call_args[0][0]
+    assert cmd[cmd.index("--fill-mode") + 1] == "stretch", cmd
 
     # Real re-investigation this session: --allow-lossless-eac3-on-disc only reaches the
     # subprocess when the new checkbox is on -- must not silently opt a job into a
@@ -25928,6 +26187,7 @@ def _run_self_tests():
         _self_test_mvc_hdr_preflight_prompt,
         _self_test_direct_mvc_checkbox,
         _self_test_mvc_allow_lossless_eac3_checkbox,
+        _self_test_mvc_fill_mode_control,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_nvenc_bitrate_cap,

@@ -2049,6 +2049,56 @@ def _tonemap_hdr_to_sdr(input_filename, args):
     if getattr(args, "end_time", None):
         trim_args += ["-to", str(parse_time(args.end_time))]
 
+    # Real user report: this pass used to be a single plain blocking subprocess.run() with no
+    # progress signal at all, so a real multi-minute 4K pass (this function runs BEFORE the
+    # depth/stereo encode's own live tqdm progress even starts) showed only the generic
+    # elapsed-time pulse timer -- indistinguishable from a hang. Source duration (for a
+    # percent/ETA estimate) is probed the same way _denoise_preprocess (right below this
+    # function) already does it for its own pre-pass, not re-invented here.
+    try:
+        import av as _av
+        with _av.open(str(input_filename), metadata_errors="ignore") as _c:
+            _dur = float(_c.duration) / 1000000.0 if _c.duration else None
+        start_sec = parse_time(args.start_time) if getattr(args, "start_time", None) else 0.0
+        end_sec = parse_time(args.end_time) if getattr(args, "end_time", None) else _dur
+        total_sec = (end_sec - start_sec) if (end_sec is not None) else _dur
+    except Exception:
+        total_sec = None
+
+    _notify_stage(args, STAGE_HDR_TO_SDR)
+    bar = _StageBar(args, f"{path.basename(input_filename)}: Converting HDR to SDR", 1000, "pct")
+
+    def _run_pass(cmd):
+        """Runs one hw_cmd/sw_cmd ffmpeg pass, live-updating `bar` from -progress pipe:1's
+        out_time_ms= lines as it runs (same key _denoise_preprocess already parses off its own
+        pipe:2, just read from stdout here to match -progress pipe:1's own documented stdout
+        destination). Raises subprocess.CalledProcessError with .stderr set, matching the
+        previous subprocess.run(check=True, capture_output=True) contract this function's own
+        except-clause below already handles, so no caller-visible behavior changes on failure."""
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        err_lines = []
+
+        def _read_stderr():
+            for line in proc.stderr:
+                err_lines.append(line)
+
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stderr_thread.start()
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time_ms=") and total_sec:
+                try:
+                    done_sec = int(line.split("=", 1)[1]) / 1000000.0  # microseconds despite the name
+                    bar.set(min(max(done_sec, 0.0) / total_sec, 1.0) * 1000)
+                except ValueError:
+                    pass
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        if proc.returncode != 0:
+            err = subprocess.CalledProcessError(proc.returncode, cmd)
+            err.stderr = "".join(err_lines).encode()
+            raise err
+
     print("[hdr-to-sdr] converting HDR source to SDR (10-bit retained) before processing "
           "-- this adds one extra encoding pass.", file=sys.stderr)
     # dither=error_diffusion on the final zscale call (not the trailing format= filter, which
@@ -2062,7 +2112,7 @@ def _tonemap_hdr_to_sdr(input_filename, args):
     tonemap_filter = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
                        "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,"
                        "format=yuv420p10le,sidedata=delete")
-    sw_cmd = [ffmpeg_bin, "-y", *trim_args, "-i", str(input_filename),
+    sw_cmd = [ffmpeg_bin, "-y", "-nostats", "-progress", "pipe:1", *trim_args, "-i", str(input_filename),
               "-vf", tonemap_filter, "-c:v", "libx265", "-pix_fmt", "yuv420p10le", "-crf", "12",
               "-c:a", "copy", tmp_sdr]
 
@@ -2084,23 +2134,34 @@ def _tonemap_hdr_to_sdr(input_filename, args):
         dl_format = "p010le"
         if ffprobe_bin and not _hdr_to_sdr_high_bit_depth(input_filename, ffprobe_bin):
             dl_format = "nv12"
-        hw_cmd = [ffmpeg_bin, "-y", *trim_args, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+        hw_cmd = [ffmpeg_bin, "-y", "-nostats", "-progress", "pipe:1", *trim_args,
+                  "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
                   "-i", str(input_filename), "-vf", f"hwdownload,format={dl_format}," + tonemap_filter,
                   "-c:v", "hevc_nvenc", "-rc", "constqp", "-qp", "12", "-pix_fmt", "yuv420p10le",
                   "-c:a", "copy", tmp_sdr]
 
+    ok = False
     try:
-        if hw_cmd is not None:
-            try:
-                subprocess.run(hw_cmd, check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                subprocess.run(sw_cmd, check=True, capture_output=True)
-        else:
-            subprocess.run(sw_cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[hdr-to-sdr] conversion failed, processing the original HDR source instead: "
-              f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
-        return input_filename, None
+        try:
+            if hw_cmd is not None:
+                try:
+                    _run_pass(hw_cmd)
+                except subprocess.CalledProcessError:
+                    _run_pass(sw_cmd)
+            else:
+                _run_pass(sw_cmd)
+            ok = True
+        except subprocess.CalledProcessError as e:
+            print(f"[hdr-to-sdr] conversion failed, processing the original HDR source instead: "
+                  f"{e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+            return input_filename, None
+    finally:
+        bar.close(complete=ok)
+        # Hands the stage display back to whichever stage the caller was already on
+        # (STAGE_DEPTH_STEREO in both current callers) -- this function only ever
+        # switches it forward, so it is always this function's job to switch it back,
+        # on both the success and the fall-back-to-original-source failure path.
+        _notify_stage(args, STAGE_DEPTH_STEREO)
 
     if trim_args:
         # The intermediate file already covers exactly [start_time, end_time]; clear those
@@ -3211,6 +3272,7 @@ STAGE_SCENE_DETECT = "Scene Boundary Detection"
 STAGE_AUTOCROP = "AutoCrop Analysis"
 STAGE_HDR_EXTRACT = "HDR/DV RPU Extraction"
 STAGE_AUDIO_EXTRACT = "Audio Extraction"
+STAGE_HDR_TO_SDR = "Converting HDR to SDR"
 STAGE_DEPTH_STEREO = "Depth & Stereo Conversion"
 STAGE_WAIFU2X_UPSCALE = "Upscaling with waifu2x"
 STAGE_RIFE_INTERPOLATE = "RIFE Frame Interpolation"

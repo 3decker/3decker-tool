@@ -25,6 +25,7 @@ from .utils import (
     _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram, build_cli_command_from_args,
     analyze_source_video, format_source_analysis,
     STAGE_SCENE_DETECT, STAGE_AUTOCROP, STAGE_HDR_EXTRACT, STAGE_AUDIO_EXTRACT,
+    STAGE_HDR_TO_SDR,
     STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
     STAGE_RESTORE_AV,
     STAGE_CONVERT_MVC,
@@ -10566,21 +10567,29 @@ class MainFrame(wx.Frame):
         matches the REAL order process_video_full()/process_video_with_resume() run
         these phases in, confirmed by reading both directly rather than assumed:
         Scene Boundary Detection, AutoCrop Analysis, and HDR/DV RPU Extraction all
-        happen BEFORE the depth/stereo encode; Audio Extraction (auto-resume's own
+        happen BEFORE the depth/stereo encode; so does the HDR-to-SDR tonemap pre-pass
+        (STAGE_HDR_TO_SDR, _tonemap_hdr_to_sdr() in utils.py) -- confirmed by reading
+        process_video()'s own call order directly: it runs immediately before the
+        depth/stereo encode starts, right after that stage's own _notify_stage(
+        STAGE_DEPTH_STEREO) call, which _tonemap_hdr_to_sdr() hands the stage display
+        back to itself once its own pass finishes. Audio Extraction (auto-resume's own
         single clean-audio pass over the whole file) happens AFTER it, once all
         segments are already encoded, not before -- so it is listed after
         STAGE_DEPTH_STEREO, not before it. Dual-Pass Depth Blend passes are still
         shown as detail WITHIN stage Depth & Stereo Conversion (their own live
         per-frame tqdm progress and sub-label via _progress_title's step_label makes
         a separate top-level stage unnecessary).
-        Two of these conditions are necessarily an upper-bound estimate, same
+        Three of these conditions are necessarily an upper-bound estimate, same
         limitation STAGE_HDR_REINJECT already had before this amendment: whether
-        --preserve-dowi's source actually HAS DV/HDR10+ metadata, and whether
-        --auto-resume's clip is actually long enough to need segmenting, can only be
-        known by probing the file once the job is running, not synchronously here --
-        so a run that turns on Preserve Dolby Vision against an SDR source, or Auto-
-        Resume against a short clip, shows one more stage in "Step k/N" than actually
-        fires (N is a maximum, matching how STAGE_HDR_REINJECT already behaved).
+        --preserve-dowi's source actually HAS DV/HDR10+ metadata, whether
+        --auto-resume's clip is actually long enough to need segmenting, and whether
+        a Convert HDR to SDR source is actually tagged PQ/HLG (_tonemap_hdr_to_sdr()
+        itself probes that and silently no-ops if it isn't), can only be known by
+        probing the file once the job is running, not synchronously here -- so a run
+        that turns on Preserve Dolby Vision or Convert HDR to SDR against an SDR
+        source, or Auto-Resume against a short clip, shows one more stage in "Step
+        k/N" than actually fires (N is a maximum, matching how STAGE_HDR_REINJECT
+        already behaved).
         STAGE_RESTORE_AV (ADR-172) is listed last -- _run_audio_subtitle_restore() is
         called after _run_rife_interpolation() in the same completion block in
         utils.py, confirmed by reading that call site directly.
@@ -10594,6 +10603,8 @@ class MainFrame(wx.Frame):
             stages.append(STAGE_AUTOCROP)
         if getattr(args, "preserve_dowi", False):
             stages.append(STAGE_HDR_EXTRACT)
+        if getattr(args, "hdr_to_sdr", False):
+            stages.append(STAGE_HDR_TO_SDR)
         stages.append(STAGE_DEPTH_STEREO)
         if getattr(args, "auto_resume", False):
             stages.append(STAGE_AUDIO_EXTRACT)
@@ -16996,6 +17007,19 @@ def _self_test_progress_stage_display():
             gui_mod.STAGE_DEPTH_STEREO, gui_mod.STAGE_AUDIO_EXTRACT], \
             "Audio Extraction must come AFTER Depth & Stereo Conversion, not before"
 
+        # STAGE_HDR_TO_SDR (_tonemap_hdr_to_sdr's own real pre-pass, see utils.py): a job
+        # WITHOUT the Convert HDR to SDR checkbox on (every fixture above, and plain_args)
+        # must show no such stage at all -- confirmed above already, since none of them set
+        # hdr_to_sdr and _compute_job_stages defaults it to False via getattr. A job WITH it
+        # on must show exactly one extra stage, positioned right before Depth & Stereo
+        # Conversion (it genuinely runs immediately before it -- see _tonemap_hdr_to_sdr's
+        # own call site in process_video()).
+        only_hdr_to_sdr = types.SimpleNamespace(
+            scene_detect=False, scene_detect_only=False, autocrop=None, preserve_dowi=False,
+            auto_resume=False, waifu2x_upscale=False, rife_interpolate=False, hdr_to_sdr=True)
+        assert frame._compute_job_stages(only_hdr_to_sdr) == [
+            gui_mod.STAGE_HDR_TO_SDR, gui_mod.STAGE_DEPTH_STEREO]
+
         full_args = types.SimpleNamespace(
             scene_detect=True, scene_detect_only=False, autocrop="768:432", preserve_dowi=True,
             auto_resume=True, waifu2x_upscale=True, rife_interpolate=True)
@@ -17003,7 +17027,7 @@ def _self_test_progress_stage_display():
             gui_mod.STAGE_SCENE_DETECT, gui_mod.STAGE_AUTOCROP, gui_mod.STAGE_HDR_EXTRACT,
             gui_mod.STAGE_DEPTH_STEREO, gui_mod.STAGE_AUDIO_EXTRACT, gui_mod.STAGE_WAIFU2X_UPSCALE,
             gui_mod.STAGE_RIFE_INTERPOLATE, gui_mod.STAGE_HDR_REINJECT,
-        ]
+        ], "a job that never set hdr_to_sdr at all must show the exact same stage count/order as before"
 
         # _format_duration
         assert gui_mod.MainFrame._format_duration(0) == "00:00"
@@ -22795,6 +22819,25 @@ def _self_test_rife_with_preserve_dolby_vision():
     assert "cannot be used together" not in inspect.getsource(MainFrame.on_click_btn_start)
 
 
+class _FakeTonemapPopen:
+    """Minimal stand-in for subprocess.Popen as _tonemap_hdr_to_sdr's own _run_pass() helper
+    uses it (stdout=PIPE, stderr=PIPE, text=True): plain-list .stdout/.stderr (iterated the
+    same way real text-mode pipes are), .wait()/.returncode. Writes a real output file at
+    cmd[-1] on success, matching what a real successful ffmpeg run produces, so downstream
+    path.exists(tmp_file) checks keep working unchanged."""
+    def __init__(self, cmd, stdout_lines=(), returncode=0, write_output=True):
+        self.args = cmd
+        self.stdout = list(stdout_lines)
+        self.stderr = [] if returncode == 0 else ["fake ffmpeg failure\n"]
+        self.returncode = returncode
+        if write_output and returncode == 0:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-sdr-output")
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 def _self_test_utils_hdr_to_sdr_gpu_decode():
     """Real user finding: the Video Filter tab's own Convert HDR to SDR option
     (iw3.utils._tonemap_hdr_to_sdr, the main conversion pipeline's -- distinct from the newer
@@ -22804,7 +22847,14 @@ def _self_test_utils_hdr_to_sdr_gpu_decode():
     hardcoded to CPU libx265. Both are now GPU-preferred (hevc_nvenc decode+encode) with the
     same real, tested fallback to the original, always-working software (libx265) command if the
     GPU attempt fails for any reason. Mocked -- no real ffmpeg/GPU touched here (already verified
-    live and directly against real HDR10/HLG test clips, both bit depths, while building this)."""
+    live and directly against real HDR10/HLG test clips, both bit depths, while building this).
+
+    Mocks subprocess.Popen (not subprocess.run) since the real-progress-reporting fix (the
+    HDR-to-SDR pre-pass used to be a single blocking subprocess.run() with zero progress signal,
+    looking identical to a hang on a real multi-minute 4K pass) switched _tonemap_hdr_to_sdr's
+    own ffmpeg invocation from subprocess.run(check=True, capture_output=True) to a streaming
+    subprocess.Popen + -progress pipe:1 loop -- see _self_test_hdr_to_sdr_tonemap_progress_is_
+    incremental for the dedicated test of that new live-progress behavior itself."""
     import types
     import tempfile
     from unittest import mock
@@ -22815,26 +22865,18 @@ def _self_test_utils_hdr_to_sdr_gpu_decode():
         open(src, "wb").close()
         args = types.SimpleNamespace(hdr_to_sdr=True, preserve_dowi=False, start_time=None, end_time=None)
 
-        calls = []
-
-        def fake_run(cmd, **kw):
-            calls.append(cmd)
-            # sw_cmd always ends in the tmp_sdr output path; hw_cmd does too -- create it so
-            # the caller sees a real produced file, matching a real successful ffmpeg run.
-            out_path = cmd[-1]
-            with open(out_path, "wb") as f:
-                f.write(b"fake-sdr-output")
-            return types.SimpleNamespace(returncode=0)
+        def fake_popen(cmd, **kw):
+            return _FakeTonemapPopen(cmd, stdout_lines=["out_time_ms=0\n", "out_time_ms=1000000\n"])
 
         # GPU available: the hw_cmd (hwaccel cuda + hevc_nvenc) must be tried, and only that one
         with mock.patch.object(U, "_detect_pq_or_hlg", return_value=True), \
              mock.patch.object(U, "_hdr_upscale_codec", return_value="hevc_nvenc"), \
              mock.patch.object(U, "_hdr_to_sdr_high_bit_depth", return_value=True), \
-             mock.patch.object(U.subprocess, "run", side_effect=fake_run) as m_run:
+             mock.patch.object(U.subprocess, "Popen", side_effect=fake_popen) as m_popen:
             result_path, tmp_file = U._tonemap_hdr_to_sdr(src, args)
             assert tmp_file is not None and path.exists(tmp_file)
-            assert m_run.call_count == 1, "GPU attempt succeeded -- software fallback must not run too"
-            called_cmd = m_run.call_args[0][0]
+            assert m_popen.call_count == 1, "GPU attempt succeeded -- software fallback must not run too"
+            called_cmd = m_popen.call_args[0][0]
             assert "-hwaccel" in called_cmd and "cuda" in called_cmd
             assert "hwdownload,format=p010le" in called_cmd[called_cmd.index("-vf") + 1]
             assert "hevc_nvenc" in called_cmd
@@ -22842,39 +22884,122 @@ def _self_test_utils_hdr_to_sdr_gpu_decode():
 
         # GPU available but the hw attempt fails (e.g. a real driver/profile issue) -- must fall
         # back to the original, always-working software command, not raise/fail the whole thing
-        def fake_run_hw_fails(cmd, **kw):
-            calls.append(cmd)
+        def fake_popen_hw_fails(cmd, **kw):
             if "hevc_nvenc" in cmd:
-                raise U.subprocess.CalledProcessError(1, cmd, output=b"", stderr=b"nvenc error")
-            out_path = cmd[-1]
-            with open(out_path, "wb") as f:
-                f.write(b"fake-sdr-output-sw")
-            return types.SimpleNamespace(returncode=0)
+                return _FakeTonemapPopen(cmd, returncode=1, write_output=False)
+            return _FakeTonemapPopen(cmd, stdout_lines=["out_time_ms=1000000\n"])
 
         with mock.patch.object(U, "_detect_pq_or_hlg", return_value=True), \
              mock.patch.object(U, "_hdr_upscale_codec", return_value="hevc_nvenc"), \
              mock.patch.object(U, "_hdr_to_sdr_high_bit_depth", return_value=True), \
-             mock.patch.object(U.subprocess, "run", side_effect=fake_run_hw_fails) as m_run:
+             mock.patch.object(U.subprocess, "Popen", side_effect=fake_popen_hw_fails) as m_popen:
             result_path, tmp_file = U._tonemap_hdr_to_sdr(src, args)
             assert tmp_file is not None and path.exists(tmp_file), \
                 "must fall back to software and still succeed, not fail the whole operation"
-            assert m_run.call_count == 2, "must have tried hw first, then sw as fallback"
-            assert "hevc_nvenc" in m_run.call_args_list[0][0][0]
-            assert "libx265" in m_run.call_args_list[1][0][0]
+            assert m_popen.call_count == 2, "must have tried hw first, then sw as fallback"
+            assert "hevc_nvenc" in m_popen.call_args_list[0][0][0]
+            assert "libx265" in m_popen.call_args_list[1][0][0]
             os.remove(tmp_file)
 
         # No GPU available at all -- must go straight to software, never attempt hw
         with mock.patch.object(U, "_detect_pq_or_hlg", return_value=True), \
              mock.patch.object(U, "_hdr_upscale_codec", return_value="libx265"), \
-             mock.patch.object(U.subprocess, "run", side_effect=fake_run) as m_run:
+             mock.patch.object(U.subprocess, "Popen", side_effect=fake_popen) as m_popen:
             result_path, tmp_file = U._tonemap_hdr_to_sdr(src, args)
             assert tmp_file is not None and path.exists(tmp_file)
-            assert m_run.call_count == 1
-            assert "libx265" in m_run.call_args[0][0]
-            assert "-hwaccel" not in m_run.call_args[0][0]
+            assert m_popen.call_count == 1
+            assert "libx265" in m_popen.call_args[0][0]
+            assert "-hwaccel" not in m_popen.call_args[0][0]
             os.remove(tmp_file)
 
     print("_self_test_utils_hdr_to_sdr_gpu_decode: PASS")
+
+
+def _self_test_hdr_to_sdr_tonemap_progress_is_incremental():
+    """The real bug this session fixes: _tonemap_hdr_to_sdr() used to be a single blocking
+    subprocess.run() with no progress signal at all, so a real multi-minute 4K HDR-to-SDR pass
+    (this pre-pass runs BEFORE the depth/stereo encode's own live tqdm progress even starts)
+    showed only the generic elapsed-time pulse timer in the GUI -- indistinguishable from a
+    hang. Confirms, with a mocked ffmpeg subprocess (same deterministic approach as direct_mvc_
+    cli.py's own _self_test_mux_progress_is_incremental, feeding several real-shaped progress
+    lines in order rather than timing a real subprocess), that: (1) the new -progress pipe:1
+    loop drives real, monotonically-increasing percent bar updates -- several distinct values,
+    not one jump at the very end; (2) the bar is closed at 100% on completion; and (3) the GUI
+    stage display is switched to STAGE_HDR_TO_SDR while this pass runs and handed back to
+    STAGE_DEPTH_STEREO once it finishes, so "Step k/N" reads correctly on both sides of it."""
+    import types
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+
+    class _FakeBar:
+        def __init__(self, log, total, desc):
+            self.desc = desc
+            self.total = total
+            self.pos = 0
+            self.closed = False
+            self.positions = []
+            log.append(self)
+
+        def update(self, n=1):
+            self.pos += n
+            self.positions.append(self.pos)
+
+        def close(self):
+            self.closed = True
+
+    class _FakeDuration:
+        duration = 10_000_000  # microseconds -- a 10 second source, av.Container's own units
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    bars = []
+
+    def fake_tqdm_fn(**kwargs):
+        return _FakeBar(bars, kwargs["total"], kwargs.get("desc", ""))
+
+    stages = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src = path.join(tmpdir, "movie_hdr.mkv")
+        open(src, "wb").close()
+        args = types.SimpleNamespace(
+            hdr_to_sdr=True, preserve_dowi=False, start_time=None, end_time=None,
+            state={"tqdm_fn": fake_tqdm_fn, "stage_fn": stages.append})
+
+        # Several distinct out_time_ms= lines spread across the fake 10s source, same real
+        # ffmpeg -progress pipe:1 shape _run_ffmpeg_stage's own proven parsing already expects.
+        progress_lines = [f"out_time_ms={ms}\n" for ms in (0, 2_500_000, 5_000_000, 7_500_000, 10_000_000)]
+
+        def fake_popen(cmd, **kw):
+            return _FakeTonemapPopen(cmd, stdout_lines=progress_lines)
+
+        with mock.patch.object(U, "_detect_pq_or_hlg", return_value=True), \
+             mock.patch.object(U, "_hdr_upscale_codec", return_value="libx265"), \
+             mock.patch("av.open", return_value=_FakeDuration()), \
+             mock.patch.object(U.subprocess, "Popen", side_effect=fake_popen):
+            result_path, tmp_file = U._tonemap_hdr_to_sdr(src, args)
+            assert tmp_file is not None and path.exists(tmp_file)
+            os.remove(tmp_file)
+
+        assert len(bars) == 1, f"expected exactly one tonemap progress bar, got {len(bars)}"
+        bar = bars[0]
+        assert "Converting HDR to SDR" in bar.desc, bar.desc
+        positions = bar.positions
+        assert len(positions) >= 3, f"expected several incremental updates, got {positions}"
+        assert positions == sorted(positions), f"progress must never go backwards, got {positions}"
+        assert len(set(positions)) > 1, f"progress must show more than one distinct value, got {positions}"
+        assert positions[-1] == bar.total, f"progress must finish at 100%, got {positions} vs {bar.total}"
+        assert bar.closed, "the tonemap progress bar must be closed once the pass finishes"
+
+        assert stages == [U.STAGE_HDR_TO_SDR, U.STAGE_DEPTH_STEREO], \
+            f"must switch to the HDR-to-SDR stage and hand it back afterward, got {stages}"
+
+    print("_self_test_hdr_to_sdr_tonemap_progress_is_incremental: PASS")
 
     with tempfile.TemporaryDirectory() as tmp:
         rife = path.join(tmp, "movie_LR_rife.mkv")
@@ -26442,6 +26567,7 @@ def _run_self_tests():
         _self_test_upscale_panel,
         _self_test_rife_with_preserve_dolby_vision,
         _self_test_utils_hdr_to_sdr_gpu_decode,
+        _self_test_hdr_to_sdr_tonemap_progress_is_incremental,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_truehd_eac3_audio_handling,

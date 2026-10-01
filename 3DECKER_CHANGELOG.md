@@ -19,6 +19,8 @@ it matters.
 
 **Fixed: "Direct to 3D Blu-ray MVC" showed no progress at all for the longest part of the job, looking like it had frozen.** The status bar would show real progress while generating the 3D depth, then just sit there with no detail once it moved on to actually building the 3D Blu-ray video and disc file — on a real movie, that step can take many minutes, so it genuinely looked hung. Root cause: the app was switching to that step's status label only *after* the real work behind it had already finished, so the entire wait was hiding silently behind the previous step's already-complete progress bar. Fixed, and while fixing it, also split this step into its real separate parts, each with its own live frame count, elapsed time, and time-remaining estimate, the same detail every other step already shows. This is purely a visual fix — your actual converted file is completely unaffected either way.
 
+**Fixed: converting an HDR movie could look frozen for many minutes with zero progress shown.** Same root cause as the fix just above, in a different spot — if you have "Convert HDR to SDR" turned on, the app does a full extra pass over your entire movie to flatten it from HDR to SDR before the actual 3D conversion even begins. That pass used to show absolutely nothing while it ran — no percent, no time remaining, nothing — hiding silently behind whatever step was already on screen. On a real 4K HDR movie, this pass alone can take many minutes, so it looked exactly like the app had hung. Now it gets its own clearly labeled step with real, live progress and a time estimate, the same as every other step. Purely a visual fix — your actual converted file is unaffected either way.
+
 ---
 
 ## Update — September 30, 2026

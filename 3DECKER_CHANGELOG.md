@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — September 30, 2026
+## Latest Update — October 1, 2026
+
+**New: a second, separate fix for 3D depth "flickering" — this one for mid-scene flicker, not just scene-cut jumps.** After the Cut Transition Smoothing fix above, a user found their footage was still flickering even with it turned on, specifically when using the "sod_v1" Convergence Plane mode. Traced this down to a real, distinct cause: that mode picks which part of the picture counts as "the main subject" completely fresh every single frame, with no memory of what it picked a moment ago. On real, busy footage where two different things in the frame are both borderline candidates for "the subject," the app's pick can flip back and forth between them many times within a single, uncut shot — something Cut Transition Smoothing can't catch, since that only smooths things out at actual scene cuts, not ongoing flicker within one continuous shot. There's now a new "Subject Lock" setting (off by default) that requires a new candidate to clearly win for a few frames in a row before the app actually switches to it, instead of re-deciding every single frame — confirmed in testing to fully eliminate this specific kind of flicker. Only matters if you use the "sod_v1" Convergence Plane mode; off by default, so nothing changes unless you turn it on.
+
+---
+
+## Update — September 30, 2026
 
 **Fixed: "Limit Bitrate" could make a file BIGGER instead of capping it — the opposite of what it's supposed to do.** A real user hit this: a movie that normally comes out around 20 GB ballooned to 52.78 GB with Limit Bitrate turned on at 60 Mbps — bigger than leaving it off, and even bigger than the 60 Mbps limit itself. Real, confirmed cause: the way your graphics card's encoder combines "aim for this quality" with "but stay under this size" doesn't actually work as a ceiling the way it's supposed to — it was pushing the file size up *toward* the limit even on movies that never needed anywhere near that much data in the first place. Completely rebuilt how this feature works: your movie now always encodes normally first, at full quality, exactly like before this feature existed. Only *after* it's finished does the app check the real resulting file size — and only if it's actually over your limit does it re-encode to bring it down. If your movie was never going to be too big in the first place (the normal case), nothing extra happens at all, and quality is completely unaffected. This can no longer make a file bigger than leaving Limit Bitrate off. If you turned this on for any recent conversion, it's worth checking whether that file came out unexpectedly large — you may want to redo it now that this is fixed.
 

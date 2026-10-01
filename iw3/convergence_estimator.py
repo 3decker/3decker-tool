@@ -10,7 +10,8 @@ SOD_URL = "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_sod_v1_
 
 
 class ConvergenceEstimator():
-    def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False, scene_hold=False):
+    def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False, scene_hold=False,
+                 cut_smooth=0):
         with TorchHubDir(HUB_MODEL_DIR):
             self.model, _ = load_model(SOD_URL, device_ids=[device_id], weights_only=True)
             self.model = self.model.eval().fuse()
@@ -29,17 +30,21 @@ class ConvergenceEstimator():
         # scene_hold mid-run (GUI checkbox change between runs) never carries stale
         # state from the other mode into the next call.
         self.scene_hold = scene_hold
+        self.cut_smooth = cut_smooth
         self.convergence_ema = None
-        self.tracker = SceneHoldTracker(decay)
+        self.tracker = SceneHoldTracker(decay, cut_smooth)
 
-    def reset(self, enable_ema=None, decay=None, scene_hold=None):
+    def reset(self, enable_ema=None, decay=None, scene_hold=None, cut_smooth=None):
         if enable_ema is not None:
             self.enable_ema = enable_ema
         if decay is not None:
             self.decay = decay
         if scene_hold is not None:
             self.scene_hold = scene_hold
+        if cut_smooth is not None:
+            self.cut_smooth = cut_smooth
         self.tracker.set_decay(self.decay)
+        self.tracker.set_cut_smooth(self.cut_smooth)
         self.tracker.reset()
         self.convergence_ema = None
 

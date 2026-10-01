@@ -15,12 +15,21 @@ Not tied to any particular signal (SOD closeness, face position, or anything els
 takes one raw scalar in per frame, returns one stabilized scalar out. Both
 ConvergenceEstimator and FaceConvergenceEstimator use the same instance-per-model
 pattern, one SceneHoldTracker each.
+
+cut_smooth (frames, default 0): real confirmed finding -- on fast-cut content (a
+movie trailer cutting every few seconds) the instant snap-at-cut above is very
+visible/jarring. 0 (default) keeps the snap byte-identical to the original
+behavior; a nonzero value eases `out` from its pre-cut value to the new scene's
+settling value over that many frames instead of jumping in one frame. Mirrors
+nt_auto3d's own equivalent, separately implemented here rather than imported --
+core iw3 must not depend on that optional add-on.
 """
 
 
 class SceneHoldTracker():
-    def __init__(self, decay=0.9):
+    def __init__(self, decay=0.9, cut_smooth=0):
         self.set_decay(decay)
+        self.set_cut_smooth(cut_smooth)
         self.reset()
 
     def set_decay(self, decay):
@@ -34,12 +43,17 @@ class SceneHoldTracker():
         self.drift = 0.05 - decay * 0.035                 # 0 -> 0.05/frame, 0.95 -> ~0.0167/frame
         self.deadband = 0.015 + decay * 0.06              # 0 -> 0.015, 0.95 -> ~0.072 (depth units, 0..1)
 
+    def set_cut_smooth(self, cut_smooth):
+        self.cut_smooth = max(0, int(cut_smooth or 0))
+
     def reset(self):
         self.s = None            # running/settled estimate of the current scene's value
         self.n = 0                # frames seen since the last cut
         self.out = None          # the value actually being used this frame
         self.moving = False
         self.cut_pending = True  # the next frame starts a new scene
+        self.ramp_from = None    # cut_smooth: value being eased away from
+        self.ramp_left = 0       # cut_smooth: frames left in the current ramp
 
     def mark_cut(self):
         """Call after processing the LAST frame of a scene (matches how reset_pts is
@@ -61,8 +75,18 @@ class SceneHoldTracker():
             else:
                 self.s += (raw - self.s) * self.drift        # slow drift once settled
 
+        if cut and self.cut_smooth > 0 and self.out is not None:
+            # ease into the new scene instead of snapping this frame; ramp continues below
+            self.ramp_from, self.ramp_left = self.out, self.cut_smooth
+            cut = False
+
         if self.out is None or cut:
             self.out, self.moving = self.s, False            # a cut snaps straight to the new scene
+        elif self.ramp_left > 0:
+            self.ramp_left -= 1
+            frac = 1 - self.ramp_left / self.cut_smooth
+            self.out = self.ramp_from + (self.s - self.ramp_from) * frac
+            self.moving = False
         else:
             gap = self.s - self.out
             if not self.moving and abs(gap) >= self.deadband:

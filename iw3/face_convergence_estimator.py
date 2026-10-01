@@ -29,7 +29,7 @@ class FaceConvergenceEstimator():
     Falls back to center-weighted depth when no faces are found in a frame.
     """
 
-    def __init__(self, enable_ema=False, decay=0.9, scene_hold=False):
+    def __init__(self, enable_ema=False, decay=0.9, scene_hold=False, cut_smooth=0):
         if not _CV2_AVAILABLE:
             if _CV2_CASCADE_MISSING:
                 raise ImportError(
@@ -49,17 +49,21 @@ class FaceConvergenceEstimator():
         # ADR-232: see ConvergenceEstimator's own comment -- scene_hold=False (default)
         # keeps the original plain-EMA behavior; True opts into ADR-231's tracker.
         self.scene_hold = scene_hold
+        self.cut_smooth = cut_smooth
         self.convergence_ema = None
-        self.tracker = SceneHoldTracker(decay)
+        self.tracker = SceneHoldTracker(decay, cut_smooth)
 
-    def reset(self, enable_ema=None, decay=None, scene_hold=None):
+    def reset(self, enable_ema=None, decay=None, scene_hold=None, cut_smooth=None):
         if enable_ema is not None:
             self.enable_ema = enable_ema
         if decay is not None:
             self.decay = decay
         if scene_hold is not None:
             self.scene_hold = scene_hold
+        if cut_smooth is not None:
+            self.cut_smooth = cut_smooth
         self.tracker.set_decay(self.decay)
+        self.tracker.set_cut_smooth(self.cut_smooth)
         self.tracker.reset()
         self.convergence_ema = None
 

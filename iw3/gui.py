@@ -1363,6 +1363,25 @@ class MainFrame(wx.Frame):
               "medium: settles over about half a second after a cut, then ignores small changes.\n"
               "high / very high: settles more slowly and barely moves within a shot.\n"
               "Recommended: medium."))
+        self.lbl_nt_cut_smooth = wx.StaticText(self.grp_stereo, label=T("Cut Transition Smoothing (frames)"))
+        self.cbo_nt_cut_smooth = EditableComboBox(self.grp_stereo, choices=["0", "3", "6", "12", "24"],
+                                                  name="cbo_nt_cut_smooth")
+        self.cbo_nt_cut_smooth.SetValue("0")
+        self.cbo_nt_cut_smooth.SetToolTip(
+            T("What it's for: in cuts/hybrid mode, the strength normally jumps to the new shot's value "
+              "the instant a cut is detected. This eases that jump into a smooth ramp over the given "
+              "number of frames instead of an instant snap.\n"
+              "Why it matters: a confirmed real finding -- on fast-cut content (a movie trailer cutting "
+              "every few seconds), the instant snap is very visible/jarring; on ordinary movies with cuts "
+              "seconds or minutes apart it is far less noticeable.\n"
+              "Con: this isn't free -- a longer value means the strength takes a moment to settle into "
+              "the new shot's correct value, which can itself look like a brief, soft drift right after "
+              "the cut. Has no effect in smooth mode (it never jumps at all).\n"
+              "Values: 0 = off, today's instant snap (default). Small values (3-6, at 24-30fps roughly "
+              "1/8-1/4 second) ease an occasional jarring jump on normal content. Larger values have not "
+              "been tested against deliberately fast-cut content like trailers -- try it and judge by eye "
+              "rather than assuming a bigger number is better.\n"
+              "Recommended: 0 unless you've actually seen a jarring jump at a cut."))
         self.chk_nt_auto_div_overlay = wx.CheckBox(self.grp_stereo, label=T("Show strength on video (debug)"),
                                                    name="chk_nt_auto_div_overlay")
         self.chk_nt_auto_div_overlay.SetToolTip(
@@ -1479,6 +1498,28 @@ class MainFrame(wx.Frame):
               "glides to it in the same gradual, deadband-gated way it handles any other mid-shot change.\n"
               "Recommended: try both real modes (with and without Scene Detection) on your own footage -- "
               "which one looks smoother is genuinely content- and settings-dependent, not a fixed rule."))
+        self.chk_convergence_scene_hold.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_convergence_scene_hold)
+
+        self.lbl_convergence_cut_smooth = wx.StaticText(
+            self.grp_stereo, label=T("Cut Transition Smoothing (frames)"))
+        self.cbo_convergence_cut_smooth = EditableComboBox(
+            self.grp_stereo, choices=["0", "3", "6", "12", "24"], name="cbo_convergence_cut_smooth")
+        self.cbo_convergence_cut_smooth.SetValue("0")
+        self.cbo_convergence_cut_smooth.SetToolTip(
+            T("Only affects Hold Steady Per Scene above (and only when it actually receives a cut, i.e. "
+              "with Scene Detection / Scene Batch also on -- see that checkbox's own tooltip). Normally "
+              "the convergence point snaps straight to the new scene's value the instant a cut fires. This "
+              "eases that jump into a smooth ramp over the given number of frames instead.\n"
+              "Why it matters: a confirmed real finding on the matching Auto 3D Strength mechanism -- on "
+              "fast-cut content (a movie trailer cutting every few seconds), an instant snap is very "
+              "visible/jarring; ordinary movies with cuts seconds or minutes apart notice it far less.\n"
+              "Con: not free -- a longer value means the screen plane takes a moment to settle into the "
+              "new shot's position, which can itself look like a brief, soft drift right after the cut.\n"
+              "Values: 0 = off, today's instant snap (default). Small values (3-6) ease an occasional "
+              "jarring jump on normal content. Larger values have not been tested against deliberately "
+              "fast-cut content like trailers -- try it and judge by eye rather than assuming bigger is "
+              "better.\n"
+              "Recommended: 0 unless you've actually seen a jarring jump at a cut."))
 
         self.chk_convergence_overlay = wx.CheckBox(
             self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
@@ -3109,6 +3150,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_nt_div_max, (i, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_nt_auto_div_stab, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_nt_auto_div_stab, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_nt_cut_smooth, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_nt_cut_smooth, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
@@ -3120,6 +3163,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_smoothing, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_convergence_smoothing, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_scene_hold, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_convergence_cut_smooth, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_cut_smooth, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_negative_parallax, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -9060,6 +9105,8 @@ class MainFrame(wx.Frame):
             self.cbo_max_negative_parallax,
             self.cbo_nt_div_min,
             self.cbo_nt_div_max,
+            self.cbo_nt_cut_smooth,
+            self.cbo_convergence_cut_smooth,
             self.cbo_face_protect,
             self.cbo_resolution,
             self.cbo_stereo_width,
@@ -9392,9 +9439,20 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_smoothing.Enable()
             self.chk_convergence_scene_hold.Enable()
             self.chk_convergence_overlay.Enable()
+        self.update_convergence_cut_smooth()
 
     def on_changed_cbo_convergence_mode(self, event):
         self.update_convergence_mode()
+
+    def update_convergence_cut_smooth(self):
+        # Only meaningful once Hold Steady Per Scene can actually fire (mode != constant) AND is checked --
+        # it eases that mechanism's own cut-snap, so it's inert (and kept disabled) otherwise.
+        on = self.cbo_convergence_mode.GetValue() != "constant" and self.chk_convergence_scene_hold.GetValue()
+        self.lbl_convergence_cut_smooth.Enable(on)
+        self.cbo_convergence_cut_smooth.Enable(on)
+
+    def on_changed_chk_convergence_scene_hold(self, event):
+        self.update_convergence_cut_smooth()
 
     def update_ema_normalize(self):
         if self.chk_ema_normalize.IsChecked():
@@ -9581,11 +9639,13 @@ class MainFrame(wx.Frame):
         advanced = (
             self.chk_nt_auto_div, self.cbo_nt_auto_div_mode,
             self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
-            self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay,
+            self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
+            self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay,
             self.lbl_resolution_preset, self.cbo_resolution_preset,
             self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
-            self.chk_convergence_scene_hold, self.chk_convergence_overlay,
+            self.chk_convergence_scene_hold, self.lbl_convergence_cut_smooth, self.cbo_convergence_cut_smooth,
+            self.chk_convergence_overlay,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
             self.lbl_face_protect, self.cbo_face_protect,
             self.lbl_ipd_offset, self.sld_ipd_offset,
@@ -9609,7 +9669,8 @@ class MainFrame(wx.Frame):
         # they just have no effect (--auto-divergence with no patched apply_divergence is a plain no-op).
         on = self.chk_nt_auto_div.GetValue()
         for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
-                  self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay):
+                  self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
+                  self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay):
             c.Enable(on)
         self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
 
@@ -9824,6 +9885,12 @@ class MainFrame(wx.Frame):
             return None
         if not validate_number(self.cbo_convergence_smoothing.GetValue(), 0.0, 0.999):
             self.show_validation_error_message(T("Convergence Smoothing"), 0.0, 0.999)
+            return None
+        if not validate_number(self.cbo_convergence_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
+            return None
+        if not validate_number(self.cbo_nt_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
             return None
         if not validate_number(self.cbo_pad.GetValue(), 0.0, 10.0, allow_empty=True):
             self.show_validation_error_message(T("Padding"), 0.0, 10.0)
@@ -10181,6 +10248,7 @@ class MainFrame(wx.Frame):
             convergence_mode=self.cbo_convergence_mode.GetValue(),
             convergence_smoothing=float(self.cbo_convergence_smoothing.GetValue()),
             convergence_scene_hold=self.chk_convergence_scene_hold.GetValue(),
+            convergence_cut_smooth=int(self.cbo_convergence_cut_smooth.GetValue()),
             convergence_overlay=self.chk_convergence_overlay.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
@@ -10192,6 +10260,7 @@ class MainFrame(wx.Frame):
             divergence_min=float(self.cbo_nt_div_min.GetValue()),
             divergence_max=float(self.cbo_nt_div_max.GetValue()),
             auto_divergence_stability=self.cbo_nt_auto_div_stab.GetValue().replace(" ", "-"),
+            auto_divergence_cut_smooth=int(self.cbo_nt_cut_smooth.GetValue()),
             auto_divergence_overlay=self.chk_nt_auto_div_overlay.GetValue(),
             face_protect_strength=float(self.cbo_face_protect.GetValue()),
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
@@ -11398,6 +11467,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_mode, args.convergence_mode)
         _apply_combo_value(self.cbo_convergence_smoothing, args.convergence_smoothing)
         self.chk_convergence_scene_hold.SetValue(bool(getattr(args, "convergence_scene_hold", False)))
+        _apply_combo_value(self.cbo_convergence_cut_smooth, getattr(args, "convergence_cut_smooth", 0))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
         # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- getattr defaults match create_parser()'s own
@@ -11408,6 +11478,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_nt_div_max, getattr(args, "divergence_max", 16.0))
         _apply_combo_value(self.cbo_nt_auto_div_stab,
                            getattr(args, "auto_divergence_stability", "medium").replace("-", " "))
+        _apply_combo_value(self.cbo_nt_cut_smooth, getattr(args, "auto_divergence_cut_smooth", 0))
         self.chk_nt_auto_div_overlay.SetValue(bool(getattr(args, "auto_divergence_overlay", False)))
         _apply_combo_value(self.cbo_face_protect, getattr(args, "face_protect_strength", 0.0))
         self.sld_ipd_offset.SetValue(int(round(args.ipd_offset)))
@@ -23744,9 +23815,10 @@ def _self_test_nt_auto_divergence_controls():
         frame = MainFrame()
         siblings = (frame.cbo_nt_auto_div_mode, frame.lbl_nt_div_range, frame.cbo_nt_div_min,
                    frame.cbo_nt_div_max, frame.lbl_nt_auto_div_stab, frame.cbo_nt_auto_div_stab,
-                   frame.chk_nt_auto_div_overlay)
+                   frame.lbl_nt_cut_smooth, frame.cbo_nt_cut_smooth, frame.chk_nt_auto_div_overlay)
         assert not frame.chk_nt_auto_div.GetValue() and all(not c.IsEnabled() for c in siblings)
         assert frame.lbl_divergence.GetLabelText() == "3D Strength"
+        assert frame.cbo_nt_cut_smooth.GetValue() == "0", "must default to off"
 
         frame.chk_nt_auto_div.SetValue(True)
         frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
@@ -23757,22 +23829,26 @@ def _self_test_nt_auto_divergence_controls():
         frame.cbo_nt_div_max.SetValue("12.0")
         frame.cbo_nt_auto_div_mode.SetValue("cuts")
         frame.cbo_nt_auto_div_stab.SetValue("very high")
+        frame.cbo_nt_cut_smooth.SetValue("6")
         frame.chk_nt_auto_div_overlay.SetValue(True)
         args = frame.parse_args(skip_set_state=True)
         assert args.auto_divergence is True and args.auto_divergence_mode == "cuts"
         assert args.divergence_min == 3.0 and args.divergence_max == 12.0
         assert args.auto_divergence_stability == "very-high" and args.auto_divergence_overlay is True
+        assert args.auto_divergence_cut_smooth == 6
         assert "--auto-divergence" in frame.get_cli_command(), "must show up in Copy Command like any real setting"
 
         frame.apply_parsed_args_to_gui(args)
         assert frame.chk_nt_auto_div.GetValue() and frame.cbo_nt_div_min.GetValue() == "3.0"
         assert frame.cbo_nt_auto_div_stab.GetValue() == "very high", "restore must undo the dash CLI uses"
+        assert frame.cbo_nt_cut_smooth.GetValue() == "6"
 
         frame.chk_nt_auto_div.SetValue(False)
         frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
         assert all(not c.IsEnabled() for c in siblings), "unchecking must disable its siblings again"
         assert frame.lbl_divergence.GetLabelText() == "3D Strength"
         assert "cbo_nt_div_min" in [c.GetName() for c in frame.get_editable_comboboxes()]
+        assert "cbo_nt_cut_smooth" in [c.GetName() for c in frame.get_editable_comboboxes()]
     finally:
         if frame is not None:
             frame.Destroy()
@@ -23791,17 +23867,29 @@ def _self_test_auto_divergence_metadata_tags():
         "-i", "a.mp4", "-o", "o", "--metadata", "filename",
         "--auto-divergence", "--auto-divergence-mode", "cuts",
         "--divergence-min", "3.0", "--divergence-max", "12.0",
-        "--auto-divergence-stability", "very-high", "--auto-divergence-overlay",
+        "--auto-divergence-stability", "very-high", "--auto-divergence-cut-smooth", "6",
+        "--auto-divergence-overlay",
     ])
     parsed.video_extension = ".mkv"
     name = U.make_output_filename("a.mp4", parsed, video=True)
-    assert "_auto3dcuts30-120veryhighdbg_" in name, name
+    assert "_auto3dcuts30-120veryhigh_cutsm6dbg_" in name, name
     comment = U._build_iw3_comment_metadata(parsed, video=True)
     assert "iw3_auto_divergence=1" in comment
     assert "iw3_auto_divergence_mode=cuts" in comment
     assert "iw3_divergence_min=3.0" in comment and "iw3_divergence_max=12.0" in comment
     assert "iw3_auto_divergence_stability=very-high" in comment
+    assert "iw3_auto_divergence_cut_smooth=6" in comment
     assert "iw3_auto_divergence_overlay=1" in comment
+
+    # cut-smooth is inert (and untagged) in smooth mode -- it never jumps at all
+    smooth_mode = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename",
+        "--auto-divergence", "--auto-divergence-mode", "smooth",
+        "--divergence-min", "3.0", "--divergence-max", "12.0", "--auto-divergence-cut-smooth", "6",
+    ])
+    smooth_mode.video_extension = ".mkv"
+    assert "cutsm" not in U.make_output_filename("a.mp4", smooth_mode, video=True)
+    assert "auto_divergence_cut_smooth" not in U._build_iw3_comment_metadata(smooth_mode, video=True)
 
     # default mode/stability, overlay off -> no dbg suffix, no stability suffix, no overlay line
     default_range = parser.parse_args([
@@ -23820,6 +23908,41 @@ def _self_test_auto_divergence_metadata_tags():
     assert "_auto3d" not in U.make_output_filename("a.mp4", off, video=True)
     assert "auto_divergence" not in U._build_iw3_comment_metadata(off, video=True)
     print("_self_test_auto_divergence_metadata_tags: PASS")
+
+
+def _self_test_auto_divergence_cut_smooth():
+    """Real confirmed finding this session (fast-cut movie trailer): Auto 3D Strength's Tracker
+    snaps the strength to the new scene's value the instant a cut fires -- very visible/jarring on
+    fast-cut content. --auto-divergence-cut-smooth eases that into a ramp over N frames instead.
+    Tests the Tracker directly (pure Python, no GPU/model needed): 0 (default) must reproduce the
+    exact original instant-snap value, unchanged; a nonzero value must measurably soften the first
+    post-cut frame and land on the same final value once the ramp completes."""
+    from nt_autostrength.autodiv import Tracker
+
+    def curve(s):
+        return 2.0 + (16.0 - 2.0) * s
+
+    scores = [0.1] * 5 + [0.9] * 5
+    reset_pts = [False] * 4 + [True] + [False] * 5   # iw3 resets AFTER frame index 4 -> cut lands on index 5
+
+    t0 = Tracker("hybrid", "medium")   # cut_smooth defaults to 0
+    out0 = t0.run(scores, None, reset_pts, False, curve)
+    assert abs(out0[5] - curve(0.9)) < 1e-9, \
+        f"cut_smooth=0 must snap instantly to the new scene, unchanged: {out0[5]} vs {curve(0.9)}"
+
+    t1 = Tracker("hybrid", "medium", cut_smooth=4)
+    out1 = t1.run(scores, None, reset_pts, False, curve)
+    assert out1[5] < out0[5], "a nonzero cut_smooth must soften the first post-cut frame, not snap"
+    assert out1[5] < out1[6] < out1[7] < out1[8], "the ramp must move monotonically toward the target"
+    assert abs(out1[8] - curve(0.9)) < 1e-6, "the ramp must land on the same final value once it completes"
+
+    # smooth mode never jumps at all -- cut_smooth must be completely inert there
+    t2a = Tracker("smooth", "medium", cut_smooth=0)
+    t2b = Tracker("smooth", "medium", cut_smooth=4)
+    out2a = t2a.run(scores, None, reset_pts, False, curve)
+    out2b = t2b.run(scores, None, reset_pts, False, curve)
+    assert out2a == out2b, "cut_smooth must have zero effect in smooth mode, which never jumps at all"
+    print("_self_test_auto_divergence_cut_smooth: PASS")
 
 
 def _self_test_face_protect():
@@ -25124,6 +25247,24 @@ def _self_test_convergence_scene_hold():
     hi = SceneHoldTracker(decay=0.95)
     assert hi.settle > lo.settle and hi.drift < lo.drift and hi.deadband > lo.deadband
 
+    # cut_smooth=0 (default) must reproduce the exact original instant snap, unchanged
+    t3 = SceneHoldTracker(decay=0.9)
+    for _ in range(20):
+        t3.update(0.2)
+    t3.mark_cut()
+    out_snap = t3.update(0.8)
+    assert abs(out_snap - 0.8) < 1e-9, f"cut_smooth=0 must snap instantly, unchanged: {out_snap}"
+
+    # cut_smooth=4: the same cut must now ease in over 4 frames, landing on the same value
+    t4 = SceneHoldTracker(decay=0.9, cut_smooth=4)
+    for _ in range(20):
+        t4.update(0.2)
+    t4.mark_cut()
+    ramp = [t4.update(0.8) for _ in range(4)]
+    assert ramp[0] < out_snap, "a nonzero cut_smooth must soften the first post-cut frame, not snap"
+    assert ramp[0] < ramp[1] < ramp[2] < ramp[3], "the ramp must move monotonically toward the target"
+    assert abs(ramp[3] - 0.8) < 1e-6, "the ramp must land on the same final value once it completes"
+
     # ADR-232: scene_hold is OPT-IN (off by default) -- both real estimator classes must
     # preserve the ORIGINAL plain-EMA behavior when it's off, and only route through the
     # SceneHoldTracker when explicitly turned on.
@@ -25191,23 +25332,33 @@ def _self_test_convergence_scene_hold_gui_and_metadata():
         frame.cbo_convergence_mode.SetValue("sod_v1")
         frame.update_convergence_mode()
         assert frame.chk_convergence_scene_hold.IsEnabled(), "must enable once mode is sod_v1"
+        assert not frame.cbo_convergence_cut_smooth.IsEnabled(), \
+            "Cut Transition Smoothing needs Hold Steady Per Scene checked too, not just the mode"
+        assert frame.cbo_convergence_cut_smooth.GetValue() == "0", "must default to off"
 
         # ADR-265: Hold Steady Per Scene now requires Scene Detection (or Scene Batch)
         # on too -- parse_args() blocks otherwise. Turned on here since this test is
         # about the checkbox/CLI-round-trip/GUI-restore behavior, not that gate.
         frame.chk_scene_detect.SetValue(True)
         frame.chk_convergence_scene_hold.SetValue(True)
+        frame.on_changed_chk_convergence_scene_hold(wx.CommandEvent())
+        assert frame.cbo_convergence_cut_smooth.IsEnabled(), "must enable once scene_hold is also checked"
+        frame.cbo_convergence_cut_smooth.SetValue("6")
         args = frame.parse_args(skip_set_state=True)
         assert args.convergence_scene_hold is True
+        assert args.convergence_cut_smooth == 6
         assert "--convergence-scene-hold" in frame.get_cli_command()
 
         frame.chk_convergence_scene_hold.SetValue(False)
+        frame.cbo_convergence_cut_smooth.SetValue("0")
         frame.apply_parsed_args_to_gui(args)
         assert frame.chk_convergence_scene_hold.GetValue() is True, "restore must bring the checked state back"
+        assert frame.cbo_convergence_cut_smooth.GetValue() == "6"
 
         frame.cbo_convergence_mode.SetValue("constant")
         frame.update_convergence_mode()
         assert not frame.chk_convergence_scene_hold.IsEnabled(), "must disable again back on constant"
+        assert not frame.cbo_convergence_cut_smooth.IsEnabled(), "must disable again back on constant"
     finally:
         if frame is not None:
             frame.Destroy()
@@ -25220,6 +25371,24 @@ def _self_test_convergence_scene_hold_gui_and_metadata():
     on.video_extension = ".mkv"
     assert "_scenehold" in U.make_output_filename("a.mp4", on, video=True)
     assert "iw3_convergence_scene_hold=1" in U._build_iw3_comment_metadata(on, video=True)
+
+    # cut-smooth: tagged only alongside scene_hold, and only when nonzero
+    cut_smooth_on = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "sod_v1",
+        "--convergence-scene-hold", "--convergence-cut-smooth", "6",
+    ])
+    cut_smooth_on.video_extension = ".mkv"
+    assert "_scenehold_cutsm6" in U.make_output_filename("a.mp4", cut_smooth_on, video=True)
+    assert "iw3_convergence_cut_smooth=6" in U._build_iw3_comment_metadata(cut_smooth_on, video=True)
+
+    # nonzero cut-smooth without scene_hold on has no effect and leaves no trace either
+    cut_smooth_no_hold = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "sod_v1",
+        "--convergence-cut-smooth", "6",
+    ])
+    cut_smooth_no_hold.video_extension = ".mkv"
+    assert "cutsm" not in U.make_output_filename("a.mp4", cut_smooth_no_hold, video=True)
+    assert "convergence_cut_smooth" not in U._build_iw3_comment_metadata(cut_smooth_no_hold, video=True)
 
     off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
                              "--convergence-mode", "sod_v1"])
@@ -25794,6 +25963,7 @@ def _run_self_tests():
         _self_test_face_protect,
         _self_test_nt_auto_divergence_controls,
         _self_test_auto_divergence_metadata_tags,
+        _self_test_auto_divergence_cut_smooth,
         _self_test_audio_subtitle_restore_dual_eye_flag,
         _self_test_write_job_log_checkbox,
         _self_test_standalone_write_job_log,

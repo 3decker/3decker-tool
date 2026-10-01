@@ -2613,6 +2613,9 @@ def make_output_filename(input_filename, args, video=False):
             convergence_smoothing = f"cs{to_deciaml(getattr(args, 'convergence_smoothing', 0.9), 100, 2)}"
             if getattr(args, "convergence_scene_hold", False):
                 convergence_smoothing += "_scenehold"
+                convergence_cut_smooth = int(getattr(args, "convergence_cut_smooth", 0) or 0)
+                if convergence_cut_smooth > 0:
+                    convergence_smoothing += f"_cutsm{convergence_cut_smooth}"
             if getattr(args, "convergence_overlay", False):
                 convergence_smoothing += "_dbg"
         else:
@@ -2830,6 +2833,9 @@ def make_output_filename(input_filename, args, video=False):
                           f"-{to_deciaml(auto_div_max, 10, 2)}")
             if auto_div_stab != "medium":
                 auto3d_tag += auto_div_stab.replace("-", "")
+            auto_div_cut_smooth = int(getattr(args, "auto_divergence_cut_smooth", 0) or 0)
+            if auto_div_cut_smooth > 0 and auto_div_mode != "smooth":
+                auto3d_tag += f"_cutsm{auto_div_cut_smooth}"
             if getattr(args, "auto_divergence_overlay", False):
                 auto3d_tag += "dbg"
         else:
@@ -2988,6 +2994,9 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append(f"iw3_divergence_max={getattr(args, 'divergence_max', 16.0)}")
         comment_parts.append(
             f"iw3_auto_divergence_stability={getattr(args, 'auto_divergence_stability', 'medium')}")
+        if (getattr(args, "auto_divergence_mode", "hybrid") != "smooth"
+                and getattr(args, "auto_divergence_cut_smooth", 0)):
+            comment_parts.append(f"iw3_auto_divergence_cut_smooth={args.auto_divergence_cut_smooth}")
         if getattr(args, "auto_divergence_overlay", False):
             comment_parts.append("iw3_auto_divergence_overlay=1")
     comment_parts.append(f"iw3_convergence={args.convergence}")
@@ -2997,6 +3006,8 @@ def _build_iw3_comment_metadata(args, video=True):
             f"iw3_convergence_smoothing={getattr(args, 'convergence_smoothing', 0.9)}")
         if getattr(args, "convergence_scene_hold", False):
             comment_parts.append("iw3_convergence_scene_hold=1")
+            if getattr(args, "convergence_cut_smooth", 0):
+                comment_parts.append(f"iw3_convergence_cut_smooth={args.convergence_cut_smooth}")
         if getattr(args, "convergence_overlay", False):
             comment_parts.append("iw3_convergence_overlay=1")
     if isinstance(args.edge_dilation, (list, tuple)):
@@ -6794,6 +6805,10 @@ def create_parser(required_true=True):
                               "steady for the whole scene and only readjust at cuts, instead of the default "
                               "plain per-frame EMA which can still drift within one unbroken shot. Off by "
                               "default to preserve this project's original convergence behavior."))
+    parser.add_argument("--convergence-cut-smooth", type=int, default=0,
+                        help=("Only affects --convergence-scene-hold: eases its cut-snap into a ramp over "
+                              "this many frames instead of an instant jump. 0 (default) is the original "
+                              "instant snap, unchanged."))
     parser.add_argument("--convergence-overlay", action="store_true",
                         help=("ADR-233: debug -- writes the Convergence Plane value actually used into the "
                               "top-right corner of every frame (auto convergence modes only -- sod_v1/"
@@ -7635,12 +7650,14 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         convergence_model = ConvergenceEstimator(args.convergence, device_id=args.gpu[0],
                                                  decay=getattr(args, "convergence_smoothing", 0.9),
                                                  compile=args.compile,
-                                                 scene_hold=getattr(args, "convergence_scene_hold", False))
+                                                 scene_hold=getattr(args, "convergence_scene_hold", False),
+                                                 cut_smooth=getattr(args, "convergence_cut_smooth", 0))
     elif args.convergence_mode == "face_detect":
         try:
             convergence_model = FaceConvergenceEstimator(
                 decay=getattr(args, "convergence_smoothing", 0.9),
-                scene_hold=getattr(args, "convergence_scene_hold", False))
+                scene_hold=getattr(args, "convergence_scene_hold", False),
+                cut_smooth=getattr(args, "convergence_cut_smooth", 0))
         except Exception as e:
             raise RuntimeError(
                 f"face_detect convergence mode failed to initialize.\n"

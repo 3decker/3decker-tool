@@ -59,7 +59,9 @@ No iw3 file is edited. `iw3.utils.apply_divergence` is wrapped: it works out a
 strength per frame and calls the original once per run of equal values with
 `args.divergence` set to it, so every method -- forward_inpaint, mlbw, row_flow
 -- gets it. The CLI gains --auto-divergence, --auto-divergence-mode,
---divergence-min, --divergence-max and --auto-divergence-overlay (debug: the
+--divergence-min, --divergence-max, --auto-divergence-cut-smooth (eases the
+strength change at a cut into a ramp over N frames instead of an instant
+jump; 0 default, unchanged) and --auto-divergence-overlay (debug: the
 strength used, written into each frame's corner); the iw3 window gains the
 same controls under 3D Strength, saved with the rest of its settings.
 
@@ -340,11 +342,18 @@ class Tracker:
     framing; smooth drifts always and never jumps. On top of all of that, the
     applied strength only moves once the target is `deadband` away -- during
     settling too -- and then glides to it, so small wobbles never reach the
-    picture and a higher stability always means fewer visible changes."""
+    picture and a higher stability always means fewer visible changes.
 
-    def __init__(self, mode, stability=DEFAULT_STABILITY):
+    cut_smooth (frames, default 0): real confirmed finding -- on fast-cut content
+    (a movie trailer cutting every few seconds) the instant snap-at-cut below is
+    very visible/jarring. 0 keeps that snap byte-identical to the original
+    behavior; a nonzero value eases `out` from its pre-cut value to the new
+    scene's target over that many frames instead of jumping in one frame."""
+
+    def __init__(self, mode, stability=DEFAULT_STABILITY, cut_smooth=0):
         self.mode = mode if mode in MODES else DEFAULT_MODE
         self.p = _stability(stability)
+        self.cut_smooth = max(0, int(cut_smooth or 0))
         self.reset()
 
     def reset(self):
@@ -354,6 +363,8 @@ class Tracker:
         self.moving = False
         self.prev_emb = None
         self.cut_pending = True   # the next frame starts a scene
+        self.ramp_from = None     # cut_smooth: value being eased away from
+        self.ramp_left = 0        # cut_smooth: frames left in the current ramp
 
     def run(self, scores, embs, reset_pts, own_cuts, curve):
         out = []
@@ -381,8 +392,18 @@ class Tracker:
                     self.s += (sc - self.s) * p["drift"]
 
             target = curve(self.s)
-            if self.out is None or (cut and self.mode != "smooth"):
+            cut_snap = cut and self.mode != "smooth"
+            if cut_snap and self.cut_smooth > 0 and self.out is not None:
+                # ease into the new scene instead of snapping this frame; ramp continues below
+                self.ramp_from, self.ramp_left = self.out, self.cut_smooth
+                cut_snap = False
+            if self.out is None or cut_snap:
                 self.out, self.moving = target, False           # a cut hides the change
+            elif self.ramp_left > 0:
+                self.ramp_left -= 1
+                frac = 1 - self.ramp_left / self.cut_smooth
+                self.out = self.ramp_from + (target - self.ramp_from) * frac
+                self.moving = False
             else:
                 gap = target - self.out
                 if not self.moving and abs(gap) >= p["deadband"]:
@@ -402,7 +423,8 @@ class _RunState:
         self.estimator = Estimator(args.state.get("device", "cpu")
                                    if isinstance(args.state, dict) else "cpu")
         self.tracker = Tracker(getattr(args, "auto_divergence_mode", DEFAULT_MODE),
-                               getattr(args, "auto_divergence_stability", DEFAULT_STABILITY))
+                               getattr(args, "auto_divergence_stability", DEFAULT_STABILITY),
+                               getattr(args, "auto_divergence_cut_smooth", 0))
         self.last_depth = None    # the depth tensor of the last call, held so its id stays unique
         self.last_divs = None
         self.repeat = False       # this call is iw3's alpha pass over the same frames
@@ -641,6 +663,10 @@ def _patch_utils(U):
                        choices=["low", "medium", "high", "very-high"],
                        help="how settled the strength is: low follows the framing quickly, "
                             "very-high barely moves within a shot")
+        g.add_argument("--auto-divergence-cut-smooth", type=int, default=0,
+                       help="ease the strength change at a cut (cuts/hybrid) into a ramp over this "
+                            "many frames instead of an instant jump; 0 (default) is the original, "
+                            "unchanged instant jump")
         g.add_argument("--auto-divergence-overlay", action="store_true",
                        help="debug: write the strength used into the top-left of every frame")
         return p

@@ -25621,6 +25621,17 @@ def _self_test_sbs2mvc_mkv_output_uses_mkvmerge_not_tsmuxer():
         mkv_cmd = next(cmd for cmd in popen_cmds if cmd and cmd[0] == "mkvmerge.exe")
         assert "--default-duration" in mkv_cmd, mkv_cmd
 
+        # ADR-313 regression guard: real, decker-confirmed MVC stutter fix -- a forced
+        # output "-r" on this rawvideo target made ffmpeg run its own internal CFR
+        # filter, which genuinely dup/dropped frames in a periodic pattern (confirmed
+        # via ffmpeg's own "*** 1 dup!"/"dropping frame" stderr diagnostics, since
+        # resolved: 0 such lines after this fix on the same real test clip). It must be
+        # "-fps_mode passthrough" instead -- FRIM's own "-f fps_frac" already declares
+        # the authoritative output rate independently, so nothing is lost.
+        ff_cmd = next(cmd for cmd in popen_cmds if cmd and cmd[0] == "ffmpeg.exe")
+        assert "-fps_mode" in ff_cmd and ff_cmd[ff_cmd.index("-fps_mode") + 1] == "passthrough", ff_cmd
+        assert "-r" not in ff_cmd, f"a forced output -r on rawvideo causes real dup/drop frames: {ff_cmd}"
+
     print("_self_test_sbs2mvc_mkv_output_uses_mkvmerge_not_tsmuxer: PASS")
 
 

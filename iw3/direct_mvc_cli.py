@@ -189,8 +189,16 @@ class _DirectMvcPipe:
                   "-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", f"{width}x{height}", "-r", self._fps_frac,
                   "-colorspace", str(colorspace), "-color_primaries", str(color_primaries),
                   "-color_trc", str(color_trc), "-color_range", str(color_range),
+                  # Real, decker-confirmed fix (same bug/fix as sbs_to_mvc_cli.convert()'s own
+                  # ffmpeg->FRIM pipe): a forced output "-r" on a rawvideo target makes ffmpeg
+                  # run its own internal CFR filter, which genuinely dups/drops frames in a
+                  # periodic pattern. rawvideo carries no embedded timing anyway, and FRIM's
+                  # own "-f fps_frac" below already declares the authoritative output rate
+                  # independently, so passthrough loses nothing. (The INPUT "-r" above stays --
+                  # it tells ffmpeg how to interpret this leg's headerless incoming raw pipe,
+                  # a different purpose from this output flag.)
                   "-i", "-", "-an", "-sn", "-vf", vf, "-pix_fmt", "yuv420p",
-                  "-r", self._fps_frac, "-f", "rawvideo", "-"]
+                  "-fps_mode", "passthrough", "-f", "rawvideo", "-"]
         target = int(self._bitrate_mbps * 1000)
         frim_cmd = [self._frim_bin, "-i", "-", "-o:mvc", self._base_es, self._dep_es, "-viewoutput",
                     "-sbs", "2", "-w", "1920", "-h", "1080", "-f", self._fps_frac,
@@ -689,6 +697,18 @@ def _self_test_mocked_end_to_end():
                                ("-color_trc", "1"), ("-color_range", "1")):
             assert flag in ff_cmd, f"ffmpeg command missing {flag}: {ff_cmd}"
             assert ff_cmd[ff_cmd.index(flag) + 1] == expected, ff_cmd
+        # ADR-313 regression guard: real, decker-confirmed MVC stutter fix -- a forced
+        # OUTPUT "-r" on this rawvideo target made ffmpeg run its own internal CFR filter,
+        # which genuinely dup/dropped frames in a periodic pattern. It must be
+        # "-fps_mode passthrough" instead (FRIM's own "-f fps_frac" already declares the
+        # authoritative output rate independently). The INPUT "-r" (before "-i", "-",
+        # telling ffmpeg how to interpret this leg's own headerless incoming raw pipe) is a
+        # different, legitimate flag and must still be exactly the only "-r" left.
+        input_i_index = ff_cmd.index("-i")
+        assert ff_cmd.count("-r") == 1, f"expected exactly the INPUT -r to remain: {ff_cmd}"
+        assert ff_cmd.index("-r") < input_i_index, f"the surviving -r must be the INPUT flag: {ff_cmd}"
+        assert "-fps_mode" in ff_cmd and ff_cmd[ff_cmd.index("-fps_mode") + 1] == "passthrough", ff_cmd
+        assert ff_cmd.index("-fps_mode") > input_i_index, ff_cmd
         # The work dir (and any stray raw/SBS file in it) is cleaned up on success --
         # the real point of this whole feature is that no such intermediate ever lands
         # anywhere durable.

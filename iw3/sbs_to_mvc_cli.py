@@ -1129,8 +1129,15 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         ff_cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
         if cut_seconds:
             ff_cmd += ["-t", str(cut_seconds)]
+        # Real, decker-confirmed fix: a forced output "-r" on a rawvideo target makes
+        # ffmpeg run its own internal CFR filter, which genuinely dups/drops frames in a
+        # periodic pattern (confirmed via ffmpeg's own "*** 1 dup!"/"dropping frame" stderr
+        # diagnostics -- once per ~24 frames here, from Matroska's whole-millisecond
+        # timestamp quantization not dividing evenly into 1001/24000s). rawvideo carries no
+        # embedded timing anyway, and FRIM's own "-f fps_frac" below already declares the
+        # authoritative output rate independently, so passthrough loses nothing.
         ff_cmd += ["-i", input_path, "-an", "-sn", "-vf", vf, "-pix_fmt", "yuv420p",
-                   "-r", fps_frac, "-f", "rawvideo", "-"]
+                   "-fps_mode", "passthrough", "-f", "rawvideo", "-"]
         target = int(bitrate_mbps * 1000)
         frim_cmd = [frim, "-i", "-", "-o:mvc", base_es, dep_es, "-viewoutput", "-sbs", "2",
                     "-w", "1920", "-h", "1080", "-f", fps_frac, "-profile", "high", "-level", "4.1",

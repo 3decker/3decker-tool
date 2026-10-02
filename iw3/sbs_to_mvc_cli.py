@@ -918,8 +918,16 @@ def _mux_mkv_via_mkvmerge(base_es, dep_es, fps_text, av_lines, output_path, work
                 mux.kill()
                 raise Cancelled()
         mux.wait()
-        if mux.returncode != 0:
+        # Real bug found live (decker's own real 22-subtitle-track movie): mkvmerge's own exit
+        # code convention is 0 = clean, 1 = completed successfully but printed at least one
+        # warning (e.g. about one of this many real subtitle tracks), 2+ = a real failure that
+        # did not produce usable output. Treating 1 the same as 2+ discarded a real, valid,
+        # finished file and reported a false failure -- only >=2 is a genuine mux failure.
+        if mux.returncode >= 2:
             raise RuntimeError("mkvmerge failed:\n" + "\n".join(mux_tail))
+        elif mux.returncode == 1:
+            print(f"[{log_prefix}] note: mkvmerge finished with at least one warning "
+                 f"(see above) -- the file was still produced normally", file=sys.stderr)
     finally:
         try:
             os.remove(combined_es)

@@ -42,7 +42,7 @@ import nunif.gui.subprocess_patch  # noqa
 from nunif.utils.video.metadata import parse_time
 from .utils import (
     _get_ffmpeg_bin, _find_ffprobe, _find_dovi_tool, _find_hdr10plus_tool,
-    _inject_hdr_rpu, _remux_injected_hevc,
+    _inject_hdr_rpu, _remux_injected_hevc, _detect_hdr_types,
 )
 from .depth_blend import _extract_hdr_rpu_files
 
@@ -544,6 +544,127 @@ def _check_hdr_transfer_compatibility(source, converted, ffprobe_bin):
     return None
 
 
+# Real, confirmed incident (2026-10, decker's own machine): a visible blue/pink/green
+# color-cast after a reinjection run turned out NOT to be a 3DECKER color-pipeline bug
+# (traced end-to-end, byte-identical/correct at every stage) -- the real cause was
+# --source pointing at a genuinely DIFFERENT release/master of the same movie than the
+# one the ORIGINAL iw3 conversion that produced --converted actually used. That
+# original job's own job log recorded "no DV or HDR10+ detected in source, skipping
+# extraction" (its real source had none), while the file later passed as --source for
+# this tool's reinjection DOES have real Dolby Vision data -- grafting one master's DV
+# metadata onto a different master's actual picture produces exactly the kind of severe
+# color-cast ADR-164's own check above describes, except ADR-164 can't catch THIS
+# specific case (both sides really are PQ/HDR-vs-not-HDR consistent at the container
+# level here -- --converted is SDR either way, since --preserve-dowi found nothing to
+# preserve). The exact-frame-count gate above also can't catch it -- two different real
+# releases of the same film can easily decode to the same frame count for the same
+# nominal time range. This is a WARNING, not a refusal (see this tool's own established
+# "warn clearly, let the user decide" philosophy -- --allow-longer-converted and
+# --frame-count-tolerance above are both the same shape): there may be a deliberate,
+# legitimate reason to use a different --source.
+_NO_DV_DETECTED_LOG_MARKER = "no DV or HDR10+ detected in source, skipping extraction"
+
+# Matches iw3.utils._job_log_scope's own, already-established "Input: <path>" header
+# line format exactly (see iw3/utils.py) -- MULTILINE so it matches that line anywhere
+# in a (possibly multi-job, resumed) log file, not just at the very start.
+_JOB_LOG_INPUT_LINE_RE = re.compile(r"^Input:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _job_log_path_for_output(output_path):
+    """Mirrors iw3.utils._resolve_single_file_log_path's real naming convention for the
+    job log iw3 writes next to a conversion's output whenever --write-job-log was on
+    for that job (off by default -- most converted files simply won't have one):
+    '<output_without_extension>_log.txt', sitting right next to the output file."""
+    base, _ = path.splitext(str(output_path))
+    return f"{base}_log.txt"
+
+
+def _read_original_conversion_record(converted_path):
+    """Looks for --converted's own real sibling job log and, if one exists, returns
+    (original_source_path, recorded_no_dv_detected):
+
+    - original_source_path: the real path from the log's own "Input: <path>" header
+      line (iw3.utils._job_log_scope's exact format) -- the LAST such line in the file,
+      so a resumed job's latest entry wins over an earlier one. None if the log file
+      doesn't exist, can't be read, or has no parseable Input: line.
+    - recorded_no_dv_detected: True only when the log also contains iw3.utils's own
+      exact --preserve-dowi detection message, i.e. the REAL original conversion
+      actually ran DV/HDR10+ detection (--preserve-dowi was on for it) and found
+      nothing. False otherwise -- which deliberately also covers the common, unrelated
+      case where --preserve-dowi was never used for the original job at all: there is
+      then no real signal either way about whether its source had DV/HDR10+, so this is
+      never treated as evidence of a mismatch.
+
+    Returns (None, False) whenever there's nothing to go on, so every caller's "no
+    signal -- stay silent" fallback happens automatically."""
+    log_path = _job_log_path_for_output(converted_path)
+    if not path.isfile(log_path):
+        return None, False
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return None, False
+    matches = _JOB_LOG_INPUT_LINE_RE.findall(content)
+    original_source = matches[-1] if matches else None
+    recorded_no_dv_detected = _NO_DV_DETECTED_LOG_MARKER in content
+    return original_source, recorded_no_dv_detected
+
+
+def _paths_look_different(a, b):
+    """Loose, case/slash-normalized path comparison only (os.path.normcase +
+    os.path.normpath) -- deliberately NOT resolving symlinks or hashing file content,
+    which would be overkill for what this check actually needs (see
+    _check_mismatched_master_source)."""
+    return path.normcase(path.normpath(str(a))) != path.normcase(path.normpath(str(b)))
+
+
+def _check_mismatched_master_source(source, converted, ffprobe_bin):
+    """Returns a loud, human-readable warning string (never blocks -- see the real
+    incident comment above _NO_DV_DETECTED_LOG_MARKER) if --source looks like it's from
+    a DIFFERENT real release/master than what the ORIGINAL iw3 conversion that produced
+    --converted actually used, with real DV/HDR10+ data to mismatch. Returns None
+    (silent, no-op) whenever there isn't enough real signal to warn responsibly: no
+    sibling job log, no parseable original-source record, the original job never
+    recorded a DV/HDR10+ detection outcome at all, --source already matches the job
+    log's own recorded original, or --source itself has no real DV/HDR10+ data in the
+    first place -- every normal, correct use of this tool hits one of these and stays
+    completely silent."""
+    original_source, recorded_no_dv_detected = _read_original_conversion_record(converted)
+    if not original_source or not recorded_no_dv_detected:
+        return None
+    if not _paths_look_different(original_source, source):
+        return None
+
+    source_hdr_types = _detect_hdr_types(source, ffprobe_bin)
+    labels = []
+    if source_hdr_types.get("dv"):
+        labels.append("Dolby Vision")
+    if source_hdr_types.get("hdr10plus"):
+        labels.append("HDR10+")
+    if not labels:
+        return None
+    hdr_label = " and ".join(labels)
+
+    return (
+        "possible mismatched release/master -- --source does not appear to be the file "
+        "the ORIGINAL iw3 conversion that produced --converted actually used.\n"
+        f"    Original conversion's real recorded source (its own job log): {original_source}\n"
+        f"    Your --source for this reinjection run:                       "
+        f"{path.abspath(str(source))}\n"
+        f"  That original job's own log recorded its real source as having NO Dolby Vision/"
+        f"HDR10+ metadata at all -- but the --source you gave THIS tool DOES have real "
+        f"{hdr_label} metadata. Injecting {hdr_label} metadata computed for a DIFFERENT "
+        "release/master's actual pixel values onto --converted's picture (which came from "
+        "the ORIGINAL, non-DV/HDR10+ source above) can produce a SEVERELY wrong-looking "
+        "result -- a highly visible color cast (blue/pink/green tint), especially for Dolby "
+        "Vision Profile 5, which has no HDR10-compatible fallback layer to fall back on when "
+        "the metadata doesn't match the pixels. This is a WARNING, not a block -- there may "
+        "be a deliberate reason you're using a different --source -- but double check this "
+        "is really the file you mean before trusting the result."
+    )
+
+
 def run(args):
     """Dispatches to the RIFE-manifest-aware path (ADR-051) when --rife-manifest
     is given, or the original strict exact-frame-count path (ADR-031)
@@ -778,6 +899,12 @@ def _run_with_rife_manifest(args):
         print(f"ERROR: {hdr_mismatch_reason}", file=sys.stderr)
         return 1
 
+    # --- real, confirmed-incident warning (never blocks) -- see the comment above
+    # _NO_DV_DETECTED_LOG_MARKER / _check_mismatched_master_source for the full story. ---
+    mismatched_master_warning = _check_mismatched_master_source(source, converted, ffprobe_bin)
+    if mismatched_master_warning:
+        print(f"[reinject-hdr] WARNING: {mismatched_master_warning}", file=sys.stderr)
+
     try:
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -967,6 +1094,12 @@ def _run_strict(args):
     if hdr_mismatch_reason:
         print(f"ERROR: {hdr_mismatch_reason}", file=sys.stderr)
         return 1
+
+    # --- real, confirmed-incident warning (never blocks) -- see the comment above
+    # _NO_DV_DETECTED_LOG_MARKER / _check_mismatched_master_source for the full story. ---
+    mismatched_master_warning = _check_mismatched_master_source(source, converted, ffprobe_bin)
+    if mismatched_master_warning:
+        print(f"[reinject-hdr] WARNING: {mismatched_master_warning}", file=sys.stderr)
 
     # --- required pre-flight: exact (by default) decoded frame-count match ---
     print("[reinject-hdr] probing source (trimmed) and converted decoded frame counts -- this "
@@ -1375,6 +1508,66 @@ def _self_test_hdr_transfer_compatibility():
         assert _check_hdr_transfer_compatibility("src.mkv", "conv.mkv", "ffprobe") is None
 
     print("_self_test_hdr_transfer_compatibility: PASS")
+
+
+def _self_test_mismatched_master_source_warning():
+    """Regression test for _check_mismatched_master_source -- the real, confirmed
+    2026-10 incident this guards against (see the comment above
+    _NO_DV_DETECTED_LOG_MARKER): decker ran this tool with --source pointing at a
+    DIFFERENT real release than the one the original iw3 conversion that produced
+    --converted actually used, producing a severe color-cast. Matches this file's own
+    established self-test style for its other safety checks
+    (_self_test_hdr_transfer_compatibility above) -- synthetic files/log, no real
+    movie or GPU needed."""
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="iw3_reinject_mismatch_selftest_") as tmpdir:
+        converted = path.join(tmpdir, "movie_3d.mkv")
+        other_release = path.join(tmpdir, "movie_other_release.mkv")
+        original_release = path.join(tmpdir, "movie_original.mkv")
+        log_path = path.join(tmpdir, "movie_3d_log.txt")
+
+        def _write_log(input_display, include_no_dv_line):
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("\n---- iw3 job started 2026-10-01T12:00:00 ----\n")
+                f.write(f"Input: {input_display}\nOutput: {converted}\n")
+                if include_no_dv_line:
+                    f.write(f"--preserve-dowi: {_NO_DV_DETECTED_LOG_MARKER}.\n")
+                f.write("\n---- iw3 job finished 2026-10-01T12:05:00 ----\n")
+
+        # (1) the real incident's exact shape: --source is a DIFFERENT path than the
+        # job log's own recorded original, that original had no DV/HDR10+, and --source
+        # genuinely does -- must warn, naming BOTH real paths and the real HDR label.
+        _write_log(original_release, include_no_dv_line=True)
+        with patch(f"{__name__}._detect_hdr_types", return_value={"dv": True, "hdr10plus": False}):
+            warning = _check_mismatched_master_source(other_release, converted, "ffprobe")
+        assert warning is not None
+        assert original_release in warning, warning
+        assert path.abspath(other_release) in warning, warning
+        assert "Dolby Vision" in warning, warning
+
+        # (2) correct use -- --source matches the job log's own recorded original -> silent
+        with patch(f"{__name__}._detect_hdr_types", return_value={"dv": True, "hdr10plus": False}):
+            assert _check_mismatched_master_source(original_release, converted, "ffprobe") is None
+
+        # (3) no sibling job log at all (e.g. --write-job-log was never on) -> silent
+        os.remove(log_path)
+        with patch(f"{__name__}._detect_hdr_types", return_value={"dv": True, "hdr10plus": False}):
+            assert _check_mismatched_master_source(other_release, converted, "ffprobe") is None
+
+        # (4) --source has no real DV/HDR10+ data -- nothing to mismatch -> silent
+        _write_log(original_release, include_no_dv_line=True)
+        with patch(f"{__name__}._detect_hdr_types", return_value={"dv": False, "hdr10plus": False}):
+            assert _check_mismatched_master_source(other_release, converted, "ffprobe") is None
+
+        # (5) the original job never ran detection at all (no --preserve-dowi for it) --
+        # no real signal either way about its source, so this must stay silent too, even
+        # though the path differs and the new --source has real DV data.
+        _write_log(original_release, include_no_dv_line=False)
+        with patch(f"{__name__}._detect_hdr_types", return_value={"dv": True, "hdr10plus": False}):
+            assert _check_mismatched_master_source(other_release, converted, "ffprobe") is None
+
+    print("_self_test_mismatched_master_source_warning: PASS")
 
 
 def _self_test_run_preflight_gating():
@@ -1977,6 +2170,7 @@ def _run_self_tests():
     _self_test_read_intervals_for_range()
     _self_test_rife_guard()
     _self_test_hdr_transfer_compatibility()
+    _self_test_mismatched_master_source_warning()
     _self_test_run_preflight_gating()
     _self_test_build_duplicate_ops_from_manifest()
     _self_test_expand_rpu_for_rife()

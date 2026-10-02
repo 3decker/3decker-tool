@@ -25513,6 +25513,155 @@ def _self_test_sbs2mvc_folder_detection_ignores_stray_dots():
     print("_self_test_sbs2mvc_folder_detection_ignores_stray_dots: PASS")
 
 
+def _self_test_sbs2mvc_mkv_output_uses_mkvmerge_not_tsmuxer():
+    """Real, confirmed bug fixed this session: a `.mkv` built through tsMuxeR's own
+    bare-MUXOPT native writer (the ADR-303 fix) has every GOP's video running its
+    presentation timestamps at ~2x real speed, then snapping backward at the GOP
+    boundary -- a clean, periodic sawtooth, confirmed via direct ffprobe packet-PTS
+    inspection, that a real hardware MVC player paces display off, showing as a
+    stutter about once per second (reported by a real user, reproduced on real
+    hardware and in a real software 3D player). Confirmed NOT fixable by stripping
+    FRIM's own type-24 dependent-view delimiter (ADR-292) from the bare writer's
+    input -- the sawtooth persisted unchanged. Confirmed, by the same real ffprobe
+    packet-PTS method against a known-clean reference file, that tsMuxeR's own
+    `--blu-ray` disc-authoring MUXOPT is clean on the exact same input, and that
+    mkvmerge (via mvc_extract_cli.interleave_mvc(), which already carries both the
+    ADR-290 dropped-last-AU fix and the ADR-292 type-24 fix) matches that same clean
+    pacing -- so `.mkv` output now goes through mkvmerge instead of tsMuxeR's bare
+    writer. This is a full, real (if fully mocked) end-to-end run of
+    sbs_to_mvc_cli.convert() with a `.mkv` target -- a gap no existing test closed:
+    every other S.convert() self-test here uses a .iso or folder target, which are
+    unaffected and still go through tsMuxeR exactly as before (see
+    _self_test_mvc_muxopt_new_audio_pes's own permanent regression guard for that
+    unchanged branch)."""
+    import tempfile
+    import types
+    import contextlib
+    from unittest import mock
+    from . import sbs_to_mvc_cli as S
+
+    class _FakeStdin:
+        def write(self, data):
+            pass
+
+        def close(self):
+            pass
+
+    class _FakeStdout:
+        def close(self):
+            pass
+
+        def read(self, n):
+            return b""
+
+    class _FakeProc:
+        def __init__(self, cmd, stdout=None):
+            self.cmd = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = stdout if stdout is not None else _FakeStdout()
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    popen_cmds = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_cmds.append(cmd)
+        if cmd and cmd[0] == "ffmpeg.exe":
+            return _FakeProc(cmd)
+        if cmd and cmd[0] == "frim.exe":
+            base_es = cmd[cmd.index("-o:mvc") + 1]
+            dep_es = cmd[cmd.index("-o:mvc") + 2]
+            # Real AU-boundary-shaped content (type-9 AUD for the base view, FRIM's
+            # own type-24 delimiter for the dependent view) so interleave_mvc() --
+            # run for real here, not mocked -- has something real to recombine, same
+            # shape as its own dedicated self-tests below.
+            with open(base_es, "wb") as f:
+                f.write(b"\x00\x00\x00\x01\x09\x00\x00\x01\x65fake-base-slice")
+            with open(dep_es, "wb") as f:
+                f.write(b"\x00\x00\x00\x01\x18\x00\x00\x01\x14fake-dep-slice")
+            return _FakeProc(cmd)
+        if cmd and cmd[0] == "tsmuxer.exe":
+            raise AssertionError(f"tsMuxeR must never be invoked for .mkv output: {cmd}")
+        if cmd and cmd[0] == "mkvmerge.exe":
+            return _FakeProc(cmd, stdout=["Progress: 0%\r\n", "Progress: 55%\r\n", "Progress: 100%\r\n"])
+        return _FakeProc(cmd)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video = path.join(tmpdir, "movie.mkv")
+        open(video, "wb").close()
+        out_mkv = path.join(tmpdir, "movie_MVC.mkv")
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(S, "find_frim", return_value="frim.exe"))
+            stack.enter_context(mock.patch.object(S, "_find_tsmuxer", return_value="tsmuxer.exe"))
+            stack.enter_context(mock.patch.object(S, "_get_ffmpeg_bin", return_value="ffmpeg.exe"))
+            stack.enter_context(mock.patch.object(S, "_find_mkvmerge", return_value="mkvmerge.exe"))
+            stack.enter_context(mock.patch.object(S, "_find_mkvpropedit", return_value=None))
+            stack.enter_context(mock.patch.object(S, "probe_video",
+                                                    return_value=(1920, 1080, "24/1", 2.0, False)))
+            stack.enter_context(mock.patch.object(S.shutil, "disk_usage",
+                                                   return_value=types.SimpleNamespace(free=10**12)))
+            stack.enter_context(mock.patch("subprocess.Popen", side_effect=fake_popen))
+
+            frames = S.convert(video, out_mkv, layout="full_sbs", include_av=False)
+
+        assert frames > 0
+        assert not any(cmd and cmd[0] == "tsmuxer.exe" for cmd in popen_cmds), \
+            "tsMuxeR must never be invoked for .mkv output"
+        assert any(cmd and cmd[0] == "mkvmerge.exe" for cmd in popen_cmds), \
+            "mkvmerge must be invoked for .mkv output"
+        mkv_cmd = next(cmd for cmd in popen_cmds if cmd and cmd[0] == "mkvmerge.exe")
+        assert "--default-duration" in mkv_cmd, mkv_cmd
+
+    print("_self_test_sbs2mvc_mkv_output_uses_mkvmerge_not_tsmuxer: PASS")
+
+
+def _self_test_sbs2mvc_av_lines_to_mkvmerge_args():
+    """_av_lines_to_mkvmerge_args() (new this session, see the long comment above
+    _AV_LINE_RE for why it exists) translates every real line shape
+    _plan_audio_subs() can produce -- plain audio (A_AC3/A_DTS), the disc_legal=False
+    lossless-TrueHD line (A_MLP, no merge-ac3-file -- that only appears when
+    disc_legal=True, which the .mkv caller never passes), a PGS bitmap subtitle line,
+    a text-subtitle line (_text_sub_meta()'s own real output -- confirmed this must
+    reduce to just its .srt path, NOT the PGS-render instructions: a plain .mkv has
+    no Blu-ray-legality reason to rasterize text into bitmap PGS), and a line with no
+    lang= field at all -- into the right `--language 0:XX <path>` / bare `<path>`
+    mkvmerge arguments, in order. Confirmed for real that mkvmerge itself genuinely
+    supports every one of these raw file types directly (`mkvmerge --list-types`:
+    AC-3/E-AC-3, TrueHD, DTS/DTS-HD, PGS/SUP all listed) -- this test only covers the
+    translation layer, not mkvmerge's own real capability, which was checked by hand
+    against the bundled binary."""
+    from . import sbs_to_mvc_cli as S
+
+    lines = [
+        "A_AC3, C:/work/audio_0.ac3, lang=eng",
+        "A_DTS, C:/work/audio_1.dts, lang=jpn",
+        "A_MLP, C:/work/audio_0.thd, lang=eng",
+        "S_HDMV/PGS, C:/work/subtitle_0.sup, lang=eng",
+        S._text_sub_meta("C:/work/subtitle_1.srt", "fre", "23.976", 1920, 1080),
+        "A_AC3, C:/work/audio_2.ac3",
+    ]
+    args = S._av_lines_to_mkvmerge_args(lines)
+    assert args == [
+        "--language", "0:eng", "C:/work/audio_0.ac3",
+        "--language", "0:jpn", "C:/work/audio_1.dts",
+        "--language", "0:eng", "C:/work/audio_0.thd",
+        "--language", "0:eng", "C:/work/subtitle_0.sup",
+        "--language", "0:fre", "C:/work/subtitle_1.srt",
+        "C:/work/audio_2.ac3",
+    ], args
+
+    print("_self_test_sbs2mvc_av_lines_to_mkvmerge_args: PASS")
+
+
 def _self_test_sbs2mvc_convert_hdr_to_sdr():
     """An HDR source to sbs_to_mvc_cli.convert(): by default still refused (3D Blu-ray/MVC
     cannot carry HDR or Dolby Vision at all -- there is no combination of that format with
@@ -26581,6 +26730,8 @@ def _run_self_tests():
         _self_test_last_preset_auto_load,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_folder_detection_ignores_stray_dots,
+        _self_test_sbs2mvc_mkv_output_uses_mkvmerge_not_tsmuxer,
+        _self_test_sbs2mvc_av_lines_to_mkvmerge_args,
         _self_test_sbs2mvc_convert_hdr_to_sdr,
         _self_test_dolby_vision_step_progress,
         _self_test_inpaint_download_errors,

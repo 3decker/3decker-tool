@@ -45,7 +45,8 @@ from copy import copy
 from os import path
 
 from .mvc_extract_cli import Cancelled, iso_to_bd_folder, _remove_stale_temp
-from .sbs_to_mvc_cli import bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs
+from .sbs_to_mvc_cli import (bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs,
+                             _mux_mkv_via_mkvmerge)
 from .utils import (
     _find_tsmuxer, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage, _StageBar,
     process_video_full, STAGE_CONVERT_MVC, STAGE_DEPTH_STEREO, log_subprocess_cmd,
@@ -412,9 +413,42 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
         state = getattr(args, "state", None)
         if state is not None and notes:
             state.setdefault("mvc_notes", []).extend(notes)
+
+        if is_mkv_output:
+            # Real, confirmed bug found this session (see sbs_to_mvc_cli.py's own long
+            # comment above _AV_LINE_RE for the full real evidence): tsMuxeR's bare-MUXOPT
+            # native .mkv writer -- what ADR-303 switched this branch to -- has a periodic
+            # PTS sawtooth (every GOP runs ~2x speed then snaps back) that a real hardware
+            # MVC player paces display off, showing as a stutter about once per second.
+            # Confirmed, by direct ffprobe packet-PTS comparison against a known-clean real
+            # reference file, that mkvmerge (via mvc_extract_cli.interleave_mvc(), which now
+            # carries BOTH the ADR-290 dropped-last-AU fix and the ADR-292 type-24-delimiter
+            # fix) produces pacing matching the reference as closely as tsMuxeR's own
+            # `--blu-ray` disc-authoring MUXOPT does (also independently confirmed clean) --
+            # unlike the bare writer ADR-303 moved to, which still sawtooths even when fed
+            # the type-24-stripped stream directly, ruling that marker out as the cause.
+            # This is the same mkvmerge+interleave_mvc() mechanism ADR-303 moved this branch
+            # AWAY from after a real Zidoo hardware report of doubled/overlapping video --
+            # that report used an EARLIER build of this function, before ADR-290 and ADR-292
+            # were both in place for this exact call site; real hardware re-verification
+            # (Zidoo/Vero5/SyLC) of THIS rebuilt version is still the decisive, not-yet-done
+            # step (see sbs_to_mvc_cli.py's own comment for the full reasoning).
+            mux_bar = _StageBar(args, _DIRECT_MVC_STAGE_PREFIX + "writing the final file", 1000, "pct")
+
+            def _mux_progress(stage, done, total):
+                mux_bar.set(int(min(1.0, done / total) * 1000) if total else 0)
+            try:
+                _mux_mkv_via_mkvmerge(base_es, dep_es, fps_text, av_lines, output_path, work_dir,
+                                     stop_event=stop_event, progress_cb=_mux_progress,
+                                     log_prefix="direct-mvc")
+            finally:
+                mux_bar.close(complete=path.exists(output_path))
+            ok = True
+            return output_path
+
         fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
         # ADR-289: --blu-ray builds a full BDMV/playlist/SSIF disc structure -- a bare
-        # .m2ts or .mkv skips that and just needs a bare clip.
+        # .m2ts skips that and just needs a bare clip.
         #
         # ADR-299: --new-audio-pes must be requested explicitly on the --blu-ray branch too,
         # not just on the bare-clip one -- "normally implied by --blu-ray" is confirmed FALSE
@@ -428,20 +462,18 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
         # real, evidence-based testing. Added unconditionally, same as the other two
         # --blu-ray MUXOPT lines.
         #
-        # ADR-303: real, confirmed bug (Steve, relayed by decker, verified on real Zidoo
-        # hardware) -- this .mkv branch used to build its own combined MVC stream via
-        # mvc_extract_cli.interleave_mvc() and hand it to mkvmerge directly. That combined
-        # stream decoded correctly with a standards-compliant software MVC decoder
-        # (edge264-mvc) -- proving the underlying video data itself was valid -- but showed
-        # real, visible doubled/overlapping corruption on Zidoo, a real hardware 3D player
-        # that plays this project's own tsMuxeR-built ISOs correctly. tsMuxeR's own native
-        # Matroska output (same tool, same internal interleaving logic, that already builds
-        # working ISOs) fixed it, confirmed directly on the same hardware after switching --
-        # tsMuxeR explicitly reports "3D: N dependent view frames merged into the base video
-        # track" during the mux and embeds a real attachment with 3D framing metadata that
-        # neither mkvmerge nor interleave_mvc() ever produced. interleave_mvc()/mkvmerge are
-        # no longer used by this function at all -- tsMuxeR now builds every output type
-        # (.iso/.m2ts/.mkv/folder) through this one same path.
+        # Only .m2ts reaches here now using the bare MUXOPT (is_mkv_output returned above,
+        # through mkvmerge instead -- see the real, confirmed PTS-sawtooth bug documented
+        # just above). .m2ts was already the documented-superseded, not-recognized-as-3D-by-
+        # real-hardware option (ADR-289/291) before that bug was even found, and mkvmerge
+        # cannot replace tsMuxeR here (a bare .m2ts isn't a Matroska target), so it is kept
+        # exactly as-is -- still carrying the same unfixed defect.
+        if is_m2ts_output:
+            print("[direct-mvc] note: a bare .m2ts clip is a legacy option -- not recognized "
+                 "as 3D by real hardware (ADR-289/291) AND still has a known real-hardware "
+                 "stutter defect (the exact bug .mkv output was just fixed for) -- use .mkv or "
+                 "the .iso/BD-folder options instead unless a specific player asks for a bare "
+                 "clip.", file=sys.stderr)
         muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
                   if (is_iso_output or is_folder_output) else "MUXOPT --new-audio-pes")
         meta = [muxopt,
@@ -762,11 +794,14 @@ def _self_test_encode_progress_matches_real_frim_output():
 
 
 def _self_test_mux_progress_is_incremental():
-    """convert_direct()'s new tsMuxeR streaming mux loop reports real, incrementing
-    percent values parsed from tsMuxeR's own stdout as they arrive -- not one jump at
-    the very end -- same regex sbs_to_mvc_cli.py's own proven "mux" stage already uses.
-    Deterministic: the mux loop is synchronous (no background thread involved), so
-    feeding it several real-shaped "NN.N%" lines in order needs no timing games."""
+    """convert_direct()'s tsMuxeR streaming mux loop (.iso/.m2ts/BD-folder output --
+    .mkv now goes through mkvmerge instead, see
+    _self_test_mkv_output_uses_mkvmerge_not_tsmuxer() below for that path's own
+    progress test) reports real, incrementing percent values parsed from tsMuxeR's
+    own stdout as they arrive -- not one jump at the very end -- same regex
+    sbs_to_mvc_cli.py's own proven "mux" stage already uses. Deterministic: the mux
+    loop is synchronous (no background thread involved), so feeding it several
+    real-shaped "NN.N%" lines in order needs no timing games."""
     import tempfile
     from unittest import mock
 
@@ -828,7 +863,7 @@ def _self_test_mux_progress_is_incremental():
         return output_path
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        output_path = path.join(tmp_dir, "out.mkv")  # .mkv: skips BD-folder's own extra step
+        output_path = path.join(tmp_dir, "out.iso")
         args = _fake_args()
         args.state = {"tqdm_fn": fake_tqdm_fn}
         with mock.patch.object(sys.modules[__name__], "probe_video",
@@ -853,6 +888,114 @@ def _self_test_mux_progress_is_incremental():
     print("_self_test_mux_progress_is_incremental: PASS")
 
 
+def _self_test_mkv_output_uses_mkvmerge_not_tsmuxer():
+    """Real, confirmed bug fixed this session (see sbs_to_mvc_cli.py's own long comment
+    above _AV_LINE_RE for the full real evidence): tsMuxeR's bare-MUXOPT native .mkv
+    writer has a periodic PTS sawtooth that stutters real hardware playback about once
+    per second. `.mkv` output must now go through mkvmerge (via
+    mvc_extract_cli.interleave_mvc()) instead -- this asserts that code path is
+    actually taken (tsMuxeR is never invoked at all for `.mkv`) and that its own mux
+    progress still reports real, incrementing values, same contract as the tsMuxeR
+    path _self_test_mux_progress_is_incremental() above covers for .iso/.m2ts/folder."""
+    import tempfile
+    from unittest import mock
+
+    frames = [(bytes([10]) * 100, 64, 32, "yuv420p", 1, 1, 1, 1)]
+    bars = []
+
+    def fake_tqdm_fn(**kwargs):
+        return _FakeTqdmBar(bars, kwargs["total"], kwargs.get("desc", ""))
+
+    class _FakeStdin:
+        def write(self, data):
+            pass
+
+        def close(self):
+            pass
+
+    class _FakeStdout:
+        def close(self):
+            pass
+
+        def read(self, n):
+            return b""
+
+    class _FakeProc:
+        def __init__(self, cmd, stdout=None):
+            self.cmd = cmd
+            self.stdin = _FakeStdin()
+            self.stdout = stdout if stdout is not None else _FakeStdout()
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    popen_cmds = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_cmds.append(cmd)
+        if "-o:mvc" in cmd:
+            base_es, dep_es = cmd[cmd.index("-o:mvc") + 1], cmd[cmd.index("-o:mvc") + 2]
+            # Real AU-boundary-shaped content (type-9 AUD for the base view, type-24
+            # FRIM-style delimiter for the dependent view) so interleave_mvc() -- run
+            # for real here, not mocked -- has something real to recombine, same as
+            # its own dedicated self-test in mvc_extract_cli.py.
+            with open(base_es, "wb") as f:
+                f.write(b"\x00\x00\x00\x01\x09\x00\x00\x01\x65fake-base-slice")
+            with open(dep_es, "wb") as f:
+                f.write(b"\x00\x00\x00\x01\x18\x00\x00\x01\x14fake-dep-slice")
+            return _FakeProc(cmd)
+        if cmd and cmd[0] == "tsmuxer.exe":
+            raise AssertionError(f"tsMuxeR must never be invoked for .mkv output: {cmd}")
+        if cmd and cmd[0] == "mkvmerge.exe":
+            return _FakeProc(cmd, stdout=["Progress: 0%\r\n", "Progress: 40%\r\n",
+                                          "Progress: 90%\r\n", "Progress: 100%\r\n"])
+        return _FakeProc(cmd)
+
+    def fake_process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
+        for frame_args in frames:
+            raw_frame_sink(*frame_args)
+        return output_path
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_path = path.join(tmp_dir, "out.mkv")
+        args = _fake_args()
+        args.state = {"tqdm_fn": fake_tqdm_fn}
+        with mock.patch.object(sys.modules[__name__], "probe_video",
+                               return_value=(1920, 1080, "24/1", 2.0, False)), \
+             mock.patch.object(sys.modules[__name__], "find_frim", return_value="frim.exe"), \
+             mock.patch.object(sys.modules[__name__], "_get_ffmpeg_bin", return_value="ffmpeg.exe"), \
+             mock.patch.object(sys.modules[__name__], "_find_tsmuxer", return_value="tsmuxer.exe"), \
+             mock.patch.object(sys.modules[__name__], "_plan_audio_subs", return_value=([], [])), \
+             mock.patch.object(sys.modules[__name__], "process_video_full", side_effect=fake_process_video_full), \
+             mock.patch("iw3.sbs_to_mvc_cli._find_mkvmerge", return_value="mkvmerge.exe"), \
+             mock.patch("iw3.sbs_to_mvc_cli._find_mkvpropedit", return_value=None), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen):
+            result = convert_direct("in.mp4", output_path, args, None, None)
+
+        assert result == output_path
+        assert not any(cmd and cmd[0] == "tsmuxer.exe" for cmd in popen_cmds), \
+            "tsMuxeR must never be invoked for .mkv output"
+        assert any(cmd and cmd[0] == "mkvmerge.exe" for cmd in popen_cmds), \
+            "mkvmerge must be invoked for .mkv output"
+
+        mux_bars = [b for b in bars if "writing the final file" in b.desc]
+        assert len(mux_bars) == 1, f"expected exactly one mux progress bar, got {len(mux_bars)}"
+        positions = mux_bars[0].positions
+        assert len(positions) >= 3, f"expected several incremental mux updates, got {positions}"
+        assert positions == sorted(positions), f"mux progress must never go backwards, got {positions}"
+        assert positions[-1] == mux_bars[0].total, f"mux progress must finish at 100%, got {positions}"
+        assert mux_bars[0].closed, "the mux progress bar must be closed once the mux finishes"
+
+    print("_self_test_mkv_output_uses_mkvmerge_not_tsmuxer: PASS")
+
+
 def _fake_args():
     class _Args:
         pass
@@ -875,6 +1018,7 @@ def main():
     _self_test_mocked_end_to_end()
     _self_test_encode_progress_matches_real_frim_output()
     _self_test_mux_progress_is_incremental()
+    _self_test_mkv_output_uses_mkvmerge_not_tsmuxer()
     print("ALL PASS")
 
 

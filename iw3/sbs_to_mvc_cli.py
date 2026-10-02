@@ -43,8 +43,9 @@ from os import path
 import nunif.gui.subprocess_patch  # noqa
 
 from .mvc_extract_cli import (AUTOCROP_MODES, Cancelled, detect_eye_crop, iso_to_bd_folder,
-                              _remove_stale_temp)
-from .utils import _find_tsmuxer, _get_ffmpeg_bin, log_subprocess_cmd
+                              _remove_stale_temp, interleave_mvc)
+from .utils import (_find_tsmuxer, _get_ffmpeg_bin, log_subprocess_cmd, _find_mkvmerge,
+                    _find_mkvpropedit, _apply_stereo_mode_tag)
 
 LAYOUTS = ("full_sbs", "half_sbs", "full_tb", "half_tb")
 _BD_FPS = {"23.976": "24000/1001", "24": "24/1"}
@@ -803,6 +804,141 @@ def _plan_audio_subs(input_path, work_dir, ffmpeg_bin, include_av, fps_text="23.
     return lines, notes
 
 
+# Real, confirmed bug found this session (reported by Steve, reproduced by decker with SyLC 3D
+# Player against a real FRIM-encoded source): a `.mkv` built through tsMuxeR's own bare
+# `MUXOPT --new-audio-pes` native writer (the ADR-303 fix below) has every GOP's worth of video
+# (~1 second at 23.976/24fps) running its presentation timestamps at ~2x real speed, then
+# snapping backward by about that same second at the last frame of the GOP -- a clean, periodic
+# sawtooth, confirmed via direct ffprobe packet-PTS inspection across 22+ consecutive GOPs with
+# zero exceptions, and the exact mechanism a real hardware MVC decoder pacing display off these
+# timestamps would show as "stutters about once per second" (reproduced on real Zidoo/Vero5
+# hardware and in SyLC 3D Player; invisible in plain 2D VLC playback, which tolerates a file's
+# own timestamp irregularities far better than a real-time hardware MVC pipeline synchronizing
+# two views). Confirmed NOT caused by FRIM's own non-standard dependent-view NAL type-24 marker
+# (ADR-292) -- stripping it from dep_es before feeding tsMuxeR's bare writer the same two raw
+# streams reproduced the identical 2x/snap sawtooth, unchanged. Confirmed, by direct ffprobe
+# packet-PTS comparison against a real, known-clean reference file (Steve's own manual mux),
+# that tsMuxeR's `--blu-ray` disc-authoring MUXOPT -- fed the exact same base_es/dep_es pair --
+# produces perfectly clean, 1:1-matching PTS pacing; the defect is specific to tsMuxeR's bare
+# (non-`--blu-ray`) native .mkv/.m2ts writer's own internal view-merging/timing logic, not to
+# anything this project's own code feeds it. Since `--blu-ray` cannot write a bare `.mkv`/`.m2ts`
+# file directly (confirmed: targeting one builds a full BDMV folder structure instead, ignoring
+# the filename's extension -- see iso_to_bd_folder()'s own docstring for why tsMuxeR can't build
+# a folder directly either), and ffmpeg cannot read FRIM's raw MVC dependent-view stream at all
+# (already an established project-wide finding, not re-litigated here), the only two real options
+# for a plain `.mkv` are tsMuxeR's own broken bare writer (ruled out above) or recombining the two
+# views ourselves (`mvc_extract_cli.interleave_mvc()`, which already strips the type-24 marker
+# and fixes the dropped-last-AU bug, ADR-290/292) and handing that to mkvmerge directly --
+# confirmed, by the same real ffprobe packet-PTS check, to produce pacing that matches the known-
+# clean reference file as closely as `--blu-ray` itself does (both differ from it by under 3%,
+# consistent with ordinary timestamp-scale rounding, not a systematic defect) -- this is the same
+# mechanism ADR-241 first shipped and ADR-303 later moved `.mkv` output AWAY from, after a real
+# Zidoo hardware report of doubled/overlapping video with an EARLIER build of this same function
+# (before ADR-290's dropped-last-AU fix and ADR-292's type-24 fix were both in place for this
+# exact call site) -- see this function's own real-hardware-re-verification caveat below.
+# `_find_tsmuxer()`/the bare MUXOPT path are UNCHANGED for `.iso`/BD-folder output (proven clean
+# above) and for the already-documented-superseded bare `.m2ts` option (which still has this
+# exact defect, unfixed -- `.m2ts` cannot be a Matroska target, so mkvmerge cannot replace tsMuxeR
+# there the way it does for `.mkv`; `.m2ts` was already the niche, not-recognized-as-3D-by-real-
+# hardware option before this, see ADR-289/291, so it is left as-is with a louder warning rather
+# than given a half-fix that still doesn't make it a recommended output type).
+_AV_LINE_RE = re.compile(r'^([A-Za-z_/0-9]+),\s*"?([^",]+)"?,?\s*(.*)$')
+
+
+def _av_lines_to_mkvmerge_args(av_lines):
+    """Translates _plan_audio_subs()'s tsMuxeR-meta-format lines (``TAG, path[, extra
+    fields incl. lang=XX]``) into plain mkvmerge input arguments, for the `.mkv` code path
+    that no longer hands anything to tsMuxeR at all (see the real, confirmed bug this
+    function's caller exists to work around, documented just above). Every line this
+    project's own `_plan_audio_subs()` can produce has the real file path as its second
+    comma-separated field (optionally quoted) -- including the TrueHD-with-merged-AC3-core
+    line (A_MLP's own `merge-ac3-file="..."` extra field is simply ignored: that branch only
+    ever runs when `disc_legal=True`, which the `.mkv` caller never passes) and the
+    text-subtitle line `_text_sub_meta()` builds (`S_TEXT/UTF8, "<srt path>", font-name=...`).
+    That last one is a deliberate, real behavior difference from the `.iso`/BD-folder targets:
+    there, tsMuxeR renders the extracted .srt into a bitmap PGS stream (a real Blu-ray-disc
+    legality requirement); a plain `.mkv` has no such requirement, so this instead embeds the
+    already-extracted, already-deduped .srt file directly as a native Matroska text subtitle
+    track -- strictly better for a `.mkv` target (searchable/stylable, no lossy text-to-bitmap
+    rendering), not a regression."""
+    args = []
+    for line in av_lines:
+        m = _AV_LINE_RE.match(line)
+        if not m:
+            continue
+        _tag, file_path, rest = m.group(1), m.group(2), m.group(3)
+        lang_m = re.search(r"lang=([A-Za-z]+)", rest)
+        if lang_m:
+            args += ["--language", f"0:{lang_m.group(1)}"]
+        args.append(file_path)
+    return args
+
+
+def _mux_mkv_via_mkvmerge(base_es, dep_es, fps_text, av_lines, output_path, work_dir,
+                          stop_event=None, progress_cb=None, log_prefix="sbs2mvc"):
+    """Builds the final `.mkv` for the real, confirmed-clean replacement path documented
+    above `_AV_LINE_RE`: recombine FRIM's own base/dependent elementary streams with
+    `interleave_mvc()` (ADR-290/292's fixes already live there), then mkvmerge the combined
+    stream plus every already-extracted audio/subtitle file `av_lines` references straight
+    into `output_path` in ONE pass, then tag the result's video track StereoMode=13 (the
+    same value tsMuxeR's own native writer already set, confirmed via real `mkvmerge -J`
+    against both a real tsMuxeR-built file and a real MakeMKV-built reference) via the
+    project's own existing `_apply_stereo_mode_tag()` -- mkvmerge itself never sets this.
+    Raises RuntimeError naming the real tool/output on any failure; never leaves a partial
+    `output_path` behind. `progress_cb(stage, done, total)` only ever reports stage "mux"
+    here, matching the existing contract convert()/convert_direct() already document --
+    the interleave step is fast (a bounded-memory sequential byte copy, not a re-encode)
+    and is not broken out into its own stage."""
+    mkvmerge = _find_mkvmerge()
+    if mkvmerge is None:
+        raise RuntimeError("mkvmerge not found -- it ships in this project's own mkvtoolnix/ folder")
+    combined_es = path.join(work_dir, "combined_mvc.264")
+    try:
+        base_n, dep_n, n = interleave_mvc(base_es, dep_es, combined_es)
+        if base_n != dep_n:
+            print(f"[{log_prefix}] note: base view has {base_n} frames but dependent view has "
+                 f"{dep_n}; using the first {n}", file=sys.stderr)
+        if stop_event is not None and stop_event.is_set():
+            raise Cancelled()
+
+        cmd = [mkvmerge, "-o", str(output_path), "--default-duration", f"0:{fps_text}fps", combined_es]
+        cmd += _av_lines_to_mkvmerge_args(av_lines)
+        log_subprocess_cmd(f"{log_prefix}:mkvmerge", cmd)
+        if progress_cb:
+            progress_cb("mux", 0, 100)
+        mux = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        mux_tail = []
+        for line in mux.stdout:
+            mux_tail.append(line.rstrip())
+            del mux_tail[:-12]
+            m = re.search(r"Progress:\s*(\d+)%", line)
+            if m and progress_cb:
+                progress_cb("mux", float(m.group(1)), 100)
+            if stop_event is not None and stop_event.is_set():
+                mux.kill()
+                raise Cancelled()
+        mux.wait()
+        if mux.returncode != 0:
+            raise RuntimeError("mkvmerge failed:\n" + "\n".join(mux_tail))
+    finally:
+        try:
+            os.remove(combined_es)
+        except OSError:
+            pass
+
+    # mkvmerge has no concept of Matroska's StereoMode property; tag it the same way the
+    # project's own main pipeline already does for every other stereo output.
+    from types import SimpleNamespace
+    mkvpropedit = _find_mkvpropedit()
+    if mkvpropedit is None:
+        print(f"[{log_prefix}] note: mkvpropedit not found -- {path.basename(str(output_path))} "
+             f"was NOT tagged with a StereoMode; a 3D-aware player may not auto-detect it as 3D",
+             file=sys.stderr)
+    else:
+        _apply_stereo_mode_tag(output_path, SimpleNamespace(stereo_mode_tag=True, vr180=False),
+                               mkvpropedit_bin=mkvpropedit, value_override=13)
+
+
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
             stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False,
@@ -979,6 +1115,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     # crash is exactly the scenario this closes.
     _remove_stale_temp(base_es, dep_es, meta_path, ffmpeg_log)
     procs, ok = [], False
+    temp_iso_for_folder = None  # only ever set for is_folder_output, in the non-.mkv branch below
     try:
         vf = eye_filter(layout, width, height, crop, fill_mode)
         ff_cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
@@ -1064,6 +1201,19 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         for n in notes:
             print(f"[sbs2mvc] note: {n}", file=sys.stderr)
 
+        if is_mkv_output:
+            # Real, confirmed bug this session: tsMuxeR's own bare-MUXOPT native .mkv writer
+            # (the ADR-303 fix) has a periodic PTS sawtooth that real hardware shows as a
+            # once-per-second stutter -- see the long comment above _AV_LINE_RE for the full,
+            # real evidence this is specific to that one writer, not fixable by changing its
+            # input. mkvmerge (via interleave_mvc(), ADR-290/292's fixes already applied)
+            # replaces it for this output type only; .iso/BD-folder (proven clean) and the
+            # already-superseded bare .m2ts option are unaffected, below.
+            _mux_mkv_via_mkvmerge(base_es, dep_es, fps_text, av_lines, output_iso, work_dir,
+                                 stop_event=stop_event, progress_cb=progress_cb, log_prefix="sbs2mvc")
+            ok = True
+            return total_frames
+
         fwd = lambda p: p.replace(chr(92), "/")  # noqa: E731
         # ADR-289: --blu-ray builds a full BDMV/playlist/SSIF disc structure (or a real .iso of
         # one); a plain .m2ts skips all of that and just needs a bare clip.
@@ -1096,9 +1246,19 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         # readable throughout). This is standard, expected BD-authoring practice ("which is
         # what a pressed disc does" per tsMuxeR's own warning text), so it is added
         # unconditionally rather than gated behind a GUI setting.
-        # ADR-303: .mkv now takes the same bare-clip MUXOPT as .m2ts (no --blu-ray disc
-        # structure, just --new-audio-pes) -- it's built through this same tsMuxeR path now
-        # too, not a separate mkvmerge step, so it needs the same distinction .m2ts always did.
+        # Only .m2ts reaches here now using the bare MUXOPT (is_mkv_output returned above,
+        # through mkvmerge instead -- see the real, confirmed PTS-sawtooth bug documented
+        # above _AV_LINE_RE). .m2ts was already the documented-superseded, not-recognized-
+        # as-3D-by-real-hardware option (ADR-289/291) before that bug was even found, and
+        # mkvmerge cannot replace tsMuxeR here (a bare .m2ts isn't a Matroska target), so it
+        # is kept exactly as-is -- still carrying the same unfixed defect -- rather than given
+        # a half-fix that wouldn't make it a recommended output type either way.
+        if is_m2ts_output:
+            print("[sbs2mvc] note: a bare .m2ts clip is a legacy option -- not recognized as 3D "
+                 "by real hardware (ADR-289/291) AND still has a known real-hardware stutter "
+                 "defect (the exact bug .mkv output was just fixed for) -- use .mkv or the "
+                 ".iso/BD-folder options instead unless a specific player asks for a bare clip.",
+                 file=sys.stderr)
         muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
                   if (is_iso_output or is_folder_output) else "MUXOPT --new-audio-pes")
         meta = [muxopt,

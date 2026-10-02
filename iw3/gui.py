@@ -3076,9 +3076,9 @@ class MainFrame(wx.Frame):
               "pass over an already-finished Full/Half SBS or Full/Half TB file — all four work as real "
               "MVC input, just with the expected resolution tradeoff for the Half variants (smaller "
               "file, less detail per eye than Full). Picking one of these snaps the format to the "
-              "matching real one for you and turns on \"Convert to 3D Blu-ray MVC after conversion\" "
-              "(Post-Processing, Processor tab) instead — same result as picking that format and "
-              "checking that box yourself, just in one click from here."))
+              "matching real one for you and selects \"Alongside SBS/TB output\" under 3D Blu-ray MVC "
+              "Output (Post-Processing, Processor tab) instead — same result as picking that format and "
+              "that choice yourself, just in one click from here."))
 
         self.lbl_anaglyph_method = wx.StaticText(self.grp_stereo, label=T("Anaglyph Method"))
         self.cbo_anaglyph_method = wx.ComboBox(
@@ -4198,35 +4198,71 @@ class MainFrame(wx.Frame):
         # this job's own finished output (after Restore Audio & Subtitles, if also on, so MVC gets
         # the fully-assembled file) -- one job, no separate manual step, mirroring how Restore Audio
         # & Subtitles itself already works.
-        self.chk_convert_to_mvc = wx.CheckBox(
-            self.grp_postprocess,
-            label=T("Convert to 3D Blu-ray MVC after conversion"),
-            name="chk_convert_to_mvc")
-        self.chk_convert_to_mvc.SetValue(False)
-        self.chk_convert_to_mvc.SetToolTip(
-            T("What it's for: turns this job's finished output into a real MVC file (the same video "
-              "format an actual 3D Blu-ray disc uses) automatically -- a plain 2D movie in, one real "
-              "MVC file out, with no separate manual step through the standalone 'SBS to 3D Blu-ray "
-              "MVC' tool.\n"
-              "How it's safe: written to its own separate '<name>_MVC.iso'/'<name>_MVC'(BD Folder)/"
-              "'<name>_MVC.mkv'/'<name>_MVC.m2ts' -- the plain converted output is always left "
-              "untouched either way.\n"
-              "Con: MVC encoding is real extra processing time after the main conversion already "
-              "finished -- it re-encodes the video through a separate program (FRIMEncode), CPU-only, "
-              "not a quick remux like Restore Audio & Subtitles.\n"
-              "Works with Stereo Format (above) set to Full SBS, Half SBS, Full TB, or Half TB -- the "
-              "Half variants give a lower-resolution (half the detail per eye) MVC file, same tradeoff "
-              "as using them anywhere else, but are otherwise fully valid. Any other format (VR90/Cross "
-              "Eyed/RGB-D/Anaglyph/Export/Debug Depth) isn't something MVC conversion understands at "
-              "all -- checking this box forces Stereo Format to Full SBS only if one of those is "
-              "currently selected.\n"
+        # ADR-316: real user report (Steve) -- this used to be two separately-checkable checkboxes
+        # ("Convert to 3D Blu-ray MVC after conversion" and "Direct to 3D Blu-ray MVC (single pass,
+        # no intermediate file)") stacked together with nothing stopping both from being checked at
+        # once, even though they're really alternative choices for the same output, not independent
+        # features. Consolidated into one three-way choice -- Off / Alongside SBS/TB output / Single-
+        # pass only -- same real downstream behavior and real trade-offs as before (see
+        # on_changed_cbo_mvc_mode() and update_mvc_mode()), just one control instead of two that could
+        # disagree with each other. ClientData ("off"/"alongside"/"direct") is the real internal mode
+        # read everywhere else via _mvc_mode()/_set_mvc_mode(), mirroring cbo_mvc_output_type's own
+        # label/ClientData convention just below.
+        self.lbl_mvc_mode = wx.StaticText(self.grp_postprocess, label=T("3D Blu-ray MVC Output"))
+        self.cbo_mvc_mode = wx.ComboBox(self.grp_postprocess, name="cbo_mvc_mode")
+        self.cbo_mvc_mode.SetEditable(False)
+        self.cbo_mvc_mode.Append(T("Off"), "off")
+        self.cbo_mvc_mode.Append(T("Alongside SBS/TB output"), "alongside")
+        self.cbo_mvc_mode.Append(T("Single-pass only (no intermediate file)"), "direct")
+        self.cbo_mvc_mode.SetSelection(0)
+        self.cbo_mvc_mode.SetToolTip(
+            T("What it's for: picks whether/how this job also produces a real MVC file (the same "
+              "video format an actual 3D Blu-ray disc uses), on top of (or instead of) the normal "
+              "SBS/TB conversion.\n"
+              "Off (default): no MVC output at all -- just the normal SBS/TB conversion.\n"
+              "Alongside SBS/TB output: turns this job's finished output into a real MVC file "
+              "automatically, with no separate manual step through the standalone 'SBS to 3D Blu-ray "
+              "MVC' tool -- a plain 2D movie in, BOTH a plain converted file and a separate "
+              "'<name>_MVC.iso'/'<name>_MVC'(BD Folder)/'<name>_MVC.mkv'/'<name>_MVC.m2ts' out. The "
+              "plain converted output is always left untouched either way.\n"
+              "Con (Alongside): MVC encoding is real extra processing time after the main conversion "
+              "already finished -- it re-encodes the video through a separate program (FRIMEncode), "
+              "CPU-only, not a quick remux like Restore Audio & Subtitles.\n"
+              "Single-pass only (no intermediate file): the same real MVC output, but as a single "
+              "pass -- the main conversion encodes straight into the MVC pipe, so no finished SBS/TB "
+              "file is ever written to disk at all. There is no separate plain-converted file this "
+              "time -- the MVC file/folder IS this job's only output. The Output field above must "
+              "itself end in .iso, .mkv or .m2ts, or be a folder path with no extension (BD Folder), "
+              "for this mode. Faster and saves real disk space for a movie you only ever want as an "
+              "MVC file, by skipping writing then re-reading an entire finished video file between "
+              "the two stages.\n"
+              "Con (Single-pass only): turning this on switches OFF Auto Resume, RIFE Frame "
+              "Interpolation, and Auto-crop (MVC) for this job, and disables their controls -- none "
+              "of them has a finished file to resume from, interpolate, or sample black bars from "
+              "partway through a live single-pass encode. If the job is interrupted for any reason, "
+              "the WHOLE job must be started over from scratch. Still want black bars cropped? The "
+              "\"Auto Crop\" control on the Video Filter tab detects and removes them from the "
+              "ORIGINAL source before conversion even starts, so it doesn't need a finished file and "
+              "works fine here.\n"
+              "Both choices work with Stereo Format (above) set to Full SBS, Half SBS, Full TB, or "
+              "Half TB -- the Half variants give a lower-resolution (half the detail per eye) MVC "
+              "file, same tradeoff as using them anywhere else, but are otherwise fully valid. Any "
+              "other format (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug Depth) isn't something MVC "
+              "conversion understands at all -- Alongside SBS/TB output forces Stereo Format to Full "
+              "SBS if one of those is currently selected; HDR/Dolby Vision sources need 'Convert "
+              "HDR/DV to SDR first' (below, or the main pipeline's own, for Single-pass only) turned "
+              "on -- a real 3D Blu-ray/MVC file cannot carry HDR at all.\n"
               "Real players confirmed: 3D playback works well on Kodi (and forks -- OSMC, LibreELEC, "
               "including the newer popcornmix build for Raspberry Pi 4/5), several Android-based "
               "streaming boxes (e.g. Xidoo), and some real hardware 3D Blu-ray/UHD players -- real "
               "end-user reports, see the Output Type choice below for more detail, including a "
               "directly-confirmed 2D-playback fact that applies even to a homemade AI conversion like "
-              "this one, not only a real studio disc rip."))
-        self.chk_convert_to_mvc.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_convert_to_mvc)
+              "this one, not only a real studio disc rip.\n"
+              "Recommended: Off for a normal 2D-to-3D job with no MVC need. Alongside SBS/TB output "
+              "if you want both a plain file and an MVC file, or might need Auto Resume/RIFE for this "
+              "job. Single-pass only if you never want the separate flat file and want to save the "
+              "time/disk space."))
+        self.cbo_mvc_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_mvc_mode)
 
         self.lbl_mvc_output_type = wx.StaticText(self.grp_postprocess, label=T("MVC Output Type"))
         self.cbo_mvc_output_type = wx.ComboBox(self.grp_postprocess, name="cbo_mvc_output_type")
@@ -4305,7 +4341,8 @@ class MainFrame(wx.Frame):
         self.cbo_mvc_autocrop.Append(T("Remove black bars (top and bottom only)"), "BLACK_TB")
         self.cbo_mvc_autocrop.SetSelection(0)
         self.cbo_mvc_autocrop.SetToolTip(
-            T("What it's for: only with 'Convert to 3D Blu-ray MVC' above. Removes black bars from "
+            T("What it's for: only with 3D Blu-ray MVC Output above set to 'Alongside SBS/TB output' or "
+              "'Single-pass only'. Removes black bars from "
               "the video before it's encoded into the MVC file, so a 3D-capable player with no "
               "crop/zoom option of its own (e.g. SyLC 3D Player) still shows a full, bar-free "
               "picture -- there's nothing left to fill in.\n"
@@ -4379,47 +4416,13 @@ class MainFrame(wx.Frame):
               "handles a bare E-AC-3 track -- when in doubt, use the default. Has no effect on Plain "
               "MKV/Bare M2TS output above, which already keeps DD+ lossless unconditionally."))
 
-        # ADR-283: real user request -- could the two-stage "convert to a finished SBS
-        # file, then feed that file into 'SBS to 3D Blu-ray MVC'" process instead happen
-        # as one continuous pass, with no finished SBS file ever written at all? This is
-        # that opt-in alternative -- narrower than the checkbox above (no Auto Resume/
-        # RIFE/Autocrop), but genuinely faster and saves real disk space for a movie
-        # someone only ever wants as an MVC file, never as a separate flat copy.
-        self.chk_direct_mvc = wx.CheckBox(
-            self.grp_postprocess,
-            label=T("Direct to 3D Blu-ray MVC (single pass, no intermediate file)"),
-            name="chk_direct_mvc")
-        self.chk_direct_mvc.SetValue(False)
-        self.chk_direct_mvc.SetToolTip(
-            T("What it's for: the same real MVC output as 'Convert to 3D Blu-ray MVC' above, but as a "
-              "single pass -- the main conversion encodes straight into the MVC pipe, so no finished SBS/TB "
-              "file is ever written to disk at all. There is no separate plain-converted file this "
-              "time -- the MVC file/folder (same Bitrate setting above) IS this job's only output. The "
-              "Output field above must itself end in .iso, .mkv or .m2ts, or be a folder path with no "
-              "extension (BD Folder, ADR-291), for this mode -- Output Type above is only auto-applied to "
-              "the separate file 'Convert to 3D Blu-ray MVC' produces, not to this single-pass mode's own "
-              "Output field.\n"
-              "How it's faster: skips writing, then re-reading, an entire finished video file between "
-              "the two stages -- real time and real disk space saved, worthwhile for a movie you only "
-              "ever want as an MVC file.\n"
-              "Con: turning this on switches OFF Auto Resume, RIFE Frame Interpolation, and Auto-crop "
-              "(MVC) for this job, and disables their controls -- none of them has a finished file to "
-              "resume from, interpolate, or sample black bars from partway through a live single-pass "
-              "encode. If the job is interrupted for any reason, the WHOLE job must be started over "
-              "from scratch -- there is no partial-progress checkpoint the way on-disk segment files "
-              "give Auto Resume elsewhere.\n"
-              "Still want black bars cropped? \"Auto-crop (MVC)\" above isn't the only way -- the "
-              "\"Auto Crop\" control on the Video Filter tab detects and removes them from the ORIGINAL "
-              "source before conversion even starts, so it doesn't need a finished file and works fine "
-              "here. Use that one instead for a Direct MVC job.\n"
-              "Works with the same Stereo Format restriction as 'Convert to 3D Blu-ray MVC' above (Full/"
-              "Half SBS or Full/Half TB); HDR/Dolby Vision sources need 'Convert HDR to SDR' (further "
-              "up this tab) turned on first -- a real 3D Blu-ray/MVC file cannot carry HDR at all.\n"
-              "Recommended: on if you never want the separate flat 2D/3D file 'Convert to 3D Blu-ray "
-              "MVC' above also produces -- off (default) if you want both, or if you might need Auto "
-              "Resume/RIFE for this particular job."))
-        self.chk_direct_mvc.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_direct_mvc)
-        self.update_direct_mvc()
+        # ADR-283/316: the "single pass, no intermediate file" MVC mode's own real
+        # trade-offs (Auto Resume/RIFE/Autocrop unavailable) are now one of
+        # cbo_mvc_mode's three choices above, rather than a second, independently-
+        # checkable checkbox -- see cbo_mvc_mode's own tooltip and
+        # on_changed_cbo_mvc_mode()/update_mvc_mode() for the real logic, unchanged
+        # from what this checkbox used to drive.
+        self.update_mvc_mode()
         self.update_mvc_allow_lossless_eac3()
         self.update_mvc_fill_mode()
 
@@ -4474,7 +4477,8 @@ class MainFrame(wx.Frame):
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 4), (j := j + 1, 0))
-        layout.Add(self.chk_convert_to_mvc, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_mvc_mode, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_mvc_mode, (j, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_mvc_output_type, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_mvc_output_type, (j, 1), flag=wx.EXPAND)
         layout.Add(self.txt_mvc_bitrate, (j, 2), flag=wx.EXPAND)
@@ -4486,7 +4490,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_mvc_fill_mode, (j, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.chk_mvc_allow_lossless_eac3, (j := j + 1, 0), (0, 3),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
-        layout.Add(self.chk_direct_mvc, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
 
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -9094,12 +9097,16 @@ class MainFrame(wx.Frame):
         ("disc", "lossless_copy"): ("grp_bluray", "cpn_bluray", ("cbo_bluray_layout", "bd3d_iso"), None),
         ("hdr", "sdr"): ("grp_hdr_to_sdr", "cpn_hdr_to_sdr", None, None),
         # ADR-277: real gap -- HDR/DV straight to a real MVC disc IS a real, single-
-        # screen (Processor tab) workflow, just needs two checkboxes, not one: MVC
-        # conversion itself, AND its own "Convert HDR/DV to SDR first" sibling,
-        # since a real MVC/Blu-ray file cannot carry HDR/DV at all (same real
-        # limitation an actual disc has -- see chk_convert_to_mvc_hdr_to_sdr's own
-        # tooltip). Both live in the same Post-Processing group on the same tab.
-        ("hdr", "mvc"): ("processor", None, None, ("chk_convert_to_mvc", "chk_convert_to_mvc_hdr_to_sdr")),
+        # screen (Processor tab) workflow, just needs two settings, not one: MVC
+        # output itself (cbo_mvc_mode, ADR-316), AND its own "Convert HDR/DV to SDR
+        # first" sibling checkbox, since a real MVC/Blu-ray file cannot carry HDR/DV
+        # at all (same real limitation an actual disc has -- see
+        # chk_convert_to_mvc_hdr_to_sdr's own tooltip). Both live in the same
+        # Post-Processing group on the same tab. "cbo_mvc_mode" here is a sentinel
+        # _quick_convert_navigate() special-cases (it needs to pick "alongside" by
+        # ClientData, not SetValue(True) like a real checkbox), not a literal
+        # checkbox name.
+        ("hdr", "mvc"): ("processor", None, None, ("cbo_mvc_mode", "chk_convert_to_mvc_hdr_to_sdr")),
     }
 
     # ADR-277: a handful of (have, want) combinations aren't "no tool for this" --
@@ -9146,15 +9153,16 @@ class MainFrame(wx.Frame):
         """Switches to whichever tab/page holds target_tab_panel (a no-op if it's
         already showing), pre-selects an output-type dropdown if layout_extra names
         one, checks any checkbox named in checkboxes (replicating
-        on_changed_chk_convert_to_mvc's own Stereo Format compatibility fix inline
-        for chk_convert_to_mvc specifically, since setting a checkbox's value in
-        code never fires its real EVT_CHECKBOX handler), expands target_group's own
-        Settings pane if it's currently collapsed (reusing the exact same reflow
-        sequence on_toggled_standalone_tools_collapsible_pane already uses for a
-        real user click, just called directly instead of through a real wx event --
-        so this can never drift from what that already-proven path does), then
-        scrolls target_group into view. Never runs anything -- the user still picks
-        their own file and presses Run/Start on the destination tool itself."""
+        on_changed_cbo_mvc_mode's own Stereo Format compatibility fix inline for the
+        "cbo_mvc_mode" sentinel specifically, since setting a checkbox's value or a
+        combobox's selection in code never fires its real EVT_CHECKBOX/EVT_COMBOBOX
+        handler), expands target_group's own Settings pane if it's currently
+        collapsed (reusing the exact same reflow sequence
+        on_toggled_standalone_tools_collapsible_pane already uses for a real user
+        click, just called directly instead of through a real wx event -- so this
+        can never drift from what that already-proven path does), then scrolls
+        target_group into view. Never runs anything -- the user still picks their
+        own file and presses Run/Start on the destination tool itself."""
         if self.layout_mode == LAYOUT_MODE_TABS:
             for i in range(self.nb_options.GetPageCount()):
                 page = self.nb_options.GetPage(i)
@@ -9164,8 +9172,14 @@ class MainFrame(wx.Frame):
 
         if checkboxes is not None:
             for name in checkboxes:
-                getattr(self, name).SetValue(True)
-            if "chk_convert_to_mvc" in checkboxes:
+                if name == "cbo_mvc_mode":
+                    # ADR-316: not a real checkbox -- picks the "Alongside SBS/TB
+                    # output" choice, the same real destination the old, now-removed
+                    # chk_convert_to_mvc checkbox used to drive via SetValue(True).
+                    self._set_mvc_mode("alongside")
+                else:
+                    getattr(self, name).SetValue(True)
+            if "cbo_mvc_mode" in checkboxes:
                 mvc_compatible = ("Full SBS", "Half SBS", "Full TB", "Half TB")
                 if self.cbo_stereo_format.GetValue() not in mvc_compatible:
                     self.cbo_stereo_format.SetStringSelection("Full SBS")
@@ -9466,20 +9480,21 @@ class MainFrame(wx.Frame):
             # genuine Stereo Format entry -- it's a second-pass re-encode
             # (FRIMEncode) over an already-finished Full/Half SBS or Full/Half TB
             # file, not something the main render step outputs directly (see
-            # on_changed_chk_convert_to_mvc's own comment) -- so each of these is
-            # a pure shortcut: snap the real format to the one it names and check
-            # the real checkbox, exactly what Quick Convert's hdr->mvc route
-            # already does from the Standalone Tools screen.
+            # on_changed_cbo_mvc_mode's own comment) -- so each of these is
+            # a pure shortcut: snap the real format to the one it names and select
+            # the real "Alongside SBS/TB output" MVC mode (ADR-316), exactly what
+            # Quick Convert's hdr->mvc route already does from the Standalone
+            # Tools screen.
             # ADR-282: real follow-up -- "what happens if the mvc i want is for
             # half sbs or even for top/bot" -- the original single "MVC
             # (Blu-ray)" entry only ever offered Full SBS. Four explicit entries
             # (one per real MVC-compatible format, ADR-247) let the user pick
             # exactly the one they want in one click, rather than forcing Full
             # SBS and requiring a second manual change afterward.
-            # SetValue() in code never fires chk_convert_to_mvc's own EVT_CHECKBOX
+            # SetSelection() in code never fires cbo_mvc_mode's own EVT_COMBOBOX
             # handler, but nothing else is bound to it besides that same
             # format-correction this already performs directly.
-            self.chk_convert_to_mvc.SetValue(True)
+            self._set_mvc_mode("alongside")
             self.cbo_stereo_format.SetStringSelection(real_format)
         self.update_input_option_state()
         self.update_anaglyph_state()
@@ -9803,78 +9818,46 @@ class MainFrame(wx.Frame):
     def on_changed_cbo_rife_mode(self, event):
         self.update_rife_interpolate()
 
-    def on_changed_chk_convert_to_mvc(self, event):
-        # ADR-247: real user follow-up -- Half SBS/Full TB/Half TB are all genuine,
-        # valid MVC inputs (sbs_to_mvc_cli.py, and _run_mvc_conversion()'s own layout
-        # detection, already handle all four), just with the expected resolution
-        # tradeoff for the Half variants -- ADR-246's original blanket "always force
-        # Full SBS" was more restrictive than necessary. Only a format MVC conversion
-        # genuinely cannot use at all (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug
-        # Depth) still needs correcting -- same spirit as "Frame Packed forces
-        # libx264" in the 3D Blu-ray Import panel, just narrower now.
-        mvc_compatible = ("Full SBS", "Half SBS", "Full TB", "Half TB")
-        if self.chk_convert_to_mvc.GetValue() and self.cbo_stereo_format.GetValue() not in mvc_compatible:
-            self.cbo_stereo_format.SetStringSelection("Full SBS")
-            self.on_selected_index_changed_cbo_stereo_format(None)
-        event.Skip()
+    def _mvc_mode(self):
+        """The real internal MVC mode ("off"/"alongside"/"direct") cbo_mvc_mode (ADR-316)
+        is currently set to -- read everywhere downstream used to read
+        chk_convert_to_mvc.GetValue()/chk_direct_mvc.GetValue() directly, same
+        ClientData convention as cbo_mvc_output_type/cbo_mvc_autocrop/cbo_mvc_fill_mode."""
+        return self.cbo_mvc_mode.GetClientData(self.cbo_mvc_mode.GetSelection())
 
-    def update_mvc_allow_lossless_eac3(self):
-        """Keep Dolby Digital Plus lossless on disc output only means anything for a real
-        disc-structured target (3D Blu-ray ISO/BD Folder) -- Plain MKV/Bare M2TS already keep
-        DD+ lossless unconditionally (see _plan_audio_subs() in sbs_to_mvc_cli.py), so this is a
-        no-op there. Greyed out (not hidden) for a non-disc-legal Output Type, same convention
-        as update_direct_mvc()'s own Enable(not on) toggling just below."""
-        output_type = self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection())
-        self.chk_mvc_allow_lossless_eac3.Enable(output_type in ("iso", "folder"))
+    def _set_mvc_mode(self, mode):
+        for i in range(self.cbo_mvc_mode.GetCount()):
+            if self.cbo_mvc_mode.GetClientData(i) == mode:
+                self.cbo_mvc_mode.SetSelection(i)
+                break
 
-    def on_changed_mvc_output_type(self, event):
-        self.update_mvc_allow_lossless_eac3()
-        event.Skip()
-
-    def update_mvc_fill_mode(self):
-        """Fill Screen vs. Fit Screen only means anything once Auto-crop (MVC) is actually
-        cropping bars -- greyed out (not hidden) when Auto-crop is Off, same convention as
-        update_mvc_allow_lossless_eac3()'s own Enable() toggling just above. Reading
-        cbo_mvc_autocrop's own IsEnabled() (not just chk_direct_mvc directly) means this
-        automatically stays greyed out whenever Direct to MVC has disabled Auto-crop too,
-        with no separate Direct-MVC check needed here."""
-        on = bool(self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection())) \
-            and self.cbo_mvc_autocrop.IsEnabled()
-        self.lbl_mvc_fill_mode.Enable(on)
-        self.cbo_mvc_fill_mode.Enable(on)
-
-    def on_changed_mvc_autocrop(self, event):
-        self.update_mvc_fill_mode()
-        event.Skip()
-
-    def update_direct_mvc(self):
-        """Enables/disables the controls Direct to MVC is incompatible with, matching
-        whether it's currently checked -- the real correctness guarantee is the
-        defensive force-off block in parse_args() (this can drift out of sync with a
-        widget's Enable state, e.g. update_input_option_state() re-enabling Resume
-        after an input file change; that block is what actually stops a bad
-        combination from ever reaching a real job, this is just keeping the on-screen
-        controls honest about it)."""
-        on = self.chk_direct_mvc.GetValue()
-        self.chk_resume.Enable(not on)
-        self.chk_auto_resume.Enable(not on)
-        self.chk_rife_interpolate.Enable(not on)
-        self.cbo_mvc_autocrop.Enable(not on)
-        self.update_mvc_fill_mode()
-        if not on:
-            # Re-apply whatever Resume's own real rule (input type-dependent) says,
-            # rather than leaving it force-enabled regardless of input type.
-            self.update_input_option_state()
-
-    def on_changed_chk_direct_mvc(self, event):
-        # ADR-283: real incompatibilities -- Auto Resume needs real on-disk segment
-        # files to reopen, RIFE needs a finished file to interpolate, and MVC
-        # Auto-crop needs a finished file to sample black bars from; none of those
-        # exist for a single continuous encode-straight-into-the-MVC-pipe job.
-        # Explained once, only when checking this actually changes something --
-        # unlike on_changed_chk_convert_to_mvc's own silent Stereo Format fix, losing
-        # Auto Resume/RIFE progress on a long job is significant enough to say so.
-        if self.chk_direct_mvc.GetValue():
+    def on_changed_cbo_mvc_mode(self, event):
+        """ADR-316: the real logic each of the old two checkboxes' own EVT_CHECKBOX
+        handlers used to run, unchanged -- just gated on which of the three
+        cbo_mvc_mode choices is now selected instead of which checkbox just got
+        checked."""
+        mode = self._mvc_mode()
+        if mode == "alongside":
+            # ADR-247: real user follow-up -- Half SBS/Full TB/Half TB are all genuine,
+            # valid MVC inputs (sbs_to_mvc_cli.py, and _run_mvc_conversion()'s own layout
+            # detection, already handle all four), just with the expected resolution
+            # tradeoff for the Half variants -- ADR-246's original blanket "always force
+            # Full SBS" was more restrictive than necessary. Only a format MVC conversion
+            # genuinely cannot use at all (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug
+            # Depth) still needs correcting -- same spirit as "Frame Packed forces
+            # libx264" in the 3D Blu-ray Import panel, just narrower now.
+            mvc_compatible = ("Full SBS", "Half SBS", "Full TB", "Half TB")
+            if self.cbo_stereo_format.GetValue() not in mvc_compatible:
+                self.cbo_stereo_format.SetStringSelection("Full SBS")
+                self.on_selected_index_changed_cbo_stereo_format(None)
+        elif mode == "direct":
+            # ADR-283: real incompatibilities -- Auto Resume needs real on-disk segment
+            # files to reopen, RIFE needs a finished file to interpolate, and MVC
+            # Auto-crop needs a finished file to sample black bars from; none of those
+            # exist for a single continuous encode-straight-into-the-MVC-pipe job.
+            # Explained once, only when selecting this actually changes something --
+            # unlike the "alongside" branch's own silent Stereo Format fix, losing
+            # Auto Resume/RIFE progress on a long job is significant enough to say so.
             changed = (self.chk_resume.GetValue() or self.chk_auto_resume.GetValue()
                       or self.chk_rife_interpolate.GetValue()
                       or bool(self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection())))
@@ -9890,8 +9873,60 @@ class MainFrame(wx.Frame):
                       "Auto-crop (MVC) to sample black bars from -- so all three have been turned off "
                       "for this job."),
                     T("Direct to 3D Blu-ray MVC"), wx.OK | wx.ICON_INFORMATION)
-        self.update_direct_mvc()
+        self.update_mvc_mode()
+        if event is not None:
+            event.Skip()
+
+    def update_mvc_allow_lossless_eac3(self):
+        """Keep Dolby Digital Plus lossless on disc output only means anything for a real
+        disc-structured target (3D Blu-ray ISO/BD Folder) -- Plain MKV/Bare M2TS already keep
+        DD+ lossless unconditionally (see _plan_audio_subs() in sbs_to_mvc_cli.py), so this is a
+        no-op there. Greyed out (not hidden) for a non-disc-legal Output Type, same convention
+        as update_mvc_mode()'s own Enable(not on) toggling just below."""
+        output_type = self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection())
+        self.chk_mvc_allow_lossless_eac3.Enable(output_type in ("iso", "folder"))
+
+    def on_changed_mvc_output_type(self, event):
+        self.update_mvc_allow_lossless_eac3()
         event.Skip()
+
+    def update_mvc_fill_mode(self):
+        """Fill Screen vs. Fit Screen only means anything once Auto-crop (MVC) is actually
+        cropping bars -- greyed out (not hidden) when Auto-crop is Off, same convention as
+        update_mvc_allow_lossless_eac3()'s own Enable() toggling just above. Reading
+        cbo_mvc_autocrop's own IsEnabled() (not just _mvc_mode() directly) means this
+        automatically stays greyed out whenever Single-pass only mode has disabled
+        Auto-crop too, with no separate mode check needed here."""
+        on = bool(self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection())) \
+            and self.cbo_mvc_autocrop.IsEnabled()
+        self.lbl_mvc_fill_mode.Enable(on)
+        self.cbo_mvc_fill_mode.Enable(on)
+
+    def on_changed_mvc_autocrop(self, event):
+        self.update_mvc_fill_mode()
+        event.Skip()
+
+    def update_mvc_mode(self):
+        """Enables/disables the controls Single-pass only (direct) MVC mode is
+        incompatible with, matching whether cbo_mvc_mode is currently set to it --
+        the real correctness guarantee is the defensive force-off block in
+        parse_args() (this can drift out of sync with a widget's Enable state, e.g.
+        update_input_option_state() re-enabling Resume after an input file change;
+        that block is what actually stops a bad combination from ever reaching a
+        real job, this is just keeping the on-screen controls honest about it).
+        ADR-316: renamed from update_direct_mvc() when the two separate checkboxes
+        became this one three-way choice; same logic as before, just keyed off
+        _mvc_mode() == "direct" instead of a dedicated checkbox's GetValue()."""
+        on = self._mvc_mode() == "direct"
+        self.chk_resume.Enable(not on)
+        self.chk_auto_resume.Enable(not on)
+        self.chk_rife_interpolate.Enable(not on)
+        self.cbo_mvc_autocrop.Enable(not on)
+        self.update_mvc_fill_mode()
+        if not on:
+            # Re-apply whatever Resume's own real rule (input type-dependent) says,
+            # rather than leaving it force-enabled regardless of input type.
+            self.update_input_option_state()
 
     def update_temporal_stabilize(self):
         if self.chk_temporal_stabilize.IsChecked():
@@ -10240,7 +10275,7 @@ class MainFrame(wx.Frame):
         # Skipped entirely when the main pipeline's own separate "Convert HDR to
         # SDR" is already on -- the file feeding into MVC would already be SDR by
         # then, so nothing would fail and asking would be a false alarm.
-        if (self.chk_convert_to_mvc.GetValue() and not self.chk_convert_to_mvc_hdr_to_sdr.GetValue()
+        if (self._mvc_mode() == "alongside" and not self.chk_convert_to_mvc_hdr_to_sdr.GetValue()
                 and not self.chk_hdr_to_sdr.GetValue() and path.isfile(input_path)):
             from . import utils as iw3_utils
             ffprobe_bin = iw3_utils._find_ffprobe()
@@ -10265,7 +10300,7 @@ class MainFrame(wx.Frame):
         # run a normal per-file conversion for every video in it with no MVC output
         # and no error. Caught here, before Start, same "return None blocks Start"
         # pattern as every other real validation in this function.
-        if self.chk_direct_mvc.GetValue() and path.isdir(input_path):
+        if self._mvc_mode() == "direct" and path.isdir(input_path):
             self.show_error_message(
                 T("Direct to 3D Blu-ray MVC only works on a single video file -- it does not support "
                   "a folder/batch input. Point Input at one movie file, or turn this off."))
@@ -10275,7 +10310,7 @@ class MainFrame(wx.Frame):
         # narrowed to the ONE toggle Direct to MVC actually uses (the main pipeline's
         # own "Convert HDR to SDR" -- there is no separate flat output file here for
         # a Direct MVC-only toggle to protect the way the two-stage flow's own one does).
-        if (self.chk_direct_mvc.GetValue() and not self.chk_hdr_to_sdr.GetValue()
+        if (self._mvc_mode() == "direct" and not self.chk_hdr_to_sdr.GetValue()
                 and path.isfile(input_path)):
             from . import utils as iw3_utils
             ffprobe_bin = iw3_utils._find_ffprobe()
@@ -10293,13 +10328,13 @@ class MainFrame(wx.Frame):
                 else:
                     return None
 
-        # ADR-283: real, unconditional guarantee -- not just on_changed_chk_direct_mvc's
+        # ADR-283: real, unconditional guarantee -- not just on_changed_cbo_mvc_mode's
         # own Enable()/uncheck, which a later update_input_option_state() call could
         # otherwise re-enable -- that a Direct-to-MVC job never carries a setting into
         # convert_direct()/process_video_full() that can't work against a live
         # single-pass pipe (see direct_mvc_cli.py's own module docstring for why each
         # of these needs a real, already-finished file that never exists here).
-        if self.chk_direct_mvc.GetValue():
+        if self._mvc_mode() == "direct":
             self.chk_resume.SetValue(False)
             self.chk_auto_resume.SetValue(False)
             self.chk_rife_interpolate.SetValue(False)
@@ -10464,8 +10499,8 @@ class MainFrame(wx.Frame):
             rife_target_fps=rife_target_fps,
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
             restore_dual_eye_subtitles=self.chk_restore_dual_eye_subtitles.GetValue(),
-            convert_to_mvc=self.chk_convert_to_mvc.GetValue(),
-            direct_mvc=self.chk_direct_mvc.GetValue(),
+            convert_to_mvc=self._mvc_mode() == "alongside",
+            direct_mvc=self._mvc_mode() == "direct",
             mvc_output_type=self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection()),
             mvc_bitrate=float(self.txt_mvc_bitrate.GetValue() or "20"),
             mvc_convert_hdr_to_sdr=self.chk_convert_to_mvc_hdr_to_sdr.GetValue(),
@@ -11200,12 +11235,51 @@ class MainFrame(wx.Frame):
             for control in self.get_standalone_tools_sliders_and_panes():
                 manager.Unregister(control)
             persistent_manager_restore_all(manager, exclude_names)
+            if path.exists(config_file):
+                self._migrate_legacy_mvc_checkboxes(manager)
             persistent_manager_unregister_all(manager)
         finally:
             if not restore_path:
                 self.pnl_file.set_input_path(input_path)
                 self.pnl_file.set_output_path(output_path)
             self.cbo_app_preset.SetValue(preset)
+
+    def _migrate_legacy_mvc_checkboxes(self, manager):
+        """ADR-316: real existing users' saved iw3-gui.cfg (or a saved preset) can
+        still carry the old, pre-consolidation "chk_convert_to_mvc"/"chk_direct_mvc"
+        checkboxes' state -- those two were replaced by the single cbo_mvc_mode
+        choice, so their widgets no longer exist to register/restore into. Neither
+        old key is ever written again by this build (nothing registers those names
+        any more), so this only ever sees a frozen pre-upgrade snapshot -- read
+        through real, disposable shim CheckBox widgets bound to the SAME manager/
+        file just restored above, reusing the real, already-tested CheckBoxHandler
+        restore path instead of hand-parsing the config file's own serialization.
+        Only applied when cbo_mvc_mode has no saved selection of its own in this
+        same file yet, so a real choice made with the new control after upgrading
+        (or a fresh install that never had the old checkboxes at all) can never be
+        clobbered on a later restart. direct_mvc wins the (should-be-unreachable)
+        both-old-checkboxes-checked case, since it's the more specific/newer of the
+        two old features -- same priority apply_parsed_args_to_gui() uses."""
+        if manager.GetPersistenceFile().Read("Persistence_Options/ComboBox/cbo_mvc_mode/Selection"):
+            return
+        shim_convert = wx.CheckBox(self, name="chk_convert_to_mvc")
+        shim_direct = wx.CheckBox(self, name="chk_direct_mvc")
+        try:
+            shim_convert.Hide()
+            shim_direct.Hide()
+            manager.Register(shim_convert)
+            manager.Register(shim_direct)
+            manager.Restore(shim_convert)
+            manager.Restore(shim_direct)
+            if shim_direct.GetValue():
+                self._set_mvc_mode("direct")
+            elif shim_convert.GetValue():
+                self._set_mvc_mode("alongside")
+        finally:
+            manager.Unregister(shim_convert)
+            manager.Unregister(shim_direct)
+            shim_convert.Destroy()
+            shim_direct.Destroy()
 
     def delete_preset(self, name=None):
         if not name:
@@ -11785,7 +11859,17 @@ class MainFrame(wx.Frame):
 
         self.chk_restore_audio_subtitles.SetValue(bool(getattr(args, "restore_audio_subtitles", False)))
         self.chk_restore_dual_eye_subtitles.SetValue(bool(getattr(args, "restore_dual_eye_subtitles", False)))
-        self.chk_convert_to_mvc.SetValue(bool(getattr(args, "convert_to_mvc", False)))
+        # ADR-316: direct_mvc takes priority over convert_to_mvc if an args Namespace
+        # somehow has both set (should be unreachable from a real Start click, but
+        # cbo_mvc_mode can only ever represent one of the three real choices at a
+        # time) -- same priority rule _migrate_legacy_mvc_checkboxes() uses for a
+        # real pre-upgrade saved config with both old checkboxes checked.
+        if getattr(args, "direct_mvc", False):
+            self._set_mvc_mode("direct")
+        elif getattr(args, "convert_to_mvc", False):
+            self._set_mvc_mode("alongside")
+        else:
+            self._set_mvc_mode("off")
         mvc_output_type_value = getattr(args, "mvc_output_type", None) or "iso"
         for i in range(self.cbo_mvc_output_type.GetCount()):
             if self.cbo_mvc_output_type.GetClientData(i) == mvc_output_type_value:
@@ -11810,8 +11894,7 @@ class MainFrame(wx.Frame):
         else:
             self.cbo_mvc_fill_mode.SetSelection(0)
         self.chk_mvc_allow_lossless_eac3.SetValue(bool(getattr(args, "mvc_allow_lossless_eac3_on_disc", False)))
-        self.chk_direct_mvc.SetValue(bool(getattr(args, "direct_mvc", False)))
-        self.update_direct_mvc()
+        self.update_mvc_mode()
         self.update_mvc_allow_lossless_eac3()
         self.update_mvc_fill_mode()
         self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
@@ -20306,17 +20389,20 @@ def _self_test_restore_audio_subtitles_checkbox():
 
 
 def _self_test_convert_to_mvc_checkbox():
-    """ADR-246: real user request -- "the holy grail is to take a 2D movie and just
-    convert it to MKV-MVC directly". New main-pipeline "Convert to 3D Blu-ray MVC
-    after conversion" checkbox, mirroring _self_test_restore_audio_subtitles_checkbox's
-    own coverage shape for the new option: exists/parented/default off, tooltip has
-    real content, args/stage-list/get_cli_command() round-trip in both directions,
-    output-type combo (iso/mkv) round-trips correctly, and -- the one behavior this
-    option adds beyond a plain checkbox -- checking it leaves Full/Half SBS/TB alone
-    (all four are genuine, valid MVC inputs, ADR-247) but force-switches Stereo
-    Format to Full SBS for a genuinely incompatible format (e.g. VR90), confirmed
-    via the real on_changed_chk_convert_to_mvc handler, not just
-    _run_mvc_conversion()'s own separate, defensive re-check for raw CLI use."""
+    """ADR-246/316: real user request -- "the holy grail is to take a 2D movie and
+    just convert it to MKV-MVC directly". Main-pipeline "Alongside SBS/TB output"
+    MVC mode, mirroring _self_test_restore_audio_subtitles_checkbox's own coverage
+    shape for the option: exists/parented/default off, tooltip has real content,
+    args/stage-list/get_cli_command() round-trip in both directions, output-type
+    combo (iso/mkv) round-trips correctly, and -- the one behavior this mode adds
+    beyond a plain flag -- selecting it leaves Full/Half SBS/TB alone (all four are
+    genuine, valid MVC inputs, ADR-247) but force-switches Stereo Format to Full SBS
+    for a genuinely incompatible format (e.g. VR90), confirmed via the real
+    on_changed_cbo_mvc_mode handler, not just _run_mvc_conversion()'s own separate,
+    defensive re-check for raw CLI use. ADR-316: the real control is now
+    cbo_mvc_mode (one three-way choice for Off/Alongside/Single-pass, replacing the
+    old two independently-checkable checkboxes), so this test drives selection
+    through it instead of a dedicated checkbox."""
     app = None
     frame = None
     try:
@@ -20330,17 +20416,17 @@ def _self_test_convert_to_mvc_checkbox():
         # MVC/HDR-to-SDR/autocrop usage there. Reset every widget this test's
         # "default state" assertions depend on to a known baseline first, same
         # reasoning as _self_test_direct_mvc_checkbox's own reset block -- this test
-        # verifies the checkbox's coded default/tooltip/round-trip behavior starting
+        # verifies the control's coded default/tooltip/round-trip behavior starting
         # from a known state, not "this install has never been touched."
-        frame.chk_convert_to_mvc.SetValue(False)
+        frame._set_mvc_mode("off")
         frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
         frame.cbo_mvc_output_type.SetSelection(0)
         _autocrop_items = [frame.cbo_mvc_autocrop.GetClientData(i) for i in range(frame.cbo_mvc_autocrop.GetCount())]
         frame.cbo_mvc_autocrop.SetSelection(_autocrop_items.index(""))
         frame.txt_mvc_bitrate.SetValue("20")
 
-        assert frame.chk_convert_to_mvc.GetParent() is frame.grp_postprocess
-        assert frame.chk_convert_to_mvc.GetValue() is False
+        assert frame.cbo_mvc_mode.GetParent() is frame.grp_postprocess
+        assert frame._mvc_mode() == "off"
         assert frame.cbo_mvc_output_type.GetClientData(frame.cbo_mvc_output_type.GetSelection()) == "iso"
         assert frame.txt_mvc_bitrate.GetValue() == "20"
         # ADR-252: real user report -- a Dolby Vision source made the MVC step refuse
@@ -20352,22 +20438,23 @@ def _self_test_convert_to_mvc_checkbox():
         # Player) needs bars removed at encode time instead. Off ("") by default.
         assert frame.cbo_mvc_autocrop.GetClientData(frame.cbo_mvc_autocrop.GetSelection()) == ""
 
-        tip = frame.chk_convert_to_mvc.GetToolTip().GetTip()
+        tip = frame.cbo_mvc_mode.GetToolTip().GetTip()
         assert "MVC" in tip, tip
         assert "Full SBS" in tip, tip
 
         frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
         frame.pnl_file.set_output_path("C:\\test output dir")
 
-        frame.chk_convert_to_mvc.SetValue(False)
+        frame._set_mvc_mode("off")
         args_off = frame.parse_args(skip_set_state=True)
         assert args_off.convert_to_mvc is False
         stages_off = frame._compute_job_stages(args_off)
         assert STAGE_CONVERT_MVC not in stages_off, stages_off
 
-        frame.chk_convert_to_mvc.SetValue(True)
+        frame._set_mvc_mode("alongside")
         args_on = frame.parse_args(skip_set_state=True)
         assert args_on.convert_to_mvc is True
+        assert args_on.direct_mvc is False
         assert args_on.mvc_output_type == "iso"
         assert args_on.mvc_bitrate == 20.0
         assert args_on.mvc_convert_hdr_to_sdr is False
@@ -20393,10 +20480,10 @@ def _self_test_convert_to_mvc_checkbox():
 
         command_on = frame.get_cli_command()
         assert "--convert-to-mvc" in command_on, command_on
-        frame.chk_convert_to_mvc.SetValue(False)
+        frame._set_mvc_mode("off")
         command_off = frame.get_cli_command()
         assert "--convert-to-mvc" not in command_off, command_off
-        frame.chk_convert_to_mvc.SetValue(True)
+        frame._set_mvc_mode("alongside")
 
         # output-type combo round-trips to --mvc-output-type
         items = [frame.cbo_mvc_output_type.GetClientData(i) for i in range(frame.cbo_mvc_output_type.GetCount())]
@@ -20420,22 +20507,22 @@ def _self_test_convert_to_mvc_checkbox():
         frame.cbo_mvc_output_type.SetSelection(items.index("iso"))
 
         # ADR-247: Half SBS/Full TB/Half TB are all genuine, valid MVC inputs now --
-        # checking this box must NOT force them to Full SBS, only a format MVC
+        # selecting this mode must NOT force them to Full SBS, only a format MVC
         # conversion can't use at all still gets corrected.
         for compatible_format in ("Half SBS", "Full TB", "Half TB", "Full SBS"):
-            frame.chk_convert_to_mvc.SetValue(False)
+            frame._set_mvc_mode("off")
             frame.cbo_stereo_format.SetStringSelection(compatible_format)
-            frame.chk_convert_to_mvc.SetValue(True)
-            frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
+            frame._set_mvc_mode("alongside")
+            frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
             assert frame.cbo_stereo_format.GetValue() == compatible_format, \
                 f"{compatible_format} is a valid MVC input and must not be force-switched"
 
         # a genuinely incompatible format still gets force-switched to Full SBS
-        frame.chk_convert_to_mvc.SetValue(False)
+        frame._set_mvc_mode("off")
         frame.cbo_stereo_format.SetStringSelection("VR90")
         assert frame.cbo_stereo_format.GetValue() == "VR90"
-        frame.chk_convert_to_mvc.SetValue(True)
-        frame.on_changed_chk_convert_to_mvc(wx.CommandEvent())
+        frame._set_mvc_mode("alongside")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
         assert frame.cbo_stereo_format.GetValue() == "Full SBS", \
             "an MVC-incompatible format (VR90) must still be force-switched to Full SBS"
     finally:
@@ -20455,11 +20542,11 @@ def _self_test_stereo_format_mvc_shortcut():
     the mvc i want is for half sbs or even for top/bot". Real MVC can't be a
     genuine Stereo Format entry (it's a second-pass FRIMEncode re-encode of an
     already-finished packed file, not something the main render step outputs
-    directly -- see on_changed_chk_convert_to_mvc's own comment), so all four
+    directly -- see on_changed_cbo_mvc_mode's own comment), so all four
     "MVC (Blu-ray, ...)" entries are pure shortcuts: each selects a real,
     MVC-compatible format (ADR-247: Full/Half SBS, Full/Half TB are all genuine
-    valid MVC inputs) and checks "Convert to 3D Blu-ray MVC after conversion" for
-    you, exactly what Quick Convert's hdr->mvc route already does from a
+    valid MVC inputs) and selects the "Alongside SBS/TB output" MVC mode (ADR-316)
+    for you, exactly what Quick Convert's hdr->mvc route already does from a
     different screen. Confirms none of the four ever persists as the real value
     -- parse_args()/get_cli_command() must see the plain real format, never a fake
     "MVC (Blu-ray, ...)" label."""
@@ -20479,14 +20566,14 @@ def _self_test_stereo_format_mvc_shortcut():
         frame.pnl_file.set_output_path("C:\\test output dir")
 
         for shortcut_label, real_format in MainFrame._MVC_STEREO_FORMAT_SHORTCUTS.items():
-            frame.chk_convert_to_mvc.SetValue(False)
+            frame._set_mvc_mode("off")
             frame.cbo_stereo_format.SetStringSelection(shortcut_label)
             frame.on_selected_index_changed_cbo_stereo_format(wx.CommandEvent())
 
             # the shortcut never persists as the real value -- it resolves immediately
             assert frame.cbo_stereo_format.GetValue() == real_format, \
                 f"{shortcut_label} must snap to {real_format}, got: {frame.cbo_stereo_format.GetValue()}"
-            assert frame.chk_convert_to_mvc.GetValue() is True
+            assert frame._mvc_mode() == "alongside"
 
             args = frame.parse_args(skip_set_state=True)
             assert args.convert_to_mvc is True
@@ -20541,7 +20628,7 @@ def _self_test_mvc_hdr_preflight_prompt():
             frame.pnl_file.set_output_path(tmpdir)
 
             # (a) Convert to MVC not requested -- never probes, never prompts.
-            frame.chk_convert_to_mvc.SetValue(False)
+            frame._set_mvc_mode("off")
             with mock.patch.object(iw3_utils, "_detect_pq_or_hlg") as detect, \
                  mock.patch.object(wx, "MessageBox") as msgbox:
                 args = frame.parse_args(skip_set_state=True)
@@ -20549,7 +20636,7 @@ def _self_test_mvc_hdr_preflight_prompt():
             detect.assert_not_called()
             msgbox.assert_not_called()
 
-            frame.chk_convert_to_mvc.SetValue(True)
+            frame._set_mvc_mode("alongside")
 
             # (b) the MVC-specific SDR checkbox is already on -- nothing to ask.
             frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(True)
@@ -20615,15 +20702,17 @@ def _self_test_mvc_hdr_preflight_prompt():
 
 
 def _self_test_direct_mvc_checkbox():
-    """ADR-283: Direct to 3D Blu-ray MVC. Covers: the checkbox exists with tooltip
-    content naming the real incompatibilities, checking it force-disables Auto
-    Resume/RIFE/Autocrop through the real on_changed_chk_direct_mvc handler (not a
-    bare value flip), the one-time explanatory message fires only when something
-    actually changed, the same real ADR-281-style HDR pre-flight prompt fires for
-    this checkbox too, and parse_args() both reports the mode active AND still
-    forces the incompatible settings off even if a widget's Enable state drifted
-    (simulating the update_input_option_state() re-enable race update_direct_mvc's
-    own docstring describes) -- the actual correctness guarantee, not just the UI."""
+    """ADR-283/316: Single-pass only (direct) MVC mode. Covers: the control exists
+    with tooltip content naming the real incompatibilities, selecting it
+    force-disables Auto Resume/RIFE/Autocrop through the real on_changed_cbo_mvc_mode
+    handler (not a bare value flip), the one-time explanatory message fires only
+    when something actually changed, the same real ADR-281-style HDR pre-flight
+    prompt fires for this mode too, and parse_args() both reports the mode active
+    AND still forces the incompatible settings off even if a widget's Enable state
+    drifted (simulating the update_input_option_state() re-enable race
+    update_mvc_mode's own docstring describes) -- the actual correctness guarantee,
+    not just the UI. ADR-316: this used to be a dedicated "chk_direct_mvc" checkbox,
+    now the "direct" choice of the single cbo_mvc_mode control."""
     import tempfile
     from unittest import mock
     from . import utils as iw3_utils
@@ -20634,9 +20723,9 @@ def _self_test_direct_mvc_checkbox():
         app = wx.App()
         frame = MainFrame()
 
-        assert frame.chk_direct_mvc.GetParent() is frame.grp_postprocess
-        assert frame.chk_direct_mvc.GetValue() is False
-        tip = frame.chk_direct_mvc.GetToolTip().GetTip()
+        assert frame.cbo_mvc_mode.GetParent() is frame.grp_postprocess
+        assert frame._mvc_mode() == "off"
+        tip = frame.cbo_mvc_mode.GetToolTip().GetTip()
         for phrase in ("single pass", "Auto Resume", "RIFE", "Auto-crop", "started over"):
             assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
 
@@ -20662,36 +20751,36 @@ def _self_test_direct_mvc_checkbox():
         frame.chk_auto_resume.SetValue(False)
         frame.chk_rife_interpolate.SetValue(False)
         frame.cbo_mvc_autocrop.SetSelection(0)
-        frame.chk_convert_to_mvc.SetValue(False)
+        frame._set_mvc_mode("off")
         frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
         frame.chk_hdr_to_sdr.SetValue(False)
 
-        # (a) checking it with nothing incompatible actually on -- no message needed,
+        # (a) selecting it with nothing incompatible actually on -- no message needed,
         # nothing changed.
         with mock.patch.object(wx, "MessageBox") as msgbox:
-            frame.chk_direct_mvc.SetValue(True)
-            frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+            frame._set_mvc_mode("direct")
+            frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
         msgbox.assert_not_called()
         assert not frame.chk_resume.IsEnabled()
         assert not frame.chk_auto_resume.IsEnabled()
         assert not frame.chk_rife_interpolate.IsEnabled()
         assert not frame.cbo_mvc_autocrop.IsEnabled()
-        frame.chk_direct_mvc.SetValue(False)
-        frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+        frame._set_mvc_mode("off")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
         # update_input_option_state() was re-applied (not left force-disabled) --
         # with no input file chosen yet, ITS OWN real rule is "disabled", same as a
         # fresh window that never touched Direct MVC at all.
         assert not frame.chk_resume.IsEnabled()
 
-        # (b) checking it while Auto Resume/RIFE/Autocrop are actually on -- forced
+        # (b) selecting it while Auto Resume/RIFE/Autocrop are actually on -- forced
         # off THROUGH THE REAL HANDLER, and explained once.
         frame.chk_auto_resume.SetValue(True)
         frame.chk_rife_interpolate.SetValue(True)
         items = [frame.cbo_mvc_autocrop.GetClientData(i) for i in range(frame.cbo_mvc_autocrop.GetCount())]
         frame.cbo_mvc_autocrop.SetSelection(items.index("BLACK"))
         with mock.patch.object(wx, "MessageBox") as msgbox:
-            frame.chk_direct_mvc.SetValue(True)
-            frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+            frame._set_mvc_mode("direct")
+            frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
         msgbox.assert_called_once()
         assert frame.chk_auto_resume.GetValue() is False
         assert frame.chk_rife_interpolate.GetValue() is False
@@ -20757,7 +20846,7 @@ def _self_test_direct_mvc_checkbox():
             assert args is None, "No must cancel Start, not proceed to a job that will fail"
 
             # (e) the defensive force-off in parse_args() still holds even if a
-            # widget's Enable state drifted back on (the real race update_direct_mvc's
+            # widget's Enable state drifted back on (the real race update_mvc_mode's
             # docstring names) -- this is the actual guarantee, not the UI polish.
             frame.chk_hdr_to_sdr.SetValue(True)
             frame.chk_resume.Enable()
@@ -20783,11 +20872,11 @@ def _self_test_mvc_allow_lossless_eac3_checkbox():
     instead of the app always silently downgrading it to AC-3 -- default OFF, opt-in only (see
     chk_mvc_allow_lossless_eac3's own tooltip / _plan_audio_subs()'s docstring in
     sbs_to_mvc_cli.py for the full reasoning). Covers: both the main-tab checkbox (shared by
-    'Convert to 3D Blu-ray MVC' and 'Direct to 3D Blu-ray MVC') and the standalone 'SBS to 3D
-    Blu-ray MVC' tool's own copy, default unchecked, tooltip content, greyed out for a
-    non-disc-legal Output Type (Plain MKV/Bare M2TS, where it's a real no-op) and enabled for a
-    disc-legal one (3D Blu-ray ISO/BD Folder) -- matching update_direct_mvc()'s own
-    Enable(not on) convention -- and a real round trip through parse_args()/
+    cbo_mvc_mode's "Alongside SBS/TB output" and "Single-pass only" choices, ADR-316) and the
+    standalone 'SBS to 3D Blu-ray MVC' tool's own copy, default unchecked, tooltip content,
+    greyed out for a non-disc-legal Output Type (Plain MKV/Bare M2TS, where it's a real no-op)
+    and enabled for a disc-legal one (3D Blu-ray ISO/BD Folder) -- matching update_mvc_mode()'s
+    own Enable(not on) convention -- and a real round trip through parse_args()/
     apply_parsed_args_to_gui()."""
     import tempfile
     from unittest import mock
@@ -20924,12 +21013,12 @@ def _self_test_mvc_fill_mode_control():
         frame.cbo_mvc_autocrop.SetSelection(mvc_autocrop_items.index("BLACK"))
         frame.on_changed_mvc_autocrop(wx.CommandEvent())
         assert frame.cbo_mvc_fill_mode.IsEnabled()
-        frame.chk_direct_mvc.SetValue(True)
-        frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+        frame._set_mvc_mode("direct")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
         assert not frame.cbo_mvc_autocrop.IsEnabled(), "test assumption: Direct MVC disables Auto-crop (MVC)"
         assert not frame.cbo_mvc_fill_mode.IsEnabled(), "must grey out whenever Auto-crop (MVC) itself is disabled"
-        frame.chk_direct_mvc.SetValue(False)
-        frame.on_changed_chk_direct_mvc(wx.CommandEvent())
+        frame._set_mvc_mode("off")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
 
         # Standalone tool: same real greying-out logic, driven through its own Auto-crop combo.
         sbs_autocrop_items = [frame.cbo_sbs2mvc_autocrop.GetClientData(i)
@@ -21908,20 +21997,21 @@ def _self_test_quick_convert_panel():
         assert frame.nb_options.GetSelection() == tools_tab_index()
         assert not frame.cpn_hdr_to_sdr.IsCollapsed()
 
-        # ADR-277: hdr -> mvc -- a real, single-screen (Processor tab) workflow that
-        # needs TWO checkboxes checked, not just navigation: MVC conversion itself,
-        # and its own "Convert HDR/DV to SDR first" sibling (a real MVC/disc file
-        # cannot carry HDR at all). Also exercises the Stereo Format compatibility
-        # fix (mirrors on_changed_chk_convert_to_mvc's own real behavior) when an
-        # MVC-incompatible format was previously selected.
+        # ADR-277/316: hdr -> mvc -- a real, single-screen (Processor tab) workflow
+        # that needs TWO real settings set, not just navigation: cbo_mvc_mode's
+        # "Alongside SBS/TB output" choice, and its own "Convert HDR/DV to SDR
+        # first" sibling checkbox (a real MVC/disc file cannot carry HDR at all).
+        # Also exercises the Stereo Format compatibility fix (mirrors
+        # on_changed_cbo_mvc_mode's own real behavior) when an MVC-incompatible
+        # format was previously selected.
         frame.nb_options.SetSelection(0)
-        frame.chk_convert_to_mvc.SetValue(False)
+        frame._set_mvc_mode("off")
         frame.chk_convert_to_mvc_hdr_to_sdr.SetValue(False)
         frame.cbo_stereo_format.SetStringSelection("Debug Depth")
         pick("hdr", "mvc")
         frame.on_click_btn_quick_convert_go(None)
         assert frame.nb_options.GetSelection() == processor_tab_index()
-        assert frame.chk_convert_to_mvc.GetValue(), "must check Convert to 3D Blu-ray MVC"
+        assert frame._mvc_mode() == "alongside", "must select Alongside SBS/TB output MVC mode"
         assert frame.chk_convert_to_mvc_hdr_to_sdr.GetValue(), "must check Convert HDR/DV to SDR first"
         assert frame.cbo_stereo_format.GetValue() == "Full SBS", \
             "an MVC-incompatible Stereo Format must be corrected, same as a real user checking the box"
@@ -26386,6 +26476,105 @@ def _self_test_direct_mvc_output_folder_resolution():
     print("_self_test_direct_mvc_output_folder_resolution: PASS")
 
 
+def _self_test_mvc_mode_checkbox_config_migration():
+    """ADR-316: cbo_mvc_mode replaced the old, independently-checkable
+    "chk_convert_to_mvc"/"chk_direct_mvc" checkboxes. Confirms
+    _migrate_legacy_mvc_checkboxes() loads a real existing user's pre-upgrade saved
+    iw3-gui.cfg (or preset) correctly for all 4 real old-state combinations (neither
+    checked / only convert checked / only direct checked / both checked -- the last
+    one shouldn't have been reachable from the old GUI, but a hand-edited or
+    otherwise corrupted real config could still have it, and direct_mvc must win
+    deterministically), and that it never overwrites a real choice the new control
+    has already saved for itself (a fresh install, or a user who already upgraded
+    and picked something new). Writes the old-format keys through real, disposable
+    CheckBox widgets registered with the real AGW PersistenceManager (the same
+    library load_preset()/save_preset() use), not a hand-crafted config string, so
+    this test can never drift from what a real pre-upgrade build's own Save()
+    actually wrote."""
+    import tempfile
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        combos = [
+            (False, False, "off"),
+            (True, False, "alongside"),
+            (False, True, "direct"),
+            (True, True, "direct"),  # both checked -- should be unreachable, direct wins
+        ]
+        for convert_value, direct_value, expected_mode in combos:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config_file = path.join(tmpdir, "legacy.cfg")
+
+                write_manager = persist.PersistenceManager.Get()
+                write_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+                write_manager.SetPersistenceFile(config_file)
+                shim_convert = wx.CheckBox(frame, name="chk_convert_to_mvc")
+                shim_direct = wx.CheckBox(frame, name="chk_direct_mvc")
+                try:
+                    shim_convert.SetValue(convert_value)
+                    shim_direct.SetValue(direct_value)
+                    write_manager.Register(shim_convert)
+                    write_manager.Register(shim_direct)
+                    write_manager.SaveAndUnregister()
+                finally:
+                    shim_convert.Destroy()
+                    shim_direct.Destroy()
+
+                frame._set_mvc_mode("off")
+                read_manager = persist.PersistenceManager.Get()
+                read_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+                read_manager.SetPersistenceFile(config_file)
+                frame._migrate_legacy_mvc_checkboxes(read_manager)
+
+                assert frame._mvc_mode() == expected_mode, (
+                    f"convert={convert_value} direct={direct_value} -> expected "
+                    f"{expected_mode}, got {frame._mvc_mode()}")
+
+        # A real choice the new control already saved for itself (post-upgrade)
+        # must never be clobbered by a frozen pre-upgrade checkbox snapshot, even
+        # if both old keys are still sitting in the same file.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = path.join(tmpdir, "already_migrated.cfg")
+
+            write_manager = persist.PersistenceManager.Get()
+            write_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+            write_manager.SetPersistenceFile(config_file)
+            shim_convert = wx.CheckBox(frame, name="chk_convert_to_mvc")
+            shim_direct = wx.CheckBox(frame, name="chk_direct_mvc")
+            frame._set_mvc_mode("alongside")
+            try:
+                shim_convert.SetValue(False)
+                shim_direct.SetValue(True)
+                write_manager.Register(shim_convert)
+                write_manager.Register(shim_direct)
+                write_manager.Register(frame.cbo_mvc_mode)
+                write_manager.SaveAndUnregister()
+            finally:
+                shim_convert.Destroy()
+                shim_direct.Destroy()
+
+            frame._set_mvc_mode("off")
+            read_manager = persist.PersistenceManager.Get()
+            read_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+            read_manager.SetPersistenceFile(config_file)
+            frame._migrate_legacy_mvc_checkboxes(read_manager)
+            assert frame._mvc_mode() == "off", (
+                "migration must not run at all once cbo_mvc_mode has its own saved "
+                f"selection in this file -- got {frame._mvc_mode()}")
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mvc_mode_checkbox_config_migration: PASS")
+
+
 def _self_test_convergence_overlay_inpaint_alignment():
     """ADR-237: real user-found crash (live-confirmed: toggling this exact checkbox off
     made a real crash disappear). Root cause, confirmed by reading the code: inpaint
@@ -26781,6 +26970,7 @@ def _run_self_tests():
         _self_test_convergence_overlay,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,
+        _self_test_mvc_mode_checkbox_config_migration,
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,

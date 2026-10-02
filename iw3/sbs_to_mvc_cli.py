@@ -44,6 +44,7 @@ import nunif.gui.subprocess_patch  # noqa
 
 from .mvc_extract_cli import (AUTOCROP_MODES, Cancelled, detect_eye_crop, iso_to_bd_folder,
                               _remove_stale_temp, interleave_mvc)
+from .mvc_codec_private import extract_first_nals, build_mvc_codec_private, patch_mkv_codec_private
 from .utils import (_find_tsmuxer, _get_ffmpeg_bin, log_subprocess_cmd, _find_mkvmerge,
                     _find_mkvpropedit, _apply_stereo_mode_tag)
 
@@ -933,6 +934,30 @@ def _mux_mkv_via_mkvmerge(base_es, dep_es, fps_text, av_lines, output_path, work
             os.remove(combined_es)
         except OSError:
             pass
+
+    # Real, confirmed bug (see iw3/mvc_codec_private.py's own module docstring for the
+    # full byte-level evidence): mkvmerge's raw-ES reader has no concept of MVC's own
+    # subset SPS or the ISO/IEC 14496-15 `mvcC` box, so the CodecPrivate it just wrote for
+    # `output_path`'s video track is a flat, single-view `avcC` -- real 3D-aware hardware
+    # (confirmed: a real Samsung 3D TV) does not auto-detect the file as 3D without the
+    # real avcC+mvcC structure a MakeMKV-derived MVC file has. Never fatal to the overall
+    # mux -- same philosophy as the mkvpropedit-missing case right below: the file
+    # mkvmerge already produced is left exactly as it was (still playable, just not
+    # auto-detected as 3D) if this step can't run for any reason.
+    try:
+        base_nals = extract_first_nals(base_es, {7, 8})
+        dep_nals = extract_first_nals(dep_es, {15, 8})
+        if 7 not in base_nals or 8 not in base_nals:
+            raise RuntimeError("could not find a base-view SPS/PPS near the start of the base-view stream")
+        if 15 not in dep_nals or 8 not in dep_nals:
+            raise RuntimeError("could not find a dependent-view subset SPS/PPS near the start "
+                               "of the dependent-view stream")
+        new_codec_private = build_mvc_codec_private(base_nals[7], base_nals[8], dep_nals[15], dep_nals[8])
+        patch_mkv_codec_private(output_path, new_codec_private)
+    except Exception as e:
+        print(f"[{log_prefix}] note: could not add the real MVC avcC+mvcC CodecPrivate structure "
+             f"to {path.basename(str(output_path))} ({e}) -- the file was still produced normally, "
+             f"but a 3D-aware TV/player may not auto-detect it as 3D", file=sys.stderr)
 
     # mkvmerge has no concept of Matroska's StereoMode property; tag it the same way the
     # project's own main pipeline already does for every other stereo output.

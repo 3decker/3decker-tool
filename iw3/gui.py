@@ -10016,9 +10016,12 @@ class MainFrame(wx.Frame):
         disc-structured target (3D Blu-ray ISO/BD Folder) -- Plain MKV/Bare M2TS already keep
         DD+ lossless unconditionally (see _plan_audio_subs() in sbs_to_mvc_cli.py), so this is a
         no-op there. Greyed out (not hidden) for a non-disc-legal Output Type, same convention
-        as update_mvc_mode()'s own Enable(not on) toggling just below."""
+        as update_mvc_mode()'s own Enable(not on) toggling just below. ADR-322: also greyed out
+        whenever 3D Blu-ray MVC Output itself is Off (nothing it could apply to then) -- called
+        from update_mvc_mode() for this reason, not just on_changed_mvc_output_type()."""
         output_type = self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection())
-        self.chk_mvc_allow_lossless_eac3.Enable(output_type in ("iso", "folder"))
+        self.chk_mvc_allow_lossless_eac3.Enable(
+            self._mvc_mode() != "off" and output_type in ("iso", "folder"))
 
     def on_changed_mvc_output_type(self, event):
         self.update_mvc_allow_lossless_eac3()
@@ -10063,15 +10066,34 @@ class MainFrame(wx.Frame):
         real job, this is just keeping the on-screen controls honest about it).
         ADR-316: renamed from update_direct_mvc() when the two separate checkboxes
         became this one three-way choice; same logic as before, just keyed off
-        _mvc_mode() == "direct" instead of a dedicated checkbox's GetValue()."""
-        on = self._mvc_mode() == "direct"
-        self.chk_resume.Enable(not on)
-        self.chk_auto_resume.Enable(not on)
-        self.chk_rife_interpolate.Enable(not on)
-        self.cbo_mvc_autocrop.Enable(not on)
+        _mvc_mode() == "direct" instead of a dedicated checkbox's GetValue().
+
+        ADR-322: real, evidence-based GUI audit found every whole-section setting
+        below (MVC Output Type/bitrate, Convert HDR/DV to SDR first, Auto-crop
+        (MVC), Keep DD+ lossless) stayed fully clickable even with 3D Blu-ray MVC
+        Output set to Off, a state where none of them do anything -- only
+        chk_mvc_makemkv_to_mkv already greyed out correctly in that case. Greying
+        out the whole subordinate block when mode is Off makes the section
+        self-explanatory at a glance; no option removed, merged, or renamed. Auto-
+        crop (MVC) keeps its own, separate, already-correct Single-pass-only
+        disable (that mode genuinely can't autocrop at all, not just "Off" doesn't
+        apply) -- mvc_active alone would wrongly re-enable it for Single-pass-only,
+        so it needs both conditions, not just mvc_active."""
+        mvc_active = self._mvc_mode() != "off"
+        direct_on = self._mvc_mode() == "direct"
+        self.chk_resume.Enable(not direct_on)
+        self.chk_auto_resume.Enable(not direct_on)
+        self.chk_rife_interpolate.Enable(not direct_on)
+        self.lbl_mvc_output_type.Enable(mvc_active)
+        self.cbo_mvc_output_type.Enable(mvc_active)
+        self.txt_mvc_bitrate.Enable(mvc_active)
+        self.chk_convert_to_mvc_hdr_to_sdr.Enable(mvc_active)
+        self.lbl_mvc_autocrop.Enable(mvc_active and not direct_on)
+        self.cbo_mvc_autocrop.Enable(mvc_active and not direct_on)
         self.update_mvc_fill_mode()
+        self.update_mvc_allow_lossless_eac3()
         self.update_mvc_makemkv_to_mkv()
-        if not on:
+        if not direct_on:
             # Re-apply whatever Resume's own real rule (input type-dependent) says,
             # rather than leaving it force-enabled regardless of input type.
             self.update_input_option_state()
@@ -21221,9 +21243,15 @@ def _self_test_mvc_allow_lossless_eac3_checkbox():
                            "leave this off"):
                 assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
 
-        # Main tab: cbo_mvc_output_type defaults to "iso" (disc-legal) -- checkbox must start
-        # enabled; switching to a non-disc-legal type greys it out, switching back re-enables it.
+        # Main tab: cbo_mvc_output_type defaults to "iso" (disc-legal), but 3D Blu-ray MVC
+        # Output itself defaults to "off" (ADR-316) -- ADR-322: the whole subordinate block,
+        # including this checkbox, correctly stays greyed out until MVC output is actually
+        # on, so turn it on first to test the real output-type-driven sub-logic below.
         assert frame.cbo_mvc_output_type.GetClientData(frame.cbo_mvc_output_type.GetSelection()) == "iso"
+        assert not frame.chk_mvc_allow_lossless_eac3.IsEnabled(), \
+            "must stay greyed out while 3D Blu-ray MVC Output is Off (ADR-322)"
+        frame._set_mvc_mode("alongside")
+        frame.update_mvc_mode()
         assert frame.chk_mvc_allow_lossless_eac3.IsEnabled()
         mvc_items = [frame.cbo_mvc_output_type.GetClientData(i) for i in range(frame.cbo_mvc_output_type.GetCount())]
         frame.cbo_mvc_output_type.SetSelection(mvc_items.index("mkv"))
@@ -21440,6 +21468,12 @@ def _self_test_mvc_fill_mode_control():
                            "circles become", "squished", "Recommended: Fit Screen"):
                 assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
 
+        # ADR-322: Auto-crop (MVC) itself is also greyed out while 3D Blu-ray MVC Output is
+        # Off (the default) -- turn it on first so the real autocrop-driven enable logic below
+        # is tested against its actual real precondition, not a doubly-greyed-out starting state.
+        frame._set_mvc_mode("alongside")
+        frame.update_mvc_mode()
+
         # Main tab: picking a real Auto-crop (MVC) mode enables the combo; back to Off re-greys it.
         mvc_autocrop_items = [frame.cbo_mvc_autocrop.GetClientData(i) for i in range(frame.cbo_mvc_autocrop.GetCount())]
         frame.cbo_mvc_autocrop.SetSelection(mvc_autocrop_items.index("BLACK"))
@@ -21490,7 +21524,11 @@ def _self_test_mvc_fill_mode_control():
 
         # Real round trip: picking "stretch" on the main tab reaches parse_args() as the real
         # CLI-facing attribute, and apply_parsed_args_to_gui() restores both the value and the
-        # correct enabled state from a loaded preset/config.
+        # correct enabled state from a loaded preset/config. ADR-322: the Direct-MVC sub-test
+        # above left mode at "off" -- back to "alongside" first, or Auto-crop (MVC)/Fill Mode
+        # would stay correctly-but-irrelevantly greyed out for the wrong reason here.
+        frame._set_mvc_mode("alongside")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
         with tempfile.TemporaryDirectory() as tmpdir:
             src = path.join(tmpdir, "movie.mkv")
             open(src, "wb").close()
@@ -27210,6 +27248,63 @@ def _self_test_default_output_dir_name_is_3decker():
     print("_self_test_default_output_dir_name_is_3decker: PASS")
 
 
+def _self_test_mvc_mode_greys_out_subordinate_controls_when_off():
+    """ADR-322: real, evidence-based GUI audit found the whole MVC Output
+    subordinate block (Output Type, bitrate, Convert HDR/DV to SDR first,
+    Auto-crop (MVC), Keep DD+ lossless) stayed fully clickable even with 3D
+    Blu-ray MVC Output set to Off, where none of them do anything -- only
+    chk_mvc_makemkv_to_mkv already greyed out correctly. Confirms: every one of
+    those controls (plus cbo_mvc_fill_mode, which cascades from Auto-crop's own
+    enabled state) is disabled when mode is Off, re-enabled for Alongside (full
+    block, Auto-crop included), and for Single-pass only re-enables everything
+    EXCEPT Auto-crop (MVC)/Fill Mode -- that mode's own, separate, pre-existing
+    incompatibility (it has no finished file to sample black bars from), not
+    something this fix should undo."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        frame.cbo_mvc_output_type.SetSelection(0)  # iso, so lossless-EAC3/MakeMKV can be enabled
+        frame.cbo_mvc_autocrop.SetSelection(1)  # a real crop choice, so Fill Mode can be enabled
+
+        frame._set_mvc_mode("off")
+        frame.update_mvc_mode()
+        for widget in (frame.lbl_mvc_output_type, frame.cbo_mvc_output_type, frame.txt_mvc_bitrate,
+                      frame.chk_convert_to_mvc_hdr_to_sdr, frame.lbl_mvc_autocrop, frame.cbo_mvc_autocrop,
+                      frame.lbl_mvc_fill_mode, frame.cbo_mvc_fill_mode, frame.chk_mvc_allow_lossless_eac3,
+                      frame.chk_mvc_makemkv_to_mkv):
+            assert not widget.IsEnabled(), f"{widget.GetName()} must be greyed out when MVC Output is Off"
+
+        frame._set_mvc_mode("alongside")
+        frame.update_mvc_mode()
+        for widget in (frame.lbl_mvc_output_type, frame.cbo_mvc_output_type, frame.txt_mvc_bitrate,
+                      frame.chk_convert_to_mvc_hdr_to_sdr, frame.lbl_mvc_autocrop, frame.cbo_mvc_autocrop,
+                      frame.lbl_mvc_fill_mode, frame.cbo_mvc_fill_mode, frame.chk_mvc_allow_lossless_eac3,
+                      frame.chk_mvc_makemkv_to_mkv):
+            assert widget.IsEnabled(), f"{widget.GetName()} must re-enable for Alongside SBS/TAB output"
+
+        frame._set_mvc_mode("direct")
+        frame.update_mvc_mode()
+        for widget in (frame.lbl_mvc_output_type, frame.cbo_mvc_output_type, frame.txt_mvc_bitrate,
+                      frame.chk_convert_to_mvc_hdr_to_sdr, frame.chk_mvc_allow_lossless_eac3,
+                      frame.chk_mvc_makemkv_to_mkv):
+            assert widget.IsEnabled(), f"{widget.GetName()} must stay enabled for Single-pass only"
+        for widget in (frame.lbl_mvc_autocrop, frame.cbo_mvc_autocrop, frame.lbl_mvc_fill_mode,
+                      frame.cbo_mvc_fill_mode):
+            assert not widget.IsEnabled(), \
+                f"{widget.GetName()} must stay greyed out for Single-pass only (its own real incompatibility)"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mvc_mode_greys_out_subordinate_controls_when_off: PASS")
+
+
 def _self_test_mvc_mode_checkbox_config_migration():
     """ADR-316: cbo_mvc_mode replaced the old, independently-checkable
     "chk_convert_to_mvc"/"chk_direct_mvc" checkboxes. Confirms
@@ -27710,6 +27805,7 @@ def _run_self_tests():
         _self_test_direct_mvc_output_folder_resolution,
         _self_test_default_output_dir_name_is_3decker,
         _self_test_mvc_mode_checkbox_config_migration,
+        _self_test_mvc_mode_greys_out_subordinate_controls_when_off,
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,

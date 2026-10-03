@@ -4331,6 +4331,43 @@ class MainFrame(wx.Frame):
               "too -- off (default) only makes sense for an already-SDR source, where it does nothing "
               "either way."))
 
+        # ADR-319 follow-up: real user request (Steve, relayed by decker) -- chains
+        # iw3.iso_to_mvc_makemkv_cli (the standalone "3D Blu-ray ISO to MVC MKV (MakeMKV)"
+        # tool, Standalone Tools tab) automatically onto this job's own just-built .iso, same
+        # "no separate manual step" pattern Restore Audio & Subtitles/3D Blu-ray MVC Output
+        # above already use. ISO-only (see that module's own docstring for why) --
+        # update_mvc_makemkv_to_mkv() greys this out for every other MVC Output Type.
+        self.chk_mvc_makemkv_to_mkv = wx.CheckBox(
+            self.grp_postprocess, label=T("Also build a real MVC .mkv via MakeMKV (after the ISO)"),
+            name="chk_mvc_makemkv_to_mkv")
+        self.chk_mvc_makemkv_to_mkv.SetValue(False)
+        self.chk_mvc_makemkv_to_mkv.SetToolTip(
+            T("What it's for: once this job's own 3D Blu-ray ISO is fully built, automatically runs it "
+              "through a real, separately-installed MakeMKV (makemkvcon) -- the same thing the "
+              "standalone '3D Blu-ray ISO to MVC MKV (MakeMKV)' tool (Standalone Tools tab) does by "
+              "hand -- and rips it into a real MVC .mkv, no separate manual step.\n"
+              "Why MakeMKV instead of this project's own Plain MKV output type above: a real user's "
+              "Samsung 3D TV still didn't auto-detect this project's own hand-built MVC .mkv as 3D even "
+              "after a real muxing bug fix -- MakeMKV is a mature, real, widely-used tool that "
+              "correctly builds this structure, confirmed reliable on that same real hardware.\n"
+              "Requires MakeMKV: a real, separately installed AND licensed copy (a permanent paid key "
+              "or an officially-rotated free beta key) -- 3DECKER never bundles or installs it. Get it "
+              "yourself from https://www.makemkv.com/ first; Start will refuse with a clear message "
+              "before the job even begins if it can't be found.\n"
+              "Only available when 3D Blu-ray MVC Output (above) is not Off, and MVC Output Type is "
+              "specifically '3D Blu-ray ISO' -- MakeMKV's own CLI rips from a real .iso, not a BD "
+              "Folder/Plain MKV/Bare M2TS.\n"
+              "Output: a new, separate '<name>_MVC_MKV.mkv' file next to the .iso -- the .iso itself "
+              "is never touched or replaced.\n"
+              "Con: real extra processing time after the ISO has already finished -- MakeMKV re-reads "
+              "and re-muxes the whole disc image. Never fails the job itself: if MakeMKV isn't found "
+              "or the rip fails for any reason, this step just reports why and the rest of the job's "
+              "output is unaffected.\n"
+              "Recommended: on if your 3D-capable player/TV is confirmed to auto-detect a real "
+              "MakeMKV-built MVC .mkv but not this project's own direct .mkv output (like Steve's) -- "
+              "off (default) if you're happy with ISO/BD Folder playback, or don't have MakeMKV "
+              "installed."))
+
         # ADR-257: real user report -- SyLC 3D Player (and likely other simple 3D-ISO
         # players) has no way to crop/zoom out black bars during playback, so the fix has
         # to happen when the MVC file itself is built -- same "Auto-crop" option the
@@ -4427,6 +4464,7 @@ class MainFrame(wx.Frame):
         self.update_mvc_mode()
         self.update_mvc_allow_lossless_eac3()
         self.update_mvc_fill_mode()
+        self.update_mvc_makemkv_to_mkv()
 
         # ADR-256: real user request -- "have it write a log file for each job into the
         # output folder so you can always see what happened with each job... maybe even
@@ -4485,6 +4523,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_mvc_output_type, (j, 1), flag=wx.EXPAND)
         layout.Add(self.txt_mvc_bitrate, (j, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convert_to_mvc_hdr_to_sdr, (j := j + 1, 0), (0, 3),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.chk_mvc_makemkv_to_mkv, (j := j + 1, 0), (0, 3),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.lbl_mvc_autocrop, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_mvc_autocrop, (j, 1), (0, 2), flag=wx.EXPAND)
@@ -9982,7 +10022,20 @@ class MainFrame(wx.Frame):
 
     def on_changed_mvc_output_type(self, event):
         self.update_mvc_allow_lossless_eac3()
+        self.update_mvc_makemkv_to_mkv()
         event.Skip()
+
+    def update_mvc_makemkv_to_mkv(self):
+        """ADR-319 follow-up: 'Also build a real MVC .mkv via MakeMKV' only means anything
+        when 3D Blu-ray MVC Output is actually producing an .iso -- iso_to_mvc_makemkv_cli.py's
+        own convert() is built entirely around MakeMKV's `iso:<path>` CLI source syntax, so a
+        BD Folder/Plain MKV/Bare M2TS job has nothing this step can rip from. Greyed out (not
+        hidden) otherwise, same Enable()/grey-out convention as update_mvc_allow_lossless_eac3()/
+        update_mvc_fill_mode() just above -- called from both update_mvc_mode() (cbo_mvc_mode
+        changed) and on_changed_mvc_output_type() (cbo_mvc_output_type changed), since either one
+        can flip whether this control should be usable."""
+        output_type = self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection())
+        self.chk_mvc_makemkv_to_mkv.Enable(self._mvc_mode() != "off" and output_type == "iso")
 
     def update_mvc_fill_mode(self):
         """Fill Screen vs. Fit Screen only means anything once Auto-crop (MVC) is actually
@@ -10017,6 +10070,7 @@ class MainFrame(wx.Frame):
         self.chk_rife_interpolate.Enable(not on)
         self.cbo_mvc_autocrop.Enable(not on)
         self.update_mvc_fill_mode()
+        self.update_mvc_makemkv_to_mkv()
         if not on:
             # Re-apply whatever Resume's own real rule (input type-dependent) says,
             # rather than leaving it force-enabled regardless of input type.
@@ -10434,6 +10488,24 @@ class MainFrame(wx.Frame):
             self.chk_rife_interpolate.SetValue(False)
             self.cbo_mvc_autocrop.SetSelection(0)
 
+        # ADR-319 follow-up: same "catch it before Start, not after" philosophy as every
+        # other real external-tool preflight in this file (e.g. the standalone MakeMKV
+        # panel's own build_makemkv_command()) -- only matters when this step would
+        # actually fire: MVC output must be on at all, and specifically producing an .iso
+        # (see iw3.iso_to_mvc_makemkv_cli's own module docstring for why it's ISO-only).
+        mvc_output_type_now = self.cbo_mvc_output_type.GetClientData(self.cbo_mvc_output_type.GetSelection())
+        if (self.chk_mvc_makemkv_to_mkv.GetValue() and self._mvc_mode() != "off"
+                and mvc_output_type_now == "iso"):
+            from .iso_to_mvc_makemkv_cli import _find_makemkvcon
+            if _find_makemkvcon() is None:
+                self.show_error_message(
+                    T("MakeMKV not found -- \"Also build a real MVC .mkv via MakeMKV\" needs a real, "
+                      "separately installed and licensed copy of MakeMKV (makemkvcon64.exe/"
+                      "makemkvcon.exe). Install it yourself from https://www.makemkv.com/ first; "
+                      "3DECKER never bundles or installs MakeMKV. Turn the checkbox off to continue "
+                      "without it."))
+                return None
+
         resume = self.chk_resume.IsEnabled() and self.chk_resume.GetValue()
         recursive = path.isdir(input_path) and self.chk_recursive.GetValue()
         skip_error = self.chk_skip_error.IsEnabled() and self.chk_skip_error.GetValue()
@@ -10601,6 +10673,7 @@ class MainFrame(wx.Frame):
             mvc_autocrop=self.cbo_mvc_autocrop.GetClientData(self.cbo_mvc_autocrop.GetSelection()) or None,
             mvc_fill_mode=self.cbo_mvc_fill_mode.GetClientData(self.cbo_mvc_fill_mode.GetSelection()) or "fit",
             mvc_allow_lossless_eac3_on_disc=self.chk_mvc_allow_lossless_eac3.GetValue(),
+            mvc_makemkv_to_mkv=self.chk_mvc_makemkv_to_mkv.GetValue(),
             write_job_log=self.chk_write_job_log.GetValue(),
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
@@ -11984,9 +12057,11 @@ class MainFrame(wx.Frame):
         else:
             self.cbo_mvc_fill_mode.SetSelection(0)
         self.chk_mvc_allow_lossless_eac3.SetValue(bool(getattr(args, "mvc_allow_lossless_eac3_on_disc", False)))
+        self.chk_mvc_makemkv_to_mkv.SetValue(bool(getattr(args, "mvc_makemkv_to_mkv", False)))
         self.update_mvc_mode()
         self.update_mvc_allow_lossless_eac3()
         self.update_mvc_fill_mode()
+        self.update_mvc_makemkv_to_mkv()
         self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
@@ -21211,6 +21286,123 @@ def _self_test_mvc_allow_lossless_eac3_checkbox():
     print("_self_test_mvc_allow_lossless_eac3_checkbox: PASS")
 
 
+def _self_test_mvc_makemkv_to_mkv_checkbox():
+    """ADR-319 follow-up: real user request (Steve, relayed by decker) -- chains the
+    standalone '3D Blu-ray ISO to MVC MKV (MakeMKV)' tool (ADR-319) automatically onto the
+    main pipeline's own 3D Blu-ray MVC Output, when it's specifically building an .iso.
+    Covers: default off, tooltip content (MakeMKV is real/separate/licensed, what it does,
+    the real output naming), greyed out whenever 3D Blu-ray MVC Output is Off OR MVC Output
+    Type isn't '3D Blu-ray ISO' (same Enable(not on) convention as
+    update_mvc_allow_lossless_eac3()/update_mvc_fill_mode()), enabled for Alongside/Single-pass
+    with Output Type 'iso', a real round trip through parse_args()/apply_parsed_args_to_gui(),
+    and the real "MakeMKV not found" preflight refusal (and non-refusal once a real install is
+    found, or when the step wouldn't fire at all) before Start, same philosophy as the
+    standalone MakeMKV panel's own build_makemkv_command()."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+    from . import iso_to_mvc_makemkv_cli
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # Default state: off, and greyed out (3D Blu-ray MVC Output defaults to Off).
+        assert frame.chk_mvc_makemkv_to_mkv.GetValue() is False, "must default off -- opt-in only"
+        assert not frame.chk_mvc_makemkv_to_mkv.IsEnabled(), "must start greyed out -- MVC Output defaults to Off"
+        tip = frame.chk_mvc_makemkv_to_mkv.GetToolTip().GetTip()
+        for phrase in ("separately installed", "licensed", "makemkvcon", "MVC_MKV.mkv",
+                       "3D Blu-ray ISO", "never touched"):
+            assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
+
+        # Turning on 3D Blu-ray MVC Output (Alongside) with the default Output Type (iso)
+        # enables the checkbox; switching Output Type away from iso greys it back out, and
+        # switching back to iso re-enables it.
+        frame._set_mvc_mode("alongside")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
+        assert frame.chk_mvc_makemkv_to_mkv.IsEnabled(), "iso is the default Output Type -- must be enabled"
+        mvc_items = [frame.cbo_mvc_output_type.GetClientData(i) for i in range(frame.cbo_mvc_output_type.GetCount())]
+        for output_type in ("folder", "mkv", "m2ts"):
+            frame.cbo_mvc_output_type.SetSelection(mvc_items.index(output_type))
+            frame.on_changed_mvc_output_type(wx.CommandEvent())
+            assert not frame.chk_mvc_makemkv_to_mkv.IsEnabled(), f"must grey out for {output_type}"
+        frame.cbo_mvc_output_type.SetSelection(mvc_items.index("iso"))
+        frame.on_changed_mvc_output_type(wx.CommandEvent())
+        assert frame.chk_mvc_makemkv_to_mkv.IsEnabled(), "must re-enable for 3D Blu-ray ISO"
+
+        # Single-pass only (direct) mode also produces real MVC output -- same rule applies.
+        frame._set_mvc_mode("direct")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
+        assert frame.chk_mvc_makemkv_to_mkv.IsEnabled(), "Single-pass only + iso -- must be enabled"
+
+        # Off: greyed out again regardless of Output Type.
+        frame._set_mvc_mode("off")
+        frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
+        assert not frame.chk_mvc_makemkv_to_mkv.IsEnabled(), "must grey out once 3D Blu-ray MVC Output is Off"
+
+        # Real round trip through parse_args()/apply_parsed_args_to_gui().
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = path.join(tmpdir, "movie.mkv")
+            open(src, "wb").close()
+            frame.pnl_file.set_input_path(src)
+            frame.pnl_file.set_output_path(path.join(tmpdir, "movie_out.mkv"))
+            frame._set_mvc_mode("alongside")
+            frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
+            frame.chk_mvc_makemkv_to_mkv.SetValue(True)
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False), \
+                 mock.patch.object(iso_to_mvc_makemkv_cli, "_find_makemkvcon", return_value="makemkvcon.exe"):
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None
+            assert args.mvc_makemkv_to_mkv is True
+
+            frame.chk_mvc_makemkv_to_mkv.SetValue(False)
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.chk_mvc_makemkv_to_mkv.GetValue() is True
+            assert frame.chk_mvc_makemkv_to_mkv.IsEnabled(), "iso (from args) + alongside -- must re-enable"
+
+            args.mvc_makemkv_to_mkv = False
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.chk_mvc_makemkv_to_mkv.GetValue() is False
+
+            # Real preflight: checkbox on, the step WOULD fire (alongside + iso), but no real
+            # MakeMKV install is found -- Start must refuse with a clear, specific message,
+            # before the job even begins, same "catch it before Start" philosophy as the HDR
+            # preflight above and the standalone MakeMKV panel's own build_makemkv_command().
+            frame.chk_mvc_makemkv_to_mkv.SetValue(True)
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False), \
+                 mock.patch.object(iso_to_mvc_makemkv_cli, "_find_makemkvcon", return_value=None), \
+                 mock.patch.object(frame, "show_error_message") as show_error:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is None, "MakeMKV not found must block Start, not let a doomed job run"
+            show_error.assert_called_once()
+            assert "MakeMKV not found" in show_error.call_args[0][0]
+
+            # Same situation (MakeMKV missing), but the step would never fire -- the checkbox
+            # is on, but 3D Blu-ray MVC Output is Off -- so no preflight check should even run.
+            frame._set_mvc_mode("off")
+            frame.on_changed_cbo_mvc_mode(wx.CommandEvent())
+            with mock.patch.object(iw3_utils, "_find_ffprobe", return_value="ffprobe"), \
+                 mock.patch.object(iw3_utils, "_detect_pq_or_hlg", return_value=False), \
+                 mock.patch.object(iso_to_mvc_makemkv_cli, "_find_makemkvcon", return_value=None) as find_mkv, \
+                 mock.patch.object(frame, "show_error_message") as show_error:
+                args = frame.parse_args(skip_set_state=True)
+            assert args is not None, "the step can't fire with MVC Output Off -- must not block Start"
+            find_mkv.assert_not_called()
+            show_error.assert_not_called()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_mvc_makemkv_to_mkv_checkbox: PASS")
+
+
 def _self_test_mvc_fill_mode_control():
     """Real user request (relayed by decker): for 3D Blu-ray MVC output, once Auto-crop has
     cut black letterbox/pillarbox bars off, stretch the remaining real picture to completely
@@ -23245,6 +23437,86 @@ def _self_test_mvc_conversion_step():
     assert len(args.state["mvc_notes"]) == 1 and "boom" in args.state["mvc_notes"][0], args.state
 
     print("_self_test_mvc_conversion_step: PASS")
+
+
+def _self_test_makemkv_mvc_chain_step():
+    """ADR-319 follow-up: U._run_makemkv_mvc_to_mkv() (chained onto U._run_mvc_conversion(),
+    only for mvc_output_type == "iso") -- covers: off by default (never fires, no subprocess
+    call at all); never fires for a non-iso MVC output type even with the checkbox on; fires
+    with the right -i/-o/--gui-progress command, reusing _run_mvc_with_progress (the same
+    mechanism _run_mvc_conversion itself already uses) rather than a new one; a real naming
+    stack ('<mvc_name>_MKV.mkv', never touching the .iso); and a MakeMKV failure (not found,
+    license problem, failed rip -- all surface as the SAME subprocess.CalledProcessError this
+    module already handles) never fails the overall _run_mvc_conversion() call, just logs onto
+    args.state['mvc_notes'] the same 'warn clearly, never crash the job' way ADR-248 already
+    established for the MVC step itself."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def base_args(**extra):
+        defaults = dict(convert_to_mvc=True, mvc_output_type="iso", mvc_bitrate=20.0,
+                        mvc_convert_hdr_to_sdr=False, mvc_autocrop=None, mvc_makemkv_to_mkv=False,
+                        half_sbs=False, tb=False, half_tb=False, vr180=False, cross_eyed=False,
+                        rgbd=False, half_rgbd=False, anaglyph=None, export=False,
+                        export_disparity=False, debug_depth=False, state={})
+        defaults.update(extra)
+        return types.SimpleNamespace(**defaults)
+
+    # off by default: the MVC .iso step runs, but MakeMKV is never invoked at all.
+    args = base_args()
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert run_mvc.call_count == 1, "only the .iso step itself should have run"
+
+    # on, but mvc_output_type isn't "iso" -- must never fire (BD Folder/Plain MKV/Bare M2TS
+    # are a genuinely different on-disk shape MakeMKV's CLI isn't confirmed to accept here).
+    for output_type in ("folder", "mkv", "m2ts"):
+        args = base_args(mvc_makemkv_to_mkv=True, mvc_output_type=output_type)
+        with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+                mock.patch("os.path.exists", return_value=True):
+            assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+        assert run_mvc.call_count == 1, (output_type, "MakeMKV must not run for a non-iso output type")
+
+    # on, and mvc_output_type is "iso": MakeMKV runs too, with the real "<mvc>_MKV.mkv" name,
+    # reusing the exact same _run_mvc_with_progress mechanism (no new progress plumbing).
+    args = base_args(mvc_makemkv_to_mkv=True)
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc, \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True
+    assert run_mvc.call_count == 2, "the .iso step, then the MakeMKV rip"
+    makemkv_cmd = run_mvc.call_args_list[1][0][0]
+    assert "iso_to_mvc_makemkv_cli" in makemkv_cmd[2], makemkv_cmd
+    assert makemkv_cmd[makemkv_cmd.index("-i") + 1] == "C:/out/movie_MVC.iso", makemkv_cmd
+    assert makemkv_cmd[makemkv_cmd.index("-o") + 1] == "C:/out/movie_MVC_MKV.mkv", makemkv_cmd
+    assert "--gui-progress" in makemkv_cmd, makemkv_cmd
+
+    # a MakeMKV failure (not found / license problem / failed rip all surface the same way,
+    # as a subprocess.CalledProcessError) must not fail the overall job -- the .iso is still
+    # a real success, and the reason lands on args.state["mvc_notes"] for the GUI to show.
+    args = base_args(mvc_makemkv_to_mkv=True)
+    err = subprocess.CalledProcessError(1, [], b"", b"MakeMKV not found -- this tool needs a real...")
+    call_count = [0]
+
+    def side_effect(cmd, *a, **kw):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            raise err
+        return mock.MagicMock()
+    with mock.patch.object(U, "_run_mvc_with_progress", side_effect=side_effect), \
+            mock.patch("os.path.exists", return_value=True):
+        assert U._run_mvc_conversion("C:/out/movie.mkv", args) is True, \
+            "a MakeMKV failure must never fail the .iso step's own already-successful result"
+    assert any("MakeMKV rip failed" in n for n in args.state["mvc_notes"]), args.state
+
+    # calling the helper directly with the checkbox off is a pure no-op (used by a raw CLI
+    # invocation too, not just through _run_mvc_conversion's own gating)
+    with mock.patch.object(U, "_run_mvc_with_progress") as run_mvc:
+        assert U._run_makemkv_mvc_to_mkv("movie_MVC.iso", base_args()) is False
+        run_mvc.assert_not_called()
+
+    print("_self_test_makemkv_mvc_chain_step: PASS")
 
 
 def _self_test_post_conversion_vram_release():
@@ -27318,6 +27590,7 @@ def _run_self_tests():
         _self_test_mvc_hdr_preflight_prompt,
         _self_test_direct_mvc_checkbox,
         _self_test_mvc_allow_lossless_eac3_checkbox,
+        _self_test_mvc_makemkv_to_mkv_checkbox,
         _self_test_mvc_fill_mode_control,
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
@@ -27373,6 +27646,7 @@ def _run_self_tests():
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
         _self_test_mvc_conversion_step,
+        _self_test_makemkv_mvc_chain_step,
         _self_test_mvc_notes_shown_after_job,
         _self_test_standalone_logs_cleared_on_startup,
         _self_test_post_conversion_vram_release,

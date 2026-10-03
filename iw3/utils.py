@@ -379,13 +379,20 @@ _MVC_STAGE_LABELS = {
     "tonemap": "converting HDR to SDR first", "retime": "fixing the frame rate",
     "autocrop": "looking for black bars", "encode": "encoding the real 3D (MVC) video",
     "mux": "writing the final file",
+    # ADR-319 follow-up: iw3.iso_to_mvc_makemkv_cli's own --gui-progress uses this exact
+    # same "IW3_MVC_PROGRESS <stage> <done> <total>" convention (stage in {"scan", "rip"}),
+    # so _run_mvc_with_progress below is reused as-is for it -- just these two extra labels.
+    "scan": "scanning the ISO for the main title", "rip": "ripping the real MVC video",
 }
 
 
-def _run_mvc_with_progress(cmd, cwd, args):
+def _run_mvc_with_progress(cmd, cwd, args, label_prefix="Converting to MVC: "):
     """iw3.sbs_to_mvc_cli with live progress from its "IW3_MVC_PROGRESS <stage> <done> <total>" lines --
     same shape and same _StageBar-per-stage approach as _run_av_restore_with_progress just above, since
-    sbs_to_mvc_cli.py's --gui-progress output uses the identical 4-token convention."""
+    sbs_to_mvc_cli.py's --gui-progress output uses the identical 4-token convention. `label_prefix`
+    (ADR-319 follow-up) lets a second, real caller with the exact same progress-line shape --
+    _run_makemkv_mvc_to_mkv(), running iw3.iso_to_mvc_makemkv_cli -- reuse this unchanged, just with an
+    accurate bar label instead of the sbs_to_mvc_cli-specific default."""
     if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
         return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
@@ -408,7 +415,7 @@ def _run_mvc_with_progress(cmd, cwd, args):
                 if bar is not None:
                     bar.close(complete=True)
                 stage = name
-                bar = _StageBar(args, "Converting to MVC: " + _MVC_STAGE_LABELS.get(name, name), 1000, "pct")
+                bar = _StageBar(args, label_prefix + _MVC_STAGE_LABELS.get(name, name), 1000, "pct")
             bar.set(int(min(1.0, cur / tot) * 1000))
     finally:
         proc.wait()
@@ -1275,6 +1282,67 @@ def _run_mvc_conversion(output_path, args):
         print("[iw3] MVC conversion exited 0 but produced no output file", file=sys.stderr)
         return False
     print(f"[iw3] MVC conversion done: {mvc_path}", file=sys.stderr)
+    # ADR-319 follow-up: only an .iso is something iso_to_mvc_makemkv_cli.convert() can rip
+    # from (it's built entirely around MakeMKV's own `iso:<path>` CLI source syntax) -- never
+    # attempted for BD Folder/Plain MKV/Bare M2TS output.
+    if mvc_output_type == "iso":
+        _run_makemkv_mvc_to_mkv(mvc_path, args)
+    return True
+
+
+def _run_makemkv_mvc_to_mkv(iso_path, args):
+    """ADR-319 follow-up (Steve's own suggestion, decker-approved): optionally chains
+    iw3.iso_to_mvc_makemkv_cli -- the same tool the standalone "3D Blu-ray ISO to MVC MKV
+    (MakeMKV)" panel already runs by hand -- onto this job's own just-built 3D Blu-ray .iso,
+    automatically ripping it into a real MVC .mkv via a real, separately-installed MakeMKV.
+    Exists because Steve confirmed this project's own hand-built direct-to-MVC-.mkv path
+    (ADR-245/317) still doesn't auto-detect as 3D on his real Samsung TV, while MakeMKV's own
+    .iso rip is confirmed reliable -- so instead of a plain .iso being the end of the road for
+    someone who specifically wants a real .mkv, this hands it to MakeMKV automatically.
+
+    Only called by _run_mvc_conversion() above, and only for `mvc_output_type == "iso"` --
+    never for BD Folder/Plain MKV/Bare M2TS, which are each a genuinely different on-disk
+    shape MakeMKV's CLI has not been confirmed to accept the same way (see
+    iso_to_mvc_makemkv_cli.py's own module docstring).
+
+    A genuine side effect, same as _run_mvc_conversion itself: a real, separate subprocess
+    launched only after the .iso it rips is fully written, into its own separate sibling file
+    ('<mvc_name>_MKV.mkv') -- the .iso itself is never touched or replaced. Progress reaches
+    the GUI through the exact same mechanism _run_mvc_conversion already uses
+    (_run_mvc_with_progress), since iso_to_mvc_makemkv_cli.py's own --gui-progress output uses
+    the identical "IW3_MVC_PROGRESS <stage> <done> <total>" convention (stage in
+    {"scan", "rip"}) -- no new progress mechanism needed.
+
+    Never raises and never fails the overall job: MakeMKV not being found, a license/trial
+    problem, or the rip itself failing are all reported via iso_to_mvc_makemkv_cli.py's own
+    already-honest, specific error text (surfaced the same "warn clearly, never crash the
+    whole job" way as every other post-conversion step here, including onto
+    args.state["mvc_notes"] so gui.py's on_exit_worker can show it even under the real GUI's
+    devnull'd stderr -- see _run_mvc_conversion()'s own ADR-248 comment for why that's needed).
+    Returns True on success, False (having already logged why, including when the checkbox is
+    simply off) otherwise."""
+    if not getattr(args, "mvc_makemkv_to_mkv", False):
+        return False
+    nunif_dir = path.dirname(path.dirname(path.abspath(__file__)))
+    base, _ = path.splitext(str(iso_path))
+    mkv_path = f"{base}_MKV.mkv"
+    cmd = [sys.executable, "-m", "iw3.iso_to_mvc_makemkv_cli",
+          "-i", str(iso_path), "-o", mkv_path, "--gui-progress"]
+
+    _notify_stage(args, STAGE_MAKEMKV_RIP)
+    print("[iw3] Ripping the 3D Blu-ray ISO into a real MVC MKV with MakeMKV...", file=sys.stderr)
+    try:
+        _run_mvc_with_progress(cmd, nunif_dir, args, label_prefix="Ripping with MakeMKV: ")
+    except subprocess.CalledProcessError as e:
+        msg = e.stderr.decode(errors="replace").strip()
+        print(f"[iw3] MakeMKV rip failed: {msg[:600]}", file=sys.stderr)
+        if getattr(args, "state", None) is not None:
+            args.state.setdefault("mvc_notes", []).append(f"MakeMKV rip failed: {msg[:600]}")
+        return False
+    if not path.exists(mkv_path):
+        print("[iw3] MakeMKV rip exited 0 but produced no output file", file=sys.stderr)
+        return False
+    print(f"[iw3] MakeMKV rip done: {mkv_path}", file=sys.stderr)
     return True
 
 
@@ -3323,6 +3391,7 @@ STAGE_RIFE_INTERPOLATE = "RIFE Frame Interpolation"
 STAGE_HDR_REINJECT = "HDR/Dolby Vision Reinjection"
 STAGE_RESTORE_AV = "Restoring Audio & Subtitles"
 STAGE_CONVERT_MVC = "Converting to 3D Blu-ray MVC"
+STAGE_MAKEMKV_RIP = "Ripping the 3D Blu-ray ISO into a real MVC MKV (MakeMKV)"
 
 
 def _notify_stage(args, name):

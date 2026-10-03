@@ -139,23 +139,30 @@ class VideoEncodingBox():
             T("For libopenh264 (which doesn't support CRF): a fixed data rate for the video (M = "
               "megabits/second) — higher = better quality and bigger file. Recommended: 8M-16M for 1080p, "
               "higher for 4K.\n"
-              "For hevc_nvenc/h264_nvenc with \"Limit Bitrate\" checked below: the average data rate the "
-              "encoder is capped to, regardless of content."))
+              "For hevc_nvenc/h264_nvenc with \"Limit Bitrate\" checked below: the real peak (not average) "
+              "data rate the finished file is capped to -- a short, sustained burst above this will be "
+              "detected and re-encoded; calmer stretches of the movie are left alone."))
 
         self.chk_limit_bitrate = wx.CheckBox(self.grp_video, label=T("Limit Bitrate"),
                                              name=f"{prefix}chk_limit_bitrate")
         self.chk_limit_bitrate.SetValue(False)
         self.chk_limit_bitrate.SetToolTip(
             T("hevc_nvenc/h264_nvenc only. What it's for: CRF alone has no size ceiling — the encoder "
-              "spends as many bits as it takes to hit that quality level, which is usually fine but can "
-              "make grainy/dark/noisy footage come out 2x+ larger than a cleaner movie at the identical "
-              "CRF. Checking this adds a real bitrate cap (the Bitrate field above) on top of CRF: the "
-              "encoder still aims for CRF quality on easy scenes, but is capped from running away on hard "
-              "ones. Pros: predictable, bounded file size. Cons: hard/grainy scenes may look slightly "
-              "softer than an uncapped CRF encode would, since detail gets sacrificed once the cap is hit. "
-              "Recommended: leave unchecked normally; turn on (with a Bitrate around 1.5-2x what you'd "
-              "normally expect the file to average) only for movies you know are heavily grainy/dark and "
-              "you want to keep the size in check."))
+              "spends as many bits as it takes to hit that quality level, which is usually fine but a "
+              "genuinely demanding stretch (grain/noise/motion) can push the REAL bitrate, for a few "
+              "seconds at a time, far higher than the rest of the movie -- high enough that some players/"
+              "networks (e.g. streaming a file over WiFi) can't keep up and stutter, even though the "
+              "file's own whole-movie AVERAGE looks perfectly reasonable. This checks the finished file's "
+              "real peak 1-second bitrate (not its average) against the Bitrate field above and, only if "
+              "a real peak actually exceeds it, re-encodes just enough to bring that peak down -- calmer "
+              "parts of the movie are left at their original quality. Pros: catches the kind of short, "
+              "severe burst a whole-file-average check misses entirely, while still leaving untouched "
+              "content exactly as CRF produced it. Cons: the capped stretch itself may look slightly "
+              "softer than an uncapped CRF encode would there, since detail gets sacrificed once the cap "
+              "is hit; the real-peak check reads the whole file's packet data, which takes a little extra "
+              "time after encoding. Recommended: leave unchecked normally; turn on (with a Bitrate around "
+              "1.5-2x what you'd normally expect the file to average) for movies you know have a few "
+              "heavily grainy/dark/bursty scenes and you want playback to stay smooth everywhere."))
 
         self.lbl_profile_level = wx.StaticText(self.grp_video, label=T("Level"))
         self.cbo_profile_level = EditableComboBox(self.grp_video, choices=LEVEL_ALL, name=f"{prefix}cbo_profile_level")

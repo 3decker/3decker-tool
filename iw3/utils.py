@@ -928,20 +928,93 @@ def _parse_bitrate_mbps(value):
         return num
 
 
-def _run_bitrate_cap(video_path, args, dv_source=None):
-    """ADR-298: the real, reliable implementation of "Limit Bitrate" -- a genuine
-    second pass, run only when actually needed. See make_video_codec_option()'s own
-    comment for why a single-pass NVENC mode can't do this reliably (confirmed by
-    direct, controlled real-hardware testing: `rc=vbr` with a bitrate ceiling
-    INFLATES size toward that ceiling even on easy content, the opposite of the
-    intended behavior -- every combination tried showed the same inflation).
+def _measure_peak_window_bitrate_bps(video_path, window_seconds=1.0):
+    """Real per-second bitrate curve of a finished file's video stream, via direct
+    packet-level ffprobe data (the same method used to confirm the real Hocus Pocus 2
+    burst this detection exists for: a ~17s stretch running 128-240 Mbps against a
+    ~50-60 Mbps baseline, invisible to a whole-file-average check because it's diluted
+    across a ~103-minute movie). Buckets each packet's `pts_time` into fixed
+    `window_seconds`-wide windows and sums packet `size` (bytes) per window -- a 1-second
+    window is the real, meaningful unit here: it reflects what a real streaming/decode
+    buffer actually needs to sustain, not a single-frame spike a reasonable buffer would
+    absorb anyway. Returns the single highest windowed bitrate (bits/sec) found anywhere
+    in the file, or None if the real per-packet data couldn't be read (caller must fail
+    safe -- no-op, never guess)."""
+    ffprobe = _find_ffprobe()
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time,size", "-of", "csv=p=0", str(video_path)],
+            capture_output=True, text=True, timeout=600)
+        if proc.returncode != 0:
+            print(f"[iw3] Limit Bitrate: ffprobe could not read the finished file's packet "
+                  f"data, leaving it as-is: {proc.stderr.strip()[-400:]}", file=sys.stderr)
+            return None
+        windows = {}
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split(",")
+            if len(parts) < 2:
+                continue
+            pts_time, size = parts[0], parts[1]
+            if not pts_time or not size.isdigit():
+                # Packets with no pts (rare) can't be placed in the curve -- skip rather
+                # than guess; they are a tiny minority and never the real peak.
+                continue
+            try:
+                window_idx = int(float(pts_time) // window_seconds)
+            except ValueError:
+                continue
+            windows[window_idx] = windows.get(window_idx, 0) + int(size)
+        if not windows:
+            return None
+        peak_bytes_per_window = max(windows.values())
+        return int(peak_bytes_per_window * 8 / window_seconds)
+    except Exception as e:
+        print(f"[iw3] Limit Bitrate: could not read the finished file's real per-second "
+              f"bitrate curve, leaving it as-is: {e}", file=sys.stderr)
+        return None
 
-    This checks the REAL bitrate of the just-finished file and, only if it actually
-    exceeds the user's chosen limit, re-encodes with true CBR (confirmed hitting its
-    target to within ~0.04% on real hardware, unlike the broken vbr+maxrate
-    combination) to bring it down. Content that never exceeded the limit is left
-    completely untouched, at its original, better quality -- this never makes a file
-    bigger or worse than leaving Limit Bitrate off would.
+
+def _run_bitrate_cap(video_path, args, dv_source=None):
+    """ADR-298/peak-redesign: the real, reliable implementation of "Limit Bitrate" --
+    a genuine second pass, run only when actually needed. See make_video_codec_option()'s
+    own comment for why a single-pass NVENC mode can't do this as the MAIN encode's own
+    rate control (confirmed by direct, controlled real-hardware testing: `rc=vbr` with a
+    bitrate ceiling INFLATES size toward that ceiling even on easy content when an
+    average-bitrate target close to the ceiling is also given).
+
+    Detection is PEAK-based, not whole-file-average: a real, confirmed gap in the
+    original ADR-298 average check is that a short, severe, LOCAL burst (measured on a
+    real user file: ~17s running 128-240 Mbps against a ~50-60 Mbps baseline) gets
+    diluted into the whole-file average over a long movie and never trips it, even
+    though it genuinely stutters real playback over a constrained link (the decode/
+    streaming buffer can't sustain that peak demand in real time). `_measure_peak_window_
+    bitrate_bps()` reads the REAL per-second bitrate curve and this only fires on the
+    single highest 1-second window anywhere in the file, which is also a strict superset
+    of the old average check -- a long sustained elevated stretch (the separate, earlier
+    real "Craft 1996" case) shows up just as strongly in the peak/windowed curve.
+
+    When the real peak actually exceeds the user's chosen limit, re-encodes with NVENC's
+    VBR mode, a real quality target (-cq, the same value the main encode would have used
+    for constqp), and an explicit -maxrate/-bufsize peak constraint (bufsize == the
+    target bitrate, a standard ~1-second VBV window) -- NOT flat CBR. Confirmed by direct,
+    controlled real-hardware testing on this project's own bundled ffmpeg+hevc_nvenc build
+    (RTX 5090) before implementing: plain `-rc vbr -maxrate/-bufsize` with no quality
+    signal at all under-targets broadly (collapses toward some low internal NVENC default,
+    well below what the content actually needs -- a real quality regression, not
+    "preserving" anything); adding an average-bitrate target via `-b:v` instead of `-cq`
+    reproduces ADR-298's original inflation almost exactly (content needing ~15 Mbps got
+    pushed to ~27-31 Mbps against a 40 Mbps cap, nearly identical to flat CBR's ~30 Mbps);
+    `-rc vbr -cq <crf> -b:v 0 -maxrate <target> -bufsize <target>` (this project's own
+    established pattern for letting -cq drive while -maxrate/-bufsize act as a ceiling,
+    see mvc_extract_cli.py's encoder_args()/scene_batch.py's _NVENC_CQ_CEILING) was the
+    clear best of these: ~37% smaller/better quality than flat CBR on genuinely easy
+    content at the same cap (confirmed: ~19 Mbps vs CBR's ~30 Mbps against a 40 Mbps cap)
+    while still bounding the hard/bursty content near the target. It does NOT fully
+    eliminate ADR-298's inflation effect -- the measured easy-content bitrate (~19 Mbps)
+    is still real, moderately above the pure quality-only baseline (~15 Mbps) -- so that
+    finding is reduced, not eliminated, for this dedicated second-pass use case; flat CBR
+    was ruled out as strictly worse on every measurement taken.
 
     Replaces the oversized file in place (os.replace(), the same pattern
     _inject_dovi_rpu() already uses) rather than producing a new '_capped' file
@@ -971,41 +1044,23 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
     if not target_mbps:
         return None
 
-    import json as _json
-    ffprobe = _find_ffprobe()
-    try:
-        proc = subprocess.run(
-            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format",
-             "-select_streams", "v:0", "-show_entries", "stream=bit_rate", str(video_path)],
-            capture_output=True, text=True, timeout=60)
-        data = _json.loads(proc.stdout)
-        streams = data.get("streams", [])
-        real_bps = int(streams[0]["bit_rate"]) if streams and streams[0].get("bit_rate") else None
-        if not real_bps:
-            # Some containers (MKV in particular) don't tag a per-stream bitrate --
-            # fall back to the container's own overall figure, close enough for this
-            # check since audio is a small fraction of the total for a file this size.
-            real_bps = int(data.get("format", {}).get("bit_rate") or 0)
-    except Exception as e:
-        print(f"[iw3] Limit Bitrate: could not read the finished file's real bitrate, "
-              f"leaving it as-is: {e}", file=sys.stderr)
-        return None
-    if real_bps <= 0:
+    peak_bps = _measure_peak_window_bitrate_bps(video_path)
+    if not peak_bps or peak_bps <= 0:
         return None
 
     target_bps = target_mbps * 1_000_000
     # A small tolerance avoids a wasteful, barely-necessary re-encode when the real
-    # bitrate is only marginally over the limit.
-    if real_bps <= target_bps * 1.05:
+    # peak is only marginally over the limit.
+    if peak_bps <= target_bps * 1.05:
         return None
 
     ffmpeg = _get_ffmpeg_bin()
     base, ext = path.splitext(str(video_path))
     tmp_path = f"{base}_capping_tmp{ext}"
-    print(f"[iw3] Limit Bitrate: finished file is {real_bps / 1_000_000:.1f} Mbps, above "
-          f"your {target_mbps:.0f} Mbps limit -- re-encoding to bring it down "
-          f"(quality-preserving content is left alone; this only affects what the "
-          f"limit actually caught)...", file=sys.stderr)
+    print(f"[iw3] Limit Bitrate: finished file's real peak 1-second bitrate is "
+          f"{peak_bps / 1_000_000:.1f} Mbps, above your {target_mbps:.0f} Mbps limit -- "
+          f"re-encoding to bring the peak down (quality-preserving content is left "
+          f"alone; this only affects what the limit actually caught)...", file=sys.stderr)
     pix_fmt = _clamp_pix_fmt_for_codec(getattr(args, "pix_fmt", "yuv420p"), args.video_codec)
     # Known, secondary inconsistency (not fixed here, scope kept to the DV-destruction bug above):
     # this writes Matroska via ffmpeg's own native muxer rather than mkvmerge, unlike the rest of
@@ -1022,7 +1077,8 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
     # input frame straight through unchanged, same fix, same reasoning, different call site.
     cmd = [ffmpeg, "-y", "-v", "error", "-i", str(video_path),
            "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
-           "-c:v", args.video_codec, "-rc", "cbr", "-b:v", str(args.video_bitrate),
+           "-c:v", args.video_codec, "-rc", "vbr", "-cq", str(args.crf), "-b:v", "0",
+           "-maxrate", str(args.video_bitrate), "-bufsize", str(args.video_bitrate),
            "-pix_fmt", pix_fmt, "-fps_mode", "passthrough", "-c:a", "copy", "-c:s", "copy", tmp_path]
     if torch.cuda.is_available() and args.gpu[0] >= 0:
         cmd += ["-gpu", str(args.gpu[0])]
@@ -3505,11 +3561,15 @@ def make_video_codec_option(args, input_path=None):
             # behavior. Every combination tried (with/without -b:v, -b:v 0, vbr vs vbr_hq)
             # showed the same inflation -- ffmpeg's hevc_nvenc simply doesn't offer a
             # reliable single-pass "quality-driven but capped" mode. Limit Bitrate is now
-            # implemented as a real post-step instead (_run_bitrate_cap(), a genuine second
-            # pass with true CBR, which IS reliable -- confirmed hitting 60M requested to
-            # within ~0.04%) that only re-encodes when the finished file's real bitrate
-            # actually exceeds the chosen limit. This main-encode branch stays simple and
-            # correct for every case; do not reintroduce the vbr+maxrate mechanism here.
+            # implemented as a real post-step instead (_run_bitrate_cap(), a genuine SECOND
+            # pass -- real peak-aware detection, re-encoding with rc=vbr+cq+b:v=0+maxrate/
+            # bufsize once a real re-encode is confirmed needed; direct, controlled testing
+            # for THAT separate use case found this combination meaningfully better than
+            # flat CBR, though still not fully immune to this same inflation effect -- see
+            # _run_bitrate_cap()'s own docstring) that only re-encodes when the finished
+            # file's real peak bitrate actually exceeds the chosen limit. This main-encode
+            # branch stays simple and correct for every case; do not reintroduce vbr+maxrate
+            # as the MAIN encode's own single-pass rate control here.
             options["rc"] = "constqp"
             options["qp"] = str(args.crf)
             if torch.cuda.is_available() and args.gpu[0] >= 0:

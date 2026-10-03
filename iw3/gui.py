@@ -21818,30 +21818,42 @@ def _self_test_mvc_muxopt_new_audio_pes():
     print("_self_test_mvc_muxopt_new_audio_pes: PASS")
 
 
+def _fake_packet_probe(window_mbps):
+    """Builds a fake ffprobe packet-level CSV response (`packet=pts_time,size`) for
+    _measure_peak_window_bitrate_bps()'s self-tests: one synthetic packet per
+    1-second window, sized so that window's total bytes match the given Mbps."""
+    import types
+    lines = []
+    for idx, mbps in enumerate(window_mbps):
+        nbytes = int(mbps * 1_000_000 / 8)
+        lines.append(f"{idx}.000000,{nbytes}")
+    return types.SimpleNamespace(returncode=0, stdout="\n".join(lines), stderr="")
+
+
 def _self_test_bitrate_cap_post_step():
-    """ADR-298: _run_bitrate_cap() is the real, reliable Limit Bitrate implementation
-    -- a genuine second pass that only re-encodes when the finished file's REAL
-    bitrate actually exceeds the user's chosen limit, using true CBR (confirmed
-    hitting its target to within ~0.04% on real hardware in the investigation this
-    fix came out of). Covers: off by default, off for non-NVENC codecs, no-op when
-    already under budget (mocked ffprobe reporting a low bitrate -- must never touch
-    the file or shell out to ffmpeg), and triggering a real re-encode subprocess when
-    over budget, verified via the actual command built (rc=cbr, not vbr)."""
+    """Peak-aware Limit Bitrate redesign: _run_bitrate_cap() checks the finished
+    file's REAL PEAK 1-second-windowed bitrate (via direct packet-level ffprobe
+    data), not the whole-file average -- a real, confirmed gap found a real user's
+    file (Hocus Pocus 2) with a short, severe burst (~17s at 128-240 Mbps against a
+    ~50-60 Mbps baseline) that a whole-file average completely hides (diluted across
+    a long movie) but genuinely stutters real playback over a constrained link.
+    Covers: off by default, off for non-NVENC codecs, no-op when every real window
+    stays under budget (mocked packet data -- must never touch the file or shell
+    out to ffmpeg a second time), the real diluted-burst scenario correctly
+    triggering even though its own average is well under the limit (what the OLD
+    average-based check would have missed), a long sustained-elevated curve (the
+    separate real Craft 1996 case) also correctly triggering, and the real re-encode
+    command now using rc=vbr+cq+maxrate/bufsize (never flat cbr, never a bare
+    quality-less vbr+maxrate) when a real re-encode actually fires."""
     import types
     from unittest import mock
     from . import utils as U
 
     def _args(**kw):
         base = dict(limit_bitrate=True, video_codec="hevc_nvenc", video_bitrate="20M",
-                    pix_fmt="yuv420p", gpu=[-1])
+                    crf=15, pix_fmt="yuv420p", gpu=[-1])
         base.update(kw)
         return types.SimpleNamespace(**base)
-
-    def fake_probe(bps):
-        return types.SimpleNamespace(
-            returncode=0,
-            stdout=f'{{"streams":[{{"bit_rate":"{bps}"}}],"format":{{}}}}',
-            stderr="")
 
     # off by default
     assert U._run_bitrate_cap("x.mkv", _args(limit_bitrate=False)) is None
@@ -21849,30 +21861,51 @@ def _self_test_bitrate_cap_post_step():
     # never applies to non-NVENC codecs
     assert U._run_bitrate_cap("x.mkv", _args(video_codec="libx265")) is None
 
-    # already under the limit (well under the 5% tolerance) -- must be a complete
-    # no-op: no ffmpeg subprocess call at all, file never touched
-    with mock.patch("subprocess.run", return_value=fake_probe(15_000_000)) as m_run, \
+    # genuinely fine throughout (every real 1-second window well under the 5%
+    # tolerance) -- must be a complete no-op: no ffmpeg subprocess call at all,
+    # file never touched
+    with mock.patch("subprocess.run", return_value=_fake_packet_probe([15.0] * 10)) as m_run, \
          mock.patch("os.path.exists", return_value=True):
         result = U._run_bitrate_cap("x.mkv", _args())
     assert result is None
     assert m_run.call_count == 1, "must stop after the probe -- no re-encode subprocess when under budget"
 
-    # genuinely over the limit -- must trigger a real re-encode with true CBR (never
-    # the broken vbr+maxrate combination)
-    with mock.patch("subprocess.run", side_effect=[fake_probe(40_000_000),
+    # real diluted-burst scenario (Hocus Pocus 2): 103 calm 1-second windows at
+    # ~10 Mbps plus a 17-second burst at 235 Mbps -- the whole-file AVERAGE here is
+    # (103*10 + 17*235) / 120 =~ 42 Mbps, under a 43 Mbps limit (the OLD average
+    # check would have missed this entirely, which is the real bug this redesign
+    # fixes), but the real PEAK window (235 Mbps) is far over it -- must trigger.
+    hp2_curve = [10.0] * 103 + [235.0] * 17
+    assert sum(hp2_curve) / len(hp2_curve) < 43.0, "fixture must reproduce the real diluted-average shape"
+    with mock.patch("subprocess.run", side_effect=[_fake_packet_probe(hp2_curve),
                                                     types.SimpleNamespace(returncode=0, stdout="", stderr="")]) as m_run, \
          mock.patch("os.path.exists", return_value=True), \
          mock.patch("os.replace") as m_replace:
-        result = U._run_bitrate_cap("x.mkv", _args())
-    assert result == "x.mkv"
+        result = U._run_bitrate_cap("x.mkv", _args(video_bitrate="43M"))
+    assert result == "x.mkv", "the diluted burst must trigger under the new peak-based check"
     assert m_run.call_count == 2, "must probe, then re-encode"
     reencode_cmd = m_run.call_args_list[1][0][0]
-    assert "-rc" in reencode_cmd and reencode_cmd[reencode_cmd.index("-rc") + 1] == "cbr", reencode_cmd
-    assert "-b:v" in reencode_cmd and reencode_cmd[reencode_cmd.index("-b:v") + 1] == "20M", reencode_cmd
-    assert "vbr" not in reencode_cmd, "must never use the broken vbr+maxrate mechanism"
+    assert "-rc" in reencode_cmd and reencode_cmd[reencode_cmd.index("-rc") + 1] == "vbr", reencode_cmd
+    assert "cbr" not in reencode_cmd, "must never use flat CBR -- VBR+cq+maxrate/bufsize instead"
+    assert "-cq" in reencode_cmd and reencode_cmd[reencode_cmd.index("-cq") + 1] == "15", \
+        "must use a real quality target (args.crf), not a bare quality-less vbr+maxrate"
+    assert "-b:v" in reencode_cmd and reencode_cmd[reencode_cmd.index("-b:v") + 1] == "0", reencode_cmd
+    assert "-maxrate" in reencode_cmd and reencode_cmd[reencode_cmd.index("-maxrate") + 1] == "43M", reencode_cmd
+    assert "-bufsize" in reencode_cmd and reencode_cmd[reencode_cmd.index("-bufsize") + 1] == "43M", reencode_cmd
     assert "-c:a" in reencode_cmd and reencode_cmd[reencode_cmd.index("-c:a") + 1] == "copy", \
         "audio must be stream-copied, never re-encoded"
     m_replace.assert_called_once()
+
+    # real sustained-elevated scenario (The Craft 1996): every window is elevated,
+    # not just a short burst -- the OLD average check already caught this one, and
+    # the new peak check must too (a strict superset, not a regression).
+    craft_curve = [30.0] * 10
+    with mock.patch("subprocess.run", side_effect=[_fake_packet_probe(craft_curve),
+                                                    types.SimpleNamespace(returncode=0, stdout="", stderr="")]) as m_run, \
+         mock.patch("os.path.exists", return_value=True), \
+         mock.patch("os.replace"):
+        result = U._run_bitrate_cap("x.mkv", _args())
+    assert result == "x.mkv", "a long sustained-elevated curve must still trigger (superset of the old check)"
 
     print("_self_test_bitrate_cap_post_step: PASS")
 
@@ -21895,7 +21928,7 @@ def _self_test_bitrate_cap_preserves_dv():
 
     def _args(**kw):
         base = dict(limit_bitrate=True, video_codec="hevc_nvenc", video_bitrate="20M",
-                    pix_fmt="yuv420p", gpu=[-1])
+                    crf=15, pix_fmt="yuv420p", gpu=[-1])
         base.update(kw)
         return types.SimpleNamespace(**base)
 
@@ -21914,14 +21947,9 @@ def _self_test_bitrate_cap_preserves_dv():
     assert U._dv_preserve_wanted(no_rife_args) is True, \
         "preserve_dowi alone (no RIFE) must still want DV preserved through the chain"
 
-    def fake_probe(bps):
-        return types.SimpleNamespace(
-            returncode=0,
-            stdout=f'{{"streams":[{{"bit_rate":"{bps}"}}],"format":{{}}}}',
-            stderr="")
-
-    # dv_source given + a real re-encode actually happens -> must re-attach DV
-    with mock.patch("subprocess.run", side_effect=[fake_probe(40_000_000),
+    # dv_source given + a real re-encode actually happens (real peak over budget) ->
+    # must re-attach DV
+    with mock.patch("subprocess.run", side_effect=[_fake_packet_probe([40.0] * 10),
                                                     types.SimpleNamespace(returncode=0, stdout="", stderr="")]), \
          mock.patch("os.path.exists", return_value=True), \
          mock.patch("os.replace"), \
@@ -21934,7 +21962,7 @@ def _self_test_bitrate_cap_preserves_dv():
 
     # dv_source=None (no DV wanted for this job) -> must NOT call the reinject at all,
     # even though a real re-encode still happens
-    with mock.patch("subprocess.run", side_effect=[fake_probe(40_000_000),
+    with mock.patch("subprocess.run", side_effect=[_fake_packet_probe([40.0] * 10),
                                                     types.SimpleNamespace(returncode=0, stdout="", stderr="")]), \
          mock.patch("os.path.exists", return_value=True), \
          mock.patch("os.replace"), \
@@ -21943,9 +21971,10 @@ def _self_test_bitrate_cap_preserves_dv():
     assert result == "x.mkv"
     m_reinject.assert_not_called()
 
-    # dv_source given but the file is already under budget (no-op path) -> must NOT
-    # call the reinject -- nothing was re-encoded, there is nothing to re-attach to
-    with mock.patch("subprocess.run", return_value=fake_probe(15_000_000)), \
+    # dv_source given but the file is already under budget (no-op path, real peak
+    # stays under the limit) -> must NOT call the reinject -- nothing was
+    # re-encoded, there is nothing to re-attach to
+    with mock.patch("subprocess.run", return_value=_fake_packet_probe([15.0] * 10)), \
          mock.patch("os.path.exists", return_value=True), \
          mock.patch.object(U, "_reinject_dv_after_rife") as m_reinject:
         result = U._run_bitrate_cap("x.mkv", _args(), dv_source="original_source.mkv")

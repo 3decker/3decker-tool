@@ -267,9 +267,11 @@ GENRE_PRESET_EMA_VALUES = {
     "Drama / Slow-Paced": (0.94, 120),
 }
 # ADR-057 Amendment 11's "My Preferred Settings" entry (previously part of
-# GENRE_PRESET_CHOICES above) moved to a top-bar quick-preset button --
-# see MainFrame.apply_quick_preset("3decker") and docs/ai/AI_DECISIONS.md ADR-057
-# Amendment 12.
+# GENRE_PRESET_CHOICES above) moved to a top-bar quick-preset button in
+# Amendment 12, then removed from the top bar entirely at decker's request
+# (2026-10-03) -- the preset itself (MainFrame.apply_quick_preset("3decker"))
+# is kept, just no longer exposed as its own button. See
+# docs/ai/AI_DECISIONS.md ADR-057.
 
 # ADR-132: Dual-Pass Depth Blend presets, transcribed directly from a real,
 # hands-on comparison against VisionDepth3D's own "Depth Blender" feature (its
@@ -7345,20 +7347,6 @@ class MainFrame(wx.Frame):
             T("Quick preset: strong pop effects for action/VFX scenes. Sets 3D Strength 3.0, Convergence "
               "Plane 0.5 in auto (face_detect) mode, Foreground Pop 0.5 — a more aggressive, "
               "attention-grabbing look, at some cost to comfort over long viewing."))
-        # ADR-057 Amendment 12: moved here from the Genre Preset dropdown's "My
-        # Preferred Settings" entry (Amendment 11) at the user's request, to match
-        # Movie/Action's own top-bar quick-preset button pattern instead of living
-        # inside a Flicker-Reduction-scoped dropdown.
-        self.btn_quick_preset_3decker = wx.Button(self.pnl_preset, label=T("3DECKER Preferred"))
-        self.btn_quick_preset_3decker.SetToolTip(
-            T("Quick preset: applies your own confirmed-best combo across depth/divergence/convergence/"
-              "refinement/stability/EMA settings at once, from a real tuning session. Sets Depth Model "
-              "Any_V3_Mono_01, Divergence 2.5, Convergence 0.5, Depth Detail Refinement on (strength "
-              "1.0), Object Stability on (strength 0.3, Flat-Area Boost 0, Edge Protection 0, Max Shift "
-              "off), Scene Detection on, and Auto EMA by Scene Length on using the Nagadomi_Reference "
-              "table -- so it also greys out Flicker Reduction's Decay Rate/Buffer/Genre Preset fields, "
-              "same as checking \"Auto EMA by Scene Length\" by hand would."))
-
         # preset comparison test
         self.sep_compare_preset = wx.StaticLine(self.pnl_preset, size=self.FromDIP((2, 20)), style=wx.LI_VERTICAL)
         self.btn_compare_presets = wx.Button(self.pnl_preset, label=T("Compare Presets..."))
@@ -7692,7 +7680,6 @@ class MainFrame(wx.Frame):
         self.btn_clear_all.Bind(wx.EVT_BUTTON, self.on_click_btn_clear_all)
         self.btn_quick_preset_movie.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("movie"))
         self.btn_quick_preset_action.Bind(wx.EVT_BUTTON, lambda event: self.apply_quick_preset("action"))
-        self.btn_quick_preset_3decker.Bind(wx.EVT_BUTTON, self.on_click_btn_quick_preset_3decker)
         self.btn_compare_presets.Bind(wx.EVT_BUTTON, self.on_click_btn_compare_presets)
         self.btn_copy_command.Bind(wx.EVT_BUTTON, self.on_click_btn_copy_command)
         self.btn_import_command.Bind(wx.EVT_BUTTON, self.on_click_btn_import_command)
@@ -8214,7 +8201,6 @@ class MainFrame(wx.Frame):
             ("spacer", 4),
             ("widget", self.btn_quick_preset_movie, wx.ALL, 2),
             ("widget", self.btn_quick_preset_action, wx.ALL, 2),
-            ("widget", self.btn_quick_preset_3decker, wx.ALL, 2),
             ("spacer", 2),
             ("widget", self.sep_compare_preset, wx.ALIGN_CENTER_VERTICAL | wx.ALIGN_LEFT, 0),
             ("spacer", 4),
@@ -10885,11 +10871,6 @@ class MainFrame(wx.Frame):
 
         # free vram
         gc_collect()
-
-    def on_click_btn_quick_preset_3decker(self, event):
-        if self.confirm_action(
-                T("Apply the 3DECKER Preferred preset? It replaces many of your current settings.")):
-            self.apply_quick_preset("3decker")
 
     def confirm_action(self, message):
         """Safety prompt for buttons that are easy to press by mistake. Yes/No, with
@@ -18392,11 +18373,11 @@ def _self_test_reinject_fractional_time_fields():
 
 
 def _self_test_3decker_quick_preset():
-    """Regression test for the "3DECKER Preferred" top-bar quick-preset button
-    (docs/ai/AI_DECISIONS.md ADR-057 Amendment 12, updated ADR-076) -- moved here
-    from the Genre Preset dropdown's "My Preferred Settings" entry (Amendment 11),
-    now btn_quick_preset_3decker next to btn_quick_preset_movie/btn_quick_preset_action,
-    following their exact apply_quick_preset(name) click-handler pattern. Confirms
+    """Regression test for the "3decker" quick preset (docs/ai/AI_DECISIONS.md
+    ADR-057 Amendment 12, updated ADR-076) -- no longer exposed as its own
+    top-bar button (removed 2026-10-03 at decker's request), but
+    apply_quick_preset("3decker") itself is kept and still real/reachable, so
+    this test drives it directly instead of through a button click. Confirms
     every real control this preset touches lands on the exact right value (the full
     2026-09-09 ADR-075-verified real-world command, not just the original
     Decay/Buffer-era subset), that clicking it correctly checks "Auto EMA by Scene
@@ -22237,9 +22218,8 @@ def _self_test_confirm_dangerous_buttons():
     try:
         frame = gui_mod.MainFrame()
         gui_mod.wx.MessageDialog = _FakeDialog
-        calls = {"preview": 0, "preset": []}
+        calls = {"preview": 0}
         frame.test_quick_preview = lambda: calls.__setitem__("preview", calls["preview"] + 1)
-        frame.apply_quick_preset = lambda name: calls["preset"].append(name)
 
         # ---- answer No: nothing happens
         _FakeDialog.answer = wx.ID_NO
@@ -22252,12 +22232,10 @@ def _self_test_confirm_dangerous_buttons():
             "Suspend must do nothing when answered No"
         frame.on_click_btn_quick_preview(None)
         assert calls["preview"] == 0, "Quick Preview must not run when answered No"
-        frame.on_click_btn_quick_preset_3decker(None)
-        assert calls["preset"] == [], "3DECKER Preferred must not apply when answered No"
         method_before = frame.cbo_method.GetValue()
         frame.on_click_btn_clear_all(None)
         assert frame.cbo_method.GetValue() == method_before, "Clear All must do nothing when answered No"
-        assert len(_FakeDialog.shown) == 5, _FakeDialog.shown
+        assert len(_FakeDialog.shown) == 4, _FakeDialog.shown
         assert all(s & wx.NO_DEFAULT for s in _FakeDialog.styles), "No must be the default button"
 
         # ---- answer Yes: the action runs
@@ -22270,8 +22248,6 @@ def _self_test_confirm_dangerous_buttons():
         assert frame.suspend_event.is_set() and frame.btn_suspend.GetLabel() == T("Suspend")
         frame.on_click_btn_quick_preview(None)
         assert calls["preview"] == 1
-        frame.on_click_btn_quick_preset_3decker(None)
-        assert calls["preset"] == ["3decker"]
         frame.on_click_btn_cancel(None)
         assert frame.stop_event.is_set()
     finally:

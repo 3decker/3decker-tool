@@ -1099,7 +1099,7 @@ class MainFrame(wx.Frame):
         self.pnl_file = IOPathPanel(
             self,
             input_wildcard=input_wildcard,
-            default_output_dir_name="iw3",
+            default_output_dir_name="3decker",
             resolve_output_path=self.resolve_output_path,
             translate_function=T,
         )
@@ -3078,7 +3078,7 @@ class MainFrame(wx.Frame):
               "pass over an already-finished Full/Half SBS or Full/Half TB file — all four work as real "
               "MVC input, just with the expected resolution tradeoff for the Half variants (smaller "
               "file, less detail per eye than Full). Picking one of these snaps the format to the "
-              "matching real one for you and selects \"Alongside SBS/TB output\" under 3D Blu-ray MVC "
+              "matching real one for you and selects \"Alongside SBS/TAB output\" under 3D Blu-ray MVC "
               "Output (Post-Processing, Processor tab) instead — same result as picking that format and "
               "that choice yourself, just in one click from here."))
 
@@ -4214,7 +4214,7 @@ class MainFrame(wx.Frame):
         self.cbo_mvc_mode = wx.ComboBox(self.grp_postprocess, name="cbo_mvc_mode")
         self.cbo_mvc_mode.SetEditable(False)
         self.cbo_mvc_mode.Append(T("Off"), "off")
-        self.cbo_mvc_mode.Append(T("Alongside SBS/TB output"), "alongside")
+        self.cbo_mvc_mode.Append(T("Alongside SBS/TAB output"), "alongside")
         self.cbo_mvc_mode.Append(T("Single-pass only (no intermediate file)"), "direct")
         self.cbo_mvc_mode.SetSelection(0)
         self.cbo_mvc_mode.SetToolTip(
@@ -4222,7 +4222,7 @@ class MainFrame(wx.Frame):
               "video format an actual 3D Blu-ray disc uses), on top of (or instead of) the normal "
               "SBS/TB conversion.\n"
               "Off (default): no MVC output at all -- just the normal SBS/TB conversion.\n"
-              "Alongside SBS/TB output: turns this job's finished output into a real MVC file "
+              "Alongside SBS/TAB output: turns this job's finished output into a real MVC file "
               "automatically, with no separate manual step through the standalone 'SBS to 3D Blu-ray "
               "MVC' tool -- a plain 2D movie in, BOTH a plain converted file and a separate "
               "'<name>_MVC.iso'/'<name>_MVC'(BD Folder)/'<name>_MVC.mkv'/'<name>_MVC.m2ts' out. The "
@@ -4250,7 +4250,7 @@ class MainFrame(wx.Frame):
               "Half TB -- the Half variants give a lower-resolution (half the detail per eye) MVC "
               "file, same tradeoff as using them anywhere else, but are otherwise fully valid. Any "
               "other format (VR90/Cross Eyed/RGB-D/Anaglyph/Export/Debug Depth) isn't something MVC "
-              "conversion understands at all -- Alongside SBS/TB output forces Stereo Format to Full "
+              "conversion understands at all -- Alongside SBS/TAB output forces Stereo Format to Full "
               "SBS if one of those is currently selected; HDR/Dolby Vision sources need 'Convert "
               "HDR/DV to SDR first' (below, or the main pipeline's own, for Single-pass only) turned "
               "on -- a real 3D Blu-ray/MVC file cannot carry HDR at all.\n"
@@ -4260,7 +4260,7 @@ class MainFrame(wx.Frame):
               "end-user reports, see the Output Type choice below for more detail, including a "
               "directly-confirmed 2D-playback fact that applies even to a homemade AI conversion like "
               "this one, not only a real studio disc rip.\n"
-              "Recommended: Off for a normal 2D-to-3D job with no MVC need. Alongside SBS/TB output "
+              "Recommended: Off for a normal 2D-to-3D job with no MVC need. Alongside SBS/TAB output "
               "if you want both a plain file and an MVC file, or might need Auto Resume/RIFE for this "
               "job. Single-pass only if you never want the separate flat file and want to save the "
               "time/disk space."))
@@ -4380,7 +4380,7 @@ class MainFrame(wx.Frame):
         self.cbo_mvc_autocrop.Append(T("Remove black bars (top and bottom only)"), "BLACK_TB")
         self.cbo_mvc_autocrop.SetSelection(0)
         self.cbo_mvc_autocrop.SetToolTip(
-            T("What it's for: only with 3D Blu-ray MVC Output above set to 'Alongside SBS/TB output' or "
+            T("What it's for: only with 3D Blu-ray MVC Output above set to 'Alongside SBS/TAB output' or "
               "'Single-pass only'. Removes black bars from "
               "the video before it's encoded into the MVC file, so a 3D-capable player with no "
               "crop/zoom option of its own (e.g. SyLC 3D Player) still shows a full, bar-free "
@@ -27166,6 +27166,50 @@ def _self_test_direct_mvc_output_folder_resolution():
     print("_self_test_direct_mvc_output_folder_resolution: PASS")
 
 
+def _self_test_default_output_dir_name_is_3decker():
+    """Real user report (Steve): dropping/choosing a file into Input auto-suggests an
+    Output path ending in a subfolder called 'iw3' -- a folder that has never actually
+    existed in this fork (it was a leftover from the upstream nunif project this fork is
+    based on; this fork's own name is '3decker', see 3decker-gui.bat/update-3decker.bat/
+    the '3decker' preset). This only ever SUGGESTS the text in the Output field
+    (IOPathPanel.set_same_output_dir() -- see nunif/gui/io_path_panel.py -- does a plain
+    txt_output.SetValue(), no os.makedirs()); the folder still only gets created later,
+    for real, when Start actually runs. Pure folder-NAME fix: confirms the suggested
+    name itself changed, and that the panel still never touches disk just from an
+    Input pick."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.pnl_file.default_output_dir_name == "3decker", (
+            "default output folder name must be '3decker', not a stale 'iw3' leftover")
+
+        tmpdir = tempfile.mkdtemp(prefix="iw3_default_output_dir_selftest_")
+        try:
+            input_path = path.join(tmpdir, "movie.mkv")
+            open(input_path, "wb").close()
+            suggested_dir = path.join(tmpdir, "3decker")
+            assert not path.exists(suggested_dir), "must not pre-exist before the Input pick"
+
+            frame.pnl_file.set_output_path("")
+            frame.pnl_file.set_input_path(input_path)
+
+            assert frame.pnl_file.output_path == suggested_dir, frame.pnl_file.output_path
+            assert not path.exists(suggested_dir), (
+                "picking Input must only suggest the text -- never create the folder on disk")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_default_output_dir_name_is_3decker: PASS")
+
+
 def _self_test_mvc_mode_checkbox_config_migration():
     """ADR-316: cbo_mvc_mode replaced the old, independently-checkable
     "chk_convert_to_mvc"/"chk_direct_mvc" checkboxes. Confirms
@@ -27664,6 +27708,7 @@ def _run_self_tests():
         _self_test_convergence_overlay,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,
+        _self_test_default_output_dir_name_is_3decker,
         _self_test_mvc_mode_checkbox_config_migration,
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,

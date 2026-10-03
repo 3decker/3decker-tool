@@ -1012,10 +1012,18 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
     # this pipeline's documented preference for .mkv output (docs/ai/domains/DOLBY_VISION.md). The
     # DV metadata itself survives this regardless (it is a property of the video elementary stream,
     # not the muxer), so this is a style inconsistency, not a correctness bug.
+    # ADR-321: real, confirmed incident -- without an explicit fps-mode, ffmpeg's own default
+    # output-timing behavior silently dropped frames during this re-encode (90.0s of real source
+    # came out as 89.21s, 2158 frames in vs. 2139 out) -- the exact same class of bug ADR-315
+    # already fixed once today in the completely separate ffmpeg->FRIM MVC pipe. That frame loss
+    # broke ADR-318's own DV re-attach above, which requires an exact frame-count match and
+    # correctly refused rather than risk misaligning RPU data -- so DV still silently vanished,
+    # just one step further downstream. "-fps_mode passthrough" tells ffmpeg to carry every real
+    # input frame straight through unchanged, same fix, same reasoning, different call site.
     cmd = [ffmpeg, "-y", "-v", "error", "-i", str(video_path),
            "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
            "-c:v", args.video_codec, "-rc", "cbr", "-b:v", str(args.video_bitrate),
-           "-pix_fmt", pix_fmt, "-c:a", "copy", "-c:s", "copy", tmp_path]
+           "-pix_fmt", pix_fmt, "-fps_mode", "passthrough", "-c:a", "copy", "-c:s", "copy", tmp_path]
     if torch.cuda.is_available() and args.gpu[0] >= 0:
         cmd += ["-gpu", str(args.gpu[0])]
     try:

@@ -13,7 +13,15 @@ it matters.
 
 ---
 
-## Latest Update — October 2, 2026
+## Latest Update — October 3, 2026
+
+**New: a standalone tool to turn a 3D Blu-ray ISO into a real MVC `.mkv` using MakeMKV.** Follow-up to yesterday's direct-`.mkv` fix — it turned out not to actually work on a real 3D TV when a user (Steve) tested it, even though every software check looked correct. Rather than keep chasing that, decker and Steve worked out a better approach: 3DECKER's `.iso`/disc-folder output is already proven reliable on real hardware, so this new tool automates MakeMKV (a separate, real disc-ripping program many users already own and license) to turn that already-working ISO into a `.mkv` file, the same way MakeMKV always has — instead of 3DECKER trying to build that file structure itself. Requires your own MakeMKV install and license; 3DECKER doesn't include it. Automatically finds the real movie among any bonus/trailer titles on the disc, so you don't have to guess which file is the right one. Find it on the Standalone Tools tab.
+
+**Fixed: "Limit Bitrate" could silently strip Dolby Vision from a file.** A real, found-and-confirmed bug: if a conversion's finished file came out bigger than your configured bitrate limit, the automatic re-encode that trims it back down had no idea Dolby Vision existed — it quietly produced a file with the HDR/DV grade completely gone, no warning, no error. This mostly affected unusually demanding sources (very dark, grainy, high-detail footage can legitimately need more bits than typical content at the same quality setting) that were more likely to actually trigger the bitrate cap in the first place. Fixed: the Dolby Vision data is now automatically put back after that re-encode, the same reliable method already used elsewhere in the app for this. If you use both "Preserve Dolby Vision" and "Limit Bitrate" together, and a past conversion came out larger than your limit, it may be worth checking whether that one lost its HDR grade.
+
+---
+
+## Update — October 2, 2026
 
 **Fixed: direct `.mkv` 3D Blu-ray/MVC output didn't automatically switch a real 3D TV into 3D mode.** A user (Steve) found that a file ripped manually from one of 3DECKER's own `.iso` outputs triggered his Samsung 3D TV's 3D mode correctly, but the same movie produced directly as an `.mkv` file did not. Traced to a real, specific gap: a true 3D/MVC file needs to carry a particular piece of technical information in its own metadata that formally says "this video track actually contains two separate synchronized views" — without it, a 3D-aware TV has no way to know to switch modes, even though the actual 3D video data is otherwise completely fine. That information was never being written for direct `.mkv` output. Built new code that adds it correctly, verified carefully against a real, known-working reference file byte by byte. This still needs a final confirmation on Steve's actual TV before it's considered fully closed, but every software check (file structure, frame count, playback) comes back clean.
 

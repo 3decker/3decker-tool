@@ -6939,6 +6939,113 @@ class MainFrame(wx.Frame):
         sizer_hdr_to_sdr = wx.StaticBoxSizer(self.grp_hdr_to_sdr, wx.VERTICAL)
         sizer_hdr_to_sdr.Add(pane_header_row_hdr_to_sdr, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- ISO to MVC MKV (MakeMKV) (standalone tool) ---
+        # ADR-317 follow-up / Steve's own suggestion, decker-approved: this project's own
+        # direct-to-MVC-.mkv code path (direct_mvc_cli.py/mvc_codec_private.py) still isn't
+        # recognized as 3D by real hardware even after the real mvcC-box fix, and decker
+        # decided to stop investing further in that path. This project's own .iso/BD-folder
+        # output IS confirmed reliable on real hardware, so this tool chains a third, real
+        # step on TOP of that already-working output: hand the .iso to MakeMKV's own real,
+        # mature CLI (makemkvcon) and let IT build the real .mkv, the same way a real 3D
+        # Blu-ray disc rip would -- instead of this project hand-building the MVC container
+        # itself. See iw3/iso_to_mvc_makemkv_cli.py's own module docstring for the full
+        # investigation and the real makemkvcon robot-mode protocol this was built against.
+        self.grp_makemkv = wx.StaticBox(
+            self.tab_tools, label=T("3D Blu-ray ISO to MVC MKV (MakeMKV) (Standalone Tool)"))
+
+        self.cpn_makemkv = wx.CollapsiblePane(
+            self.grp_makemkv, label=T("Settings"), name="cpn_makemkv")
+        self.cpn_makemkv.Collapse(True)
+        self.cpn_makemkv.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                              self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_makemkv.GetPane().SetName("cpn_makemkv_pane")
+
+        self.lbl_makemkv_input = wx.StaticText(self.cpn_makemkv.GetPane(), label=T("3D Blu-ray ISO"))
+        self.txt_makemkv_input = wx.TextCtrl(self.cpn_makemkv.GetPane(), name="txt_makemkv_input")
+        self.txt_makemkv_input.SetToolTip(
+            T("What it's for: a real 3D Blu-ray .iso -- from this project's own 'SBS to 3D Blu-ray "
+              "MVC' tool above (ISO or BD Folder output) or any other real 3D Blu-ray image -- to rip "
+              "into a real .mkv using MakeMKV's own ripping engine.\n"
+              "Why this exists instead of a direct MVC .mkv: this project's OWN direct-to-MVC-.mkv "
+              "code path was not reliably recognized as real 3D by actual hardware even after a real "
+              "fix to its codec metadata, so this tool instead reuses the already-confirmed-working "
+              ".iso output and lets MakeMKV -- a real, mature, widely-used disc-ripping tool -- build "
+              "the final .mkv the same way a real disc rip would.\n"
+              "Requires your own MakeMKV: this project never bundles or installs MakeMKV. You need a "
+              "real, separately installed copy (looked for as makemkvcon64.exe/makemkvcon.exe) with "
+              "its own real license -- a paid key or an officially-rotated free beta key from "
+              "makemkv.com. If it isn't found, Run will tell you clearly instead of failing silently.\n"
+              "How it picks the movie: a real 3D Blu-ray ISO usually has one long main feature plus "
+              "several short extras/trailers -- this tool scans the disc first and rips only the "
+              "single LONGEST title, never 'all' titles and never a guess among several output files.\n"
+              "Read-only: your ISO is never modified."))
+        self.btn_makemkv_input = wx.Button(self.cpn_makemkv.GetPane(), label=T("..."))
+
+        self.lbl_makemkv_output = wx.StaticText(self.cpn_makemkv.GetPane(), label=T("Output MKV File"))
+        self.txt_makemkv_output = wx.TextCtrl(self.cpn_makemkv.GetPane(), name="txt_makemkv_output")
+        self.txt_makemkv_output.SetToolTip(
+            T("Where to write the real MakeMKV-ripped .mkv. Auto-filled with '<iso name>.mkv' next to "
+              "the input once you pick one.\n"
+              "How it's safe: this tool never overwrites the input ISO, only ever writes here. "
+              "MakeMKV's own temporary rip files are written to a work folder next to this file and "
+              "deleted automatically once the real result is moved into place."))
+        self.btn_makemkv_output = wx.Button(self.cpn_makemkv.GetPane(), label=T("..."))
+
+        self.btn_makemkv_run = wx.Button(self.cpn_makemkv.GetPane(), label=T("Run"))
+        self.btn_makemkv_run.SetToolTip(
+            T("What it's for: starts the rip as a separate background process (python -m "
+              "iw3.iso_to_mvc_makemkv_cli), which in turn runs your own installed makemkvcon.\n"
+              "Con: a real disc-sized rip (10-50GB) takes real time and real disk space (the work "
+              "folder briefly holds the same data MakeMKV itself writes). Refuses clearly up front "
+              "if MakeMKV isn't found on this system, instead of failing partway through.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded, then "
+              "test the resulting .mkv on your real 3D hardware."))
+        self.btn_makemkv_cancel = wx.Button(self.cpn_makemkv.GetPane(), label=T("Cancel"))
+        self.btn_makemkv_cancel.Disable()
+        self.btn_makemkv_cancel.SetToolTip(
+            T("Stops the running rip and removes the partial output file."))
+
+        self.gauge_makemkv = wx.Gauge(self.cpn_makemkv.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_makemkv.SetToolTip(
+            T("Real progress of the current scan/rip, read live from MakeMKV's own output."))
+        self.lbl_makemkv_progress = wx.StaticText(self.cpn_makemkv.GetPane(), label="")
+
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_makemkv_log = self.txt_standalone_log
+        self.btn_makemkv_clear = self.btn_standalone_log_clear
+
+        self.btn_makemkv_input.Bind(wx.EVT_BUTTON, self.on_click_btn_makemkv_input)
+        self.btn_makemkv_output.Bind(wx.EVT_BUTTON, self.on_click_btn_makemkv_output)
+        self.btn_makemkv_run.Bind(wx.EVT_BUTTON, self.on_click_btn_makemkv_run)
+        self.btn_makemkv_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_makemkv_cancel)
+        self.makemkv_proc = None
+        self.makemkv_cancelled = False
+        self.makemkv_start_time = 0.0
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_makemkv_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_makemkv_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_makemkv_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_makemkv_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_makemkv_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_makemkv_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_makemkv_run, (h := h + 1, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_makemkv_cancel, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_makemkv, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_makemkv_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        self.cpn_makemkv.GetPane().SetSizer(layout)
+
+        self.pnl_makemkv_dot = wx.Panel(self.grp_makemkv, size=self.FromDIP((10, 10)))
+        self.pnl_makemkv_dot.SetBackgroundColour(wx.Colour(255, 187, 51))
+        pane_header_row_makemkv = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_makemkv.Add(self.pnl_makemkv_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_makemkv.Add(self.cpn_makemkv, 1, wx.EXPAND)
+
+        sizer_makemkv = wx.StaticBoxSizer(self.grp_makemkv, wx.VERTICAL)
+        sizer_makemkv.Add(pane_header_row_makemkv, 0, wx.ALL | wx.EXPAND, 4)
+
         # --- standalone tool: Upscale with waifu2x ---
         # Runs the SAME two commands the "Upscale with waifu2x after conversion" option runs
         # (iw3.utils._run_waifu2x_upscale / _run_waifu2x_upscale_stereo), but on any
@@ -7287,6 +7394,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_bluray, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_hdr_to_sdr, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_makemkv, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_upscale, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_standalone_log, 1, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
@@ -8885,7 +8993,7 @@ class MainFrame(wx.Frame):
         only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
                       "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
-                      "cpn_bluray", "cpn_sbs2mvc", "cpn_hdr_to_sdr", "cpn_upscale")
+                      "cpn_bluray", "cpn_sbs2mvc", "cpn_hdr_to_sdr", "cpn_makemkv", "cpn_upscale")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -11322,7 +11430,7 @@ class MainFrame(wx.Frame):
     _STANDALONE_TOOL_GROUP_NAMES = (
         "grp_quick_convert",
         "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone",
-        "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_upscale",
+        "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_makemkv", "grp_upscale",
         "grp_standalone_log",
     )
 
@@ -11348,6 +11456,7 @@ class MainFrame(wx.Frame):
         "txt_bluray_disc", "txt_bluray_output",
         "txt_sbs2mvc_input", "txt_sbs2mvc_output",
         "txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output",
+        "txt_makemkv_input", "txt_makemkv_output",
         "txt_upscale_input", "txt_upscale_output",
         "txt_standalone_log",
     )
@@ -14954,6 +15063,165 @@ class MainFrame(wx.Frame):
         self.btn_hdr_to_sdr_cancel.Enable()
         self.SetStatusText(T("Converting HDR to SDR..."))
         startWorker(self.on_exit_hdr_to_sdr_worker, self.run_hdr_to_sdr, wargs=(cmd,))
+
+    # --- ISO to MVC MKV (MakeMKV) (standalone tool) ---
+
+    def on_click_btn_makemkv_input(self, event):
+        with wx.FileDialog(self, message=T("Select 3D Blu-ray ISO"),
+                           wildcard="Disc images (*.iso)|*.iso|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_makemkv_input.GetValue():
+                dlg.SetPath(self.txt_makemkv_input.GetValue())
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            input_path = dlg.GetPath()
+        self.txt_makemkv_input.SetValue(input_path)
+        if not self.txt_makemkv_output.GetValue():
+            self.txt_makemkv_output.SetValue(f"{path.splitext(input_path)[0]}.mkv")
+
+    def on_click_btn_makemkv_output(self, event):
+        with wx.FileDialog(self, message=T("Save MVC MKV File As"),
+                           wildcard="Matroska files (*.mkv)|*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_makemkv_output.GetValue():
+                dlg.SetPath(self.txt_makemkv_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_makemkv_output.SetValue(dlg.GetPath())
+
+    def _update_makemkv_progress(self, stage, done, total):
+        # Called via wx.CallAfter from run_makemkv's background thread.
+        names = {"scan": T("Scanning the disc for the main feature"),
+                 "rip": T("Ripping with MakeMKV")}
+        name = names.get(stage, stage)
+        if total > 0:
+            self.gauge_makemkv.SetRange(int(total))
+            self.gauge_makemkv.SetValue(int(min(done, total)))
+            percent = min(100, int(done / total * 100))
+            elapsed = time() - self.makemkv_start_time
+            self.lbl_makemkv_progress.SetLabel(
+                f"{name}: {percent}% [{T('elapsed')} {self._format_duration(elapsed)}]")
+        else:
+            self.gauge_makemkv.Pulse()
+            self.lbl_makemkv_progress.SetLabel(f"{name}...")
+
+    def run_makemkv(self, cmd):
+        self.makemkv_proc = proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+        for line in proc.stdout:
+            parts = line.strip().split(" ")
+            if len(parts) == 4 and parts[0] == "IW3_MVC_PROGRESS":
+                try:
+                    wx.CallAfter(self._update_makemkv_progress, parts[1], float(parts[2]), float(parts[3]))
+                except ValueError:
+                    continue
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
+
+    def _cleanup_after_makemkv_cancel(self):
+        output_path = self.txt_makemkv_output.GetValue().strip()
+        stem = path.splitext(path.basename(output_path))[0]
+        out_dir = path.dirname(path.abspath(output_path))
+        shutil.rmtree(path.join(out_dir, f"_makemkv_work_{stem}"), ignore_errors=True)
+        try:
+            if path.exists(output_path) and path.getmtime(output_path) >= self.makemkv_start_time - 1:
+                os.remove(output_path)
+        except OSError:
+            pass
+
+    def on_exit_makemkv_worker(self, result):
+        self.btn_makemkv_run.Enable()
+        self.btn_makemkv_clear.Enable()
+        self.btn_makemkv_cancel.Disable()
+        self.makemkv_proc = None
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_makemkv_log.AppendText(message)
+            self._write_standalone_job_log(T("3D Blu-ray ISO to MVC MKV (MakeMKV)"),
+                                           self.txt_makemkv_output.GetValue(), message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        self._write_standalone_job_log(T("3D Blu-ray ISO to MVC MKV (MakeMKV)"),
+                                       self.txt_makemkv_output.GetValue(), output)
+        self.txt_makemkv_log.SetValue(output.replace("\r", "\n"))
+        self.txt_makemkv_log.ShowPosition(self.txt_makemkv_log.GetLastPosition())
+        if self.makemkv_cancelled:
+            self._cleanup_after_makemkv_cancel()
+            self.lbl_makemkv_progress.SetLabel(T("Cancelled"))
+            self.SetStatusText(T("MakeMKV rip cancelled"))
+        elif returncode == 0:
+            self.gauge_makemkv.SetValue(self.gauge_makemkv.GetRange())
+            self.lbl_makemkv_progress.SetLabel(
+                f"{T('Done')} [{T('elapsed')} {self._format_duration(time() - self.makemkv_start_time)}]")
+            self.SetStatusText(T("MakeMKV rip successful"))
+        else:
+            self.SetStatusText(T("MakeMKV rip failed -- see the log below"))
+            failure_message = _describe_subprocess_failure(returncode, output)
+            generic_message = T("The conversion failed or refused -- see the log box for the exact reason.")
+            if failure_message != generic_message:
+                self.txt_makemkv_log.AppendText(f"\n[3DECKER] {failure_message}")
+            wx.MessageBox(failure_message, T("3D Blu-ray ISO to MVC MKV (MakeMKV)"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_makemkv_cancel(self, event):
+        proc = self.makemkv_proc
+        if proc is not None and proc.poll() is None:
+            self.makemkv_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_makemkv_cancel.Disable()
+
+    def build_makemkv_command(self):
+        """Returns (cmd, None) or (None, error_message); no process is started. Checks for
+        a real MakeMKV install up front (same "warn clearly" philosophy as every other
+        external-tool preflight in this project) rather than letting Run launch a subprocess
+        that's certain to fail."""
+        input_path = self.txt_makemkv_input.GetValue().strip()
+        output_path = self.txt_makemkv_output.GetValue().strip()
+        if not input_path or not path.exists(input_path):
+            return None, T("Select a valid 3D Blu-ray .iso file first.")
+        if not output_path:
+            return None, T("Set an Output MKV File path first.")
+        if path.abspath(output_path) == path.abspath(input_path):
+            return None, T("Output must be different from the input ISO.")
+        from .iso_to_mvc_makemkv_cli import _find_makemkvcon
+        if _find_makemkvcon() is None:
+            return None, T(
+                "MakeMKV not found -- this tool needs a real, separately installed and licensed copy "
+                "of MakeMKV (makemkvcon64.exe/makemkvcon.exe). Install it yourself from "
+                "https://www.makemkv.com/ first; 3DECKER never bundles or installs MakeMKV.")
+        cmd = [sys.executable, "-m", "iw3.iso_to_mvc_makemkv_cli", "--iso", input_path,
+               "--output", output_path, "--gui-progress"]
+        return cmd, None
+
+    def on_click_btn_makemkv_run(self, event):
+        cmd, error = self.build_makemkv_command()
+        if error:
+            wx.MessageBox(error, T("3D Blu-ray ISO to MVC MKV (MakeMKV)"), wx.OK | wx.ICON_WARNING)
+            return
+        self.txt_makemkv_log.SetValue(T("Running...\n"))
+        self.gauge_makemkv.SetRange(1)
+        self.gauge_makemkv.SetValue(0)
+        self.lbl_makemkv_progress.SetLabel("")
+        self.makemkv_cancelled = False
+        self.makemkv_start_time = time()
+        self.btn_makemkv_run.Disable()
+        self.btn_makemkv_clear.Disable()
+        self.btn_makemkv_cancel.Enable()
+        self.SetStatusText(T("Ripping with MakeMKV..."))
+        startWorker(self.on_exit_makemkv_worker, self.run_makemkv, wargs=(cmd,))
 
     # --- Upscale with waifu2x (standalone tool) ---
 
@@ -21379,6 +21647,84 @@ def _self_test_bitrate_cap_post_step():
     print("_self_test_bitrate_cap_post_step: PASS")
 
 
+def _self_test_bitrate_cap_preserves_dv():
+    """ADR-318: real, confirmed incident -- _run_bitrate_cap()'s own re-encode has zero
+    Dolby Vision awareness (a fresh NVENC pass carries no DV VPS/RPU SEI of its own), so
+    it silently destroyed a file's already-injected DV whenever the cap actually fired.
+    Covers: (1) _dv_preserve_wanted() is a true superset of _dv_after_rife_wanted() --
+    on with --preserve-dowi alone, with or without RIFE, off with --hdr-to-sdr/--keyframe
+    regardless of --preserve-dowi (both strip/bypass DV on purpose); (2) _run_bitrate_cap()
+    re-attaches DV via the real _reinject_dv_after_rife() one-to-one path (use_manifest=False,
+    same convention _reinject_dv_after_upscale() uses, since a bitrate re-encode never
+    changes frame count/timing) only when a real re-encode actually happened AND dv_source
+    was given -- never when dv_source is None (the common no-DV case must stay a no-op here),
+    never on the already-under-budget/non-NVENC/off no-op paths above."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def _args(**kw):
+        base = dict(limit_bitrate=True, video_codec="hevc_nvenc", video_bitrate="20M",
+                    pix_fmt="yuv420p", gpu=[-1])
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    # _dv_preserve_wanted() superset check
+    assert U._dv_preserve_wanted(types.SimpleNamespace(preserve_dowi=True)) is True
+    assert U._dv_preserve_wanted(
+        types.SimpleNamespace(preserve_dowi=True, hdr_to_sdr=True)) is False
+    assert U._dv_preserve_wanted(
+        types.SimpleNamespace(preserve_dowi=True, keyframe=True)) is False
+    assert U._dv_preserve_wanted(types.SimpleNamespace(preserve_dowi=False)) is False
+    rife_args = types.SimpleNamespace(preserve_dowi=True, rife_interpolate=True)
+    assert U._dv_after_rife_wanted(rife_args) is True
+    assert U._dv_preserve_wanted(rife_args) is True
+    no_rife_args = types.SimpleNamespace(preserve_dowi=True, rife_interpolate=False)
+    assert U._dv_after_rife_wanted(no_rife_args) is False
+    assert U._dv_preserve_wanted(no_rife_args) is True, \
+        "preserve_dowi alone (no RIFE) must still want DV preserved through the chain"
+
+    def fake_probe(bps):
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=f'{{"streams":[{{"bit_rate":"{bps}"}}],"format":{{}}}}',
+            stderr="")
+
+    # dv_source given + a real re-encode actually happens -> must re-attach DV
+    with mock.patch("subprocess.run", side_effect=[fake_probe(40_000_000),
+                                                    types.SimpleNamespace(returncode=0, stdout="", stderr="")]), \
+         mock.patch("os.path.exists", return_value=True), \
+         mock.patch("os.replace"), \
+         mock.patch.object(U, "_reinject_dv_after_rife") as m_reinject:
+        result = U._run_bitrate_cap("x.mkv", _args(), dv_source="original_source.mkv")
+    assert result == "x.mkv"
+    m_reinject.assert_called_once_with("original_source.mkv", "x.mkv", mock.ANY,
+                                       use_manifest=False, what="bitrate-capped video",
+                                       trim_source=True)
+
+    # dv_source=None (no DV wanted for this job) -> must NOT call the reinject at all,
+    # even though a real re-encode still happens
+    with mock.patch("subprocess.run", side_effect=[fake_probe(40_000_000),
+                                                    types.SimpleNamespace(returncode=0, stdout="", stderr="")]), \
+         mock.patch("os.path.exists", return_value=True), \
+         mock.patch("os.replace"), \
+         mock.patch.object(U, "_reinject_dv_after_rife") as m_reinject:
+        result = U._run_bitrate_cap("x.mkv", _args(), dv_source=None)
+    assert result == "x.mkv"
+    m_reinject.assert_not_called()
+
+    # dv_source given but the file is already under budget (no-op path) -> must NOT
+    # call the reinject -- nothing was re-encoded, there is nothing to re-attach to
+    with mock.patch("subprocess.run", return_value=fake_probe(15_000_000)), \
+         mock.patch("os.path.exists", return_value=True), \
+         mock.patch.object(U, "_reinject_dv_after_rife") as m_reinject:
+        result = U._run_bitrate_cap("x.mkv", _args(), dv_source="original_source.mkv")
+    assert result is None
+    m_reinject.assert_not_called()
+
+    print("_self_test_bitrate_cap_preserves_dv: PASS")
+
+
 def _self_test_analyze_source_video():
     """ADR-297: real, measured source facts (resolution/codec/bitrate/HDR, plus best-effort
     CRF detection for x264/x265 sources) so a user picking Limit Bitrate/CRF has a real
@@ -22124,6 +22470,102 @@ def _self_test_hdr_to_sdr_panel():
         app.Destroy()
 
     print("_self_test_hdr_to_sdr_panel: PASS")
+
+
+def _self_test_makemkv_panel():
+    """3D Blu-ray ISO to MVC MKV (MakeMKV) standalone tool (ADR-317 follow-up, Steve's own
+    suggestion): widgets and defaults, command building and validation, the "MakeMKV not
+    found" preflight warning, Run/Cancel/Clear lockstep, cancel cleanup. No real MakeMKV
+    install is assumed -- _find_makemkvcon is monkeypatched either way, matching
+    _self_test_hdr_to_sdr_panel's own pattern exactly."""
+    import iw3.gui as gui_mod
+    import iw3.iso_to_mvc_makemkv_cli as makemkv_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_find = makemkv_mod._find_makemkvcon
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.cpn_makemkv.GetPane().GetName() == "cpn_makemkv_pane"
+        assert frame.cpn_makemkv in frame.get_standalone_tools_sliders_and_panes()
+        for name in ("txt_makemkv_input", "txt_makemkv_output"):
+            assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        # ADR-250: txt_makemkv_log is a plain alias to the one shared txt_standalone_log.
+        assert frame.txt_makemkv_log is frame.txt_standalone_log
+        assert frame.btn_makemkv_run.IsEnabled() and not frame.btn_makemkv_cancel.IsEnabled()
+
+        cmd, err = frame.build_makemkv_command()
+        assert cmd is None and err, "empty input must be refused"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            iso = path.join(tmpdir, "movie.iso")
+            open(iso, "wb").close()
+            frame.txt_makemkv_input.SetValue(iso)
+            cmd, err = frame.build_makemkv_command()
+            assert cmd is None and err, "empty output must be refused"
+            out = path.join(tmpdir, "movie.mkv")
+            frame.txt_makemkv_output.SetValue(iso)
+            cmd, err = frame.build_makemkv_command()
+            assert cmd is None and err, "output colliding with input must be refused"
+            frame.txt_makemkv_output.SetValue(out)
+
+            # real "warn clearly" requirement: MakeMKV not found must be caught here,
+            # before Run ever launches a subprocess certain to fail.
+            makemkv_mod._find_makemkvcon = lambda: None
+            cmd, err = frame.build_makemkv_command()
+            assert cmd is None and "MakeMKV not found" in err, err
+
+            makemkv_mod._find_makemkvcon = lambda: "makemkvcon64.exe"
+            cmd, err = frame.build_makemkv_command()
+            assert err is None
+            assert cmd[1:3] == ["-m", "iw3.iso_to_mvc_makemkv_cli"], cmd
+            assert cmd[cmd.index("--iso") + 1] == iso and cmd[cmd.index("--output") + 1] == out
+            assert "--gui-progress" in cmd
+
+            gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
+            frame.on_click_btn_makemkv_run(None)
+            assert not frame.btn_makemkv_run.IsEnabled() and not frame.btn_makemkv_clear.IsEnabled()
+            assert frame.btn_makemkv_cancel.IsEnabled()
+            frame.on_exit_makemkv_worker(_FakeResult((0, "[makemkv] done")))
+            assert frame.btn_makemkv_run.IsEnabled() and frame.btn_makemkv_clear.IsEnabled()
+            assert not frame.btn_makemkv_cancel.IsEnabled()
+            assert "done" in frame.txt_makemkv_log.GetValue()
+
+            # cancel cleanup: removes a partial output written during this run, never the input
+            open(out, "wb").close()
+            frame.makemkv_start_time = time() - 5
+            frame.makemkv_cancelled = True
+            frame.on_exit_makemkv_worker(_FakeResult((1, "")))
+            assert not path.exists(out), "cancel must remove the partial output file"
+            assert path.exists(iso), "the input ISO must never be touched"
+
+            # a real crash (empty output, negative returncode) must reach both the popup and
+            # log, via the same _describe_subprocess_failure honest-diagnosis path
+            frame.makemkv_cancelled = False
+            message_box_calls = []
+            orig_message_box = gui_mod.wx.MessageBox
+            gui_mod.wx.MessageBox = lambda *a, **kw: message_box_calls.append(a)
+            try:
+                frame.on_exit_makemkv_worker(_FakeResult((-1073741819, "")))
+                assert "crashed" in message_box_calls[-1][0] and "access violation" in message_box_calls[-1][0]
+                assert "crashed" in frame.txt_makemkv_log.GetValue()
+            finally:
+                gui_mod.wx.MessageBox = orig_message_box
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        makemkv_mod._find_makemkvcon = orig_find
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_makemkv_panel: PASS")
 
 
 def _self_test_sbs2mvc_crash_diagnosis():
@@ -26881,12 +27323,14 @@ def _run_self_tests():
         _self_test_frame_packing_sei,
         _self_test_nvenc_bitrate_cap,
         _self_test_bitrate_cap_post_step,
+        _self_test_bitrate_cap_preserves_dv,
         _self_test_mvc_muxopt_new_audio_pes,
         _self_test_analyze_source_video,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
         _self_test_quick_convert_panel,
         _self_test_hdr_to_sdr_panel,
+        _self_test_makemkv_panel,
         _self_test_sbs2mvc_crash_diagnosis,
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,

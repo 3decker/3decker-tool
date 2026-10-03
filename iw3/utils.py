@@ -462,11 +462,19 @@ def _run_av_restore_with_progress(cmd, cwd, args):
 _HEVC_ENCODERS = ("libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf")
 
 
+def _dv_preserve_wanted(args):
+    """True when this job wants Dolby Vision/HDR10+ preserved AT ALL (--preserve-dowi), minus
+    --hdr-to-sdr/--keyframe, which strip or bypass DV on purpose (ADR-318). Used wherever a step
+    needs to know "does the finished file have DV this job actually wants to keep" regardless of
+    RIFE -- the RIFE-specific subset of this is _dv_after_rife_wanted() below."""
+    return (getattr(args, "preserve_dowi", False)
+            and not getattr(args, "hdr_to_sdr", False) and not getattr(args, "keyframe", False))
+
+
 def _dv_after_rife_wanted(args):
     """True when Preserve Dolby Vision and RIFE are both on (ADR-192). The DV/HDR10+ data can't be attached
     during conversion (RIFE adds frames that have none), so it is put back AFTER RIFE, once."""
-    return (getattr(args, "rife_interpolate", False) and getattr(args, "preserve_dowi", False)
-            and not getattr(args, "hdr_to_sdr", False) and not getattr(args, "keyframe", False))
+    return getattr(args, "rife_interpolate", False) and _dv_preserve_wanted(args)
 
 
 _DV_STAGE_LABELS = {
@@ -913,7 +921,7 @@ def _parse_bitrate_mbps(value):
         return num
 
 
-def _run_bitrate_cap(video_path, args):
+def _run_bitrate_cap(video_path, args, dv_source=None):
     """ADR-298: the real, reliable implementation of "Limit Bitrate" -- a genuine
     second pass, run only when actually needed. See make_video_codec_option()'s own
     comment for why a single-pass NVENC mode can't do this reliably (confirmed by
@@ -935,7 +943,19 @@ def _run_bitrate_cap(video_path, args):
     keeping both the giant original and a smaller copy around would defeat the whole
     point of the feature (avoiding disk bloat). Returns video_path on a real
     re-encode, or None if no-op / failed (original file always left intact either
-    way)."""
+    way).
+
+    ADR-318: this re-encode is a plain ffmpeg pass with ZERO Dolby Vision/HDR10+
+    awareness -- a fresh NVENC encode carries no DV VPS/RPU SEI of its own, so it
+    silently destroyed any DV already in the file whenever it actually fired (real,
+    confirmed incident: a user's file lost its entire DOVI configuration record this
+    way, with no warning). `dv_source`, when given, is the original untouched source
+    to re-attach that metadata from afterward -- same one-to-one re-attach
+    _reinject_dv_after_upscale() uses (not the RIFE/manifest path: this re-encode
+    changes compression only, never frame count/timing, so the DV data still lines
+    up exactly). If re-attaching fails for a real reason, _reinject_dv_after_rife()
+    already prints a clear FAILED message naming the file as left without DV --
+    never a silent loss."""
     if not getattr(args, "limit_bitrate", False):
         return None
     if getattr(args, "video_codec", None) not in ("hevc_nvenc", "h264_nvenc"):
@@ -980,6 +1000,11 @@ def _run_bitrate_cap(video_path, args):
           f"(quality-preserving content is left alone; this only affects what the "
           f"limit actually caught)...", file=sys.stderr)
     pix_fmt = _clamp_pix_fmt_for_codec(getattr(args, "pix_fmt", "yuv420p"), args.video_codec)
+    # Known, secondary inconsistency (not fixed here, scope kept to the DV-destruction bug above):
+    # this writes Matroska via ffmpeg's own native muxer rather than mkvmerge, unlike the rest of
+    # this pipeline's documented preference for .mkv output (docs/ai/domains/DOLBY_VISION.md). The
+    # DV metadata itself survives this regardless (it is a property of the video elementary stream,
+    # not the muxer), so this is a style inconsistency, not a correctness bug.
     cmd = [ffmpeg, "-y", "-v", "error", "-i", str(video_path),
            "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
            "-c:v", args.video_codec, "-rc", "cbr", "-b:v", str(args.video_bitrate),
@@ -1003,19 +1028,37 @@ def _run_bitrate_cap(video_path, args):
         return None
     os.replace(tmp_path, video_path)
     print("[iw3] Limit Bitrate: re-encoded successfully.", file=sys.stderr)
+    if dv_source:
+        # ADR-318: the re-encode above has no DV/HDR10+ of its own -- put back whatever was
+        # already in this file (from the main conversion, or from _reinject_dv_after_rife earlier
+        # in this same chain) before it gets silently left out. use_manifest=False/trim_source=True:
+        # same frame count/timing as before (a bitrate re-encode never drops/duplicates frames), so
+        # the exact-frame-count-matched re-attach _reinject_dv_after_upscale() uses applies here too.
+        _reinject_dv_after_rife(dv_source, video_path, args, use_manifest=False,
+                                what="bitrate-capped video", trim_source=True)
     return video_path
 
 
 def _run_post_conversion_steps(video_path, args, dv_source=None):
     """ADR-209: the steps that run after the conversion, CHAINED so each one works on the previous one's result:
-    waifu2x upscale -> RIFE -> Dolby Vision re-attach (only when `dv_source` is given, i.e. RIFE + Preserve Dolby
-    Vision) -> Restore Audio & Subtitles. Before this every step started again from the plain converted file, so
-    ticking upscale AND RIFE gave two separate files (one upscaled, one smoothed) instead of one that was both.
+    waifu2x upscale -> RIFE -> Dolby Vision re-attach (only when RIFE actually ran and `dv_source` is given, i.e.
+    RIFE + Preserve Dolby Vision) -> Restore Audio & Subtitles -> Limit Bitrate. Before this every step started
+    again from the plain converted file, so ticking upscale AND RIFE gave two separate files (one upscaled, one
+    smoothed) instead of one that was both.
 
     Upscaling comes before RIFE on purpose: the upscale is by far the slowest step and RIFE doubles the frame count,
     so upscaling first does half the frames. The names simply stack: "<name>_w2x_rife_alldub.mkv". A step that is
     off, or fails, is skipped and the chain carries on with the file it had (each step already reports its own
-    failure). Returns the path of the file the user should keep."""
+    failure). Returns the path of the file the user should keep.
+
+    `dv_source` (ADR-318): the original, untouched source to pull Dolby Vision/HDR10+ metadata from, given
+    whenever this job wants DV preserved at all (--preserve-dowi, minus --hdr-to-sdr/--keyframe, which strip or
+    bypass DV on purpose) -- NOT only the RIFE case. It is used in two places: (1) right after RIFE, when RIFE is
+    also on, since RIFE's own re-encode has no DV and the main conversion deliberately skipped injecting it for
+    the same reason (ADR-192); (2) passed through to _run_bitrate_cap(), whose own re-encode has zero DV awareness
+    and would otherwise silently destroy whatever DV is already in the file by that point -- regardless of
+    whether it got there from the main conversion directly (the common case: preserve-dowi with no RIFE) or from
+    step (1) above."""
     current = video_path
     if _should_use_stereo_upscale(args):
         upscaled = _run_waifu2x_upscale_stereo(current, args)
@@ -1024,7 +1067,7 @@ def _run_post_conversion_steps(video_path, args, dv_source=None):
     if upscaled:
         current = upscaled
     rife_output_path = _run_rife_interpolation(current, args, force_hevc=bool(dv_source))
-    if dv_source:
+    if dv_source and getattr(args, "rife_interpolate", False):
         _reinject_dv_after_rife(dv_source, rife_output_path, args)
     if rife_output_path:
         current = rife_output_path
@@ -1035,8 +1078,9 @@ def _run_post_conversion_steps(video_path, args, dv_source=None):
     # ADR-298: checks/re-encodes the fully-assembled file (audio already restored, if
     # that ran) so the real bitrate check reflects what the user will actually keep --
     # an in-place fix (see _run_bitrate_cap()'s own docstring for why), so `current`
-    # doesn't change, just what's sitting at that same path.
-    _run_bitrate_cap(current, args)
+    # doesn't change, just what's sitting at that same path. ADR-318: dv_source is forwarded
+    # so this step can re-attach DV it would otherwise silently destroy (see its own docstring).
+    _run_bitrate_cap(current, args, dv_source=dv_source)
     # ADR-246: MVC conversion is a side effect (its own separate file), not a chain link -- it
     # never changes `current`/the file this function returns as "the one to keep".
     _run_mvc_conversion(current, args)
@@ -6002,8 +6046,13 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
         if needs_vram_release:
             _release_pause_vram(args)
         try:
-            _run_post_conversion_steps(final_output_path, args,
-                                       dv_source=original_input_filename if dv_after_rife else None)
+            # ADR-318: broadened from "only when dv_after_rife" -- dv_after_rife is just the
+            # RIFE-specific subset of _dv_preserve_wanted(). _run_post_conversion_steps also needs
+            # this for _run_bitrate_cap(), whose own re-encode can destroy DV that was already
+            # injected by the MAIN conversion pass itself (no RIFE involved at all) -- see that
+            # function's own docstring.
+            dv_preserve_source = original_input_filename if _dv_preserve_wanted(args) else None
+            _run_post_conversion_steps(final_output_path, args, dv_source=dv_preserve_source)
         finally:
             if needs_vram_release:
                 _reload_pause_vram(args)

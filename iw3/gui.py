@@ -7086,6 +7086,129 @@ class MainFrame(wx.Frame):
         sizer_makemkv = wx.StaticBoxSizer(self.grp_makemkv, wx.VERTICAL)
         sizer_makemkv.Add(pane_header_row_makemkv, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- VobSub to PGS (BDSup2Sub++) (standalone tool) ---
+        # Real user report (Steve, via decker, 2026-10-03): this project's own disc-legal
+        # 3D Blu-ray/MVC output (sbs_to_mvc_cli._plan_audio_subs()) already turns text
+        # subtitles into PGS automatically, but a real Blu-ray disc has no legal way to
+        # carry a VobSub (DVD-era bitmap) subtitle track at all -- that track is always
+        # silently skipped there, a real, intentional, UNCHANGED trade-off, not a bug. This
+        # tool lets a VobSub track (standalone .idx/.sub, or embedded in an .mkv) be
+        # converted to a real PGS .sup first, via BDSup2Sub++'s own genuine, OCR-free,
+        # bitmap-to-bitmap conversion -- see iw3/vobsub_to_pgs_bdsup2sub_cli.py's own module
+        # docstring for the full real CLI shape and the honestly disclosed verification gap
+        # (no full conversion demonstrated yet against a real, well-formed VobSub file).
+        # v1 is standalone ONLY, same deliberate scope decision as the MakeMKV tool above
+        # before its own later pipeline auto-chain was added -- not wired into
+        # _plan_audio_subs() in this pass.
+        self.grp_vobsub = wx.StaticBox(
+            self.tab_tools, label=T("VobSub to PGS Subtitle (BDSup2Sub++) (Standalone Tool)"))
+
+        self.cpn_vobsub = wx.CollapsiblePane(
+            self.grp_vobsub, label=T("Settings"), name="cpn_vobsub")
+        self.cpn_vobsub.Collapse(True)
+        self.cpn_vobsub.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                             self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_vobsub.GetPane().SetName("cpn_vobsub_pane")
+
+        self.lbl_vobsub_input = wx.StaticText(self.cpn_vobsub.GetPane(), label=T("VobSub .idx or .mkv"))
+        self.txt_vobsub_input = wx.TextCtrl(self.cpn_vobsub.GetPane(), name="txt_vobsub_input")
+        self.txt_vobsub_input.SetToolTip(
+            T("What it's for: a real VobSub (DVD-era bitmap) subtitle to convert into a real PGS "
+              "(Blu-ray bitmap) subtitle, via BDSup2Sub++'s own genuine bitmap-to-bitmap conversion -- "
+              "no OCR, no re-rendering, no font guessing.\n"
+              "Why this exists: a real Blu-ray disc has no legal way to carry a VobSub track at all, so "
+              "this project's own 3D Blu-ray/MVC output always silently skips one. This tool converts it "
+              "to PGS yourself first; it is not yet auto-chained into that pipeline.\n"
+              "Pick either: a standalone .idx file (its matching .sub must sit alongside it, same name) "
+              "or an .mkv file with an embedded VobSub subtitle track (the one real track is picked "
+              "automatically; if the file has more than one, Run will tell you the real track IDs to "
+              "choose from in the Track field below).\n"
+              "Honest, disclosed gap: this tool's real detection/invocation/error-handling have all been "
+              "verified against the actual bundled BDSup2Sub++ binary, but a full successful conversion "
+              "has not yet been verified end-to-end against a real, well-formed VobSub file (the only "
+              "real-world sample available during development turned out to be a genuinely malformed "
+              "one). Please report back if you hit any issue.\n"
+              "Read-only: your source file is never modified."))
+        self.btn_vobsub_input = wx.Button(self.cpn_vobsub.GetPane(), label=T("..."))
+
+        self.lbl_vobsub_track = wx.StaticText(self.cpn_vobsub.GetPane(), label=T("Track (optional)"))
+        self.txt_vobsub_track = wx.TextCtrl(self.cpn_vobsub.GetPane(), name="txt_vobsub_track")
+        self.txt_vobsub_track.SetToolTip(
+            T("What it's for: only needed when the input above is an .mkv with MORE THAN ONE VobSub "
+              "subtitle track -- the real Matroska track ID (not just a position number, read from "
+              "mkvmerge's own track list) of the one to convert.\n"
+              "Recommended: leave this blank. It's only needed if Run tells you the file has more than "
+              "one VobSub track and lists their real IDs to pick from; a standalone .idx input or an "
+              ".mkv with exactly one VobSub track never needs it."))
+
+        self.lbl_vobsub_output = wx.StaticText(self.cpn_vobsub.GetPane(), label=T("Output PGS (.sup) File"))
+        self.txt_vobsub_output = wx.TextCtrl(self.cpn_vobsub.GetPane(), name="txt_vobsub_output")
+        self.txt_vobsub_output.SetToolTip(
+            T("Where to write the real PGS .sup file BDSup2Sub++ produces. Auto-filled with '<input "
+              "name>.sup' next to the input once you pick one.\n"
+              "How it's safe: this tool never overwrites the input; a temporary extraction/conversion "
+              "work folder next to this file is deleted automatically once the real result is moved "
+              "into place."))
+        self.btn_vobsub_output = wx.Button(self.cpn_vobsub.GetPane(), label=T("..."))
+
+        self.btn_vobsub_run = wx.Button(self.cpn_vobsub.GetPane(), label=T("Run"))
+        self.btn_vobsub_run.SetToolTip(
+            T("What it's for: starts the conversion as a separate background process (python -m "
+              "iw3.vobsub_to_pgs_bdsup2sub_cli), which runs the bundled BDSup2Sub++ (and, for an .mkv "
+              "input, mkvextract first to pull the embedded track out).\n"
+              "Con: see the real, disclosed verification gap in the input field's own tooltip above -- "
+              "a genuinely malformed/unusual VobSub source can fail with no real error text at all "
+              "(confirmed directly against a real public test sample); this tool still reports that "
+              "clearly rather than hanging or crashing.\n"
+              "Recommended: check the log box below afterward to confirm it actually succeeded, then "
+              "test the resulting .sup file before relying on it."))
+        self.btn_vobsub_cancel = wx.Button(self.cpn_vobsub.GetPane(), label=T("Cancel"))
+        self.btn_vobsub_cancel.Disable()
+        self.btn_vobsub_cancel.SetToolTip(
+            T("Stops the running conversion and removes the partial output file."))
+
+        self.gauge_vobsub = wx.Gauge(self.cpn_vobsub.GetPane(), style=wx.GA_HORIZONTAL)
+        self.gauge_vobsub.SetToolTip(T("Real progress of the current extract/convert stage."))
+        self.lbl_vobsub_progress = wx.StaticText(self.cpn_vobsub.GetPane(), label="")
+
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_vobsub_log = self.txt_standalone_log
+        self.btn_vobsub_clear = self.btn_standalone_log_clear
+
+        self.btn_vobsub_input.Bind(wx.EVT_BUTTON, self.on_click_btn_vobsub_input)
+        self.btn_vobsub_output.Bind(wx.EVT_BUTTON, self.on_click_btn_vobsub_output)
+        self.btn_vobsub_run.Bind(wx.EVT_BUTTON, self.on_click_btn_vobsub_run)
+        self.btn_vobsub_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_vobsub_cancel)
+        self.vobsub_proc = None
+        self.vobsub_cancelled = False
+        self.vobsub_start_time = 0.0
+
+        layout = wx.GridBagSizer(vgap=4, hgap=4)
+        layout.SetEmptyCellSize((0, 0))
+        h = -1
+        layout.Add(self.lbl_vobsub_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_vobsub_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_vobsub_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_vobsub_track, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_vobsub_track, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.lbl_vobsub_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_vobsub_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_vobsub_output, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_vobsub_run, (h := h + 1, 2), flag=wx.EXPAND)
+        layout.Add(self.btn_vobsub_cancel, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.gauge_vobsub, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_vobsub_progress, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        self.cpn_vobsub.GetPane().SetSizer(layout)
+
+        self.pnl_vobsub_dot = wx.Panel(self.grp_vobsub, size=self.FromDIP((10, 10)))
+        self.pnl_vobsub_dot.SetBackgroundColour(wx.Colour(255, 187, 51))
+        pane_header_row_vobsub = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_vobsub.Add(self.pnl_vobsub_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_vobsub.Add(self.cpn_vobsub, 1, wx.EXPAND)
+
+        sizer_vobsub = wx.StaticBoxSizer(self.grp_vobsub, wx.VERTICAL)
+        sizer_vobsub.Add(pane_header_row_vobsub, 0, wx.ALL | wx.EXPAND, 4)
+
         # --- standalone tool: Upscale with waifu2x ---
         # Runs the SAME two commands the "Upscale with waifu2x after conversion" option runs
         # (iw3.utils._run_waifu2x_upscale / _run_waifu2x_upscale_stereo), but on any
@@ -7435,6 +7558,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_hdr_to_sdr, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_makemkv, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_vobsub, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_upscale, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_standalone_log, 1, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
@@ -9033,7 +9157,8 @@ class MainFrame(wx.Frame):
         only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
                       "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
-                      "cpn_bluray", "cpn_sbs2mvc", "cpn_hdr_to_sdr", "cpn_makemkv", "cpn_upscale")
+                      "cpn_bluray", "cpn_sbs2mvc", "cpn_hdr_to_sdr", "cpn_makemkv", "cpn_vobsub",
+                      "cpn_upscale")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -11552,6 +11677,7 @@ class MainFrame(wx.Frame):
         "txt_sbs2mvc_input", "txt_sbs2mvc_output",
         "txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output",
         "txt_makemkv_input", "txt_makemkv_output",
+        "txt_vobsub_input", "txt_vobsub_track", "txt_vobsub_output",
         "txt_upscale_input", "txt_upscale_output",
         "txt_standalone_log",
     )
@@ -15320,6 +15446,170 @@ class MainFrame(wx.Frame):
         self.SetStatusText(T("Ripping with MakeMKV..."))
         startWorker(self.on_exit_makemkv_worker, self.run_makemkv, wargs=(cmd,))
 
+    # --- VobSub to PGS (BDSup2Sub++) (standalone tool) ---
+
+    def on_click_btn_vobsub_input(self, event):
+        with wx.FileDialog(self, message=T("Select a VobSub .idx or an .mkv with an embedded VobSub track"),
+                           wildcard="VobSub/MKV (*.idx;*.mkv)|*.idx;*.mkv|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_vobsub_input.GetValue():
+                dlg.SetPath(self.txt_vobsub_input.GetValue())
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            input_path = dlg.GetPath()
+        self.txt_vobsub_input.SetValue(input_path)
+        if not self.txt_vobsub_output.GetValue():
+            self.txt_vobsub_output.SetValue(f"{path.splitext(input_path)[0]}.sup")
+
+    def on_click_btn_vobsub_output(self, event):
+        with wx.FileDialog(self, message=T("Save PGS Subtitle File As"),
+                           wildcard="PGS subtitle files (*.sup)|*.sup|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_vobsub_output.GetValue():
+                dlg.SetPath(self.txt_vobsub_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_vobsub_output.SetValue(dlg.GetPath())
+
+    def _update_vobsub_progress(self, stage, done, total):
+        # Called via wx.CallAfter from run_vobsub's background thread.
+        names = {"extract": T("Extracting the VobSub track"),
+                 "convert": T("Converting to PGS")}
+        name = names.get(stage, stage)
+        if total > 0:
+            self.gauge_vobsub.SetRange(int(total))
+            self.gauge_vobsub.SetValue(int(min(done, total)))
+            percent = min(100, int(done / total * 100))
+            elapsed = time() - self.vobsub_start_time
+            self.lbl_vobsub_progress.SetLabel(
+                f"{name}: {percent}% [{T('elapsed')} {self._format_duration(elapsed)}]")
+        else:
+            self.gauge_vobsub.Pulse()
+            self.lbl_vobsub_progress.SetLabel(f"{name}...")
+
+    def run_vobsub(self, cmd):
+        self.vobsub_proc = proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        stderr_chunks = []
+
+        def _drain_stderr():
+            for line in proc.stderr:
+                stderr_chunks.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+        for line in proc.stdout:
+            parts = line.strip().split(" ")
+            if len(parts) == 4 and parts[0] == "IW3_MVC_PROGRESS":
+                try:
+                    wx.CallAfter(self._update_vobsub_progress, parts[1], float(parts[2]), float(parts[3]))
+                except ValueError:
+                    continue
+        proc.wait()
+        stderr_thread.join(timeout=5)
+        return proc.returncode, "".join(stderr_chunks)
+
+    def _cleanup_after_vobsub_cancel(self):
+        output_path = self.txt_vobsub_output.GetValue().strip()
+        stem = path.splitext(path.basename(output_path))[0]
+        out_dir = path.dirname(path.abspath(output_path))
+        shutil.rmtree(path.join(out_dir, f"_vobsub_pgs_work_{stem}"), ignore_errors=True)
+        try:
+            if path.exists(output_path) and path.getmtime(output_path) >= self.vobsub_start_time - 1:
+                os.remove(output_path)
+        except OSError:
+            pass
+
+    def on_exit_vobsub_worker(self, result):
+        self.btn_vobsub_run.Enable()
+        self.btn_vobsub_clear.Enable()
+        self.btn_vobsub_cancel.Disable()
+        self.vobsub_proc = None
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_vobsub_log.AppendText(message)
+            self._write_standalone_job_log(T("VobSub to PGS Subtitle (BDSup2Sub++)"),
+                                           self.txt_vobsub_output.GetValue(), message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        self._write_standalone_job_log(T("VobSub to PGS Subtitle (BDSup2Sub++)"),
+                                       self.txt_vobsub_output.GetValue(), output)
+        self.txt_vobsub_log.SetValue(output.replace("\r", "\n"))
+        self.txt_vobsub_log.ShowPosition(self.txt_vobsub_log.GetLastPosition())
+        if self.vobsub_cancelled:
+            self._cleanup_after_vobsub_cancel()
+            self.lbl_vobsub_progress.SetLabel(T("Cancelled"))
+            self.SetStatusText(T("VobSub to PGS conversion cancelled"))
+        elif returncode == 0:
+            self.gauge_vobsub.SetValue(self.gauge_vobsub.GetRange())
+            self.lbl_vobsub_progress.SetLabel(
+                f"{T('Done')} [{T('elapsed')} {self._format_duration(time() - self.vobsub_start_time)}]")
+            self.SetStatusText(T("VobSub to PGS conversion successful"))
+        else:
+            self.SetStatusText(T("VobSub to PGS conversion failed -- see the log below"))
+            failure_message = _describe_subprocess_failure(returncode, output)
+            generic_message = T("The conversion failed or refused -- see the log box for the exact reason.")
+            if failure_message != generic_message:
+                self.txt_vobsub_log.AppendText(f"\n[3DECKER] {failure_message}")
+            wx.MessageBox(failure_message, T("VobSub to PGS Subtitle (BDSup2Sub++)"), wx.OK | wx.ICON_ERROR)
+
+    def on_click_btn_vobsub_cancel(self, event):
+        proc = self.vobsub_proc
+        if proc is not None and proc.poll() is None:
+            self.vobsub_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_vobsub_cancel.Disable()
+
+    def build_vobsub_command(self):
+        """Returns (cmd, None) or (None, error_message); no process is started. Checks for
+        a real bundled BDSup2Sub++ install up front (same "warn clearly" philosophy as
+        every other external-tool preflight in this project) rather than letting Run launch
+        a subprocess that's certain to fail."""
+        input_path = self.txt_vobsub_input.GetValue().strip()
+        output_path = self.txt_vobsub_output.GetValue().strip()
+        track_text = self.txt_vobsub_track.GetValue().strip()
+        if not input_path or not path.exists(input_path):
+            return None, T("Select a valid VobSub .idx or .mkv file first.")
+        if not output_path:
+            return None, T("Set an Output PGS (.sup) File path first.")
+        if path.abspath(output_path) == path.abspath(input_path):
+            return None, T("Output must be different from the input.")
+        if track_text and not re.match(r"^\d+$", track_text):
+            return None, T("Track must be a whole number (the real Matroska track ID), or left blank.")
+        from .utils import _find_bdsup2sub
+        if _find_bdsup2sub() is None:
+            return None, T(
+                "BDSup2Sub++ not found -- this project bundles it at <install root>/bdsup2sub/"
+                "bdsup2sub++.exe; the bundled install looks damaged or incomplete. Try reinstalling/"
+                "updating 3DECKER.")
+        cmd = [sys.executable, "-m", "iw3.vobsub_to_pgs_bdsup2sub_cli", "--input", input_path,
+               "--output", output_path, "--gui-progress"]
+        if track_text:
+            cmd += ["--track", track_text]
+        return cmd, None
+
+    def on_click_btn_vobsub_run(self, event):
+        cmd, error = self.build_vobsub_command()
+        if error:
+            wx.MessageBox(error, T("VobSub to PGS Subtitle (BDSup2Sub++)"), wx.OK | wx.ICON_WARNING)
+            return
+        self.txt_vobsub_log.SetValue(T("Running...\n"))
+        self.gauge_vobsub.SetRange(1)
+        self.gauge_vobsub.SetValue(0)
+        self.lbl_vobsub_progress.SetLabel("")
+        self.vobsub_cancelled = False
+        self.vobsub_start_time = time()
+        self.btn_vobsub_run.Disable()
+        self.btn_vobsub_clear.Disable()
+        self.btn_vobsub_cancel.Enable()
+        self.SetStatusText(T("Converting VobSub to PGS..."))
+        startWorker(self.on_exit_vobsub_worker, self.run_vobsub, wargs=(cmd,))
+
     # --- Upscale with waifu2x (standalone tool) ---
 
     def _upscale_suffix(self):
@@ -17070,9 +17360,9 @@ def _self_test_video_filter_collapsible_section():
 
 
 def _self_test_standalone_tools_collapsible_sections():
-    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 12
+    """Same regression coverage as _self_test_stereo_collapsible_sections, for the 14
     Guided Light panes added to Standalone Tools (ADR-101, one per tool; ADR-169
-    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th; ADR-182 UPDATE 6 adds SBS to 3D Blu-ray MVC as the 10th; the Upscale with waifu2x tool is the 11th; the Convert HDR/DV to SDR tool (built alongside ADR-222) is the 12th) --
+    adds Restore All Audio Tracks as the 8th; ADR-182 adds 3D Blu-ray Import as the 9th; ADR-182 UPDATE 6 adds SBS to 3D Blu-ray MVC as the 10th; the Upscale with waifu2x tool is the 11th; the Convert HDR/DV to SDR tool (built alongside ADR-222) is the 12th; 3D Blu-ray ISO to MVC MKV (MakeMKV) (ADR-317 follow-up) is the 13th; VobSub to PGS Subtitle (BDSup2Sub++) is the 14th) --
     tab_tools/tab_wrap_tools/on_toggled_standalone_tools_collapsible_pane in place of
     the Stereo Generation equivalents. Also checks each pane has a real, unique
     name (the exact bug class this pattern already broke once with 2+ panes sharing
@@ -17090,9 +17380,9 @@ def _self_test_standalone_tools_collapsible_sections():
         frame = gui_mod.MainFrame()
         panes = frame.get_standalone_tools_sliders_and_panes()
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
-        assert len(panes) == 12, f"expected 12 Standalone Tools panes, found {len(panes)}"
+        assert len(panes) == 14, f"expected 14 Standalone Tools panes, found {len(panes)}"
         names = [p.GetName() for p in panes]
-        assert len(set(names)) == 12, f"pane names are not all unique: {names}"
+        assert len(set(names)) == 14, f"pane names are not all unique: {names}"
         for p in panes:
             assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
 
@@ -22827,6 +23117,101 @@ def _self_test_makemkv_panel():
     print("_self_test_makemkv_panel: PASS")
 
 
+def _self_test_vobsub_panel():
+    """VobSub to PGS Subtitle (BDSup2Sub++) standalone tool: widgets and defaults, command
+    building and validation, the "BDSup2Sub++ not found" preflight warning, Run/Cancel/Clear
+    lockstep, cancel cleanup. No real BDSup2Sub++ install is assumed -- iw3.utils's own
+    _find_bdsup2sub is monkeypatched either way, matching _self_test_makemkv_panel's own
+    pattern exactly (that one patches iso_to_mvc_makemkv_cli._find_makemkvcon instead, since
+    this tool's finder lives in iw3.utils, not its own CLI module)."""
+    import iw3.gui as gui_mod
+    import iw3.utils as utils_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_find = utils_mod._find_bdsup2sub
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.cpn_vobsub.GetPane().GetName() == "cpn_vobsub_pane"
+        assert frame.cpn_vobsub in frame.get_standalone_tools_sliders_and_panes()
+        for name in ("txt_vobsub_input", "txt_vobsub_track", "txt_vobsub_output"):
+            assert name in frame._CLEAR_ALL_STANDALONE_TEXT_FIELDS, name
+        # ADR-250: txt_vobsub_log is a plain alias to the one shared txt_standalone_log.
+        assert frame.txt_vobsub_log is frame.txt_standalone_log
+        assert frame.btn_vobsub_run.IsEnabled() and not frame.btn_vobsub_cancel.IsEnabled()
+
+        cmd, err = frame.build_vobsub_command()
+        assert cmd is None and err, "empty input must be refused"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            idx = path.join(tmpdir, "movie.idx")
+            open(idx, "wb").close()
+            frame.txt_vobsub_input.SetValue(idx)
+            cmd, err = frame.build_vobsub_command()
+            assert cmd is None and err, "empty output must be refused"
+            out = path.join(tmpdir, "movie.sup")
+            frame.txt_vobsub_output.SetValue(idx)
+            cmd, err = frame.build_vobsub_command()
+            assert cmd is None and err, "output colliding with input must be refused"
+            frame.txt_vobsub_output.SetValue(out)
+
+            frame.txt_vobsub_track.SetValue("abc")
+            cmd, err = frame.build_vobsub_command()
+            assert cmd is None and "whole number" in err, err
+            frame.txt_vobsub_track.SetValue("")
+
+            # real "warn clearly" requirement: BDSup2Sub++ not found must be caught here,
+            # before Run ever launches a subprocess certain to fail.
+            utils_mod._find_bdsup2sub = lambda: None
+            cmd, err = frame.build_vobsub_command()
+            assert cmd is None and "BDSup2Sub++ not found" in err, err
+
+            utils_mod._find_bdsup2sub = lambda: "bdsup2sub++.exe"
+            cmd, err = frame.build_vobsub_command()
+            assert err is None
+            assert cmd[1:3] == ["-m", "iw3.vobsub_to_pgs_bdsup2sub_cli"], cmd
+            assert cmd[cmd.index("--input") + 1] == idx and cmd[cmd.index("--output") + 1] == out
+            assert "--gui-progress" in cmd
+            assert "--track" not in cmd
+
+            frame.txt_vobsub_track.SetValue("3")
+            cmd, err = frame.build_vobsub_command()
+            assert err is None and cmd[cmd.index("--track") + 1] == "3"
+            frame.txt_vobsub_track.SetValue("")
+
+            gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: None
+            frame.on_click_btn_vobsub_run(None)
+            assert not frame.btn_vobsub_run.IsEnabled() and not frame.btn_vobsub_clear.IsEnabled()
+            assert frame.btn_vobsub_cancel.IsEnabled()
+            frame.on_exit_vobsub_worker(_FakeResult((0, "[vobsub-to-pgs] done")))
+            assert frame.btn_vobsub_run.IsEnabled() and frame.btn_vobsub_clear.IsEnabled()
+            assert not frame.btn_vobsub_cancel.IsEnabled()
+            assert "done" in frame.txt_vobsub_log.GetValue()
+
+            # cancel cleanup: removes a partial output written during this run, never the input
+            open(out, "wb").close()
+            frame.vobsub_start_time = time() - 5
+            frame.vobsub_cancelled = True
+            frame.on_exit_vobsub_worker(_FakeResult((1, "")))
+            assert not path.exists(out), "cancel must remove the partial output file"
+            assert path.exists(idx), "the input must never be touched"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        utils_mod._find_bdsup2sub = orig_find
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_vobsub_panel: PASS")
+
+
 def _self_test_sbs2mvc_crash_diagnosis():
     """Real user report: a standalone-tool subprocess (ffmpeg/FRIM/tsMuxeR, run as separate
     .exe's) can crash hard enough that nothing ever reaches stderr -- 'it gave me an error and
@@ -27772,6 +28157,7 @@ def _run_self_tests():
         _self_test_quick_convert_panel,
         _self_test_hdr_to_sdr_panel,
         _self_test_makemkv_panel,
+        _self_test_vobsub_panel,
         _self_test_sbs2mvc_crash_diagnosis,
         _self_test_confirm_dangerous_buttons,
         _self_test_upscale_panel,

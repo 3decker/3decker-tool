@@ -1519,6 +1519,60 @@ def _find_tsmuxer():
     return None
 
 
+def _find_mkvextract():
+    """Same bundled-tool convention as _find_mkvmerge() above (mkvextract ships in the
+    same mkvtoolnix/ folder as mkvmerge -- one MKVToolNix release, both binaries). Needed
+    for iw3.vobsub_to_pgs_bdsup2sub_cli: pulling an embedded MKV VobSub (S_VOBSUB) subtitle
+    track out to a standalone .idx/.sub pair before handing it to BDSup2Sub++, since this
+    project's own bundled ffmpeg build can only DEMUX VobSub (read it), not MUX it (write a
+    standalone .idx/.sub pair) -- confirmed directly against the real bundled ffmpeg.exe:
+    `-muxers` lists no "vobsub" entry at all, only `-demuxers` does. mkvextract's own
+    `tracks <TID>:out.idx` mode writes the matching out.sub alongside automatically when the
+    track's CodecID is S_VOBSUB, which is the real, established MKVToolNix behavior this
+    relies on."""
+    import shutil
+    found = shutil.which("mkvextract") or shutil.which("mkvextract.exe")
+    if found:
+        return found
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    for candidate in (
+        path.join(here, "mkvtoolnix", "mkvextract.exe"),
+        path.join(here, "mkvextract.exe"),
+    ):
+        if path.exists(candidate):
+            return candidate
+    return None
+
+
+def _find_bdsup2sub():
+    """Locates the bundled BDSup2Sub++ CLI (prinsbert/dvd-subtitle-utils, Apache-2.0/
+    LGPL-3.0 -- genuinely redistributable, unlike MakeMKV's own separate-install/licensed
+    model, see iw3.iso_to_mvc_makemkv_cli._find_makemkvcon()'s docstring for that contrast),
+    used by iw3.vobsub_to_pgs_bdsup2sub_cli to convert a real VobSub (DVD-era bitmap)
+    subtitle into a real PGS (Blu-ray bitmap) subtitle -- genuine OCR-free bitmap-to-bitmap
+    conversion, not a re-render. Same "<nunif-windows root>/<tool>/<tool>.exe" bundled-tool
+    convention as _find_mkvmerge()/_find_tsmuxer() above (a project-relative candidate,
+    never installed/downloaded by this function itself), chosen over the separately
+    -installed-tool convention _find_makemkvcon() uses because this tool's own license
+    permits bundling it directly for zero-extra-setup UX, the same reasoning already
+    applied to ffmpeg/mkvmerge/tsMuxeR/FRIM.
+    Real, confirmed-from-source CLI shape: `bdsup2sub++.exe -o <output> <input>` -- the
+    output FORMAT is selected purely by -o's own file extension (.sup for PGS/BD-SUP, also
+    .sub/.idx for VobSub, .xml/.ifo for others), confirmed directly against the real
+    downloaded build's own behavior (an unrecognized flag prints a real, specific "Unknown
+    option '<name>'." error to stderr -- confirmed real error handling, not a silent
+    failure)."""
+    import shutil
+    found = shutil.which("bdsup2sub++") or shutil.which("bdsup2sub++.exe")
+    if found:
+        return found
+    here = path.dirname(path.dirname(path.dirname(path.abspath(__file__))))
+    candidate = path.join(here, "bdsup2sub", "bdsup2sub++.exe")
+    if path.exists(candidate):
+        return candidate
+    return None
+
+
 def log_subprocess_cmd(stage, cmd):
     """Real user report (Steve, via decker, 2026-09-30): debugging a real 3D Blu-ray
     MVC problem needed knowing exactly which external tool (ffmpeg/FRIM/tsMuxeR/

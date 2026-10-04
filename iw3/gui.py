@@ -4326,13 +4326,18 @@ class MainFrame(wx.Frame):
               "it) a real 3D watch, instead of keeping separate 2D and 3D copies of the same movie.\n"
               "None of these four play as 3D in VLC, MPC-HC or most everyday TVs -- all still need a real "
               "MVC-capable player specifically for the 3D side."))
-        self.txt_mvc_bitrate = EditableComboBox(self.grp_postprocess, choices=["10", "20", "30", "40"],
+        self.txt_mvc_bitrate = EditableComboBox(self.grp_postprocess, choices=["10", "20", "30", "40", "60"],
                                                 name="txt_mvc_bitrate")
         self.txt_mvc_bitrate.SetValue("20")
         self.txt_mvc_bitrate.SetToolTip(
-            T("Target Mbps per eye for the MVC encode. 20 (default) is a solid, widely-used middle "
-              "ground; 3D Blu-ray allows up to about 40 combined (both eyes together). Higher = better "
-              "quality and a bigger file, same tradeoff as any other video bitrate setting."))
+            T("Target COMBINED Mbps for the MVC encode -- both eyes together, not per eye. 20 "
+              "(default) is a solid, widely-used middle ground. Higher = better quality and a "
+              "bigger file, same tradeoff as any other video bitrate setting.\n"
+              "Ceiling depends on MVC Output Type above: 3D Blu-ray ISO/BD Folder are limited to "
+              "about 60 Mbps combined (the real disc/hardware compliance limit); Plain MKV/Bare "
+              "M2TS allow up to 62.5 Mbps (this encode's own AVC Level 4.1 High Profile ceiling -- "
+              "no physical player compliance applies to those, but the encoder is still declared "
+              "at that level)."))
         # ADR-252: real user report -- a real Dolby Vision UHD source made this step refuse
         # ("HDR video is not supported for 3D Blu-ray here -- convert it to SDR first") with
         # no way to opt into automatic handling, even though the standalone SBS-to-MVC tool
@@ -6759,8 +6764,12 @@ class MainFrame(wx.Frame):
         self.lbl_sbs2mvc_bitrate = wx.StaticText(self.cpn_sbs2mvc.GetPane(), label=T("Bitrate (Mbps)"))
         self.txt_sbs2mvc_bitrate = wx.TextCtrl(self.cpn_sbs2mvc.GetPane(), value="20", name="txt_sbs2mvc_bitrate")
         self.txt_sbs2mvc_bitrate.SetToolTip(
-            T("What it's for: target video bitrate per eye-view, in Mbps. Higher = better picture, bigger file.\n"
-              "Values: 2-40 (3D Blu-ray allows about 40 combined). Measured on a real clip against the input: "
+            T("What it's for: target COMBINED video bitrate for both eye-views together, in Mbps "
+              "(not per eye). Higher = better picture, bigger file.\n"
+              "Values: 2 up to about 60 for 3D Blu-ray ISO/BD Folder output (the real disc/hardware "
+              "combined-bitrate limit); up to 62.5 for Plain MKV/Bare M2TS output (no physical-player "
+              "compliance applies there, so the ceiling instead comes from this encode's own AVC "
+              "Level 4.1 High Profile declaration). Measured on a real clip against the input: "
               "12 -> 45.9 dB, 20 -> 47.4 dB, 30 -> 48.5 dB (above ~45 dB is visually indistinguishable). "
               "The encoder only uses what the picture needs, so an easy movie is smaller than the target.\n"
               "Con: the encode is software-only (no GPU); expect roughly real-time speed or a bit faster.\n"
@@ -15199,8 +15208,19 @@ class MainFrame(wx.Frame):
         # validate this side -- every string is a valid choice one way or the other.
         if path.abspath(output_path) == path.abspath(input_path):
             return None, T("Output must be different from the input video.")
-        if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, 40, allow_empty=False):
-            return None, T("Bitrate must be a number between 2 and 40 (20 recommended).")
+        # Output-type-aware ceiling (real research, 2026-10-04): same disc_legal split
+        # sbs_to_mvc_cli.convert() itself enforces -- keyed off the real output path's own
+        # extension (not cbo_sbs2mvc_output_type's selection) for the same ADR-295 reason the
+        # extension check just above was dropped: the combo is only a convenience that sets
+        # this same field's extension, the field itself is the real source of truth.
+        from .sbs_to_mvc_cli import _mvc_bitrate_ceiling_mbps
+        lower_output_path = output_path.lower()
+        is_mkv_or_m2ts = lower_output_path.endswith(".mkv") or lower_output_path.endswith(".m2ts")
+        disc_legal = not is_mkv_or_m2ts  # .iso, or a folder path (neither .mkv/.m2ts nor .iso)
+        bitrate_ceiling = _mvc_bitrate_ceiling_mbps(disc_legal)
+        if not validate_number(self.txt_sbs2mvc_bitrate.GetValue(), 2, bitrate_ceiling, allow_empty=False):
+            return None, T("Bitrate must be a number between 2 and {} (20 recommended).").format(
+                f"{bitrate_ceiling:g}")
         layout = self.cbo_sbs2mvc_layout.GetClientData(self.cbo_sbs2mvc_layout.GetSelection()).replace("_4k", "")
         cmd = [sys.executable, "-m", "iw3.sbs_to_mvc_cli", "--input", input_path, "--output", output_path,
                "--layout", layout, "--bitrate", str(float(self.txt_sbs2mvc_bitrate.GetValue())), "--gui-progress"]
@@ -22910,6 +22930,20 @@ def _self_test_sbs2mvc_panel():
             frame.txt_sbs2mvc_bitrate.SetValue("99")
             cmd, err = frame.build_sbs2mvc_command()
             assert cmd is None and err, "out-of-range bitrate must be refused"
+            # Real research finding (2026-10-04): the old 40 Mbps ceiling was the wrong
+            # (2D-only) BD-ROM number misapplied to the 3D combined MVC case -- the real
+            # BD-3D combined ceiling is 60 Mbps, and it applies to disc-structured (.iso/
+            # BD-folder) output. A value previously rejected (50) must now be accepted for
+            # ISO output, up to the new 60 ceiling; above 60 must still be refused.
+            frame.txt_sbs2mvc_bitrate.SetValue("50")
+            cmd, err = frame.build_sbs2mvc_command()
+            assert err is None, "50 Mbps must now be accepted for ISO output (new 60 ceiling)"
+            frame.txt_sbs2mvc_bitrate.SetValue("60")
+            cmd, err = frame.build_sbs2mvc_command()
+            assert err is None, "60 Mbps (the new ISO ceiling) must be accepted"
+            frame.txt_sbs2mvc_bitrate.SetValue("61")
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd is None and err, "above the new 60 Mbps ISO ceiling must still be refused"
             frame.txt_sbs2mvc_bitrate.SetValue("20")
 
             cmd, err = frame.build_sbs2mvc_command()
@@ -22931,6 +22965,16 @@ def _self_test_sbs2mvc_panel():
             frame.txt_sbs2mvc_output.SetValue(out_mkv)
             cmd, err = frame.build_sbs2mvc_command()
             assert err is None and cmd[cmd.index("--output") + 1] == out_mkv, (cmd, err)
+            # Plain MKV output has no real physical-player compliance concern, so it gets a
+            # higher ceiling grounded in this encode's own fixed AVC Level 4.1 High Profile
+            # declaration (62.5 Mbps, the spec's own formal max bitrate for that level/profile).
+            frame.txt_sbs2mvc_bitrate.SetValue("62")
+            cmd, err = frame.build_sbs2mvc_command()
+            assert err is None, "62 Mbps must be accepted for Plain MKV output (62.5 ceiling)"
+            frame.txt_sbs2mvc_bitrate.SetValue("63")
+            cmd, err = frame.build_sbs2mvc_command()
+            assert cmd is None and err, "above the 62.5 Mbps Plain MKV ceiling must be refused"
+            frame.txt_sbs2mvc_bitrate.SetValue("20")
             frame.txt_sbs2mvc_output.SetValue(out)
 
             # ADR-273: real end-user suggestion -- "What if you opt to skip the ISO

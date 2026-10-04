@@ -46,7 +46,7 @@ from os import path
 
 from .mvc_extract_cli import Cancelled, iso_to_bd_folder, _remove_stale_temp
 from .sbs_to_mvc_cli import (bd_frame_rate, eye_filter, find_frim, probe_video, _plan_audio_subs,
-                             _mux_mkv_via_mkvmerge)
+                             _mux_mkv_via_mkvmerge, _mvc_bitrate_ceiling_mbps)
 from .utils import (
     _find_tsmuxer, _get_ffmpeg_bin, _tonemap_hdr_to_sdr, _notify_stage, _StageBar,
     process_video_full, STAGE_CONVERT_MVC, STAGE_DEPTH_STEREO, log_subprocess_cmd,
@@ -332,6 +332,10 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
     is_m2ts_output = lower_output.endswith(".m2ts")
     is_iso_output = lower_output.endswith(".iso")
     is_folder_output = not (is_mkv_output or is_m2ts_output or is_iso_output)
+    # Same disc-legal grouping sbs_to_mvc_cli.convert() uses -- see its own real research
+    # finding comment above _mvc_bitrate_ceiling_mbps() for why the bitrate ceiling (and audio-
+    # codec legality, and the muxopt choice below) key off this instead of a single flat number.
+    disc_legal = is_iso_output or is_folder_output
 
     frim = find_frim()
     if frim is None:
@@ -344,8 +348,14 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
         raise RuntimeError("tsMuxeR not found -- run `python -m iw3.install_mvc_tools`")
 
     bitrate_mbps = float(getattr(args, "mvc_bitrate", 20.0) or 20.0)
-    if not 2 <= bitrate_mbps <= 40:
-        raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
+    bitrate_ceiling = _mvc_bitrate_ceiling_mbps(disc_legal)
+    if not 2 <= bitrate_mbps <= bitrate_ceiling:
+        raise ValueError(
+            f"bitrate must be between 2 and {bitrate_ceiling:g} Mbps "
+            + ("(3D Blu-ray disc output -- .iso/BD-folder -- is combined-bitrate-limited to about "
+               "60 Mbps)" if disc_legal else
+               "(non-disc MVC output is limited by this encode's own AVC Level 4.1 High Profile "
+               "ceiling of 62.5 Mbps)"))
 
     out_dir = path.dirname(path.abspath(output_path))
     os.makedirs(out_dir, exist_ok=True)
@@ -415,7 +425,7 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
             raise Cancelled()
 
         av_lines, notes = _plan_audio_subs(original_source_path, work_dir, ffmpeg, True, fps_text=fps_text,
-                                           disc_legal=(is_iso_output or is_folder_output),
+                                           disc_legal=disc_legal,
                                            allow_lossless_eac3_on_disc=getattr(
                                                args, "mvc_allow_lossless_eac3_on_disc", False))
         state = getattr(args, "state", None)
@@ -483,7 +493,7 @@ def convert_direct(original_source_path, output_path, args, depth_model, side_mo
                  "the .iso/BD-folder options instead unless a specific player asks for a bare "
                  "clip.", file=sys.stderr)
         muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
-                  if (is_iso_output or is_folder_output) else "MUXOPT --new-audio-pes")
+                  if disc_legal else "MUXOPT --new-audio-pes")
         meta = [muxopt,
                 f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                 f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines

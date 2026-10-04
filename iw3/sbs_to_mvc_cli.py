@@ -972,6 +972,36 @@ def _mux_mkv_via_mkvmerge(base_es, dep_es, fps_text, av_lines, output_path, work
                                mkvpropedit_bin=mkvpropedit, value_override=13)
 
 
+# Real research finding (2026-10-04, cross-checked against several independent doom9.org
+# community sources -- the same community FRIM itself came from -- the official BDA spec text
+# is paywalled): FRIMEncode's own -vbr target in -o:mvc mode below is the COMBINED bitrate for
+# both views together, not "per eye". The old 40 Mbps ceiling here was the real BD-ROM 2D/
+# base-view-ONLY limit, misapplied to this 3D combined case -- the real BD-3D combined MVC
+# ceiling is 60 Mbps. That figure is a genuine hardware/compliance concern only for a real
+# disc-structured target (.iso/BD-folder) played on certified Blu-ray hardware; it doesn't
+# meaningfully apply to a plain .mkv/.m2ts file read by an ordinary software player (VLC,
+# MPC-HC, ...) with no certified-hardware decoder-buffer model to honor.
+#
+# The encode below still declares "-profile high -level 4.1" for every output type regardless,
+# though, so AVC Level 4.1 High Profile's own formally-defined max bitrate is the real next
+# ceiling if the non-disc case is pushed arbitrarily far past BD's own number: Table A-1 of the
+# H.264/AVC spec gives MaxBR=50000 (kbit/s) for Baseline/Main/Extended at Level 4.1, and High
+# Profile's cpbBrVclFactor of 1.25 scales that to 62500 kbit/s = 62.5 Mbps (confirmed against
+# ffmpeg's own h264_levels.c level-limits table) -- the non-disc ceiling stops just under that
+# real formal limit instead of picking an arbitrary large number.
+_DISC_BITRATE_CEILING_MBPS = 60.0
+_NONDISC_BITRATE_CEILING_MBPS = 62.5
+
+
+def _mvc_bitrate_ceiling_mbps(disc_legal):
+    """The real upper bound for --bitrate, by output type -- see the real research finding
+    above. disc_legal=True (.iso/BD-folder, same grouping convert()/convert_direct() already
+    use for audio-codec legality) gets the real BD-3D combined-MVC ceiling; disc_legal=False
+    (.mkv/.m2ts, no certified-hardware compliance to honor) gets the higher ceiling grounded in
+    this encode's own fixed AVC Level 4.1 High Profile declaration instead."""
+    return _DISC_BITRATE_CEILING_MBPS if disc_legal else _NONDISC_BITRATE_CEILING_MBPS
+
+
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,
             include_av=True, work_dir=None, cut_seconds=None, keep_temp=False,
             stop_event=None, progress_cb=None, autocrop=None, fix_frame_rate=False,
@@ -1046,6 +1076,9 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
     is_m2ts_output = lower_output.endswith(".m2ts")
     is_iso_output = lower_output.endswith(".iso")
     is_folder_output = not (is_mkv_output or is_m2ts_output or is_iso_output)
+    # Same disc-legal grouping _plan_audio_subs()/the muxopt choice below already use for audio-
+    # codec legality -- a real physical-player compliance concern only applies to .iso/BD-folder.
+    disc_legal = is_iso_output or is_folder_output
     if frim is None:
         raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
     if tsmuxer is None:
@@ -1054,8 +1087,14 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         raise RuntimeError("ffmpeg not found")
     if not path.exists(input_path):
         raise RuntimeError(f"input file not found: {input_path}")
-    if not 2 <= bitrate_mbps <= 40:
-        raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
+    bitrate_ceiling = _mvc_bitrate_ceiling_mbps(disc_legal)
+    if not 2 <= bitrate_mbps <= bitrate_ceiling:
+        raise ValueError(
+            f"bitrate must be between 2 and {bitrate_ceiling:g} Mbps "
+            + ("(3D Blu-ray disc output -- .iso/BD-folder -- is combined-bitrate-limited to about "
+               "60 Mbps)" if disc_legal else
+               "(non-disc MVC output is limited by this encode's own AVC Level 4.1 High Profile "
+               "ceiling of 62.5 Mbps)"))
 
     width, height, rate, duration, hdr = probe_video(input_path)
     if hdr and not convert_hdr_to_sdr:
@@ -1236,7 +1275,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
         av_lines, notes = ([], [])
         if include_av:
             av_lines, notes = _plan_audio_subs(input_path, work_dir, ffmpeg, True, fps_text=fps_text,
-                                               disc_legal=(is_iso_output or is_folder_output),
+                                               disc_legal=disc_legal,
                                                allow_lossless_eac3_on_disc=allow_lossless_eac3_on_disc)
         for n in notes:
             print(f"[sbs2mvc] note: {n}", file=sys.stderr)
@@ -1300,7 +1339,7 @@ def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_e
                  ".iso/BD-folder options instead unless a specific player asks for a bare clip.",
                  file=sys.stderr)
         muxopt = ("MUXOPT --blu-ray --new-audio-pes --auto-chapters=10 --maxbitrate=48000"
-                  if (is_iso_output or is_folder_output) else "MUXOPT --new-audio-pes")
+                  if disc_legal else "MUXOPT --new-audio-pes")
         meta = [muxopt,
                 f"V_MPEG4/ISO/AVC, {fwd(base_es)}, fps={fps_text}, insertSEI, contSPS",
                 f"V_MPEG4/ISO/MVC, {fwd(dep_es)}, fps={fps_text}, insertSEI, contSPS"] + av_lines
@@ -1389,7 +1428,9 @@ def main():
     parser.add_argument("--layout", choices=LAYOUTS, default=None,
                         help="how the eyes are stored in the input (default: guessed from its size)")
     parser.add_argument("--bitrate", type=float, default=20.0,
-                        help="target Mbps per view (default 20; 3D Blu-ray allows about 40 combined)")
+                        help="target COMBINED Mbps for both views together (default 20; disc output "
+                             "-- .iso/BD-folder -- allows up to about 60; non-disc .mkv/.m2ts output "
+                             "allows up to 62.5, this encode's own AVC Level 4.1 High Profile ceiling)")
     parser.add_argument("--swap-eyes", action="store_true", help="the input is right-eye-first (cross-eyed)")
     parser.add_argument("--autocrop", type=str.upper, default=None, choices=AUTOCROP_MODES,
                         help="remove black bars from each eye before fitting: BLACK = all sides, BLACK_TB = "

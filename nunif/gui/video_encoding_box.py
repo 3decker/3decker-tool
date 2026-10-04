@@ -53,7 +53,7 @@ def codecs_available(codecs):
 
 class VideoEncodingBox():
     def __init__(self, parent, name_prefix="", translate_function=empty_translate_function,
-                 has_nvenc=False, has_qsv=False, **kwargs):
+                 has_nvenc=False, has_qsv=False, on_preview_peak_bitrate=None, **kwargs):
         T = translate_function
         prefix = name_prefix + "_" if name_prefix else ""
         self.has_nvenc = has_nvenc
@@ -145,6 +145,19 @@ class VideoEncodingBox():
 
         self.chk_limit_bitrate = wx.CheckBox(self.grp_video, label=T("Limit Bitrate"),
                                              name=f"{prefix}chk_limit_bitrate")
+        self.btn_preview_peak_bitrate = None
+        if on_preview_peak_bitrate is not None:
+            self.btn_preview_peak_bitrate = wx.Button(self.grp_video, label=T("Preview Peak Bitrate"),
+                                                      name=f"{prefix}btn_preview_peak_bitrate")
+            self.btn_preview_peak_bitrate.SetToolTip(
+                T("Converts a short sample (about 3 minutes from the middle of the movie) with your current "
+                  "settings and reports the expected peak bitrate against the Bitrate value above, so you "
+                  "know whether Limit Bitrate would likely trigger before converting the whole movie. "
+                  "Pros: no need to convert the whole movie to find out. Cons: it is only an estimate from a "
+                  "short sample, so a burst elsewhere in the movie can still push the real peak higher. "
+                  "Recommendation: run it once per movie if Limit Bitrate matters for your playback."))
+            self.btn_preview_peak_bitrate.Bind(wx.EVT_BUTTON, on_preview_peak_bitrate)
+            self.btn_preview_peak_bitrate.Hide()
         self.chk_limit_bitrate.SetValue(False)
         self.chk_limit_bitrate.SetToolTip(
             T("hevc_nvenc/h264_nvenc only. What it's for: CRF alone has no size ceiling — the encoder "
@@ -229,7 +242,11 @@ class VideoEncodingBox():
         layout.Add(self.cbo_crf, (5, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_bitrate, (6, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_bitrate, (6, 1), flag=wx.EXPAND)
-        layout.Add(self.chk_limit_bitrate, (7, 1), flag=wx.EXPAND)
+        limit_row = wx.BoxSizer(wx.HORIZONTAL)
+        limit_row.Add(self.chk_limit_bitrate, 1, wx.ALIGN_CENTER_VERTICAL)
+        if self.btn_preview_peak_bitrate is not None:
+            limit_row.Add(self.btn_preview_peak_bitrate, 0, wx.LEFT, 4)
+        layout.Add(limit_row, (7, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_profile_level, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_profile_level, (8, 1), flag=wx.EXPAND)
 
@@ -537,4 +554,6 @@ class VideoEncodingBox():
         elif codec != "libopenh264":
             self.lbl_bitrate.Hide()
             self.cbo_bitrate.Hide()
+        if self.btn_preview_peak_bitrate is not None:
+            self.btn_preview_peak_bitrate.Show(codec in {"hevc_nvenc", "h264_nvenc"} and self.limit_bitrate)
         self.sizer.Layout()

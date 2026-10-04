@@ -20,7 +20,7 @@ import wx.lib.stattext as stattext
 import wx.lib.scrolledpanel as scrolledpanel
 import torch
 from .utils import (
-    create_parser, set_state_args, iw3_main, run_iw3_main_with_job_log,
+    create_parser, set_state_args, iw3_main, run_iw3_main_with_job_log, preview_peak_bitrate,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
     _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram, build_cli_command_from_args,
     analyze_source_video, format_source_analysis,
@@ -1020,6 +1020,12 @@ class IW3App(wx.App):
         # stays silent unless there's a real update to report.
         startWorker(main_frame.on_exit_startup_check_updates_worker, main_frame.run_check_3decker_updates)
         return True
+
+
+def run_preview_peak_bitrate(args):
+    """Worker-thread body for Preview Peak Bitrate. Returns the args too, so the GUI can keep
+    the depth model this run loaded (same reuse as test_quick_preview())."""
+    return preview_peak_bitrate(args.input, args), args
 
 
 class MainFrame(wx.Frame):
@@ -3436,7 +3442,8 @@ class MainFrame(wx.Frame):
         # sbs/vr180, padding
         # max-fps, crf, preset, tune
         self.grp_video = VideoEncodingBox(self.tab_video_enc, translate_function=T,
-                                          has_nvenc=has_nvenc(), has_qsv=has_qsv())
+                                          has_nvenc=has_nvenc(), has_qsv=has_qsv(),
+                                          on_preview_peak_bitrate=self.on_click_btn_preview_peak_bitrate)
 
         # input video filter
         # deinterlace, rotate, vf
@@ -12992,6 +12999,63 @@ class MainFrame(wx.Frame):
             traceback.print_tb(tb)
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
 
+    def on_click_btn_preview_peak_bitrate(self, event):
+        # CRITICAL, DO NOT REORDER: ensure_cuda_context() must run before parse_args() -- see ADR-218
+        # and on_click_btn_start()'s own comment.
+        if not self._ensure_cuda_context_safe():
+            return
+        try:
+            args = self.parse_args()
+        except ValueError as e:
+            wx.MessageBox(str(e), f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        if args is None:
+            return
+        if self.processing:
+            wx.MessageBox(T("Wait for the current conversion to finish before previewing the peak bitrate."),
+                          T("Preview Peak Bitrate"), wx.OK | wx.ICON_INFORMATION)
+            return
+        if not is_video(args.input):
+            wx.MessageBox(T("Preview Peak Bitrate only supports a single video file"),
+                          T("Preview Peak Bitrate"), wx.OK | wx.ICON_INFORMATION)
+            return
+
+        self.grp_video.btn_preview_peak_bitrate.Disable()
+        self.btn_start.Disable()
+        self.SetStatusText(T("Previewing peak bitrate..."))
+        startWorker(self.on_exit_preview_peak_bitrate_worker, run_preview_peak_bitrate, wargs=(args,))
+
+    def on_exit_preview_peak_bitrate_worker(self, result):
+        self.grp_video.btn_preview_peak_bitrate.Enable()
+        self.update_start_button_state()
+        try:
+            preview, args = result.get()
+        except: # noqa
+            self.SetStatusText(T("Error"))
+            self._show_and_log_crash(*sys.exc_info())
+            return
+
+        self.depth_model = args.state["depth_model"]
+        self.depth_model_type = args.depth_model
+        self.depth_model_device_id = args.gpu
+        self.depth_model_height = args.resolution
+        self.depth_model_limit_resolution = args.limit_resolution
+        self.SetStatusText(T("Preview ready"))
+
+        peak = preview["peak_mbps"]
+        limit = preview["limit_mbps"]
+        if preview["would_trigger"]:
+            verdict = T("Limit Bitrate would likely trigger on a full run.")
+            icon = wx.ICON_WARNING
+        else:
+            verdict = T("Limit Bitrate would likely NOT trigger on a full run.")
+            icon = wx.ICON_INFORMATION
+        caveat = T("This is an estimate from a short sample, not a guarantee for the whole movie. "
+                   "A short burst elsewhere in the full movie can still push the real peak higher.")
+        message = (f"{T('Expected peak')}: {peak:.1f} Mbps ({T('your limit')}: {limit:.0f} Mbps)\n\n"
+                   f"{verdict}\n\n{caveat}")
+        wx.MessageBox(message, T("Preview Peak Bitrate"), wx.OK | icon)
+
     def on_click_btn_analyze_source(self, event):
         """ADR-297: real, measured facts about the current Input video (resolution, codec,
         actual average bitrate, and best-effort source CRF) so the user has a real reference
@@ -22513,6 +22577,155 @@ def _self_test_bitrate_cap_post_step():
     print("_self_test_bitrate_cap_post_step: PASS")
 
 
+def _self_test_preview_peak_bitrate():
+    """Preview Peak Bitrate (ADR-338): converts a short sample with the user's current settings
+    and reports whether Limit Bitrate would likely trigger on a full run. Fully mocked (no GPU,
+    no real movie): iw3_main() is replaced by a fake that writes a placeholder output file, and
+    _measure_peak_window_bitrate_bps() returns a chosen peak.
+    Covers: peak clearly under / over the limit; the 5% tolerance band agreeing with what
+    _run_bitrate_cap() itself decides for the same peak; a temp-folder cleanup that still runs
+    when the conversion fails partway; the real source file never being written to; the sample
+    window (middle of the movie, honoring Start/End, short range kept whole); Limit Bitrate forced
+    off for the sample; and the GUI button only showing for NVENC with Limit Bitrate checked."""
+    import types
+    import copy
+    import tempfile
+    import shutil
+    from unittest import mock
+    from . import utils as U
+
+    class _WouldReencode(Exception):
+        pass
+
+    def _args(**kw):
+        base = dict(video_bitrate="20M", start_time=None, end_time=None)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    tmp_root = tempfile.mkdtemp(prefix="iw3_peak_selftest_")
+    try:
+        src = path.join(tmp_root, "source.mkv")
+        with open(src, "wb") as f:
+            f.write(b"ORIGINAL SOURCE BYTES")
+        src_stat = os.stat(src)
+
+        fake_meta = types.SimpleNamespace(get_duration=lambda: 600.0)
+        seen = {}
+
+        def fake_iw3_main(sample_args, fail=False):
+            seen["args"] = copy.copy(sample_args)
+            seen["out_dir"] = sample_args.output
+            with open(path.join(sample_args.output, "sample.mkv"), "wb") as f:
+                f.write(b"placeholder")
+            if fail:
+                raise RuntimeError("simulated conversion failure")
+            return sample_args
+
+        def _preview(peak_mbps, fail=False, **kw):
+            def _iw3(sample_args):
+                return fake_iw3_main(sample_args, fail=fail)
+            with mock.patch.object(U.VU.VideoMetadata, "from_file", return_value=fake_meta), \
+                 mock.patch.object(U, "iw3_main", side_effect=_iw3), \
+                 mock.patch.object(U, "_measure_peak_window_bitrate_bps",
+                                   return_value=int(peak_mbps * 1_000_000)) as m_measure:
+                result = U.preview_peak_bitrate(src, _args(**kw))
+            seen["measured_path"] = m_measure.call_args[0][0] if m_measure.called else None
+            return result
+
+        # clearly under / clearly over
+        r = _preview(12.0)
+        assert r["would_trigger"] is False and abs(r["peak_mbps"] - 12.0) < 1e-6 and r["limit_mbps"] == 20.0, r
+        r = _preview(35.0)
+        assert r["would_trigger"] is True and abs(r["peak_mbps"] - 35.0) < 1e-6, r
+
+        # tolerance band must agree with what _run_bitrate_cap() itself decides for the same peak
+        cap_args = types.SimpleNamespace(limit_bitrate=True, video_codec="hevc_nvenc", video_bitrate="20M",
+                                         crf=15, pix_fmt="yuv420p", gpu=[-1])
+
+        def _cap_would_reencode(peak_mbps):
+            with mock.patch.object(U, "_measure_peak_window_bitrate_bps",
+                                   return_value=int(peak_mbps * 1_000_000)), \
+                 mock.patch.object(U, "_get_ffmpeg_bin", side_effect=_WouldReencode()):
+                try:
+                    U._run_bitrate_cap("x.mkv", cap_args)
+                except _WouldReencode:
+                    return True
+            return False
+
+        for peak in (20.8, 21.2, 19.0, 35.0):
+            preview_verdict = _preview(peak)["would_trigger"]
+            assert preview_verdict == _cap_would_reencode(peak), (peak, preview_verdict)
+        assert _preview(20.8)["would_trigger"] is False
+        assert _preview(21.2)["would_trigger"] is True
+
+        # sample window: middle of the movie by default, honoring Start/End when given
+        r = _preview(12.0)
+        assert r["sample_seconds"] == U.PREVIEW_PEAK_SAMPLE_SECONDS
+        assert seen["args"].start_time == str(210.0) and seen["args"].end_time == str(390.0), seen["args"]
+        _preview(12.0, start_time="00:05:00", end_time="00:10:00")
+        assert seen["args"].start_time == str(360.0) and seen["args"].end_time == str(540.0), seen["args"]
+        r = _preview(12.0, start_time="00:00:00", end_time="00:01:00")
+        assert r["sample_seconds"] == 60.0 and seen["args"].start_time == "0.0", (r, seen["args"])
+
+        # the sample conversion itself must measure the RAW conversion (Limit Bitrate forced off),
+        # never write into the real source, and never write a companion MVC file
+        _preview(12.0, limit_bitrate=True)
+        assert seen["args"].limit_bitrate is False and seen["args"].convert_to_mvc is False
+        assert seen["args"].input == src
+        assert path.abspath(seen["out_dir"]) != path.abspath(src)
+        assert seen["measured_path"] is not None and path.dirname(seen["measured_path"]) == seen["out_dir"]
+
+        # temp sample folder is removed even when the conversion fails partway
+        try:
+            _preview(12.0, fail=True)
+            raise AssertionError("expected the simulated failure to propagate")
+        except RuntimeError as e:
+            assert "simulated" in str(e), e
+        assert not path.exists(seen["out_dir"]), "temp sample folder must be removed after a failure"
+
+        # bad Bitrate value is rejected up front
+        try:
+            U.preview_peak_bitrate(src, _args(video_bitrate="abc"))
+            raise AssertionError("expected ValueError for an unparseable Bitrate")
+        except ValueError:
+            pass
+
+        # the real source file was never written to by any of the above
+        src_stat_after = os.stat(src)
+        with open(src, "rb") as f:
+            assert f.read() == b"ORIGINAL SOURCE BYTES"
+        assert src_stat_after.st_mtime == src_stat.st_mtime and src_stat_after.st_size == src_stat.st_size
+
+        # GUI button: shown only for NVENC with Limit Bitrate checked, never otherwise
+        import wx
+        app = None
+        frame = None
+        try:
+            app = wx.App()
+            frame = MainFrame()
+            box = frame.grp_video
+            box.cbo_video_codec.SetValue("hevc_nvenc")
+            box.chk_limit_bitrate.SetValue(False)
+            box.update_bitrate_cap_visibility()
+            assert not box.btn_preview_peak_bitrate.IsShown()
+            box.chk_limit_bitrate.SetValue(True)
+            box.update_bitrate_cap_visibility()
+            assert box.btn_preview_peak_bitrate.IsShown()
+            box.cbo_video_codec.SetValue("libx264")
+            box.update_bitrate_cap_visibility()
+            assert not box.btn_preview_peak_bitrate.IsShown()
+        finally:
+            if frame is not None:
+                frame.Destroy()
+                wx.SafeYield()
+            if app is not None:
+                app.Destroy()
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    print("_self_test_preview_peak_bitrate: PASS")
+
+
 def _self_test_bitrate_cap_preserves_dv():
     """ADR-318: real, confirmed incident -- _run_bitrate_cap()'s own re-encode has zero
     Dolby Vision awareness (a fresh NVENC pass carries no DV VPS/RPU SEI of its own), so
@@ -28576,6 +28789,7 @@ def _run_self_tests():
         _self_test_nvenc_bitrate_cap,
         _self_test_bitrate_cap_stage_in_job_stages,
         _self_test_bitrate_cap_post_step,
+        _self_test_preview_peak_bitrate,
         _self_test_bitrate_cap_preserves_dv,
         _self_test_mvc_muxopt_new_audio_pes,
         _self_test_analyze_source_video,

@@ -1055,6 +1055,14 @@ def _measure_peak_window_bitrate_bps(video_path, window_seconds=1.0):
         return None
 
 
+def _bitrate_cap_exceeded(peak_bps, target_mbps):
+    """The one real "does this peak exceed the Limit Bitrate cap" decision. Shared by
+    _run_bitrate_cap() and preview_peak_bitrate() so the preview's answer always matches what
+    a real full run would do. A small tolerance avoids a wasteful, barely-necessary re-encode
+    when the real peak is only marginally over the limit."""
+    return peak_bps > target_mbps * 1_000_000 * 1.05
+
+
 def _run_bitrate_cap(video_path, args, dv_source=None):
     """ADR-298/peak-redesign: the real, reliable implementation of "Limit Bitrate" --
     a genuine second pass, run only when actually needed. See make_video_codec_option()'s
@@ -1128,10 +1136,7 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
     if not peak_bps or peak_bps <= 0:
         return None
 
-    target_bps = target_mbps * 1_000_000
-    # A small tolerance avoids a wasteful, barely-necessary re-encode when the real
-    # peak is only marginally over the limit.
-    if peak_bps <= target_bps * 1.05:
+    if not _bitrate_cap_exceeded(peak_bps, target_mbps):
         return None
 
     ffmpeg = _get_ffmpeg_bin()
@@ -1189,6 +1194,84 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
         _reinject_dv_after_rife(dv_source, video_path, args, use_manifest=False,
                                 what="bitrate-capped video", trim_source=True)
     return video_path
+
+
+PREVIEW_PEAK_SAMPLE_SECONDS = 180.0
+
+
+def preview_peak_bitrate(source_path, args, sample_seconds=PREVIEW_PEAK_SAMPLE_SECONDS):
+    """Preview Peak Bitrate: converts a short sample of the source with the user's CURRENT
+    settings (args, the same ones a real run would use), measures the real peak 1-second bitrate
+    of that sample's finished output, and reports whether Limit Bitrate would likely trigger on a
+    full run.
+
+    The sample is `sample_seconds` long, taken from the middle of the user's Start/End range (or
+    the whole movie when neither is set) -- a simple, documented default, not scene-aware. It is
+    only an estimate: a burst elsewhere in the full movie can push the real peak higher, and a
+    sample can miss a burst entirely, so neither answer is a guarantee.
+
+    Limit Bitrate is forced off for the sample, so the measurement is of the raw conversion --
+    the same thing _run_bitrate_cap() measures on a full run before deciding. The sample is written
+    into a fresh temp folder that is always removed afterward, so the real source file and any real
+    output folder are never written to. Returns a dict: peak_mbps, limit_mbps, would_trigger,
+    sample_seconds."""
+    import copy
+    import shutil
+    import tempfile
+
+    limit_mbps = _parse_bitrate_mbps(getattr(args, "video_bitrate", None))
+    if not limit_mbps:
+        raise ValueError("Preview Peak Bitrate needs a valid Bitrate value to compare against")
+
+    duration = VU.VideoMetadata.from_file(source_path).get_duration()
+    range_start = parse_time(args.start_time) if getattr(args, "start_time", None) else 0.0
+    range_end = parse_time(args.end_time) if getattr(args, "end_time", None) else duration
+    range_len = range_end - range_start
+    if range_len <= 0:
+        raise ValueError("Could not determine the length of the video to sample")
+    if range_len > sample_seconds:
+        sample_start = range_start + (range_len - sample_seconds) / 2
+        sample_len = sample_seconds
+    else:
+        sample_start = range_start
+        sample_len = range_len
+
+    sample_dir = tempfile.mkdtemp(prefix="iw3_peak_preview_")
+    try:
+        sample_args = copy.copy(args)
+        sample_args.input = source_path
+        sample_args.output = sample_dir
+        sample_args.start_time = str(sample_start)
+        sample_args.end_time = str(sample_start + sample_len)
+        sample_args.resume = False
+        sample_args.recursive = False
+        sample_args.auto_resume = False
+        sample_args.export = False
+        sample_args.export_disparity = False
+        sample_args.metadata = None
+        sample_args.write_job_log = False
+        sample_args.convert_to_mvc = False
+        sample_args.limit_bitrate = False
+        iw3_main(sample_args)
+
+        video_files = [path.join(sample_dir, f) for f in os.listdir(sample_dir) if is_video(f)]
+        if not video_files:
+            raise RuntimeError("Preview conversion produced no video file")
+        # The post-processing chain (upscale, RIFE, audio restore) can write more than one
+        # file; the most recently written one is the one a real run would keep.
+        final_path = max(video_files, key=os.path.getmtime)
+        peak_bps = _measure_peak_window_bitrate_bps(final_path)
+        if not peak_bps:
+            raise RuntimeError("Could not read the preview's per-second bitrate data")
+    finally:
+        shutil.rmtree(sample_dir, ignore_errors=True)
+
+    return {
+        "peak_mbps": peak_bps / 1_000_000,
+        "limit_mbps": limit_mbps,
+        "would_trigger": _bitrate_cap_exceeded(peak_bps, limit_mbps),
+        "sample_seconds": sample_len,
+    }
 
 
 def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_path=None):

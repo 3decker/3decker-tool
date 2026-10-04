@@ -1137,6 +1137,7 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
     ffmpeg = _get_ffmpeg_bin()
     base, ext = path.splitext(str(video_path))
     tmp_path = f"{base}_capping_tmp{ext}"
+    _notify_stage(args, STAGE_BITRATE_CAP)
     print(f"[iw3] Limit Bitrate: finished file's real peak 1-second bitrate is "
           f"{peak_bps / 1_000_000:.1f} Mbps, above your {target_mbps:.0f} Mbps limit -- "
           f"re-encoding to bring the peak down (quality-preserving content is left "
@@ -3630,6 +3631,14 @@ STAGE_HDR_REINJECT = "HDR/Dolby Vision Reinjection"
 STAGE_RESTORE_AV = "Restoring Audio & Subtitles"
 STAGE_CONVERT_MVC = "Converting to 3D Blu-ray MVC"
 STAGE_MAKEMKV_RIP = "Ripping the 3D Blu-ray ISO into a real MVC MKV (MakeMKV)"
+# Real gap found 2026-10-04: _run_bitrate_cap() never called _notify_stage() at all, so
+# when its real re-encode fired, the GUI's step indicator just kept showing whatever the
+# previous stage's label was (e.g. "Restoring Audio & Subtitles") with no progress
+# information, even though real, separate work (a real second ffmpeg pass) was genuinely
+# happening -- confirmed via a real user report mid-job, cross-checked against the
+# growing real _capping_tmp file on disk. Listed last since _run_bitrate_cap() is called
+# last in _run_post_conversion_steps() (after RIFE and Restore Audio & Subtitles).
+STAGE_BITRATE_CAP = "Capping Peak Bitrate"
 
 
 def _notify_stage(args, name):

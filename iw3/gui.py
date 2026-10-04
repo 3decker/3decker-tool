@@ -29,6 +29,7 @@ from .utils import (
     STAGE_DEPTH_STEREO, STAGE_WAIFU2X_UPSCALE, STAGE_RIFE_INTERPOLATE, STAGE_HDR_REINJECT,
     STAGE_RESTORE_AV,
     STAGE_CONVERT_MVC,
+    STAGE_BITRATE_CAP,
 )
 from . import update_check
 from . import subtitle_search_cli
@@ -11020,6 +11021,17 @@ class MainFrame(wx.Frame):
             stages.append(STAGE_HDR_REINJECT)
         if getattr(args, "restore_audio_subtitles", False):
             stages.append(STAGE_RESTORE_AV)
+        # Real gap fixed 2026-10-04: _run_bitrate_cap() is the LAST real post-step
+        # (utils.py's _run_post_conversion_steps() calls it after RIFE and Restore
+        # Audio & Subtitles), and it previously never called _notify_stage() at all, so
+        # its own real re-encode looked identical to the job being stuck on whatever the
+        # previous stage's label was. Like STAGE_HDR_REINJECT above, this is an
+        # upper-bound estimate: whether the finished file's real peak bitrate actually
+        # exceeds the limit can only be known by measuring it once the job is running,
+        # not synchronously here -- a run that enables Limit Bitrate but never actually
+        # trips it shows one more stage in "Step k/N" than fires, same known limitation.
+        if getattr(args, "limit_bitrate", False):
+            stages.append(STAGE_BITRATE_CAP)
         if getattr(args, "convert_to_mvc", False):
             stages.append(STAGE_CONVERT_MVC)
         return stages
@@ -22349,6 +22361,49 @@ def _fake_packet_probe(window_mbps):
     return types.SimpleNamespace(returncode=0, stdout="\n".join(lines), stderr="")
 
 
+def _self_test_bitrate_cap_stage_in_job_stages():
+    """Real gap fixed 2026-10-04: _compute_job_stages() never listed Limit Bitrate's
+    own real re-encode step at all, so a real user watching the GUI mid-job saw the
+    step indicator stuck on whatever stage ran before it (no progress info), even
+    though _run_bitrate_cap()'s own real second ffmpeg pass was genuinely running
+    (confirmed via the real growing _capping_tmp file on disk). STAGE_BITRATE_CAP must
+    appear if and only if Limit Bitrate is actually checked, and must be listed AFTER
+    STAGE_RESTORE_AV, matching _run_post_conversion_steps()'s own real call order in
+    utils.py (RIFE, then Restore Audio & Subtitles, then the bitrate cap, last)."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        frame.grp_video.chk_limit_bitrate.SetValue(False)
+        args_off = frame.parse_args(skip_set_state=True)
+        assert args_off.limit_bitrate is False
+        stages_off = frame._compute_job_stages(args_off)
+        assert STAGE_BITRATE_CAP not in stages_off, stages_off
+
+        frame.grp_video.chk_limit_bitrate.SetValue(True)
+        frame.chk_restore_audio_subtitles.SetValue(True)
+        args_on = frame.parse_args(skip_set_state=True)
+        assert args_on.limit_bitrate is True
+        assert args_on.restore_audio_subtitles is True
+        stages_on = frame._compute_job_stages(args_on)
+        assert STAGE_BITRATE_CAP in stages_on, stages_on
+        assert STAGE_RESTORE_AV in stages_on, stages_on
+        assert stages_on.index(STAGE_BITRATE_CAP) > stages_on.index(STAGE_RESTORE_AV), (
+            "must be listed AFTER Restore Audio & Subtitles, matching the real "
+            "post-conversion call order", stages_on)
+
+        print("_self_test_bitrate_cap_stage_in_job_stages: PASS")
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if app is not None:
+            app.Destroy()
+
+
 def _self_test_bitrate_cap_post_step():
     """Peak-aware Limit Bitrate redesign: _run_bitrate_cap() checks the finished
     file's REAL PEAK 1-second-windowed bitrate (via direct packet-level ffprobe
@@ -22396,12 +22451,21 @@ def _self_test_bitrate_cap_post_step():
     # fixes), but the real PEAK window (235 Mbps) is far over it -- must trigger.
     hp2_curve = [10.0] * 103 + [235.0] * 17
     assert sum(hp2_curve) / len(hp2_curve) < 43.0, "fixture must reproduce the real diluted-average shape"
+    # Real gap fixed 2026-10-04: _run_bitrate_cap() never called _notify_stage() at all,
+    # so a real user saw the GUI's step indicator stuck on the PREVIOUS stage's label
+    # (no progress info) while this step's own real re-encode was genuinely running.
+    # args() has no real args.state/stage_fn here (same as every other case in this
+    # test), so this only confirms the call site itself fires correctly -- the no-op
+    # behavior for CLI/no-stage_fn callers is _notify_stage()'s own existing contract,
+    # unchanged by this fix.
     with mock.patch("subprocess.run", side_effect=[_fake_packet_probe(hp2_curve),
                                                     types.SimpleNamespace(returncode=0, stdout="", stderr="")]) as m_run, \
          mock.patch("os.path.exists", return_value=True), \
-         mock.patch("os.replace") as m_replace:
+         mock.patch("os.replace") as m_replace, \
+         mock.patch.object(U, "_notify_stage") as m_notify:
         result = U._run_bitrate_cap("x.mkv", _args(video_bitrate="43M"))
     assert result == "x.mkv", "the diluted burst must trigger under the new peak-based check"
+    m_notify.assert_called_once_with(mock.ANY, U.STAGE_BITRATE_CAP)
     assert m_run.call_count == 2, "must probe, then re-encode"
     reencode_cmd = m_run.call_args_list[1][0][0]
     assert "-rc" in reencode_cmd and reencode_cmd[reencode_cmd.index("-rc") + 1] == "vbr", reencode_cmd
@@ -28466,6 +28530,7 @@ def _run_self_tests():
         _self_test_max_negative_parallax_field,
         _self_test_frame_packing_sei,
         _self_test_nvenc_bitrate_cap,
+        _self_test_bitrate_cap_stage_in_job_stages,
         _self_test_bitrate_cap_post_step,
         _self_test_bitrate_cap_preserves_dv,
         _self_test_mvc_muxopt_new_audio_pes,

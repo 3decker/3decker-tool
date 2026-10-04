@@ -213,10 +213,35 @@ def ensure_rife_model(tier, show_progress=True):
     return path.join(get_rife_dir(tier), "train_log")
 
 
-def load_rife_model(tier, device):
+def load_rife_model(tier, device, fp16=False):
     """Dynamically imports the official RIFE_HDv3.Model class from the fetched,
     version-matched train_log/ directory (see module docstring) and loads it onto
-    `device`. Returns the loaded, eval()-mode model instance."""
+    `device`. Returns the loaded, eval()-mode model instance.
+
+    `fp16` (opt-in, default False -- see rife_cli.py's --fp16 flag): casts the
+    loaded model to half precision for faster inference on CUDA Tensor Cores.
+    Half precision is only meaningful on CUDA -- on any other device (CPU, MPS,
+    XPU) it is silently ignored with a logged warning rather than attempted,
+    since CPU half-precision inference is both unsupported-in-practice for most
+    ops and not a real speedup, and attempting it would risk a confusing dtype
+    crash deep inside the externally-fetched, version-matched Model class rather
+    than a clear, actionable message here at the real decision point.
+
+    The externally-fetched Model class (see module docstring -- its exact
+    architecture is NOT vendored in this repo and can differ per tier/version)
+    is not guaranteed to expose `.half()` itself; the known, stable real
+    attribute every RIFE_HDv3.Model implementation wraps a plain nn.Module
+    flownet in is `.flownet`, so that is used as the fallback. Neither being
+    present means this tier's fetched code doesn't support half precision at
+    all -- raised as a clear error rather than silently continuing in float32,
+    since the caller explicitly opted into --fp16.
+
+    The resulting enabled/disabled state is stashed on the returned model as
+    `_iw3_fp16` so interpolate_frame() (the only caller of model.inference())
+    knows whether to cast its own input tensors to match, without needing a
+    second, separately-threaded fp16 argument through every call site --
+    mirrors how interpolate_frame() already reads the model's own `version`
+    attribute for the timestep-support check."""
     import torch
 
     train_log_dir = ensure_rife_model(tier)
@@ -256,6 +281,26 @@ def load_rife_model(tier, device):
     model.load_model(train_log_dir, -1)
     model.eval()
     model.device()
+
+    applied_fp16 = False
+    if fp16:
+        if device.type != "cuda":
+            logger.warning(
+                f"RIFE: --fp16 was requested but device is '{device.type}', not 'cuda' -- "
+                f"half precision is only meaningful on CUDA (Tensor Cores); ignoring --fp16 "
+                f"and continuing in float32.")
+        elif hasattr(model, "half"):
+            model.half()
+            applied_fp16 = True
+        elif hasattr(model, "flownet"):
+            model.flownet.half()
+            applied_fp16 = True
+        else:
+            raise RuntimeError(
+                f"RIFE: --fp16 was requested but the loaded model exposes neither "
+                f"'half()' nor a 'flownet' attribute to cast -- this tier's fetched "
+                f"model code does not support half precision.")
+    model._iw3_fp16 = applied_fp16
     return model
 
 
@@ -273,15 +318,28 @@ def pad_to_valid_size(img, scale=1.0):
 
 
 def interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
-    """img0/img1: NCHW float tensors, 0-1 range, same H/W, same device as model.
+    """img0/img1: NCHW float32 tensors, 0-1 range, same H/W, same device as model.
     Returns the single interpolated frame at the given `timestep` (0.0=img0,
     1.0=img1, 0.5=midpoint -- the previous, only-ever-used default), cropped back
     to the original size -- matches the official inference_video.py two-frame
     call convention (RIFE >=3.9 models take an explicit timestep; older ones only
     support the fixed midpoint via a 2-arg call, so any other timestep against
-    one of those is a real caller error, not silently rounded to 0.5)."""
+    one of those is a real caller error, not silently rounded to 0.5).
+
+    When `model` was loaded with --fp16 (see load_rife_model's `_iw3_fp16` flag),
+    the padded inputs are cast to half precision to match the model's own
+    half-precision weights before inference, and the result is always cast back
+    to float32 before being returned -- every downstream consumer (the manifest/
+    clone logic in rife_cli.py's frame_callback, VU.process_video's own encoder
+    feed) expects float32 NCHW tensors exactly as before this feature existed;
+    half precision is strictly an internal inference detail here and must never
+    leak out as a dtype change to the rest of the pipeline. Output is always
+    float32 regardless of whether fp16 was used, for the same reason."""
     padded0, h, w = pad_to_valid_size(img0, scale)
     padded1, _h, _w = pad_to_valid_size(img1, scale)
+    if getattr(model, "_iw3_fp16", False):
+        padded0 = padded0.half()
+        padded1 = padded1.half()
     if getattr(model, "version", 0) >= 3.9:
         middle = model.inference(padded0, padded1, timestep, scale)
     else:
@@ -290,4 +348,5 @@ def interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
                 f"RIFE model version {getattr(model, 'version', 0)} does not support arbitrary "
                 f"timesteps (only the fixed midpoint, timestep=0.5) -- got timestep={timestep}")
         middle = model.inference(padded0, padded1, scale)
+    middle = middle.float()
     return middle[:, :, :h, :w]

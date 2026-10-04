@@ -96,6 +96,16 @@ def create_parser():
                              "(e.g. 60 from a 24fps source). Must be higher than the source's own "
                              "fps. Mutually exclusive with --rife-multiplier.")
     parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--fp16", action="store_true", default=False,
+                         help="run RIFE inference in half precision (FP16) instead of the default "
+                              "float32 -- a real speed win on CUDA Tensor Cores (matches the official "
+                              "Practical-RIFE inference_video.py's own --fp16 flag/convention), but a "
+                              "genuine precision trade-off: half precision has been reported as "
+                              "occasionally unstable for flow-estimation models in some RIFE/frame-"
+                              "interpolation tools. Opt-in only -- omitted (the default), behavior is "
+                              "byte-for-byte unchanged float32 inference. Only meaningful with a CUDA "
+                              "--gpu device; with CPU (--gpu -1) or another non-CUDA device, this is "
+                              "ignored with a logged warning rather than attempted.")
     parser.add_argument("--video-codec", "-vc", type=str, default=None,
                          help="output video codec (same flag name/convention as the main iw3 "
                               "conversion pipeline's own --video-codec/-vc). Default: unset, which "
@@ -522,9 +532,9 @@ def _load_scene_cut_times_file(scene_cut_times_file):
 
 def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         rife_multiplier=None, rife_target_fps=None, video_codec=None,
-        scene_cut_times_file=None):
+        scene_cut_times_file=None, fp16=False):
     device = create_device(gpu)
-    model = load_rife_model(rife_model, device)
+    model = load_rife_model(rife_model, device, fp16=fp16)
     ratio_state = {"ratio": None, "cut_pair_indices": None}
     scene_cut_times = _load_scene_cut_times_file(scene_cut_times_file)
     manifest_frames = []
@@ -1287,6 +1297,208 @@ def _test_rife_carries_forward_source_comment_metadata():
     print("_test_rife_carries_forward_source_comment_metadata: PASS")
 
 
+def _test_rife_fp16_opt_in():
+    """Regression test for the real 2026-10-03 FP16 feature: load_rife_model()
+    gained an opt-in `fp16` argument (CLI: --fp16, off by default -- see
+    create_parser) that casts the loaded model to half precision for faster
+    CUDA Tensor Core inference. This is a genuine opt-in, not a default-on
+    change: existing callers that never pass fp16 must see byte-identical
+    behavior (model.half() never even attempted).
+
+    Covers every real branch in load_rife_model's fp16 handling:
+      - fp16=False (the default): half() never attempted, `_iw3_fp16` stays False.
+      - fp16=True on a CUDA device, model exposes `.half()` directly: used directly.
+      - fp16=True on a CUDA device, model has no `.half()` but DOES wrap a plain
+        `.flownet` (the one real attribute name every known RIFE_HDv3.Model
+        implementation uses): falls back to `model.flownet.half()`.
+      - fp16=True on a CUDA device, model supports neither: raises a clear
+        RuntimeError (the caller explicitly opted in -- silently continuing in
+        float32 would hide that the requested speedup never happened).
+      - fp16=True on a CPU device: ignored with a logged warning, never attempted
+        at all -- half precision is only meaningful on CUDA (Tensor Cores); see
+        load_rife_model's own docstring for why this isn't attempted-anyway.
+
+    Synthetic (CS-TEST-001): follows the exact same pattern as the existing
+    _test_rife_cpu_device_not_overridden_by_cuda_availability -- a fake
+    `train_log.RIFE_HDv3` module is injected via a mocked `importlib.import_module`
+    (load_rife_model actively clears any cached train_log.* sys.modules entries,
+    so pre-seeding sys.modules directly would just be deleted), and
+    `ensure_rife_model` is mocked to skip any real network/filesystem access.
+    `torch.cuda.set_device` is also mocked for the CUDA-device cases -- this
+    environment has no real GPU, and load_rife_model calls it unconditionally
+    whenever device.type == 'cuda', real GPU or not."""
+    import types
+    from unittest.mock import patch
+    from . import rife_model as rm
+
+    class FakeFlownet:
+        def __init__(self):
+            self.halved = False
+
+        def half(self):
+            self.halved = True
+
+    class FakeModelWithHalf:
+        version = 4.25
+
+        def __init__(self):
+            self.halved = False
+            self.flownet = FakeFlownet()
+
+        def device(self):
+            pass
+
+        def load_model(self, path, rank=0):
+            pass
+
+        def eval(self):
+            pass
+
+        def half(self):
+            self.halved = True
+
+    class FakeModelFlownetOnly:
+        version = 4.25
+
+        def __init__(self):
+            self.flownet = FakeFlownet()
+
+        def device(self):
+            pass
+
+        def load_model(self, path, rank=0):
+            pass
+
+        def eval(self):
+            pass
+
+    class FakeModelNoHalfSupport:
+        version = 4.25
+
+        def device(self):
+            pass
+
+        def load_model(self, path, rank=0):
+            pass
+
+        def eval(self):
+            pass
+
+    real_import_module = rm.importlib.import_module
+
+    def _run(model_cls, device, fp16):
+        fake_module = types.ModuleType("train_log.RIFE_HDv3")
+        fake_module.Model = model_cls
+
+        def fake_import_module(name, *args, **kwargs):
+            if name == "train_log.RIFE_HDv3":
+                return fake_module
+            return real_import_module(name, *args, **kwargs)
+
+        with patch.object(rm, "ensure_rife_model", lambda tier, show_progress=True: "/fake/train_log"), \
+             patch.object(rm.importlib, "import_module", fake_import_module), \
+             patch("torch.cuda.set_device", lambda d: None):
+            return rm.load_rife_model("rife_425", device, fp16=fp16)
+
+    # Default: no behavior change, half() never attempted.
+    model = _run(FakeModelWithHalf, torch.device("cpu"), fp16=False)
+    assert model.halved is False
+    assert model._iw3_fp16 is False
+
+    # CUDA + model.half() available -- used directly, no flownet fallback needed.
+    model = _run(FakeModelWithHalf, torch.device("cuda"), fp16=True)
+    assert model.halved is True
+    assert model.flownet.halved is False
+    assert model._iw3_fp16 is True
+
+    # CUDA + no model.half() -- falls back to model.flownet.half().
+    model = _run(FakeModelFlownetOnly, torch.device("cuda"), fp16=True)
+    assert model.flownet.halved is True
+    assert model._iw3_fp16 is True
+
+    # CUDA + neither half() nor flownet -- a clear, actionable error, not a silent no-op.
+    try:
+        _run(FakeModelNoHalfSupport, torch.device("cuda"), fp16=True)
+        raise AssertionError("expected RuntimeError for a model with no half-precision support")
+    except RuntimeError as e:
+        assert "half" in str(e).lower() or "flownet" in str(e).lower(), e
+
+    # CPU + fp16=True -- ignored (never attempted), no crash.
+    model = _run(FakeModelWithHalf, torch.device("cpu"), fp16=True)
+    assert model.halved is False
+    assert model._iw3_fp16 is False
+
+    print("_test_rife_fp16_opt_in: PASS")
+
+
+def _test_rife_fp16_interpolate_dtype_handling():
+    """Regression test for the other half of the real 2026-10-03 FP16 feature:
+    interpolate_frame() must cast its padded inputs to half precision when (and
+    only when) the model it's given was loaded with fp16 enabled (model._iw3_fp16,
+    set by load_rife_model -- see _test_rife_fp16_opt_in), and must ALWAYS return
+    a float32 tensor regardless -- every downstream consumer (rife_cli.py's
+    frame_callback, which feeds manifest/clone logic and VU.process_video's
+    encoder) expects float32 NCHW tensors exactly as before this feature existed.
+    Half precision must never leak out as a dtype change to the rest of the
+    pipeline.
+
+    Synthetic (CS-TEST-001): the REAL, unmodified interpolate_frame()/
+    pad_to_valid_size() run against plain fake model objects whose `inference()`
+    method asserts the dtype it was actually called with (float32 when
+    `_iw3_fp16` is False/absent -- the pre-existing, unchanged behavior; float16
+    when True) and deliberately returns ITS OWN input dtype unchanged (simulating
+    a real half-precision model's output staying half), so the float32 assertion
+    on interpolate_frame's return value only passes if the function's own
+    explicit cast-back-to-float32 step actually ran -- not because the fake
+    model happened to already return float32."""
+    from . import rife_model as rm
+
+    class FakeModelFP32:
+        version = 4.25
+        _iw3_fp16 = False
+
+        def inference(self, img0, img1, timestep, scale):
+            assert img0.dtype == torch.float32, img0.dtype
+            assert img1.dtype == torch.float32, img1.dtype
+            return img0.clone()
+
+    class FakeModelFP16:
+        version = 4.25
+        _iw3_fp16 = True
+
+        def inference(self, img0, img1, timestep, scale):
+            assert img0.dtype == torch.float16, img0.dtype
+            assert img1.dtype == torch.float16, img1.dtype
+            return img0.clone()  # stays float16 -- interpolate_frame must cast back
+
+    class FakeModelNoFp16Attr:
+        # No _iw3_fp16 attribute at all -- simulates a model loaded by code that
+        # predates this feature (or any caller that never set it): must behave
+        # exactly like fp16=False, not crash on a missing attribute.
+        version = 4.25
+
+        def inference(self, img0, img1, timestep, scale):
+            assert img0.dtype == torch.float32, img0.dtype
+            assert img1.dtype == torch.float32, img1.dtype
+            return img0.clone()
+
+    img0 = torch.rand(1, 3, 8, 8, dtype=torch.float32)
+    img1 = torch.rand(1, 3, 8, 8, dtype=torch.float32)
+
+    out_fp32 = rm.interpolate_frame(FakeModelFP32(), img0, img1, timestep=0.5, scale=1.0)
+    assert out_fp32.dtype == torch.float32, out_fp32.dtype
+    assert out_fp32.shape == img0.shape, out_fp32.shape
+
+    out_fp16 = rm.interpolate_frame(FakeModelFP16(), img0, img1, timestep=0.5, scale=1.0)
+    assert out_fp16.dtype == torch.float32, out_fp16.dtype
+    assert out_fp16.shape == img0.shape, out_fp16.shape
+
+    out_no_attr = rm.interpolate_frame(FakeModelNoFp16Attr(), img0, img1, timestep=0.5, scale=1.0)
+    assert out_no_attr.dtype == torch.float32, out_no_attr.dtype
+
+    print("_test_rife_fp16_interpolate_dtype_handling: PASS")
+
+
 def _run_self_tests():
     _test_ensure_rife_model_downloads_model_package()
     _test_rife_cpu_device_not_overridden_by_cuda_availability()
@@ -1299,6 +1511,8 @@ def _run_self_tests():
     _test_rife_video_codec_options()
     _test_rife_output_pix_fmt()
     _test_rife_carries_forward_source_comment_metadata()
+    _test_rife_fp16_opt_in()
+    _test_rife_fp16_interpolate_dtype_handling()
     print("All iw3.rife_cli self-tests PASSED")
 
 
@@ -1309,7 +1523,8 @@ def main(argv=None):
     args = create_parser().parse_args(argv)
     run(args.input, args.output, rife_model=args.rife_model, gpu=args.gpu,
         rife_multiplier=args.rife_multiplier, rife_target_fps=args.rife_target_fps,
-        video_codec=args.video_codec, scene_cut_times_file=args.scene_cut_times_file)
+        video_codec=args.video_codec, scene_cut_times_file=args.scene_cut_times_file,
+        fp16=args.fp16)
 
 
 if __name__ == "__main__":

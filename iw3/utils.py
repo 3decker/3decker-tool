@@ -2747,6 +2747,40 @@ def _inject_hdr_rpu(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin,
     return current, fps_str, None
 
 
+def _replace_with_retry(src, dst, attempts=5, initial_delay=0.5):
+    """os.replace() wrapper that retries through a transient Windows file-lock
+    race (CS-IO-001): something external -- Windows Defender real-time scanning,
+    a cloud-sync client (OneDrive, etc.) watching the folder, the Windows Search
+    Indexer -- can briefly grab a freshly-written large video file right as the
+    very next line of Python tries to rename it, raising
+    `PermissionError: [WinError 32] The process cannot access the file because
+    it is being used by another process`. That is exactly the error a real user
+    hit immediately after the DV/HDR reinjection pipeline's own internal
+    os.replace() had just (re)created the file (see ADR for this fix).
+
+    Retries with a short exponential backoff (0.5s, 1s, 2s, 4s, capped at 4s per
+    attempt -- ~7.5s worst case total across `attempts=5`, negligible next to a
+    multi-hour conversion job) but only for that specific transient pattern
+    (`PermissionError`, or any `OSError` whose `winerror` is 32). Any other
+    error -- e.g. `dst` being a directory, a real/non-transient permissions
+    problem -- is re-raised immediately on the first attempt, and the original
+    exception is always re-raised unchanged once `attempts` is exhausted, so a
+    genuine problem still surfaces clearly instead of being swallowed or
+    retried forever."""
+    import time as _time
+    delay = initial_delay
+    for attempt in range(1, attempts + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as e:
+            transient = isinstance(e, PermissionError) or getattr(e, "winerror", None) == 32
+            if not transient or attempt == attempts:
+                raise
+            _time.sleep(delay)
+            delay = min(delay * 2, 4.0)
+
+
 def _remux_injected_hevc(output_path, injected_hevc_path, fps_str, ffmpeg_bin, tmp_dir):
     """Phase 2 of DV/HDR10+ injection: remux an already-injected HEVC stream (from
     _inject_hdr_rpu) back into output_path's container in place of its original video
@@ -2774,7 +2808,7 @@ def _remux_injected_hevc(output_path, injected_hevc_path, fps_str, ffmpeg_bin, t
                  "-c", "copy", "-copyts", final_tmp],
                 "[HDR] packing the final file", total_bytes=_sz(injected_hevc_path) + _sz(output_path) // 20,
                 paths=[final_tmp])
-        os.replace(final_tmp, output_path)
+        _replace_with_retry(final_tmp, output_path)
     finally:
         for f in (injected_hevc_path, final_tmp):
             if f and path.exists(f):

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 3, 2026
+## Latest Update — October 4, 2026
+
+**Fixed: Dolby Vision could fail to reattach after RIFE on Windows, leaving the file without DV.** A real user report: running RIFE on a Dolby Vision source could fail at the very last step of putting DV back onto the finished file, with the file left unchanged (no DV) and an error about a file "being used by another process." Root cause: a real, known Windows quirk — right after that last file gets written, something else on your system (antivirus scanning it, OneDrive or another cloud-sync tool watching the folder, Windows' own search indexer) can briefly grab a lock on it for a split second, right as 3DECKER tries to move it into place. It now waits and tries again a few times if this happens, which should ride out that brief lock without adding any real delay to a normal run.
+
+## Update — October 3, 2026
 
 **Fixed: RIFE frame interpolation could produce a visible morph/warp effect right at a hard scene cut.** A real, confirmed gap: RIFE had no awareness of scene cuts at all, so it would try to smoothly blend between two completely unrelated frames whenever a cut happened to fall where it was generating an in-between frame — producing a brief, visible warping artifact right at the cut. It now reuses this app's own existing scene-detection data (already available if you've used Scene Detection or Scene Batch on that source) to recognize a cut and duplicate the nearest real frame there instead of blending across it — exactly how an ordinary, non-interpolated hard cut already looks, an instant change rather than a smooth morph. Costs nothing extra when that scene data is already available, and never forces a new scan on its own, so a normal RIFE job isn't slowed down by this fix.
 

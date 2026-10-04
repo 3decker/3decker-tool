@@ -42,7 +42,7 @@ import nunif.gui.subprocess_patch  # noqa
 from nunif.utils.video.metadata import parse_time
 from .utils import (
     _get_ffmpeg_bin, _find_ffprobe, _find_dovi_tool, _find_hdr10plus_tool,
-    _inject_hdr_rpu, _remux_injected_hevc, _detect_hdr_types,
+    _inject_hdr_rpu, _remux_injected_hevc, _detect_hdr_types, _replace_with_retry,
 )
 from .depth_blend import _extract_hdr_rpu_files
 
@@ -1047,7 +1047,7 @@ def _run_with_rife_manifest(args):
         print("[reinject-hdr] remuxing injected stream back into the container...", file=sys.stderr)
         _remux_injected_hevc(tmp_output, injected_hevc, fps_str, ffmpeg_bin, work_dir)
 
-        os.replace(tmp_output, output)
+        _replace_with_retry(tmp_output, output)
         print(f"[reinject-hdr] done -- wrote {output}", file=sys.stderr)
         return 0
     finally:
@@ -1222,7 +1222,7 @@ def _run_strict(args):
         print("[reinject-hdr] remuxing injected stream back into the container...", file=sys.stderr)
         _remux_injected_hevc(tmp_output, injected_hevc, fps_str, ffmpeg_bin, work_dir)
 
-        os.replace(tmp_output, output)
+        _replace_with_retry(tmp_output, output)
         print(f"[reinject-hdr] done -- wrote {output}", file=sys.stderr)
         return 0
     finally:
@@ -2163,7 +2163,74 @@ def _self_test_run_with_rife_manifest_dispatch_and_gating():
     print("_self_test_run_with_rife_manifest_dispatch_and_gating: PASS")
 
 
+def _self_test_replace_with_retry():
+    """Regression test for a real user-reported crash: a transient Windows
+    file-lock race (`PermissionError: [WinError 32] The process cannot access
+    the file because it is being used by another process`) hit the DV/HDR
+    reinjection pipeline's own os.replace() calls right after an earlier
+    os.replace() inside _remux_injected_hevc() had just (re)created that same
+    file -- plausibly Windows Defender/OneDrive/Search Indexer briefly grabbing
+    a freshly-written file. _replace_with_retry() must retry through that
+    specific transient error and eventually succeed, WITHOUT actually sleeping
+    for real seconds, but must re-raise immediately (no infinite retry loop,
+    no silently swallowed error) when the failure is genuinely persistent."""
+    from unittest.mock import patch
+
+    # (a) transient failures (PermissionError / winerror 32) that clear up after
+    # a few attempts -> must retry and eventually succeed, and must actually
+    # sleep between attempts (mocked so the test itself runs fast).
+    real_os_replace = os.replace
+    calls = {"n": 0}
+
+    def _flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(32, "The process cannot access the file "
+                                       "because it is being used by another process")
+        return real_os_replace(src, dst)
+
+    with tempfile.TemporaryDirectory(prefix="iw3_replace_retry_selftest_") as tmpdir:
+        src = path.join(tmpdir, "src.tmp")
+        dst = path.join(tmpdir, "dst.bin")
+        with open(src, "wb") as f:
+            f.write(b"data")
+        with patch("os.replace", side_effect=_flaky_replace) as mock_replace, \
+             patch("time.sleep") as mock_sleep:
+            _replace_with_retry(src, dst, attempts=5, initial_delay=0.5)
+        assert calls["n"] == 3, calls["n"]
+        assert path.exists(dst) and not path.exists(src)
+        assert mock_sleep.call_count == 2, mock_sleep.call_count  # retried twice before success
+        assert mock_replace.call_count == 3
+
+    # (b) a GENUINELY persistent transient-shaped failure -> must exhaust
+    # `attempts` and re-raise the original exception, not hang or swallow it.
+    with patch("os.replace", side_effect=PermissionError(32, "always locked")) as mock_replace, \
+         patch("time.sleep") as mock_sleep:
+        try:
+            _replace_with_retry("never_used_src", "never_used_dst", attempts=4, initial_delay=0.1)
+            assert False, "expected PermissionError to propagate"
+        except PermissionError:
+            pass
+        assert mock_replace.call_count == 4
+        assert mock_sleep.call_count == 3
+
+    # (c) a genuinely non-transient error (not a PermissionError, no winerror 32)
+    # -> must NOT be retried at all, and must re-raise immediately.
+    with patch("os.replace", side_effect=IsADirectoryError("dst is a directory")) as mock_replace, \
+         patch("time.sleep") as mock_sleep:
+        try:
+            _replace_with_retry("never_used_src", "never_used_dst")
+            assert False, "expected IsADirectoryError to propagate"
+        except IsADirectoryError:
+            pass
+        assert mock_replace.call_count == 1
+        mock_sleep.assert_not_called()
+
+    print("_self_test_replace_with_retry: PASS")
+
+
 def _run_self_tests():
+    _self_test_replace_with_retry()
     _self_test_probe_frames_and_duration()
     _self_test_reinject_progress_streaming()
     _self_test_reinject_duration_hint_helpers()

@@ -228,6 +228,60 @@ def _compute_cut_pair_indices(scene_cut_times, orig_fps):
     return {round(t * orig_fps_f) for t in (scene_cut_times or [])}
 
 
+# Duplicate-source-frame detection (real feature, 2026-10-03): real research comparing
+# this project's RIFE integration against Flowframes surfaced a documented equivalent --
+# Flowframes' own "Intelligent frame de-duplication" skips real flow-warp interpolation
+# between two consecutive real frames that are visually indistinguishable (a held frame
+# in 2D animation, or telecine/pulldown-style duplication), since there is no real motion
+# there for the model to interpolate -- any synthetic frame between them is already known,
+# with certainty, to look like both of them.
+#
+# Exact pixel equality (torch.equal) was rejected: real encoded video is essentially never
+# byte-identical even for a genuinely duplicated source frame (independent per-frame
+# compression noise), so it would catch almost nothing real. A near-equality check is used
+# instead, but deliberately kept VERY tight -- unlike the scene-cut protection above (whose
+# cut times come from an already-CONFIRMED detector, so a false positive there is impossible
+# by construction), a learned pixel-difference threshold here could genuinely misfire, and
+# the cost of a false positive (skipping real interpolation that should have happened) is a
+# real quality regression, not just a missed optimization -- so this is tuned to
+# under-detect (miss some real duplicate pairs, costing only a smaller time saving) rather
+# than over-detect.
+#
+# Thresholds are in normalized [0, 1] float units (VU.to_tensor's own output range --
+# 1/255 ~= 0.0039, one 8-bit level):
+#   - mean absolute difference < 0.004 (about 1 level): the WHOLE frame, on average, must
+#     look essentially unchanged -- genuine motion of any meaningful size pushes this well
+#     above a single frame's own compression-noise floor.
+#   - max absolute difference < 0.02 (about 5 levels): guards the opposite failure mode --
+#     a small, high-contrast moving object could keep the MEAN difference low (diluted by a
+#     mostly-static background) while still being real, visible motion; capping the single
+#     worst pixel too catches that case and refuses to call the pair a duplicate.
+# Both must hold (AND, not OR) -- stacking them is strictly more conservative than either
+# alone.
+#
+# On this project's own primary real use case (live-action movies), ordinary sensor/film
+# grain alone generates frame-to-frame noise above this bar even for a genuinely static
+# shot, so this is expected to fire on almost nothing for that content -- exactly as
+# intended (Flowframes documents the same "stays off for camera footage" behavior, for the
+# same underlying reason: real camera noise defeats near-exact equality on its own). It is
+# expected to fire mainly on 2D animation's held-frame duplicates and literal
+# telecine/pulldown duplicate frames, where the two real frames originate from identical
+# source content. Unconditional (no new user-facing toggle, matching ADR-325's own
+# precedent): at these thresholds a false positive on real content is not a realistic risk,
+# so this needs no opt-in/opt-out of its own.
+_DUPLICATE_MEAN_DIFF_THRESHOLD = 0.004
+_DUPLICATE_MAX_DIFF_THRESHOLD = 0.02
+
+
+def _is_near_duplicate_pair(pending, x):
+    """True when two consecutive REAL frame tensors (CHW/NCHW float32 in [0, 1], same
+    shape -- see VU.to_tensor) are close enough to call visually indistinguishable, per
+    the conservative dual mean+max threshold explained in the block comment above."""
+    diff = (pending - x).abs()
+    return (diff.mean().item() < _DUPLICATE_MEAN_DIFF_THRESHOLD
+            and diff.max().item() < _DUPLICATE_MAX_DIFF_THRESHOLD)
+
+
 def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
     # Buffers exactly the previous decoded frame; when the next frame arrives,
     # computes this pair's interpolation timesteps (see _compute_pair_timesteps)
@@ -261,6 +315,17 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
     # instant change, not a smooth one). Every other (non-cut) pair is completely
     # unaffected -- omitting --scene-cut-times-file (the default) makes this
     # byte-for-byte the same frame_callback as before this fix existed.
+    #
+    # Duplicate-source-frame detection (real feature, 2026-10-03, see
+    # _is_near_duplicate_pair above): independent of the cut-pair mechanism, a pair
+    # whose two real frames are near-pixel-identical (per that function's conservative
+    # threshold) is ALSO cloned instead of interpolated -- same clone-instead-of-blend
+    # action as a cut pair, flagged separately in the manifest (duplicate_source_frame,
+    # vs. scene_cut_duplicate) since it's a different real reason. The two compose
+    # cleanly: the near-duplicate check only runs for a pair that isn't ALREADY a known
+    # cut pair (a confirmed cut and a learned pixel-similarity guess are never both
+    # computed/trusted for the same pair -- the confirmed cut wins, and checking
+    # similarity on it would be wasted work since the outcome is identical either way).
     state = {"pending": None, "pending_source_index": None, "pair_index": 0, "frames_out": 1}
     next_source_index = [0]
 
@@ -290,9 +355,15 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
             manifest_frames.append({"real": True, "source_index": pending_source_index})
         cut_pair_indices = ratio_state.get("cut_pair_indices")
         is_cut_pair = bool(cut_pair_indices) and state["pair_index"] in cut_pair_indices
+        # Only checked when NOT already a confirmed cut pair -- see the block comment
+        # above _make_frame_callback: a confirmed cut always wins, and the outcome
+        # (clone instead of blend) is identical either way, so checking similarity on
+        # a cut pair would just be wasted tensor work.
+        is_duplicate_pair = (not is_cut_pair) and _is_near_duplicate_pair(pending, x)
+        skip_interpolation = is_cut_pair or is_duplicate_pair
         for t in timesteps:
             nearest = _nearest_real_index(pending_source_index, cur_source_index, t)
-            if is_cut_pair:
+            if skip_interpolation:
                 source_tensor = pending if nearest == pending_source_index else x
                 middle = source_tensor.clone()
             else:
@@ -302,6 +373,8 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
                 entry = {"real": False, "nearest_real_index": nearest}
                 if is_cut_pair:
                     entry["scene_cut_duplicate"] = True
+                if is_duplicate_pair:
+                    entry["duplicate_source_frame"] = True
                 manifest_frames.append(entry)
         state["pending"] = x
         state["pending_source_index"] = cur_source_index
@@ -851,8 +924,22 @@ def _test_rife_manifest_emission():
     def _run_fake_rife(source_frame_count, ratio):
         manifest_frames = []
         ratio_state = {"ratio": ratio}
+        # Each fake "decoded frame" gets DISTINCT content (a running counter), not a
+        # constant zero tensor -- pre-existing test-fixture gap uncovered while adding
+        # the real 2026-10-03 duplicate-source-frame feature (_is_near_duplicate_pair):
+        # every pair here is otherwise pixel-identical by construction, so it would now
+        # ALSO get flagged duplicate_source_frame in every entry, which is not what this
+        # test is checking (that has its own dedicated test,
+        # _test_rife_duplicate_frame_detection) and broke this one's exact-manifest
+        # equality assertion below. No production code touched for this.
+        counter = [0.0]
+
+        def fake_to_tensor(frame, device=None):
+            counter[0] += 1.0
+            return torch.full((1, 2, 2), counter[0])
+
         with patch(f"{__name__}.interpolate_frame", fake_interpolate_frame), \
-             patch.object(VU, "to_tensor", lambda frame, device=None: torch.zeros(1, 2, 2)):
+             patch.object(VU, "to_tensor", fake_to_tensor):
             frame_callback = _make_frame_callback(
                 model=None, device=torch.device("cpu"), ratio_state=ratio_state,
                 manifest_frames=manifest_frames)
@@ -982,6 +1069,134 @@ def _test_rife_scene_cut_protection():
     print("_test_rife_scene_cut_protection: PASS")
 
 
+def _test_rife_duplicate_frame_detection():
+    """Regression test for the real 2026-10-03 duplicate-source-frame feature (see
+    _is_near_duplicate_pair's own block comment for the full conservative-threshold
+    design, modeled on Flowframes' documented "Intelligent frame de-duplication").
+
+    Part 1: _is_near_duplicate_pair's threshold behavior in isolation, including
+    values just inside and just outside both the mean and max bounds -- confirms
+    this is a genuine AND of both conditions, not either alone:
+      - exact zero difference -> duplicate (the easy case).
+      - just under both thresholds -> duplicate.
+      - mean difference just OVER its threshold -> NOT a duplicate (strict '<',
+        confirms the boundary is exclusive, not inclusive).
+      - a single outlier pixel whose OWN difference is clearly over the max
+        threshold, diluted to a tiny mean by many unchanged pixels (the "small
+        moving object" failure mode the max check exists to catch) -> NOT a
+        duplicate, even though the mean alone would have passed.
+
+    Part 2: drives the REAL, unmodified _make_frame_callback (same CS-TEST-001
+    sentinel-value technique as _test_rife_scene_cut_protection) over a synthetic
+    8-real-frame, 2x sequence whose content is [0, 1, 2, 3, 3, 4, 5, 5] -- i.e. real
+    frames 3-4 and 6-7 carry IDENTICAL content (a held/duplicated source frame),
+    every other consecutive pair genuinely differs. Pair_index 3 (connecting real
+    frames 3 and 4) is ALSO put in cut_pair_indices, to confirm composition with the
+    scene-cut mechanism: a pair that is both is cloned (as it always would be
+    either way) and flagged ONLY scene_cut_duplicate, never ALSO
+    duplicate_source_frame (the near-duplicate check is short-circuited for a
+    confirmed cut pair -- see _make_frame_callback's own comment). Pair_index 6
+    (connecting real frames 6 and 7) is a near-duplicate with NO cut involved at
+    all, confirming the mechanism also works standalone, flagged
+    duplicate_source_frame with no scene_cut_duplicate. Every other pair (0, 1, 2,
+    4, 5) genuinely differs and must still produce a real interpolation (the
+    sentinel), completely unaffected by this feature."""
+    from unittest.mock import patch
+
+    # Part 1: threshold behavior in isolation. Margins are kept well clear of the
+    # exact threshold float value on purpose (not hit bit-for-bit) -- float32
+    # rounding of an arbitrary decimal threshold can land a fraction of a ULP on
+    # either side of the python-float literal, which would make a bit-exact
+    # boundary check flaky for reasons that have nothing to do with the real
+    # behavior being verified (strict '<', not a specific rounding direction).
+    zeros = torch.zeros(1, 1, 2, 2)
+    assert _is_near_duplicate_pair(zeros, zeros.clone())
+
+    just_under = torch.full((1, 1, 2, 2), _DUPLICATE_MEAN_DIFF_THRESHOLD - 0.0015)
+    assert _is_near_duplicate_pair(zeros, just_under)
+
+    just_over_mean_threshold = torch.full((1, 1, 2, 2), _DUPLICATE_MEAN_DIFF_THRESHOLD + 0.0015)
+    assert not _is_near_duplicate_pair(zeros, just_over_mean_threshold)
+
+    # 100 pixels: 99 unchanged, 1 outlier clearly above the max threshold -- mean
+    # stays tiny (diluted), but the single worst pixel must still refuse the
+    # "duplicate" call (the small-moving-object case the max check exists for).
+    outlier = torch.zeros(1, 1, 10, 10)
+    outlier_x = outlier.clone()
+    outlier_x[0, 0, 0, 0] = _DUPLICATE_MAX_DIFF_THRESHOLD + 0.005
+    outlier_mean = outlier_x.abs().mean().item()
+    assert outlier_mean < _DUPLICATE_MEAN_DIFF_THRESHOLD, outlier_mean  # confirms mean alone would have passed
+    assert not _is_near_duplicate_pair(outlier, outlier_x)
+
+    # Part 2: end-to-end frame_callback behavior + composition with a cut pair.
+    SENTINEL = 999.0
+
+    def fake_interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
+        return torch.full_like(img0, SENTINEL)
+
+    def fake_to_tensor(frame, device=None):
+        return torch.full((1, 2, 2), float(frame))
+
+    content = [0, 1, 2, 3, 3, 4, 5, 5]
+    cut_pair_indices = {3}  # pair 3 (real frames 3-4) is ALSO a confirmed scene cut
+    manifest_frames = []
+    ratio_state = {"ratio": Fraction(2), "cut_pair_indices": cut_pair_indices}
+
+    outputs = []
+    with patch(f"{__name__}.interpolate_frame", fake_interpolate_frame), \
+         patch.object(VU, "to_tensor", fake_to_tensor):
+        frame_callback = _make_frame_callback(
+            model=None, device=torch.device("cpu"), ratio_state=ratio_state,
+            manifest_frames=manifest_frames)
+        for value in content:
+            result = frame_callback(value)
+            if result is not None:
+                outputs.extend(result)
+        last = frame_callback(None)
+        if last is not None:
+            outputs.append(last)
+
+    assert len(outputs) == len(manifest_frames), (len(outputs), len(manifest_frames))
+
+    # Each "real" manifest entry (source_index i) is logged immediately BEFORE the
+    # synthetic entries for pair i (pending frame i is the earlier half of that
+    # pair) -- so source_index doubles exactly as the pair index its following
+    # synthetic entries belong to.
+    synth_by_pair = {}
+    current_pair = None
+    for out_tensor, entry in zip(outputs, manifest_frames):
+        value = out_tensor.flatten()[0].item()
+        if entry["real"]:
+            current_pair = entry["source_index"]
+            continue
+        synth_by_pair[current_pair] = (value, entry)
+
+    # Pairs 0, 1, 2, 4, 5: genuinely different content -> real interpolation, no flags.
+    for p in (0, 1, 2, 4, 5):
+        value, entry = synth_by_pair[p]
+        assert value == SENTINEL, (p, value)
+        assert "scene_cut_duplicate" not in entry, (p, entry)
+        assert "duplicate_source_frame" not in entry, (p, entry)
+
+    # Pair 3: cut AND near-duplicate -- cloned (content[4] == 3, never the sentinel),
+    # flagged scene_cut_duplicate ONLY (the near-duplicate check never even ran).
+    value, entry = synth_by_pair[3]
+    assert value == content[4], (value, entry)
+    assert value != SENTINEL, (value, entry)
+    assert entry.get("scene_cut_duplicate") is True, entry
+    assert "duplicate_source_frame" not in entry, entry
+
+    # Pair 6: near-duplicate only, no cut involved -- cloned (content[7] == 5, never
+    # the sentinel), flagged duplicate_source_frame ONLY.
+    value, entry = synth_by_pair[6]
+    assert value == content[7], (value, entry)
+    assert value != SENTINEL, (value, entry)
+    assert entry.get("duplicate_source_frame") is True, entry
+    assert "scene_cut_duplicate" not in entry, entry
+
+    print("_test_rife_duplicate_frame_detection: PASS")
+
+
 def _test_rife_video_codec_options():
     """Regression test for the real, confirmed fix (2026-09-08, see
     docs/ai/AI_DECISIONS.md ADR-051/ADR-064 amendments) for the bug that RIFE could
@@ -1080,6 +1295,7 @@ def _run_self_tests():
     _test_rife_fps_validation()
     _test_rife_manifest_emission()
     _test_rife_scene_cut_protection()
+    _test_rife_duplicate_frame_detection()
     _test_rife_video_codec_options()
     _test_rife_output_pix_fmt()
     _test_rife_carries_forward_source_comment_metadata()

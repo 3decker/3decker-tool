@@ -7,6 +7,9 @@ import os
 from os import path
 import sys
 import subprocess
+import tempfile
+import re
+import itertools
 
 
 myEVT_TQDM = wx.NewEventType()
@@ -516,6 +519,121 @@ def set_tooltip_long_hover():
     wx.ToolTip.SetAutoPop(32767)
 
 
+_TOOLTIP_FULL_TEXT_ATTR = "_nunif_full_tooltip_text"
+_TOOLTIP_CTX_MENU_BOUND_ATTR = "_nunif_tooltip_ctx_menu_bound"
+_tooltip_fallback_name_counter = itertools.count(1)
+
+# Saved BEFORE wx.Window.SetToolTip is monkey-patched below, so any internal
+# plumbing in this module (see _PersistentTooltipManager.bind) can clear the
+# native tooltip without going through the patch -- that keeps the full text
+# captured below intact even after enable_persistent_tooltips() swaps a
+# control over to the custom popup and calls SetToolTip(None) on it.
+_original_window_set_tooltip = wx.Window.SetToolTip
+
+
+def _tooltip_text_from_arg(tip):
+    if tip is None:
+        return None
+    if isinstance(tip, wx.ToolTip):
+        return tip.GetTip()
+    return tip or None
+
+
+def _tooltip_safe_filename(widget):
+    # Prefer the widget's own wx `name` (already a safe, stable identifier
+    # used throughout this codebase, e.g. "chk_rife_interpolate") over the
+    # tooltip's own free-text content, which may contain characters unsafe
+    # for a filename. Falls back to a counter for widgets wx gave an
+    # auto-generated, non-unique default name (persist.BAD_DEFAULT_NAMES).
+    name = widget.GetName()
+    if name and name not in persist.BAD_DEFAULT_NAMES:
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_")
+        if safe:
+            return safe
+    return f"control_{next(_tooltip_fallback_name_counter)}"
+
+
+def _open_tooltip_full_text(widget, text):
+    file_path = path.join(tempfile.gettempdir(), f"nunif_tooltip_{_tooltip_safe_filename(widget)}.txt")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.startfile(file_path)
+
+
+def _build_tooltip_context_menu(widget, text):
+    menu = wx.Menu()
+    if isinstance(widget, wx.TextEntry):
+        # Compose with the control's own real editing actions instead of
+        # silently replacing its native Cut/Copy/Paste context menu --
+        # EVT_CONTEXT_MENU below takes over the whole context menu for this
+        # widget, so its usual Cut/Copy/Paste/Undo/Redo must be rebuilt here
+        # or they would otherwise just disappear.
+        for undo_redo_id, can, action in (
+                (wx.ID_UNDO, widget.CanUndo, widget.Undo),
+                (wx.ID_REDO, widget.CanRedo, widget.Redo)):
+            menu.Append(undo_redo_id)
+            menu.Enable(undo_redo_id, can())
+            menu.Bind(wx.EVT_MENU, lambda evt, action=action: action(), id=undo_redo_id)
+        menu.AppendSeparator()
+        for edit_id, can, action in (
+                (wx.ID_CUT, widget.CanCut, widget.Cut),
+                (wx.ID_COPY, widget.CanCopy, widget.Copy),
+                (wx.ID_PASTE, widget.CanPaste, widget.Paste)):
+            menu.Append(edit_id)
+            menu.Enable(edit_id, can())
+            menu.Bind(wx.EVT_MENU, lambda evt, action=action: action(), id=edit_id)
+        menu.AppendSeparator()
+        menu.Append(wx.ID_SELECTALL)
+        menu.Bind(wx.EVT_MENU, lambda evt: widget.SelectAll(), id=wx.ID_SELECTALL)
+        menu.AppendSeparator()
+    view_item = menu.Append(wx.ID_ANY, "View Full Help Text")
+    menu.Bind(wx.EVT_MENU, lambda evt: _open_tooltip_full_text(widget, text), view_item)
+    return menu
+
+
+def _on_tooltip_context_menu(event):
+    widget = event.GetEventObject()
+    # Read the CURRENT stored text, not whatever it was when SetToolTip was
+    # first called -- some controls (e.g. iw3_ext/preview_frame.py's depth
+    # model combo) change their tooltip text after construction.
+    text = getattr(widget, _TOOLTIP_FULL_TEXT_ATTR, None)
+    if not text:
+        event.Skip()  # nothing to show -- let any native default menu appear instead
+        return
+    menu = _build_tooltip_context_menu(widget, text)
+    widget.PopupMenu(menu)
+    menu.Destroy()
+
+
+def _patched_window_set_tooltip(self, tip=None):
+    """Monkey-patch for wx.Window.SetToolTip, installed once below for the whole
+    process. Purely additive -- always calls through to the real SetToolTip so
+    the native tooltip still works exactly as before -- and on top of that,
+    remembers the full tooltip text and wires up a right-click/context-menu
+    "View Full Help Text" item (first bind only) that writes it to a temp .txt
+    file and opens it with the OS default handler (Notepad), so every one of
+    this project's hundred-plus existing SetToolTip(...) call sites across all
+    4 GUIs gets this for free with no individual changes.
+
+    Known gap: wx.SpinCtrl/wx.SpinCtrlDouble are native composites where the
+    editable text area is a separate sibling native window from the one this
+    bind attaches to (see install_spinctrl_wheel_block's docstring above for
+    the full diagnosis of this same architecture) -- right-clicking directly
+    over their text portion is handled entirely natively and does not reach
+    this handler. Matches the pre-existing wx.RadioBox per-item gap documented
+    on enable_persistent_tooltips below.
+    """
+    _original_window_set_tooltip(self, tip)
+    text = _tooltip_text_from_arg(tip)
+    setattr(self, _TOOLTIP_FULL_TEXT_ATTR, text)
+    if text and not getattr(self, _TOOLTIP_CTX_MENU_BOUND_ATTR, False):
+        setattr(self, _TOOLTIP_CTX_MENU_BOUND_ATTR, True)
+        self.Bind(wx.EVT_CONTEXT_MENU, _on_tooltip_context_menu)
+
+
+wx.Window.SetToolTip = _patched_window_set_tooltip
+
+
 class _TooltipPopup(wx.PopupWindow):
     """A borderless popup styled to look like a native tooltip, used in place of
     wx.ToolTip specifically because the native one cannot be kept open longer than
@@ -554,7 +672,11 @@ class _PersistentTooltipManager():
         self.pending = None
 
     def bind(self, widget, text):
-        widget.SetToolTip(None)  # avoid the native tooltip double-showing alongside this one
+        # Bypass the SetToolTip monkey-patch (_patched_window_set_tooltip above) for
+        # this internal clear -- going through it here would overwrite the full
+        # tooltip text it already captured for the "View Full Help Text" context
+        # menu with None, since this call doesn't mean the tooltip was really removed.
+        _original_window_set_tooltip(widget, None)  # avoid the native tooltip double-showing alongside this one
         widget.Bind(wx.EVT_ENTER_WINDOW, lambda evt, w=widget, t=text: self._on_enter(w, t))
         widget.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, w=widget: self._on_leave(w))
         widget.Bind(wx.EVT_WINDOW_DESTROY, lambda evt, w=widget: self._on_leave(w))
@@ -631,3 +753,108 @@ def refresh_layouts(window):
         refresh_layouts(child)
     window.Layout()
     window.Fit()
+
+
+def _self_test_tooltip_context_menu_wiring():
+    """CS-TEST-001: synthetic/mocked coverage for the universal SetToolTip()
+    monkey-patch above (the "View Full Help Text" right-click feature), run
+    with a real hidden wx.App/wx.Frame but no real GPU/media, and os.startfile
+    mocked rather than actually launching Notepad."""
+    import unittest.mock as mock
+
+    app = wx.App()
+    frame = wx.Frame(None)
+    try:
+        # A widget with a real tooltip gets the handler wired, the exact text
+        # stored, and selecting the menu item writes that exact text to a temp
+        # file and calls os.startfile with that file's path.
+        chk = wx.CheckBox(frame, name="chk_self_test_tooltip")
+        tip_text = "What it's for: a synthetic self-test tooltip.\nWhy: CS-TEST-001."
+        chk.SetToolTip(tip_text)
+        assert getattr(chk, _TOOLTIP_CTX_MENU_BOUND_ATTR, False) is True, \
+            "a widget with a real tooltip must get the context menu handler bound"
+        assert getattr(chk, _TOOLTIP_FULL_TEXT_ATTR) == tip_text
+
+        written = {}
+
+        def _fake_open(path_):
+            written["path"] = path_
+            with open(path_, "r", encoding="utf-8") as f:
+                written["content"] = f.read()
+
+        with mock.patch("os.startfile", side_effect=_fake_open) as m_startfile:
+            _open_tooltip_full_text(chk, getattr(chk, _TOOLTIP_FULL_TEXT_ATTR))
+            assert m_startfile.called, "os.startfile must be called to open the file"
+            called_path = m_startfile.call_args[0][0]
+            assert called_path == written["path"]
+            assert "chk_self_test_tooltip" in path.basename(called_path), \
+                "filename should be derived from the widget's own real GetName()"
+            assert written["content"] == tip_text, \
+                "written file content must match the real tooltip text exactly"
+        os.remove(written["path"])
+
+        # A widget with NO tooltip ever set gets no context menu handler at all --
+        # no useless menu item.
+        btn = wx.Button(frame, name="btn_self_test_no_tooltip")
+        assert getattr(btn, _TOOLTIP_CTX_MENU_BOUND_ATTR, False) is False, \
+            "a widget with no tooltip must not get the context menu handler bound"
+        assert getattr(btn, _TOOLTIP_FULL_TEXT_ATTR, None) is None
+
+        # Explicitly setting an empty tooltip (e.g. iw3_ext/preview_frame.py's
+        # dynamic depth-model combo, which does exactly this) must clear the
+        # stored text -- a later right-click must fall through (event.Skip())
+        # rather than show a stale menu for a tooltip that no longer exists.
+        lbl = wx.StaticText(frame, name="lbl_self_test_dynamic_tooltip")
+        lbl.SetToolTip("Temporary warning text")
+        assert getattr(lbl, _TOOLTIP_FULL_TEXT_ATTR) == "Temporary warning text"
+        lbl.SetToolTip("")
+        assert getattr(lbl, _TOOLTIP_FULL_TEXT_ATTR, None) is None, \
+            "an explicit SetToolTip('') must clear the stored full text"
+
+        class _FakeContextMenuEvent:
+            def __init__(self, obj):
+                self._obj = obj
+                self.skipped = False
+
+            def GetEventObject(self):
+                return self._obj
+
+            def Skip(self):
+                self.skipped = True
+
+        evt = _FakeContextMenuEvent(lbl)
+        _on_tooltip_context_menu(evt)
+        assert evt.skipped is True, "no stored text -> handler must Skip(), not show an empty menu"
+
+        # enable_persistent_tooltips()'s internal SetToolTip(None) (via
+        # _PersistentTooltipManager.bind) must NOT be mistaken for a real
+        # external clear -- the "View Full Help Text" feature must still work
+        # after it runs, since this plumbing dance happens on every control in
+        # all 4 real GUIs.
+        txt = wx.TextCtrl(frame, name="txt_self_test_persistent_tooltip")
+        persistent_tip = "Persistent-popup tooltip text."
+        txt.SetToolTip(persistent_tip)
+        enable_persistent_tooltips(frame)
+        assert txt.GetToolTip() is None, "enable_persistent_tooltips must still clear the native tooltip"
+        assert getattr(txt, _TOOLTIP_FULL_TEXT_ATTR) == persistent_tip, \
+            "the full text for the context menu must survive enable_persistent_tooltips' internal clear"
+
+        # A text-entry control (TextCtrl/ComboBox) must get a composed menu that
+        # still has real Cut/Copy/Paste/Undo/Redo/Select All items, not just our
+        # one new item replacing them -- the existing native right-click editing
+        # behavior this task's constraint 3 says must not be broken.
+        menu = _build_tooltip_context_menu(txt, persistent_tip)
+        try:
+            items = menu.GetMenuItems()
+            item_ids = {item.GetId() for item in items}
+            for stock_id in (wx.ID_UNDO, wx.ID_REDO, wx.ID_CUT, wx.ID_COPY, wx.ID_PASTE, wx.ID_SELECTALL):
+                assert stock_id in item_ids, f"composed menu must keep the real edit action {stock_id}"
+            labels = [item.GetItemLabelText() for item in items]
+            assert "View Full Help Text" in labels, "composed menu must still add the new item"
+        finally:
+            menu.Destroy()
+    finally:
+        frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_tooltip_context_menu_wiring: PASS")

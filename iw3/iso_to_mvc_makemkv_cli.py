@@ -119,10 +119,6 @@ _LICENSE_PROBLEM_SUBSTRINGS = (
 # ADR-333: MakeMKV's own shipped default.mmcp.xml selection rule excludes the real MVC
 # video stream by default (`-sel:mvcvideo`) -- confirmed live, this is why a real 3D
 # Blu-ray's MVC/StereoHigh track comes unchecked in MakeMKV's own GUI track tree.
-# Everything else here is copied verbatim from that shipped default (same mkvSettings,
-# same selection scoring rules) with exactly that one rule flipped to `+sel:mvcvideo`,
-# so normal audio/subtitle default-track selection behaves identically to a stock
-# MakeMKV install -- this only changes whether the MVC video stream is included.
 # `mvcvideo` is MakeMKV's own generic stream classifier (confirmed against this
 # session's real `info` scan output), not a per-disc track index, so this selection
 # rule applies to any real 3D Blu-ray disc/ISO MakeMKV recognizes as having one.
@@ -130,7 +126,38 @@ _LICENSE_PROBLEM_SUBSTRINGS = (
 # own internal default-profile resource-id name (":5086", what its shipped
 # default.mmcp.xml uses) makes MakeMKV silently treat this as a duplicate of its own
 # built-in default and keep using THAT (with zero error or warning in robot-mode
-# output), silently undoing the `+sel:mvcvideo` flip above.
+# output), silently undoing the selection override below.
+#
+# Real follow-up fix (same day, after ADR-333): ADR-333's first version of this
+# profile copied the REST of MakeMKV's own shipped selection expression verbatim
+# (`-sel:all,+sel:(favlang|nolang|single),-sel:(havemulti|havecore),...`), which is
+# MakeMKV's own "smart default" dedup logic -- pick ONE representative audio track
+# and ONE representative subtitle variant per language, not every real track on the
+# disc. Confirmed via a real rip of decker's own MOONED_3D.iso: that dropped a real,
+# distinct second audio track (Dolby Digital 5.1, alongside the TrueHD Atmos 7.1 that
+# was kept) entirely -- a real data-loss bug, not a duplicate. This tool's whole
+# purpose is a faithful, COMPLETE rip (decker's own real GUI session checked every
+# track by hand), not MakeMKV's own space-saving default, so the expression below is
+# simply `+sel:all` -- select every real, distinct track MakeMKV reports.
+#
+# Confirmed live (against the real MOONED_3D.iso, mounted and ripped end-to-end) that
+# `+sel:all` does NOT double up tracks that are really just alternate representations
+# of the SAME underlying elementary stream, rather than two distinct real streams:
+# - Video: title scan lists a plain base-view AVC track AND a richer MVC-enhanced
+#   AVC track (same elementary data, two selectable representations -- this is
+#   exactly ADR-333's own `mvcvideo` alternate). `+sel:all` selects both, but MakeMKV
+#   still writes only ONE output video track, correctly choosing the richer MVC one
+#   (confirmed via the same byte-level NAL scan ADR-333 used: 6 type-15 / 726 type-20
+#   NAL units in a 5s sample, an exact match to decker's own known-good reference
+#   rip) -- no accidental duplicate plain-AVC track is produced.
+# - Subtitles: a real ffprobe scan of the disc's own raw .m2ts (bypassing MakeMKV
+#   entirely) found only 2 real distinct PGS elementary PIDs on this disc, confirmed
+#   via `info`'s own SINFO output pairing each PID with a "full" and a "forced-only"
+#   selectable variant (4 SINFO entries, 2 real PIDs) -- the "forced-only" variant is
+#   a strict subset of its own "full" sibling's data, not separate content. `+sel:all`
+#   selects all 4 variants, but MakeMKV again writes only one output track per real
+#   PID, keeping the fuller (non-forced-only) variant -- so every real byte of
+#   subtitle data on the disc is still captured, just without a redundant duplicate.
 _MVC_SELECT_PROFILE_XML = """<?xml version="1.0" encoding="utf-8"?>
 <profile>
     <name lang="eng">iw3 MVC Select</name>
@@ -147,7 +174,7 @@ _MVC_SELECT_PROFILE_XML = """<?xml version="1.0" encoding="utf-8"?>
     </outputSettings>
     <trackSettings input="default">
         <output outputSettingsName="copy"
-                defaultSelection="-sel:all,+sel:(favlang|nolang|single),-sel:(havemulti|havecore),+sel:mvcvideo,=100:all,-10:favlang">
+                defaultSelection="+sel:all">
         </output>
     </trackSettings>
 </profile>
@@ -438,9 +465,11 @@ def convert(iso_path, output_path, work_dir=None, cache_mb=1024, keep_temp=False
 
             # Second real half of ADR-333's fix: MakeMKV's own shipped default profile
             # excludes the MVC video stream by default (confirmed live) -- this custom
-            # profile flips that one rule. Written into work_dir so it's cleaned up with
-            # everything else in the `finally` below; a fresh file per run rather than a
-            # bundled resource, since it's tiny and has no reason to vary.
+            # profile selects every real track instead (see _MVC_SELECT_PROFILE_XML's own
+            # comment for the real follow-up fix and live evidence). Written into work_dir
+            # so it's cleaned up with everything else in the `finally` below; a fresh file
+            # per run rather than a bundled resource, since it's tiny and has no reason to
+            # vary.
             profile_path = path.join(work_dir, "_mvc_select.mmcp.xml")
             with open(profile_path, "w", encoding="utf-8") as f:
                 f.write(_MVC_SELECT_PROFILE_XML)
@@ -817,7 +846,20 @@ def _self_test_mocked_end_to_end():
         if "mkv" in cmd:
             assert "disc:3" in cmd, cmd
             profile_args = [a for a in cmd if a.startswith("--profile=")]
-            assert profile_args and path.exists(profile_args[0].split("=", 1)[1]), cmd
+            assert profile_args, cmd
+            profile_file = profile_args[0].split("=", 1)[1]
+            assert path.exists(profile_file), cmd
+            # Real fix (follow-up to ADR-333): the written profile must select every real
+            # track (`+sel:all`), not MakeMKV's own dedup default -- confirmed live this
+            # is what actually keeps every real audio/subtitle track on a real disc (see
+            # _MVC_SELECT_PROFILE_XML's own comment). Checking the file written to disk at
+            # rip time, not just the in-memory constant, matches CS-TEST-001's own
+            # intent -- proves the real bytes handed to makemkvcon are correct.
+            with open(profile_file, encoding="utf-8") as pf:
+                assert pf.read() == _MVC_SELECT_PROFILE_XML, \
+                    "the profile file written to disk must match _MVC_SELECT_PROFILE_XML exactly"
+            assert 'defaultSelection="+sel:all"' in _MVC_SELECT_PROFILE_XML, \
+                "the real fix: select every real track, not MakeMKV's own per-language dedup default"
             rip_calls.append(cmd)
             work_dir = cmd[-1]
             with open(path.join(work_dir, "the_movie_t01.mkv"), "wb") as f:

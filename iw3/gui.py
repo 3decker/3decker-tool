@@ -6042,7 +6042,9 @@ class MainFrame(wx.Frame):
               "the Retroactive HDR/DV Reinjection tool above (its \"RIFE Manifest\" field is built for "
               "exactly this), that tool can ONLY inject into an HEVC (H.265) file -- RIFE's H.264 default "
               "output can NEVER accept that metadata, no matter what. Pick an HEVC option here FIRST if "
-              "that's your plan.\n"
+              "that's your plan. Run will warn you if it detects Dolby Vision/HDR10+ on your Input File "
+              "while this is still on the default -- you can still proceed anyway from that prompt if "
+              "you genuinely don't need to keep it for this job.\n"
               "H.265/HEVC -- libx265 (CPU): software encode, works on any machine, slower and produces a "
               "larger file than the H.264 default at the same quality setting.\n"
               "H.265/HEVC -- hevc_nvenc (GPU): hardware encode on the GPU selected above, much faster "
@@ -14574,16 +14576,17 @@ class MainFrame(wx.Frame):
         video_codec = self.cbo_rife_standalone_codec.GetClientData(self.cbo_rife_standalone_codec.GetSelection())
 
         dv = None
-        dv = None
         dv_source = self.txt_rife_standalone_dv_source.GetValue().strip()
+        hdr_info = None
         if not dv_source:
             # The 3D video itself may already carry Dolby Vision (converted with Preserve Dolby Vision). RIFE
             # would silently drop it, so offer to keep it, using the 3D video itself as the source.
             try:
                 from . import utils as iw3_utils
-                already_dv = bool(iw3_utils._detect_hdr_types(input_path, iw3_utils._find_ffprobe())["dv"])
+                hdr_info = iw3_utils._detect_hdr_types(input_path, iw3_utils._find_ffprobe())
             except Exception:
-                already_dv = False
+                hdr_info = None
+            already_dv = bool(hdr_info and hdr_info.get("dv"))
             if already_dv:
                 answer = wx.MessageBox(
                     T("This 3D video already contains Dolby Vision, and RIFE would remove it.\n\n"
@@ -14612,6 +14615,30 @@ class MainFrame(wx.Frame):
             dv = {"source": dv_source, "output": output_path,
                   "start": None if same_file else (self.txt_rife_standalone_dv_start.GetValue().strip() or None),
                   "end": None if same_file else (self.txt_rife_standalone_dv_end.GetValue().strip() or None)}
+
+        # Real incident (see docs/ai/AI_DECISIONS.md ADR-330): RIFE run against a Dolby
+        # Vision/HDR10+ source while Output Codec stayed on its H.264 default -- that
+        # metadata can only ever be reinjected into an HEVC (H.265) file, so once the job
+        # finishes as H.264 there is no way to add it back afterward; the whole RIFE pass
+        # has to be redone from scratch with an HEVC codec. Same real pre-flight-prompt
+        # pattern as ADR-281 (probe before Start, ask Yes/No, never silently change the
+        # user's own dropdown selection for them). Only fires when nothing above already
+        # forced an HEVC codec (an explicit DV Source, or saying Yes just above), and
+        # reuses the same probe already taken for the "Keep it?" check above instead of
+        # probing the file a second time -- when dv_source was given explicitly instead,
+        # video_codec is already forced HEVC, so there is nothing left to warn about.
+        if not video_codec and hdr_info and (hdr_info.get("dv") or hdr_info.get("hdr10plus")):
+            answer = wx.MessageBox(
+                T("This source has Dolby Vision or HDR10+ metadata, but Output Codec is still set to "
+                  "\"H.264 (default)\". That metadata can only ever be reinjected into an HEVC (H.265) "
+                  "file -- once this job finishes as H.264, there is no way to add it back afterward; "
+                  "the whole RIFE pass would have to be redone with an HEVC codec from the start.\n\n"
+                  "Yes: proceed anyway with H.264 (you don't need to keep Dolby Vision/HDR10+ for this "
+                  "job).\n"
+                  "No: cancel, so you can pick an HEVC option in Output Codec first."),
+                T("HDR Source, H.264 Output Selected"), wx.YES_NO | wx.ICON_QUESTION)
+            if answer != wx.YES:
+                return
 
         cmd = [sys.executable, "-m", "iw3.rife_cli",
                "--input", input_path, "--output", output_path,
@@ -19345,6 +19372,126 @@ def _self_test_rife_standalone_panel():
         app.Destroy()
 
     print("_self_test_rife_standalone_panel: PASS")
+
+
+def _self_test_rife_standalone_hdr_codec_warning():
+    """Regression test for the real incident behind ADR-330: decker ran RIFE on a
+    Dolby Vision source through this same Standalone RIFE Tool while Output Codec
+    stayed on its H.264 default -- DV/HDR10+ metadata can only ever be reinjected
+    into an HEVC file, so the output was unrecoverable and the whole RIFE pass had
+    to be redone from scratch. Confirms the new pre-flight warning (mirroring
+    ADR-281's own probe-before-Start pattern, reusing utils._detect_hdr_types rather
+    than new detection logic): fires only when the source genuinely has DV/HDR10+
+    AND Output Codec is still the H.264 default, lets the user cancel (No) or
+    proceed anyway (Yes) without ever silently changing the dropdown itself, stays
+    silent when an HEVC codec is already selected or the source has neither, and
+    fails safe (no warning, no crash, job proceeds) when the probe itself raises."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["cmd"] = wargs[0]
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = path.join(tmpdir, "movie_3d.mkv")
+            with open(input_path, "wb") as f:
+                f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_rife.mkv")
+            frame.txt_rife_standalone_input.SetValue(input_path)
+            frame.txt_rife_standalone_output.SetValue(output_path)
+            # The new warning is about the general case -- no explicit "Original DV
+            # Source" wired up, which would force an HEVC codec on its own already.
+            assert frame.txt_rife_standalone_dv_source.GetValue() == ""
+
+            default_codec_index = frame.cbo_rife_standalone_codec.GetSelection()
+            hevc_index = frame.cbo_rife_standalone_codec.FindString(T("H.265/HEVC -- libx265 (CPU)"))
+            assert frame.cbo_rife_standalone_codec.GetClientData(default_codec_index) is None
+
+            def _decline_keep_dv_then(next_answer):
+                # Always decline the separate, pre-existing "Keep it?" offer (ADR-193)
+                # first, so it never forces an HEVC codec itself and masks the new
+                # warning below; the new warning's own dialog gets `next_answer`.
+                def _side_effect(message, caption, *a, **kw):
+                    if caption == T("RIFE Frame Interpolation"):
+                        return wx.NO
+                    assert caption == T("HDR Source, H.264 Output Selected"), caption
+                    return next_answer
+                return _side_effect
+
+            # (a) DV source + H.264 selected, user cancels (No) -> warning shown, Start blocked.
+            frame.cbo_rife_standalone_codec.SetSelection(default_codec_index)
+            captured.clear()
+            with mock.patch.object(iw3_utils, "_detect_hdr_types",
+                                    return_value={"dv": True, "hdr10plus": False}), \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                msgbox.side_effect = _decline_keep_dv_then(wx.NO)
+                frame.on_click_btn_rife_standalone_run(None)
+            assert "cmd" not in captured, "No on the new warning must cancel Start, not run the job anyway"
+            assert msgbox.call_count == 2, "both the Keep-it? offer and the new warning must have fired"
+
+            # same case, but confirming (Yes) on the new warning proceeds with H.264 as-is.
+            captured.clear()
+            with mock.patch.object(iw3_utils, "_detect_hdr_types",
+                                    return_value={"dv": True, "hdr10plus": False}), \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                msgbox.side_effect = _decline_keep_dv_then(wx.YES)
+                frame.on_click_btn_rife_standalone_run(None)
+            assert "cmd" in captured, "Yes on the new warning must let the job proceed"
+            assert "--video-codec" not in captured["cmd"], \
+                "proceeding anyway must keep the user's own H.264 choice, never auto-upgrade it"
+
+            # (b) DV/HDR10+ source, but an HEVC codec is already selected -> no new warning.
+            frame.cbo_rife_standalone_codec.SetSelection(hevc_index)
+            captured.clear()
+            with mock.patch.object(iw3_utils, "_detect_hdr_types",
+                                    return_value={"dv": False, "hdr10plus": True}), \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                frame.on_click_btn_rife_standalone_run(None)
+            assert "cmd" in captured
+            assert "--video-codec" in captured["cmd"] and "libx265" in captured["cmd"], captured["cmd"]
+            msgbox.assert_not_called()
+
+            # (c) a genuinely non-DV/HDR source, H.264 selected -> no warning either.
+            frame.cbo_rife_standalone_codec.SetSelection(default_codec_index)
+            captured.clear()
+            with mock.patch.object(iw3_utils, "_detect_hdr_types",
+                                    return_value={"dv": False, "hdr10plus": False}), \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                frame.on_click_btn_rife_standalone_run(None)
+            assert "cmd" in captured
+            assert "--video-codec" not in captured["cmd"]
+            msgbox.assert_not_called()
+
+            # (d) the probe itself fails (bad/unreadable file, ffprobe error, etc.) -> fails
+            # safe: no warning, no crash, the job proceeds with the user's own H.264 choice.
+            captured.clear()
+            with mock.patch.object(iw3_utils, "_detect_hdr_types",
+                                    side_effect=RuntimeError("probe failed")), \
+                 mock.patch.object(wx, "MessageBox") as msgbox:
+                frame.on_click_btn_rife_standalone_run(None)
+            assert "cmd" in captured, "a probe failure must never block the job"
+            assert "--video-codec" not in captured["cmd"]
+            msgbox.assert_not_called()
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_hdr_codec_warning: PASS")
 
 
 def _self_test_sharpen_progress_bar():
@@ -28225,6 +28372,7 @@ def _run_self_tests():
         _self_test_hdr_reinject_rife_manifest_field,
         _self_test_reinject_fractional_time_fields,
         _self_test_rife_standalone_panel,
+        _self_test_rife_standalone_hdr_codec_warning,
         _self_test_rife_standalone_progress_bar,
         _self_test_sharpen_progress_bar,
         _self_test_sharpen_codec_option,

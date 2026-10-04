@@ -38,6 +38,7 @@ accompanying repo clone, `model/` is fetched separately here (from the repo's
 zip archive) and placed as a sibling of train_log/ so `from model.warplayer
 import warp` resolves as a top-level import -- see
 _RifeModelPackageDownloader/_ensure_rife_model_package below."""
+import contextlib
 import importlib
 import os
 import shutil
@@ -317,6 +318,61 @@ def pad_to_valid_size(img, scale=1.0):
     return F.pad(img, padding), h, w
 
 
+@contextlib.contextmanager
+def _fp16_inference_default_dtype():
+    """Real, confirmed fix for a real GPU crash (2026-10-04): `--fp16` worked in
+    every CPU-only/mocked test (ADR-327) but crashed on a real CUDA run 3 seconds
+    in with `RuntimeError: expected scalar type Half but found Float`, thrown
+    from inside RIFE's warp function.
+
+    Root cause, confirmed directly against the real, currently-fetched
+    model/warplayer.py (the version this project actually loads -- see
+    get_rife_dir): `warp()`'s backwarp_tenGrid coordinate grid is built lazily,
+    on first use per (device, size), via `torch.linspace(..., device=flow_device)`
+    with NO explicit `dtype=` argument -- so it always defaults to float32
+    regardless of the model's own half-precision weights/inputs. Casting
+    `padded0`/`padded1` to `.half()` (interpolate_frame's existing behavior,
+    below) makes the FLOW tensor half, but the cached GRID tensor stays float32
+    -- and `torch.nn.functional.grid_sample(input=tenInput, grid=g, ...)`
+    requires `input` and `grid` to share the same dtype, so the first call
+    crashes exactly as decker observed.
+
+    Confirmed directly against the real, live upstream inference_video.py
+    (https://github.com/hzwer/Practical-RIFE, 2026-10-04): its own `--fp16`
+    handling does NOT rely on `model.half()` + manual input casts alone -- it
+    additionally calls `torch.set_default_tensor_type(torch.cuda.HalfTensor)`
+    once, globally, before the model is even constructed, specifically so any
+    tensor created with no explicit dtype (like warplayer.py's grid) also comes
+    out half, matching the rest of the half-precision pipeline. This mirrors
+    that same real mechanism (a global default-dtype override, not
+    `torch.autocast` -- upstream does not use autocast for this), narrowed to
+    just the dtype axis via `torch.set_default_dtype` rather than upstream's
+    full `set_default_tensor_type` (which also overrides the default DEVICE for
+    new tensors): unnecessary here since every tensor warplayer.py creates
+    already passes an explicit `device=` argument, and overriding the default
+    device process-wide would risk affecting unrelated, unaudited tensor
+    creation elsewhere in this same subprocess (VU.process_video's own decode/
+    color-transform/encode pipeline, which runs in the SAME process right after
+    this, every frame) that was never part of this fix's scope.
+
+    Scoped to just the one `model.inference()` call via a context manager
+    (restored in `finally`, so it is restored even if `inference()` raises)
+    rather than left set for the rest of the process the way upstream's
+    script-level call is -- upstream's process does nothing after that point but
+    RIFE inference plus explicit-dtype numpy/cv2 frame IO (every tensor<->numpy
+    boundary there casts explicitly, e.g. `.float()`/`.half()`/`.byte()`), so an
+    unrestored global change is harmless there; this subprocess's own
+    VU.process_video call must never observe an altered default dtype."""
+    import torch
+
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float16)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(prev_dtype)
+
+
 def interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
     """img0/img1: NCHW float32 tensors, 0-1 range, same H/W, same device as model.
     Returns the single interpolated frame at the given `timestep` (0.0=img0,
@@ -334,19 +390,29 @@ def interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
     feed) expects float32 NCHW tensors exactly as before this feature existed;
     half precision is strictly an internal inference detail here and must never
     leak out as a dtype change to the rest of the pipeline. Output is always
-    float32 regardless of whether fp16 was used, for the same reason."""
+    float32 regardless of whether fp16 was used, for the same reason.
+
+    The actual `model.inference()` call is additionally wrapped in
+    `_fp16_inference_default_dtype()` (fp16 only -- see that function's
+    docstring for the real, confirmed bug it fixes): RIFE's warp function
+    creates its own on-the-fly tensors with no explicit dtype, which otherwise
+    stay float32 and crash against the half-precision flow tensor they're
+    combined with."""
     padded0, h, w = pad_to_valid_size(img0, scale)
     padded1, _h, _w = pad_to_valid_size(img1, scale)
-    if getattr(model, "_iw3_fp16", False):
+    use_fp16 = getattr(model, "_iw3_fp16", False)
+    if use_fp16:
         padded0 = padded0.half()
         padded1 = padded1.half()
-    if getattr(model, "version", 0) >= 3.9:
-        middle = model.inference(padded0, padded1, timestep, scale)
-    else:
-        if timestep != 0.5:
-            raise ValueError(
-                f"RIFE model version {getattr(model, 'version', 0)} does not support arbitrary "
-                f"timesteps (only the fixed midpoint, timestep=0.5) -- got timestep={timestep}")
-        middle = model.inference(padded0, padded1, scale)
+    inference_context = _fp16_inference_default_dtype() if use_fp16 else contextlib.nullcontext()
+    with inference_context:
+        if getattr(model, "version", 0) >= 3.9:
+            middle = model.inference(padded0, padded1, timestep, scale)
+        else:
+            if timestep != 0.5:
+                raise ValueError(
+                    f"RIFE model version {getattr(model, 'version', 0)} does not support arbitrary "
+                    f"timesteps (only the fixed midpoint, timestep=0.5) -- got timestep={timestep}")
+            middle = model.inference(padded0, padded1, scale)
     middle = middle.float()
     return middle[:, :, :h, :w]

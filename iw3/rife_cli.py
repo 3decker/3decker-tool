@@ -1499,6 +1499,105 @@ def _test_rife_fp16_interpolate_dtype_handling():
     print("_test_rife_fp16_interpolate_dtype_handling: PASS")
 
 
+def _test_rife_fp16_warp_grid_dtype_fix():
+    """Regression test for the REAL GPU crash found by decker's own hands-on
+    A/B test, fixed 2026-10-04: `--fp16` passed every prior CPU-only/mocked
+    test (ADR-327) but crashed on real CUDA hardware 3 seconds in with
+    `RuntimeError: expected scalar type Half but found Float`, from inside
+    RIFE's warp function.
+
+    Confirmed root cause (see rife_model._fp16_inference_default_dtype's own
+    docstring for the full investigation against the real, currently-fetched
+    model/warplayer.py and the live upstream inference_video.py): RIFE's warp()
+    builds its own coordinate-grid tensor on the fly via
+    `torch.linspace(..., device=...)` with NO explicit `dtype=` argument, so it
+    always comes out float32 by default -- regardless of the model's own
+    half-precision weights/inputs -- unless torch's own DEFAULT dtype has been
+    changed first. The real fix wraps `model.inference()` in
+    `_fp16_inference_default_dtype()`, which temporarily sets torch's default
+    dtype to float16 (mirroring upstream's own real `--fp16` mechanism,
+    `torch.set_default_tensor_type(torch.cuda.HalfTensor)`, confirmed directly
+    against the live upstream source -- narrowed to just the dtype axis since
+    every tensor warplayer.py creates already passes an explicit device).
+
+    Synthetic (CS-TEST-001, no GPU/real RIFE model needed): a fake model whose
+    `inference()` method reproduces the EXACT mechanism of the real bug --
+    creates its own tensor with no explicit dtype (`torch.linspace(-1, 1, 4)`,
+    standing in for warplayer.py's backwarp_tenGrid) and returns ITS dtype, not
+    the input's -- so this test can only pass if interpolate_frame's own
+    default-dtype context manager actually ran: without the fix, this "grid"
+    tensor would come back float32 even under fp16=True, and WOULD be exactly
+    the dtype mismatch that crashes the real `grid_sample` call (not
+    reproduced here directly -- grid_sample itself is real upstream code, not
+    this project's own logic; the fake model asserts on the dtype that would
+    feed it instead, which is the actual thing this project's fix controls).
+
+    Also confirms the default dtype never leaks: it is float32 again
+    immediately after interpolate_frame returns (fp16 case), and is restored
+    even when `inference()` raises (fp16 case) -- the real guarantee a
+    `finally`-based restore provides, since this subprocess's own
+    VU.process_video decode/encode pipeline runs in the same process right
+    after every single frame's call and must never observe an altered default
+    dtype."""
+    from . import rife_model as rm
+
+    captured_dtype = {}
+
+    class FakeModelGridDtype:
+        version = 4.25
+
+        def __init__(self, fp16):
+            self._iw3_fp16 = fp16
+
+        def inference(self, img0, img1, timestep, scale):
+            # Stands in for warplayer.py's warp(): a tensor created with NO
+            # explicit dtype, exactly like backwarp_tenGrid's torch.linspace.
+            grid = torch.linspace(-1.0, 1.0, 4)
+            captured_dtype["grid"] = grid.dtype
+            return img0.clone()
+
+    class FakeModelRaises:
+        version = 4.25
+        _iw3_fp16 = True
+
+        def inference(self, img0, img1, timestep, scale):
+            torch.linspace(-1.0, 1.0, 4)  # side effect not under test here
+            raise RuntimeError("simulated inference failure")
+
+    img0 = torch.rand(1, 3, 8, 8, dtype=torch.float32)
+    img1 = torch.rand(1, 3, 8, 8, dtype=torch.float32)
+
+    assert torch.get_default_dtype() == torch.float32, "test must start from the normal default dtype"
+
+    # fp16=False (unchanged behavior): the on-the-fly "grid" tensor stays
+    # float32, exactly as before this fix -- no context manager engaged at all.
+    rm.interpolate_frame(FakeModelGridDtype(fp16=False), img0, img1, timestep=0.5, scale=1.0)
+    assert captured_dtype["grid"] == torch.float32, captured_dtype["grid"]
+    assert torch.get_default_dtype() == torch.float32
+
+    # fp16=True (the real fix): the SAME on-the-fly tensor-creation pattern
+    # must now come out float16 -- this is exactly what prevents the real
+    # grid_sample dtype-mismatch crash, since the model's other half-precision
+    # tensors are also float16.
+    rm.interpolate_frame(FakeModelGridDtype(fp16=True), img0, img1, timestep=0.5, scale=1.0)
+    assert captured_dtype["grid"] == torch.float16, captured_dtype["grid"]
+    # No leak: the default dtype is back to float32 immediately after return,
+    # for VU.process_video's own decode/encode pipeline running right after.
+    assert torch.get_default_dtype() == torch.float32
+
+    # The restore must happen even when inference() itself raises -- a
+    # finally-based restore, not a happy-path-only one.
+    try:
+        rm.interpolate_frame(FakeModelRaises(), img0, img1, timestep=0.5, scale=1.0)
+        raise AssertionError("expected the simulated RuntimeError to propagate")
+    except RuntimeError as e:
+        assert "simulated" in str(e), e
+    assert torch.get_default_dtype() == torch.float32, \
+        "default dtype leaked after an exception inside model.inference()"
+
+    print("_test_rife_fp16_warp_grid_dtype_fix: PASS")
+
+
 def _run_self_tests():
     _test_ensure_rife_model_downloads_model_package()
     _test_rife_cpu_device_not_overridden_by_cuda_availability()
@@ -1513,6 +1612,7 @@ def _run_self_tests():
     _test_rife_carries_forward_source_comment_metadata()
     _test_rife_fp16_opt_in()
     _test_rife_fp16_interpolate_dtype_handling()
+    _test_rife_fp16_warp_grid_dtype_fix()
     print("All iw3.rife_cli self-tests PASSED")
 
 

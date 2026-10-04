@@ -4055,6 +4055,15 @@ class MainFrame(wx.Frame):
               "practice it moves both eyes together so this doesn't cause left/right desync.\n"
               "Works together with Preserve Dolby Vision: RIFE's in-between frames get a copy of their "
               "nearest real frame's Dolby Vision data, attached after RIFE finishes.\n"
+              "Scene cuts: RIFE normally has no idea where a hard cut is, so it would otherwise try to "
+              "smoothly blend across one -- morphing between two completely unrelated images. Whenever this "
+              "job's source already has scene-cut locations detected (the \"Scene Boundary Detection\" "
+              "checkbox was used for this job, or this source was already scanned by Scene Batch/a previous "
+              "run), RIFE automatically reuses that for free and duplicates the nearest real frame at each cut "
+              "instead of blending across it -- an instant cut, like an un-interpolated video already has, not "
+              "a warped one. If no scene-cut data is available yet, this job's cuts are interpolated "
+              "unprotected exactly as before; turn on Scene Boundary Detection too if you also want this "
+              "protection, at the cost of that scan's own time.\n"
               "Chained with the other after-conversion steps: if Upscale with waifu2x is also on, RIFE works "
               "on the upscaled file (upscale first: it is the slowest step and RIFE doubles the frames), and "
               "Restore Audio & Subtitles goes onto the last file in the chain.\n"
@@ -23687,15 +23696,15 @@ def _self_test_post_steps_are_chained():
     from unittest import mock
     from . import utils as U
 
-    def run(upscaled, rife, restored, dv_source=None, stereo=False):
+    def run(upscaled, rife, restored, dv_source=None, stereo=False, scene_source_path=None):
         calls = []
 
         def up(p, a):
             calls.append(("upscale", p))
             return upscaled
 
-        def rf(p, a, force_hevc=False):
-            calls.append(("rife", p, force_hevc))
+        def rf(p, a, force_hevc=False, scene_source_path=None):
+            calls.append(("rife", p, force_hevc, scene_source_path))
             return rife
 
         def dv(src, p, a):
@@ -23706,18 +23715,29 @@ def _self_test_post_steps_are_chained():
             calls.append(("restore", p))
             return restored
 
+        # ADR-318's own dv-reinject gate (_run_post_conversion_steps) separately checks
+        # args.rife_interpolate (not just whether the mocked RIFE step returned a file) --
+        # pre-existing test-fixture gap found while verifying the scene-cut fix below (a bare
+        # types.SimpleNamespace() here always made that gate False, silently dropping every "dv"
+        # call this test expected -- reproduced identically on an unmodified baseline, unrelated
+        # to this fix). Set consistently with whether this sub-case is simulating "RIFE on".
         with mock.patch.object(U, "_should_use_stereo_upscale", lambda a: stereo), \
                 mock.patch.object(U, "_run_waifu2x_upscale", up), \
                 mock.patch.object(U, "_run_waifu2x_upscale_stereo", lambda p, a: (calls.append(("stereo", p)), upscaled)[1]), \
                 mock.patch.object(U, "_run_rife_interpolation", rf), \
                 mock.patch.object(U, "_reinject_dv_after_rife", dv), \
                 mock.patch.object(U, "_run_audio_subtitle_restore", rs):
-            result = U._run_post_conversion_steps("m.mkv", types.SimpleNamespace(), dv_source=dv_source)
+            result = U._run_post_conversion_steps(
+                "m.mkv", types.SimpleNamespace(rife_interpolate=bool(rife)), dv_source=dv_source,
+                scene_source_path=scene_source_path)
         return calls, result
 
-    # everything on: each step gets the previous step's file, the result is the last file
-    calls, result = run("m_w2x.mkv", "m_w2x_rife.mkv", "m_w2x_rife_alldub.mkv", dv_source="orig.mkv")
-    assert calls == [("upscale", "m.mkv"), ("rife", "m_w2x.mkv", True), ("dv", "orig.mkv", "m_w2x_rife.mkv"),
+    # everything on: each step gets the previous step's file, the result is the last file. Also
+    # confirms scene_source_path (real bug fix, 2026-10-03) is threaded straight through to
+    # _run_rife_interpolation, unmodified by anything else in the chain.
+    calls, result = run("m_w2x.mkv", "m_w2x_rife.mkv", "m_w2x_rife_alldub.mkv", dv_source="orig.mkv",
+                        scene_source_path="orig.mkv")
+    assert calls == [("upscale", "m.mkv"), ("rife", "m_w2x.mkv", True, "orig.mkv"), ("dv", "orig.mkv", "m_w2x_rife.mkv"),
                      ("restore", "m_w2x_rife.mkv")], calls
     assert result == "m_w2x_rife_alldub.mkv", result
     # the stereo-aware upscale takes the same place in the chain
@@ -24008,7 +24028,7 @@ def _self_test_post_conversion_vram_release():
         calls = []
         args, depth_model = make_args(waifu2x_upscale, rife_interpolate)
 
-        def post_steps(video_path, a, dv_source=None):
+        def post_steps(video_path, a, dv_source=None, scene_source_path=None):
             calls.append("post_steps")
             if raise_in_post_steps:
                 raise RuntimeError("boom")
@@ -24530,6 +24550,83 @@ def _self_test_rife_progress_reaches_job_bar():
         assert result is None and not path.exists(partial) and not path.exists(partial + ".rife_manifest.json")
 
     print("_self_test_rife_progress_reaches_job_bar: PASS")
+
+
+def _self_test_rife_scene_cut_times_plumbing():
+    """Regression test for the real 2026-10-03 RIFE scene-cut-morph fix's wiring in
+    iw3.utils._run_rife_interpolation: RIFE previously had no scene-cut awareness at
+    all, so it blended across hard cuts (two unrelated images), producing a visible
+    morph/warp artifact. The fix reuses iw3's EXISTING scene-boundary detection
+    cache (iw3/scene_boundary_cache.py, already built for Scene Batch/--scene-detect)
+    rather than forcing a brand-new scan: when one is already available for the real
+    per-file original source (`scene_source_path`), the built RIFE subprocess command
+    now includes --scene-cut-times-file pointing at a real JSON sidecar containing
+    those exact cut times (seconds) -- and that sidecar is deleted again once the
+    (faked) subprocess finishes, success or failure. When no cache is available (the
+    common case: the user never ran --scene-detect for this job), or no
+    scene_source_path is known at all (e.g. the Standalone RIFE Tool, which has no
+    "original source" concept), the command is BYTE-IDENTICAL to before this fix --
+    confirming this is a strictly additive, zero-regression, zero-added-cost change:
+    it never forces an expensive fresh scene-boundary scan of its own.
+
+    Mocked (CS-TEST-001): _load_rife_scene_cut_times is patched directly -- its own
+    job (reusing an existing scene_boundary_cache.py entry rather than scanning) is
+    that function's own responsibility and is exercised directly against the real
+    cache format by iw3/scene_boundary_cache.py's own _test() suite; this test
+    isolates _run_rife_interpolation's OWN responsibility of wiring whatever it
+    returns into the subprocess command and cleaning up the sidecar afterward."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    captured = {}
+
+    def fake_run_cli(cmd, cwd, args, prefix, desc):
+        captured["cmd"] = list(cmd)
+        out_path = cmd[cmd.index("-o") + 1]
+        with open(out_path, "wb") as f:
+            f.write(b"fake rife output")
+        return 0, "", False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x")
+
+        args = types.SimpleNamespace(rife_interpolate=True, state={}, rife_model=None,
+                                      rife_multiplier=None, rife_target_fps=None, rife_gpu=0)
+
+        real_run_cli = U._run_cli_with_progress
+        U._run_cli_with_progress = fake_run_cli
+        try:
+            # Case 1: an already-detected scene-cut cache IS available.
+            with mock.patch.object(U, "_load_rife_scene_cut_times", lambda p, a: [1.0, 2.5]):
+                result = U._run_rife_interpolation(src, args, scene_source_path=src)
+            assert result is not None and path.exists(result), result
+            assert "--scene-cut-times-file" in captured["cmd"], captured["cmd"]
+            cut_file = captured["cmd"][captured["cmd"].index("--scene-cut-times-file") + 1]
+            # The sidecar must be cleaned up again once the (fake) run finished.
+            assert not path.exists(cut_file), cut_file
+            os.remove(result)
+
+            # Case 2: no cache available (the common/default case) -- command unchanged.
+            captured.clear()
+            with mock.patch.object(U, "_load_rife_scene_cut_times", lambda p, a: None):
+                result2 = U._run_rife_interpolation(src, args, scene_source_path=src)
+            assert "--scene-cut-times-file" not in captured["cmd"], captured["cmd"]
+            os.remove(result2)
+
+            # Case 3: no scene_source_path at all (e.g. Standalone RIFE Tool) -- never
+            # even attempts a cache lookup, same unchanged command.
+            captured.clear()
+            result3 = U._run_rife_interpolation(src, args)
+            assert "--scene-cut-times-file" not in captured["cmd"], captured["cmd"]
+            os.remove(result3)
+        finally:
+            U._run_cli_with_progress = real_run_cli
+
+    print("_self_test_rife_scene_cut_times_plumbing: PASS")
 
 
 def _self_test_dolby_vision_step_progress():
@@ -28218,6 +28315,7 @@ def _run_self_tests():
         _self_test_inpaint_model_in_filename_and_metadata,
         _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,
+        _self_test_rife_scene_cut_times_plumbing,
         _self_test_standalone_tool_titles_share_accent_colour,
         _self_test_pop_feather,
         _self_test_convergence_scene_hold,

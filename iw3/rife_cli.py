@@ -107,6 +107,19 @@ def create_parser():
                               "(python -m iw3.reinject_hdr_cli --rife-manifest) -- that step requires "
                               "HEVC output and otherwise always refuses (see "
                               "docs/ai/domains/DOLBY_VISION.md).")
+    parser.add_argument("--scene-cut-times-file", type=str, default=None,
+                         help="path to a JSON file containing a list of scene-cut times, in seconds, "
+                              "relative to THIS video's own start (--input's frame 0). When given, "
+                              "RIFE skips flow-warp blending across any real-frame pair a cut falls "
+                              "between, duplicating the nearest real frame instead -- avoids the "
+                              "morphing artifact RIFE (and any frame-interpolation model) otherwise "
+                              "produces across a hard scene cut, where the two real frames show "
+                              "completely unrelated content. Written automatically by the main iw3 "
+                              "pipeline (iw3.utils._run_rife_interpolation) from its own existing "
+                              "scene-boundary detection cache, when one is already available for the "
+                              "source this job converted -- not intended to be set by hand. Omitted "
+                              "(the default): unchanged prior behavior, every real-frame pair is "
+                              "interpolated unconditionally.")
     return parser
 
 
@@ -193,6 +206,28 @@ def _nearest_real_index(pending_source_index, cur_source_index, t):
     return pending_source_index if t < 0.5 else cur_source_index
 
 
+def _compute_cut_pair_indices(scene_cut_times, orig_fps):
+    """Translates scene-cut times (seconds since this video's own start -- see
+    create_parser's --scene-cut-times-file help, and iw3.utils._load_rife_scene_cut_times
+    for how the caller derives them) into the set of real-frame PAIR indices (the
+    pair connecting real frame i and real frame i+1, using the exact same 0-based
+    `pair_index` _make_frame_callback's own state machine already tracks) that a
+    hard scene cut falls inside.
+
+    nunif.utils.shot_boundary_detection.detect_boundary's own pts convention is
+    "the end point of the segment, not the starting point" (see that module's
+    NOTE) -- i.e. a detected cut's frame index IS the last real frame of the
+    OUTGOING scene, so the pair to protect is exactly (that index, that index + 1)
+    == pair_index == that same index. `round()` recovers the original integer
+    frame index from its float-seconds form (seconds = index / scan_fps) --
+    tolerant of ordinary float round-tripping, valid as long as scan_fps and this
+    video's own orig_fps are the same effective frame rate (true whenever the
+    real conversion's own output fps was capped identically to the scan -- see
+    docs/ai/AI_DECISIONS.md ADR-059 / resolve_scene_scan_fps)."""
+    orig_fps_f = float(orig_fps)
+    return {round(t * orig_fps_f) for t in (scene_cut_times or [])}
+
+
 def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
     # Buffers exactly the previous decoded frame; when the next frame arrives,
     # computes this pair's interpolation timesteps (see _compute_pair_timesteps)
@@ -212,6 +247,20 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
     # default) makes this byte-for-byte the same frame_callback as before this
     # feature existed; the returned/emitted video frames themselves are
     # completely unaffected by whether it's provided.
+    #
+    # Scene-cut protection (real bug fix, 2026-10-03, see --scene-cut-times-file):
+    # `ratio_state["cut_pair_indices"]`, if set, is filled in by run()'s
+    # config_callback the same way `ratio_state["ratio"]` already is -- a set of
+    # `pair_index` values a real hard scene cut falls inside (see
+    # _compute_cut_pair_indices). For those pairs ONLY, every synthetic frame is
+    # a duplicate of its nearest real neighbor instead of an actual RIFE
+    # flow-warp blend -- RIFE blending two frames from unrelated scenes produces
+    # a visible morph/warp across the cut (the same artifact Flowframes' own
+    # "Fix Scene Changes" feature exists to avoid); a duplicated frame at a cut
+    # looks exactly like an ordinary un-interpolated hard cut always has (an
+    # instant change, not a smooth one). Every other (non-cut) pair is completely
+    # unaffected -- omitting --scene-cut-times-file (the default) makes this
+    # byte-for-byte the same frame_callback as before this fix existed.
     state = {"pending": None, "pending_source_index": None, "pair_index": 0, "frames_out": 1}
     next_source_index = [0]
 
@@ -239,12 +288,21 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
         out_frames = [pending.squeeze(0)]
         if manifest_frames is not None:
             manifest_frames.append({"real": True, "source_index": pending_source_index})
+        cut_pair_indices = ratio_state.get("cut_pair_indices")
+        is_cut_pair = bool(cut_pair_indices) and state["pair_index"] in cut_pair_indices
         for t in timesteps:
-            middle = interpolate_frame(model, pending, x, timestep=float(t), scale=1.0)
+            nearest = _nearest_real_index(pending_source_index, cur_source_index, t)
+            if is_cut_pair:
+                source_tensor = pending if nearest == pending_source_index else x
+                middle = source_tensor.clone()
+            else:
+                middle = interpolate_frame(model, pending, x, timestep=float(t), scale=1.0)
             out_frames.append(middle.squeeze(0))
             if manifest_frames is not None:
-                nearest = _nearest_real_index(pending_source_index, cur_source_index, t)
-                manifest_frames.append({"real": False, "nearest_real_index": nearest})
+                entry = {"real": False, "nearest_real_index": nearest}
+                if is_cut_pair:
+                    entry["scene_cut_duplicate"] = True
+                manifest_frames.append(entry)
         state["pending"] = x
         state["pending_source_index"] = cur_source_index
         state["pair_index"] += 1
@@ -368,11 +426,34 @@ def _write_rife_manifest(output_path, input_path, manifest_frames, rife_model,
     return manifest_path
 
 
+def _load_scene_cut_times_file(scene_cut_times_file):
+    """Reads --scene-cut-times-file (see create_parser), tolerating any failure
+    (missing/unreadable/corrupt file) by returning None -- a bad or missing file
+    here must never crash a RIFE run; it should just fall back to the original,
+    unprotected behavior for every pair, exactly as if the flag had been omitted."""
+    if not scene_cut_times_file:
+        return None
+    try:
+        with open(scene_cut_times_file, mode="r", encoding="utf-8") as f:
+            times = json.load(f)
+        times = [float(t) for t in times]
+        print(f"[iw3.rife_cli] loaded {len(times)} scene-cut time(s) for cut-aware interpolation "
+              f"from {scene_cut_times_file}", file=sys.stderr)
+        return times
+    except Exception as e:
+        print(f"[iw3.rife_cli] could not read --scene-cut-times-file '{scene_cut_times_file}' "
+              f"({e.__class__.__name__}: {e}) -- continuing without scene-cut protection.",
+              file=sys.stderr)
+        return None
+
+
 def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
-        rife_multiplier=None, rife_target_fps=None, video_codec=None):
+        rife_multiplier=None, rife_target_fps=None, video_codec=None,
+        scene_cut_times_file=None):
     device = create_device(gpu)
     model = load_rife_model(rife_model, device)
-    ratio_state = {"ratio": None}
+    ratio_state = {"ratio": None, "cut_pair_indices": None}
+    scene_cut_times = _load_scene_cut_times_file(scene_cut_times_file)
     manifest_frames = []
     frame_callback = _make_frame_callback(model, device, ratio_state, manifest_frames)
     fps_info = {}
@@ -386,6 +467,7 @@ def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         target_fps = _resolve_target_fps(orig_fps, rife_multiplier, rife_target_fps)
         orig_fps_frac = orig_fps if isinstance(orig_fps, Fraction) else Fraction(orig_fps)
         ratio_state["ratio"] = target_fps / orig_fps_frac
+        ratio_state["cut_pair_indices"] = _compute_cut_pair_indices(scene_cut_times, orig_fps_frac)
         fps_info["orig_fps"] = float(orig_fps_frac)
         fps_info["target_fps"] = float(target_fps)
         return _build_output_config(target_fps, video_codec, gpu,
@@ -804,6 +886,102 @@ def _test_rife_manifest_emission():
     print("_test_rife_manifest_emission: PASS")
 
 
+def _test_rife_scene_cut_protection():
+    """Regression test for the real 2026-10-03 fix: RIFE had no scene-cut
+    awareness at all, so it blended across hard cuts, producing a visible
+    morph/warp between two unrelated images (the same artifact Flowframes'
+    "Fix Scene Changes" feature exists to avoid -- see rife_cli.py's and
+    iw3.utils._load_rife_scene_cut_times's own module-level docs for the full
+    design).
+
+    Part 1: _compute_cut_pair_indices correctly recovers the exact integer
+    frame-pair index from a cut time expressed in seconds (the form
+    iw3.utils._load_rife_scene_cut_times actually produces).
+
+    Part 2: drives the REAL, unmodified _make_frame_callback (CS-TEST-001:
+    interpolate_frame mocked to return an obviously-distinguishable SENTINEL
+    value no real duplicate could ever coincidentally equal; VU.to_tensor mocked
+    to turn each fake "decoded frame" -- a plain int standing in for its own
+    source index -- into a tensor filled with that same number, so a duplicated
+    frame's exact VALUE proves which real frame it came from) over a synthetic
+    8-real-frame, 2x sequence with a cut set between real frames 3 and 4
+    (pair_index 3): confirms every synthetic frame OUTSIDE that pair is still a
+    genuine RIFE interpolation (the sentinel) exactly as before this fix, the
+    synthetic frame INSIDE that pair is instead an exact duplicate of its
+    nearest real neighbor's own content (never the sentinel), that duplicate's
+    manifest entry is flagged scene_cut_duplicate=True, and every other
+    synthetic entry has no such flag -- i.e. this is a surgical, pair-scoped
+    change with no effect on normal (non-cut) interpolation."""
+    from unittest.mock import patch
+
+    # Part 1: time -> pair_index translation.
+    assert _compute_cut_pair_indices([0.3], Fraction(10)) == {3}
+    assert _compute_cut_pair_indices([0.0, 1.0, 2.5], Fraction(10)) == {0, 10, 25}
+    assert _compute_cut_pair_indices(None, Fraction(10)) == set()
+    assert _compute_cut_pair_indices([], Fraction(10)) == set()
+
+    # Part 2: end-to-end frame_callback behavior.
+    SENTINEL = 999.0
+
+    def fake_interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
+        return torch.full_like(img0, SENTINEL)
+
+    def fake_to_tensor(frame, device=None):
+        return torch.full((1, 2, 2), float(frame))
+
+    source_frame_count = 8
+    ratio = Fraction(2)  # integer 2x -> exactly one synthetic frame per pair, at t=0.5
+    cut_pair_indices = {3}  # the pair connecting real frame 3 and real frame 4
+    manifest_frames = []
+    ratio_state = {"ratio": ratio, "cut_pair_indices": cut_pair_indices}
+
+    outputs = []
+    with patch(f"{__name__}.interpolate_frame", fake_interpolate_frame), \
+         patch.object(VU, "to_tensor", fake_to_tensor):
+        frame_callback = _make_frame_callback(
+            model=None, device=torch.device("cpu"), ratio_state=ratio_state,
+            manifest_frames=manifest_frames)
+        for i in range(source_frame_count):
+            result = frame_callback(i)
+            if result is not None:
+                outputs.extend(result)
+        last = frame_callback(None)
+        if last is not None:
+            outputs.append(last)
+
+    assert len(outputs) == len(manifest_frames), (len(outputs), len(manifest_frames))
+
+    synth_seen = 0
+    cut_synth_seen = 0
+    for out_tensor, entry in zip(outputs, manifest_frames):
+        if entry["real"]:
+            continue
+        synth_seen += 1
+        value = out_tensor.flatten()[0].item()
+        if entry.get("scene_cut_duplicate"):
+            cut_synth_seen += 1
+            # Must be an exact duplicate of its nearest real neighbor's own
+            # content (4.0, per the t=0.5/nearest=cur_source_index rule below),
+            # never the interpolation sentinel.
+            assert value == entry["nearest_real_index"], (entry, value)
+            assert value != SENTINEL, (entry, value)
+        else:
+            # Every normal (non-cut) synthetic frame is still a genuine RIFE
+            # interpolation, completely unaffected by this feature.
+            assert value == SENTINEL, (entry, value)
+
+    # 7 pairs total (8 real frames), exactly 1 of them is the cut pair.
+    assert synth_seen == 7, synth_seen
+    assert cut_synth_seen == 1, cut_synth_seen
+
+    cut_entry = next(e for e in manifest_frames if e.get("scene_cut_duplicate"))
+    # t=0.5 is NOT < 0.5, so _nearest_real_index resolves to the LATER real
+    # frame (cur_source_index = 4) for pair_index 3 (real frames 3 and 4).
+    assert cut_entry["nearest_real_index"] == 4, cut_entry
+
+    print("_test_rife_scene_cut_protection: PASS")
+
+
 def _test_rife_video_codec_options():
     """Regression test for the real, confirmed fix (2026-09-08, see
     docs/ai/AI_DECISIONS.md ADR-051/ADR-064 amendments) for the bug that RIFE could
@@ -901,6 +1079,7 @@ def _run_self_tests():
     _test_rife_target_fps_scheduling()
     _test_rife_fps_validation()
     _test_rife_manifest_emission()
+    _test_rife_scene_cut_protection()
     _test_rife_video_codec_options()
     _test_rife_output_pix_fmt()
     _test_rife_carries_forward_source_comment_metadata()
@@ -914,7 +1093,7 @@ def main(argv=None):
     args = create_parser().parse_args(argv)
     run(args.input, args.output, rife_model=args.rife_model, gpu=args.gpu,
         rife_multiplier=args.rife_multiplier, rife_target_fps=args.rife_target_fps,
-        video_codec=args.video_codec)
+        video_codec=args.video_codec, scene_cut_times_file=args.scene_cut_times_file)
 
 
 if __name__ == "__main__":

@@ -834,7 +834,64 @@ def _run_cli_with_progress(cmd, cwd, args, progress_prefix, desc):
     return proc.returncode, "".join(stderr_chunks), cancelled
 
 
-def _run_rife_interpolation(output_path, args, force_hevc=False):
+def _load_rife_scene_cut_times(scene_source_path, args):
+    """Looks up an ALREADY-COMPUTED scene-boundary cache for the real original
+    source this job converted (`scene_source_path` -- the per-file input, NOT
+    necessarily args.input, which is a directory in batch/folder mode), so RIFE's
+    scene-cut protection (see rife_cli.py's _compute_cut_pair_indices) costs
+    NOTHING extra on top of a normal RIFE run: this only ever reuses a scan that
+    already ran for some other reason (--scene-detect on this same job,
+    --scene-batch, or an earlier run against this same source) -- it deliberately
+    never TRIGGERS a fresh scene-boundary scan itself, since that is a real,
+    multi-minute-per-movie AI pass (see scene_batch.py's own "_detect_scenes"
+    comment) that would otherwise silently add significant time to every RIFE job
+    even for users who never asked for scene detection at all. Returns None (RIFE
+    falls back to its original, pre-fix unconditional-blend behavior for every
+    pair, unchanged) whenever no such cache exists yet, `scene_source_path` is not
+    a real file (e.g. unavailable, or the Standalone RIFE Tool, which has no
+    notion of an "original source" at all), or anything about the lookup fails.
+
+    The returned times are in SECONDS since the start of whatever range was
+    actually processed (0 = args.start_time, matching detect_boundary's own
+    frame-counter convention -- see resolve_scene_scan_fps/ADR-059), which lines
+    up directly with RIFE's own real-frame timeline: RIFE decodes the FINISHED
+    stereo output, whose frame 0 is the first frame of that same processed range,
+    at the SAME effective fps the scan used (args.max_fps caps the real
+    conversion's own output fps identically to how it caps the scan -- see
+    process_video_full's fps-clamping, mirrored by resolve_scene_scan_fps)."""
+    if not scene_source_path or not path.isfile(scene_source_path):
+        return None
+    from .scene_batch import resolve_scene_scan_fps
+    try:
+        native_fps = float(VU.VideoMetadata.from_file(scene_source_path).get_fps())
+        scan_fps = resolve_scene_scan_fps(native_fps, args.max_fps)
+        segment_pts = try_load_scene_cache(scene_source_path, args)
+    except Exception as e:
+        print(f"[iw3] RIFE: could not check for an existing scene-cut cache ({e}) -- "
+              f"continuing without scene-cut protection.", file=sys.stderr)
+        return None
+    if not segment_pts:
+        return None
+    return sorted(p / scan_fps for p in segment_pts)
+
+
+def _write_rife_scene_cut_times_file(interpolated_path, scene_cut_times):
+    """Small sidecar JSON listing scene-cut times (seconds) for rife_cli.py's own
+    subprocess to read via --scene-cut-times-file (see _load_rife_scene_cut_times
+    above and rife_cli.py's _compute_cut_pair_indices). Written atomically
+    (tmp-name + os.replace, CS-IO-001) even though it's a short-lived, internal
+    plumbing file the subprocess reads once immediately after this returns and
+    the caller deletes once RIFE finishes -- never left half-written."""
+    import json as _json
+    cut_times_path = f"{interpolated_path}.scene_cuts.json"
+    tmp_path = cut_times_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        _json.dump(scene_cut_times, f)
+    os.replace(tmp_path, cut_times_path)
+    return cut_times_path
+
+
+def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_path=None):
     """Optionally invokes RIFE (iw3.rife_cli, a thin wrapper around the
     Practical-RIFE model -- see docs/ai/AI_DECISIONS.md ADR-029) as a subprocess
     against a just-finished iw3 output, when the user explicitly opted in (GUI:
@@ -860,6 +917,14 @@ def _run_rife_interpolation(output_path, args, force_hevc=False):
     exclusion and the "target must exceed source fps" rule itself (see
     docs/ai/AI_DECISIONS.md ADR-049); args.rife_multiplier defaults to the
     original 2x behavior when neither is set.
+
+    `scene_source_path` (real bug fix, 2026-10-03): the real per-file original 2D
+    source this job converted, if known -- passed through so RIFE can skip
+    flow-warp blending across a real hard scene cut (which otherwise morphs
+    between two unrelated images, a known RIFE/frame-interpolation artifact --
+    see _load_rife_scene_cut_times above) whenever scene-boundary data for it is
+    already cheaply available. None (the Standalone RIFE Tool, which has no
+    original-source concept) keeps the exact prior unconditional-blend behavior.
 
     Returns the interpolated file's path on success, or None (having already
     logged why) on failure -- verifies the output file actually exists rather
@@ -888,29 +953,44 @@ def _run_rife_interpolation(output_path, args, force_hevc=False):
         codec = getattr(args, "video_codec", None)
         cmd += ["--video-codec", codec if codec in _HEVC_ENCODERS else "libx265"]
 
-    _notify_stage(args, STAGE_RIFE_INTERPOLATE)
-    print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
-    returncode, stderr_text, cancelled = _run_cli_with_progress(
-        cmd, nunif_dir, args, "IW3_RIFE_PROGRESS", f"{path.basename(str(output_path))} [RIFE {rife_model}]")
-    if cancelled:
-        print("[iw3] RIFE interpolation cancelled.", file=sys.stderr)
-        for leftover in (interpolated_path, interpolated_path + ".rife_manifest.json"):
+    scene_cut_times = _load_rife_scene_cut_times(scene_source_path, args)
+    scene_cut_times_path = None
+    if scene_cut_times:
+        scene_cut_times_path = _write_rife_scene_cut_times_file(interpolated_path, scene_cut_times)
+        cmd += ["--scene-cut-times-file", scene_cut_times_path]
+        print(f"[iw3] RIFE: reusing {len(scene_cut_times)} already-detected scene cut(s) to avoid "
+              f"morphing across hard cuts.", file=sys.stderr)
+
+    try:
+        _notify_stage(args, STAGE_RIFE_INTERPOLATE)
+        print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
+        returncode, stderr_text, cancelled = _run_cli_with_progress(
+            cmd, nunif_dir, args, "IW3_RIFE_PROGRESS", f"{path.basename(str(output_path))} [RIFE {rife_model}]")
+        if cancelled:
+            print("[iw3] RIFE interpolation cancelled.", file=sys.stderr)
+            for leftover in (interpolated_path, interpolated_path + ".rife_manifest.json"):
+                try:
+                    if path.exists(leftover):
+                        os.remove(leftover)
+                except OSError:
+                    pass
+            return None
+        if returncode != 0:
+            print(f"[iw3] RIFE interpolation failed: {stderr_text.strip()[-600:]}", file=sys.stderr)
+            return None
+        if not path.exists(interpolated_path):
+            print("[iw3] RIFE interpolation exited 0 but produced no output file", file=sys.stderr)
+            return None
+        print(f"[iw3] RIFE interpolation done: {interpolated_path}", file=sys.stderr)
+        # RIFE re-encodes into a new file, which has no StereoMode tag yet (no-op unless --stereo-mode-tag)
+        _apply_stereo_mode_tag(interpolated_path, args)
+        return interpolated_path
+    finally:
+        if scene_cut_times_path:
             try:
-                if path.exists(leftover):
-                    os.remove(leftover)
+                os.remove(scene_cut_times_path)
             except OSError:
                 pass
-        return None
-    if returncode != 0:
-        print(f"[iw3] RIFE interpolation failed: {stderr_text.strip()[-600:]}", file=sys.stderr)
-        return None
-    if not path.exists(interpolated_path):
-        print("[iw3] RIFE interpolation exited 0 but produced no output file", file=sys.stderr)
-        return None
-    print(f"[iw3] RIFE interpolation done: {interpolated_path}", file=sys.stderr)
-    # RIFE re-encodes into a new file, which has no StereoMode tag yet (no-op unless --stereo-mode-tag)
-    _apply_stereo_mode_tag(interpolated_path, args)
-    return interpolated_path
 
 
 def _parse_bitrate_mbps(value):
@@ -1110,7 +1190,7 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
     return video_path
 
 
-def _run_post_conversion_steps(video_path, args, dv_source=None):
+def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_path=None):
     """ADR-209: the steps that run after the conversion, CHAINED so each one works on the previous one's result:
     waifu2x upscale -> RIFE -> Dolby Vision re-attach (only when RIFE actually ran and `dv_source` is given, i.e.
     RIFE + Preserve Dolby Vision) -> Restore Audio & Subtitles -> Limit Bitrate. Before this every step started
@@ -1129,7 +1209,12 @@ def _run_post_conversion_steps(video_path, args, dv_source=None):
     the same reason (ADR-192); (2) passed through to _run_bitrate_cap(), whose own re-encode has zero DV awareness
     and would otherwise silently destroy whatever DV is already in the file by that point -- regardless of
     whether it got there from the main conversion directly (the common case: preserve-dowi with no RIFE) or from
-    step (1) above."""
+    step (1) above.
+
+    `scene_source_path` (real bug fix, 2026-10-03): the real per-file original 2D source this job converted --
+    passed straight through to _run_rife_interpolation() so it can reuse an already-detected scene-boundary cache
+    for RIFE's own scene-cut protection (see that function's docstring). Distinct from `dv_source`, which is only
+    ever set when DV preservation is actually wanted -- this needs the real source path unconditionally."""
     current = video_path
     if _should_use_stereo_upscale(args):
         upscaled = _run_waifu2x_upscale_stereo(current, args)
@@ -1137,7 +1222,8 @@ def _run_post_conversion_steps(video_path, args, dv_source=None):
         upscaled = _run_waifu2x_upscale(current, args)
     if upscaled:
         current = upscaled
-    rife_output_path = _run_rife_interpolation(current, args, force_hevc=bool(dv_source))
+    rife_output_path = _run_rife_interpolation(current, args, force_hevc=bool(dv_source),
+                                                scene_source_path=scene_source_path)
     if dv_source and getattr(args, "rife_interpolate", False):
         _reinject_dv_after_rife(dv_source, rife_output_path, args)
     if rife_output_path:
@@ -6243,7 +6329,8 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
             # injected by the MAIN conversion pass itself (no RIFE involved at all) -- see that
             # function's own docstring.
             dv_preserve_source = original_input_filename if _dv_preserve_wanted(args) else None
-            _run_post_conversion_steps(final_output_path, args, dv_source=dv_preserve_source)
+            _run_post_conversion_steps(final_output_path, args, dv_source=dv_preserve_source,
+                                        scene_source_path=original_input_filename)
         finally:
             if needs_vram_release:
                 _reload_pause_vram(args)

@@ -1253,8 +1253,15 @@ def _run_depth_blend_passes(args, depth_model, input_path, output_path, work_dir
 
     if not cancelled():
         # Same chained steps as the main conversion (upscale -> RIFE -> Dolby Vision -> audio & subtitles), ADR-209.
+        # scene_source_path=input_path (real bug fix, 2026-10-03): lets RIFE reuse an already-detected
+        # scene-boundary cache for this same source (if one exists) to avoid morphing across hard cuts --
+        # see iw3.utils._run_rife_interpolation's own docstring. input_path is this job's real, single
+        # original source (--depth-blend only ever runs on one video, never a directory/batch -- see the
+        # ValueError check above), so it needs no translation unlike dv_source, which is only set at all
+        # when DV-after-RIFE is actually wanted.
         from .utils import _run_post_conversion_steps
-        _run_post_conversion_steps(output_path, args, dv_source=getattr(args, "_dv_after_rife_source", None))
+        _run_post_conversion_steps(output_path, args, dv_source=getattr(args, "_dv_after_rife_source", None),
+                                    scene_source_path=input_path)
 
     print(f"[depth-blend] done. Working files (full rgb/depth dumps from both passes) are still in:\n"
           f"  {work_dir}\n"

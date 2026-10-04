@@ -44,6 +44,34 @@ MakeMKV's own raw output had no StereoMode property at all, so no 3D-aware playe
 had anything to auto-detect 3D from). This reuses the exact same value/mechanism this
 project's own real MVC-producing tools already proved on real hardware -- see ADR-284
 and sbs_to_mvc_cli.py's `_mux_mkv_via_mkvmerge()`.
+
+Real follow-up fix (ADR-333): `convert()` used to hand MakeMKV the `iso:<path>` source
+directly -- confirmed, via a real byte-level NAL scan of decker's own MOONED_3D.iso
+rip, to produce a base-view-only file with ZERO real MVC data (no type-15/type-20 NAL
+units at all), even though MakeMKV's own `info` scan correctly reports a real MVC
+stream on the disc. Root cause, confirmed by live testing against the real ISO: TWO
+separate real problems, both needed, neither sufficient alone --
+1. MakeMKV's `iso:<path>` access path genuinely skips the real interleaved `.ssif`
+   payload on this kind of disc. Mounting the ISO as a real virtual drive first (the
+   same `mount_iso()`/`dismount_iso()` this project's own `mvc_extract_cli.py` already
+   uses) and pointing MakeMKV at the resulting disc via `disc:<id>` ("direct disc
+   access mode", confirmed in MakeMKV's own real log output) instead fixes this --
+   `info` then reports the real `Mpeg4-MVC-3D`/`StereoHigh` stream with correct size.
+2. Even in `disc:` mode, MakeMKV's own SHIPPED default track-selection rule
+   (`-sel:mvcvideo` in its real `default.mmcp.xml`) EXCLUDES the MVC video stream by
+   default -- confirmed this is exactly why decker's own real MakeMKV GUI left that
+   track unchecked until he manually checked it. `convert()` now writes its own small
+   custom MakeMKV profile (`_MVC_SELECT_PROFILE_XML` below) that flips this one rule to
+   `+sel:mvcvideo` and passes it via `--profile=<path>`, confirmed live (byte-for-byte
+   output size changed and a real NAL scan found genuine type-15/type-20 data) -- the
+   profile's own `<name>` tag must be a real, unique string (NOT MakeMKV's own internal
+   resource-id name `:5086` that its shipped default.mmcp.xml uses), confirmed live: a
+   colliding name causes MakeMKV to silently keep using its built-in default profile
+   with zero error/warning in robot-mode output -- the single most misleading dead end
+   in this investigation.
+Selection is keyed on MakeMKV's own generic `mvcvideo` stream classifier, not a
+hardcoded track index, so this generalizes to any real 3D Blu-ray disc/ISO, not just
+this one disc's own track layout.
 """
 import argparse
 import csv
@@ -62,7 +90,7 @@ from os import path
 # subprocess calls made from the GUI's own process, not this separate one.
 import nunif.gui.subprocess_patch  # noqa
 
-from .mvc_extract_cli import Cancelled
+from .mvc_extract_cli import Cancelled, mount_iso, dismount_iso
 from .utils import log_subprocess_cmd, _find_mkvpropedit, _apply_stereo_mode_tag
 
 # Confirmed real registry location MakeMKV's own Windows installer registers its CLI exe
@@ -87,6 +115,43 @@ _LICENSE_PROBLEM_SUBSTRINGS = (
     "evaluation period", "shareware functionality", "purchase an activation key",
     "key is not valid", "key not found", "registration key",
 )
+
+# ADR-333: MakeMKV's own shipped default.mmcp.xml selection rule excludes the real MVC
+# video stream by default (`-sel:mvcvideo`) -- confirmed live, this is why a real 3D
+# Blu-ray's MVC/StereoHigh track comes unchecked in MakeMKV's own GUI track tree.
+# Everything else here is copied verbatim from that shipped default (same mkvSettings,
+# same selection scoring rules) with exactly that one rule flipped to `+sel:mvcvideo`,
+# so normal audio/subtitle default-track selection behaves identically to a stock
+# MakeMKV install -- this only changes whether the MVC video stream is included.
+# `mvcvideo` is MakeMKV's own generic stream classifier (confirmed against this
+# session's real `info` scan output), not a per-disc track index, so this selection
+# rule applies to any real 3D Blu-ray disc/ISO MakeMKV recognizes as having one.
+# The `<name>` tag MUST be a real, unique string -- confirmed live, reusing MakeMKV's
+# own internal default-profile resource-id name (":5086", what its shipped
+# default.mmcp.xml uses) makes MakeMKV silently treat this as a duplicate of its own
+# built-in default and keep using THAT (with zero error or warning in robot-mode
+# output), silently undoing the `+sel:mvcvideo` flip above.
+_MVC_SELECT_PROFILE_XML = """<?xml version="1.0" encoding="utf-8"?>
+<profile>
+    <name lang="eng">iw3 MVC Select</name>
+    <mkvSettings
+        ignoreForcedSubtitlesFlag="true"
+        useISO639Type2T="false"
+        setFirstAudioTrackAsDefault="true"
+        setFirstSubtitleTrackAsDefault="true"
+        setFirstForcedSubtitleTrackAsDefault="true"
+        insertFirstChapter00IfMissing="true"
+    />
+    <outputSettings name="copy" outputFormat="directCopy">
+        <description lang="eng">Copy track as is</description>
+    </outputSettings>
+    <trackSettings input="default">
+        <output outputSettingsName="copy"
+                defaultSelection="-sel:all,+sel:(favlang|nolang|single),-sel:(havemulti|havecore),+sel:mvcvideo,=100:all,-10:favlang">
+        </output>
+    </trackSettings>
+</profile>
+"""
 
 
 def _find_makemkvcon():
@@ -152,12 +217,20 @@ def _parse_duration(value):
         return None
 
 
-def _run_makemkvcon_robot(cmd, stop_event, on_msg, on_tcount, on_tinfo, on_prgv):
+def _run_makemkvcon_robot(cmd, stop_event, on_msg, on_tcount, on_tinfo, on_prgv, on_drv=None):
     """Runs a `makemkvcon -r ...` command, dispatching each real robot-mode line it prints
     on stdout to the matching callback as it arrives (same live-streaming shape as
     sbs_to_mvc_cli._run_ffmpeg_stage, just for MakeMKV's own line format instead of ffmpeg's).
     Raises Cancelled() if stop_event fires; otherwise returns (returncode, stdout_tail) once
-    the process exits, where stdout_tail is the last ~40 lines (for error reporting)."""
+    the process exits, where stdout_tail is the last ~40 lines (for error reporting).
+
+    on_drv(fields), fields being one `DRV:id,...,"drive name","disc name","drive letter"`
+    line's own fields -- optional (defaults to a no-op) since only disc-id resolution
+    (ADR-333) needs per-drive info; every other existing call site ignores DRV lines,
+    same as before this parameter existed."""
+    if on_drv is None:
+        def on_drv(fields):
+            pass
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, bufsize=1,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -196,6 +269,8 @@ def _run_makemkvcon_robot(cmd, stop_event, on_msg, on_tcount, on_tinfo, on_prgv)
                     on_tinfo(fields[0], fields[1], fields[-1])
                 elif tag == "PRGV" and len(fields) >= 3:
                     on_prgv(fields[0], fields[1], fields[2])
+                elif tag == "DRV":
+                    on_drv(fields)
         except Exception as e:  # noqa
             callback_error.append(e)
 
@@ -240,15 +315,51 @@ def _check_license_problem(message):
             f"itself (not this app) to renew your license or trial key, then try again.")
 
 
-def _scan_main_title(makemkvcon, iso_path, cache_mb, stop_event, progress_cb):
-    """Runs `makemkvcon -r info iso:<path>`, parses every title's real duration, and
+def _resolve_disc_index(makemkvcon, drive_root, cache_mb, stop_event):
+    """ADR-333: `mount_iso()` gives a real drive letter, not a MakeMKV disc id -- MakeMKV
+    enumerates its own disc ids independently (its real `DRV:` robot-mode lines), and the
+    id assigned to a given drive letter is not fixed (confirmed live: it depends on this
+    machine/session's own drive enumeration order, not on the drive letter itself).
+
+    `info disc:9999` is a real, confirmed-live trick: 9999 is never a real disc id, so
+    MakeMKV always reports "Failed to open disc" for it -- but it still prints one real
+    `DRV:` line per optical (real or mounted-virtual) drive it sees first, which is all
+    this needs. Matches the DRV line whose own drive-letter field equals `drive_root`'s
+    drive letter, so this generalizes to whatever drive letter Windows happens to assign
+    when mounting, instead of assuming a fixed disc id like `disc:0`."""
+    letter = drive_root.rstrip("\\").upper()
+    cmd = [makemkvcon, "-r", f"--cache={cache_mb}", "info", "disc:9999"]
+    log_subprocess_cmd("makemkv-list-drives", cmd)
+    drv_letters = {}
+
+    def on_msg(message):
+        pass  # the "Failed to open disc" MSG for the fake id 9999 is expected, not a real error
+
+    def on_drv(fields):
+        if len(fields) >= 7 and fields[6]:
+            drv_letters[fields[6].rstrip("\\").upper()] = fields[0]
+
+    _run_makemkvcon_robot(cmd, stop_event, on_msg, lambda count_str: None,
+                          lambda title_id, attr_code, value: None, lambda cur, tot, mx: None,
+                          on_drv=on_drv)
+    disc_id = drv_letters.get(letter)
+    if disc_id is None:
+        raise RuntimeError(
+            f"MakeMKV did not report a disc id for the mounted drive {drive_root} -- it "
+            f"may have failed to recognize the ISO as a disc (drive letters MakeMKV saw: "
+            f"{sorted(drv_letters) or 'none'})")
+    return disc_id
+
+
+def _scan_main_title(makemkvcon, source, cache_mb, stop_event, progress_cb):
+    """Runs `makemkvcon -r info <source>`, parses every title's real duration, and
     returns the title index with the longest duration -- the real main feature, never a
     short extra/trailer. Raises RuntimeError (with MakeMKV's own real error text folded in)
-    if the ISO can't be opened, no titles are found, or MakeMKV's own output reports a real
-    trial/license problem."""
+    if the disc can't be opened, no titles are found, or MakeMKV's own output reports a
+    real trial/license problem."""
     if progress_cb:
         progress_cb("scan", 0, 1)
-    cmd = [makemkvcon, "-r", f"--cache={cache_mb}", "info", f"iso:{iso_path}"]
+    cmd = [makemkvcon, "-r", f"--cache={cache_mb}", "info", source]
     log_subprocess_cmd("makemkv-info", cmd)
     durations = {}
     messages = []
@@ -311,41 +422,67 @@ def convert(iso_path, output_path, work_dir=None, cache_mb=1024, keep_temp=False
     before = set(os.listdir(work_dir))
 
     try:
-        main_title = _scan_main_title(makemkvcon, iso_path, cache_mb, stop_event, progress_cb)
+        # ADR-333: `iso:<path>` genuinely skips this disc's real interleaved `.ssif` MVC
+        # payload (confirmed live via a byte-level NAL scan -- see module docstring).
+        # Mounting the ISO as a real virtual drive first and pointing MakeMKV at the
+        # resulting disc (`disc:<id>`, MakeMKV's own "direct disc access mode") instead
+        # fixes this. Same mount_iso()/dismount_iso() this project's own mvc_extract_cli.py
+        # already uses for the read direction -- an ISO the user already had mounted is
+        # used as-is and (mounted_by_us is False) never dismounted out from under them.
+        drive_root, mounted_by_us = mount_iso(iso_path)
+        try:
+            if stop_event is not None and stop_event.is_set():
+                raise Cancelled()
+            disc_id = _resolve_disc_index(makemkvcon, drive_root, cache_mb, stop_event)
+            source = f"disc:{disc_id}"
 
-        if progress_cb:
-            progress_cb("rip", 0, 0)
-        cmd = [makemkvcon, "-r", f"--cache={cache_mb}", "--progress=-same",
-               "mkv", f"iso:{iso_path}", str(main_title), work_dir]
-        log_subprocess_cmd("makemkv-rip", cmd)
-        messages = []
-        last_max = [1.0]
+            # Second real half of ADR-333's fix: MakeMKV's own shipped default profile
+            # excludes the MVC video stream by default (confirmed live) -- this custom
+            # profile flips that one rule. Written into work_dir so it's cleaned up with
+            # everything else in the `finally` below; a fresh file per run rather than a
+            # bundled resource, since it's tiny and has no reason to vary.
+            profile_path = path.join(work_dir, "_mvc_select.mmcp.xml")
+            with open(profile_path, "w", encoding="utf-8") as f:
+                f.write(_MVC_SELECT_PROFILE_XML)
 
-        def on_msg(message):
-            messages.append(message)
-            _check_license_problem(message)
+            main_title = _scan_main_title(makemkvcon, source, cache_mb, stop_event, progress_cb)
 
-        def on_tcount(count_str):
-            pass
-
-        def on_tinfo(title_id, attr_code, value):
-            pass
-
-        def on_prgv(current, total, max_):
-            try:
-                total_f, max_f = float(total), float(max_)
-            except ValueError:
-                return
-            last_max[0] = max_f
             if progress_cb:
-                progress_cb("rip", total_f, max_f)
+                progress_cb("rip", 0, 0)
+            cmd = [makemkvcon, "-r", f"--cache={cache_mb}", "--progress=-same",
+                   f"--profile={profile_path}", "mkv", source, str(main_title), work_dir]
+            log_subprocess_cmd("makemkv-rip", cmd)
+            messages = []
+            last_max = [1.0]
 
-        returncode, tail = _run_makemkvcon_robot(cmd, stop_event, on_msg, on_tcount, on_tinfo, on_prgv)
-        if returncode != 0:
-            raise RuntimeError(
-                f"MakeMKV rip failed (exit {returncode}):\n  " + "\n  ".join(messages[-5:] or tail[-5:]))
-        if progress_cb:
-            progress_cb("rip", last_max[0], last_max[0])
+            def on_msg(message):
+                messages.append(message)
+                _check_license_problem(message)
+
+            def on_tcount(count_str):
+                pass
+
+            def on_tinfo(title_id, attr_code, value):
+                pass
+
+            def on_prgv(current, total, max_):
+                try:
+                    total_f, max_f = float(total), float(max_)
+                except ValueError:
+                    return
+                last_max[0] = max_f
+                if progress_cb:
+                    progress_cb("rip", total_f, max_f)
+
+            returncode, tail = _run_makemkvcon_robot(cmd, stop_event, on_msg, on_tcount, on_tinfo, on_prgv)
+            if returncode != 0:
+                raise RuntimeError(
+                    f"MakeMKV rip failed (exit {returncode}):\n  " + "\n  ".join(messages[-5:] or tail[-5:]))
+            if progress_cb:
+                progress_cb("rip", last_max[0], last_max[0])
+        finally:
+            if mounted_by_us:
+                dismount_iso(iso_path)
 
         after = set(os.listdir(work_dir))
         ripped = sorted(f for f in (after - before) if f.lower().endswith(".mkv"))
@@ -503,6 +640,50 @@ def _info_lines(titles):
     return [l + "\n" for l in lines]
 
 
+def _drv_lines(pairs):
+    """pairs: list of (disc_id, drive_letter) -> synthetic robot-mode `info disc:9999`
+    drive-enumeration output (same real shape confirmed live: one DRV: line per real/
+    mounted-virtual optical drive, then a "Failed to open disc" MSG for the fake id)."""
+    lines = [f'MSG:1005,0,1,"MakeMKV v1.18.4 win(x64-release) started","%1 started"']
+    for disc_id, letter in pairs:
+        lines.append(f'DRV:{disc_id},2,999,4,"Fake Drive","Fake Disc","{letter}"')
+    lines.append('MSG:5010,0,0,"Failed to open disc","Failed to open disc"')
+    return [l + "\n" for l in lines]
+
+
+def _self_test_resolve_disc_index():
+    """ADR-333: the mounted drive letter ("Z:") must resolve to ITS OWN disc id (1, not
+    the first-listed drive's id 0) -- proves the match is keyed on drive letter, not on
+    enumeration order/position."""
+    from unittest import mock
+    lines = _drv_lines([("0", "F:"), ("1", "Z:")])
+
+    def fake_popen(cmd, **kwargs):
+        assert "disc:9999" in cmd, cmd
+        return _FakeProc(lines)
+
+    with mock.patch("subprocess.Popen", side_effect=fake_popen):
+        disc_id = _resolve_disc_index("makemkvcon.exe", "Z:\\", 1024, None)
+    assert disc_id == "1", disc_id
+    print("_self_test_resolve_disc_index: PASS")
+
+
+def _self_test_resolve_disc_index_not_found_raises():
+    from unittest import mock
+    lines = _drv_lines([("0", "F:")])
+
+    def fake_popen(cmd, **kwargs):
+        return _FakeProc(lines)
+
+    with mock.patch("subprocess.Popen", side_effect=fake_popen):
+        try:
+            _resolve_disc_index("makemkvcon.exe", "Z:\\", 1024, None)
+            raise AssertionError("expected a RuntimeError when the drive letter isn't seen")
+        except RuntimeError as e:
+            assert "did not report a disc id" in str(e)
+    print("_self_test_resolve_disc_index_not_found_raises: PASS")
+
+
 def _self_test_main_title_selection():
     """Three titles (a short extra, the real movie, a trailer) -- the longest real
     duration (title 1, 2h10m15s) must be chosen, not title 0 or the title count."""
@@ -510,11 +691,11 @@ def _self_test_main_title_selection():
     lines = _info_lines([(0, "0:05:00"), (1, "2:10:15"), (2, "0:03:30")])
 
     def fake_popen(cmd, **kwargs):
-        assert "info" in cmd and "iso:fake.iso" in cmd
+        assert "info" in cmd and "disc:0" in cmd
         return _FakeProc(lines)
 
     with mock.patch("subprocess.Popen", side_effect=fake_popen):
-        chosen = _scan_main_title("makemkvcon.exe", "fake.iso", 1024, None, None)
+        chosen = _scan_main_title("makemkvcon.exe", "disc:0", 1024, None, None)
     assert chosen == 1, chosen
     print("_self_test_main_title_selection: PASS")
 
@@ -532,7 +713,7 @@ def _self_test_scan_license_problem_raises():
 
     with mock.patch("subprocess.Popen", side_effect=fake_popen):
         try:
-            _scan_main_title("makemkvcon.exe", "fake.iso", 1024, None, None)
+            _scan_main_title("makemkvcon.exe", "disc:0", 1024, None, None)
             raise AssertionError("expected a license-problem RuntimeError")
         except RuntimeError as e:
             assert "renew your license" in str(e)
@@ -550,7 +731,7 @@ def _self_test_no_titles_raises():
 
     with mock.patch("subprocess.Popen", side_effect=fake_popen):
         try:
-            _scan_main_title("makemkvcon.exe", "fake.iso", 1024, None, None)
+            _scan_main_title("makemkvcon.exe", "disc:0", 1024, None, None)
             raise AssertionError("expected a RuntimeError when no titles are found")
         except RuntimeError as e:
             assert "no titles" in str(e)
@@ -607,26 +788,36 @@ def _self_test_cancel_raises():
 
 
 def _self_test_mocked_end_to_end():
-    """No real MakeMKV/ISO: subprocess.Popen is mocked for both the info scan and the rip
-    itself (which 'creates' a fake .mkv file in the work directory, the same way the real
-    makemkvcon would). Proves: the main (longest) title is selected and passed to the real
-    `mkv` command, the ripped file is atomically moved to output_path, the work directory
-    is cleaned up afterward, and the real StereoMode-tagging step (added for the real
-    "missing stereo tag" bug, see module docstring) runs with StereoMode 13 after a
-    successful rip. _find_mkvpropedit/_apply_stereo_mode_tag are mocked here (not real
-    mkvpropedit) so this test stays fast/deterministic regardless of whether a real
-    mkvpropedit happens to be installed on the machine running this suite -- the real,
-    hands-on mkvpropedit/mkvmerge check against decker's own actual ripped file is done
-    separately, outside this self-test suite."""
+    """No real MakeMKV/ISO/mount: subprocess.Popen is mocked for the drive-enumeration
+    call, the info scan, and the rip itself (which 'creates' a fake .mkv file in the work
+    directory, the same way the real makemkvcon would); mount_iso/dismount_iso are mocked
+    too (not a real Windows mount). Proves: the mounted drive's own disc id is resolved
+    and used (ADR-333, not the old `iso:<path>` source), the real forced-MVC-selection
+    profile is written and passed via `--profile=`, the main (longest) title is selected
+    and passed to the real `mkv` command, the ripped file is atomically moved to
+    output_path, the work directory (and the profile file inside it) is cleaned up
+    afterward, the ISO is dismounted exactly once, and the real StereoMode-tagging step
+    (added for the real "missing stereo tag" bug, see module docstring) runs with
+    StereoMode 13 after a successful rip. _find_mkvpropedit/_apply_stereo_mode_tag are
+    mocked here (not real mkvpropedit) so this test stays fast/deterministic regardless
+    of whether a real mkvpropedit happens to be installed on the machine running this
+    suite -- the real, hands-on mkvpropedit/mkvmerge/MakeMKV check against decker's own
+    actual ripped file is done separately, outside this self-test suite."""
     import tempfile
     from unittest import mock
 
     rip_calls = []
 
     def fake_popen(cmd, **kwargs):
+        if "disc:9999" in cmd:
+            return _FakeProc(_drv_lines([("3", "Z:")]))
         if "info" in cmd:
+            assert "disc:3" in cmd, cmd
             return _FakeProc(_info_lines([(0, "0:02:00"), (1, "1:30:00")]))
         if "mkv" in cmd:
+            assert "disc:3" in cmd, cmd
+            profile_args = [a for a in cmd if a.startswith("--profile=")]
+            assert profile_args and path.exists(profile_args[0].split("=", 1)[1]), cmd
             rip_calls.append(cmd)
             work_dir = cmd[-1]
             with open(path.join(work_dir, "the_movie_t01.mkv"), "wb") as f:
@@ -634,10 +825,15 @@ def _self_test_mocked_end_to_end():
             return _FakeProc([l + "\n" for l in ["PRGV:0,0,65536", "PRGV:65536,65536,65536"]])
         raise AssertionError(f"unexpected command: {cmd}")
 
+    dismount_calls = []
+
     with tempfile.TemporaryDirectory() as tmp_dir, \
          mock.patch.object(sys.modules[__name__], "_find_makemkvcon", return_value="makemkvcon.exe"), \
          mock.patch.object(sys.modules[__name__], "_find_mkvpropedit", return_value="mkvpropedit.exe"), \
          mock.patch.object(sys.modules[__name__], "_apply_stereo_mode_tag", return_value=True) as mock_tag, \
+         mock.patch.object(sys.modules[__name__], "mount_iso", return_value=("Z:\\", True)), \
+         mock.patch.object(sys.modules[__name__], "dismount_iso",
+                           side_effect=lambda p: dismount_calls.append(p)), \
          mock.patch("subprocess.Popen", side_effect=fake_popen):
         iso_path = path.join(tmp_dir, "movie.iso")
         open(iso_path, "wb").close()
@@ -649,7 +845,9 @@ def _self_test_mocked_end_to_end():
         assert path.exists(out_path) and open(out_path, "rb").read() == b"fake-mkv-data"
         assert rip_calls and rip_calls[0][rip_calls[0].index("mkv") + 2] == "1", rip_calls
         assert not path.exists(path.join(tmp_dir, "_makemkv_work_movie")), \
-            "the work directory must be cleaned up after a successful run"
+            "the work directory (and the profile file written inside it) must be " \
+            "cleaned up after a successful run"
+        assert dismount_calls == [iso_path], dismount_calls
 
         mock_tag.assert_called_once()
         tag_call_args, tag_call_kwargs = mock_tag.call_args
@@ -662,6 +860,47 @@ def _self_test_mocked_end_to_end():
     print("_self_test_mocked_end_to_end: PASS")
 
 
+def _self_test_mount_not_dismounted_if_already_mounted():
+    """mount_iso() returns mounted_by_us=False when the user already had the ISO mounted
+    themselves (same convention as mvc_extract_cli.py's own mount_iso docstring) --
+    convert() must never dismount a drive it didn't mount, so as not to yank it out from
+    under the user's own separate use of it."""
+    import tempfile
+    from unittest import mock
+
+    def fake_popen(cmd, **kwargs):
+        if "disc:9999" in cmd:
+            return _FakeProc(_drv_lines([("0", "Z:")]))
+        if "info" in cmd:
+            return _FakeProc(_info_lines([(0, "1:00:00")]))
+        if "mkv" in cmd:
+            work_dir = cmd[-1]
+            with open(path.join(work_dir, "the_movie_t00.mkv"), "wb") as f:
+                f.write(b"fake-mkv-data")
+            return _FakeProc([l + "\n" for l in ["PRGV:65536,65536,65536"]])
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    dismount_calls = []
+
+    with tempfile.TemporaryDirectory() as tmp_dir, \
+         mock.patch.object(sys.modules[__name__], "_find_makemkvcon", return_value="makemkvcon.exe"), \
+         mock.patch.object(sys.modules[__name__], "_find_mkvpropedit", return_value=None), \
+         mock.patch.object(sys.modules[__name__], "_apply_stereo_mode_tag"), \
+         mock.patch.object(sys.modules[__name__], "mount_iso", return_value=("Z:\\", False)), \
+         mock.patch.object(sys.modules[__name__], "dismount_iso",
+                           side_effect=lambda p: dismount_calls.append(p)), \
+         mock.patch("subprocess.Popen", side_effect=fake_popen):
+        iso_path = path.join(tmp_dir, "movie.iso")
+        open(iso_path, "wb").close()
+        out_path = path.join(tmp_dir, "movie.mkv")
+        result = convert(iso_path, out_path)
+
+        assert result == out_path
+        assert dismount_calls == [], \
+            "an ISO the user already had mounted must never be dismounted by this tool"
+    print("_self_test_mount_not_dismounted_if_already_mounted: PASS")
+
+
 def _self_test_tagging_missing_mkvpropedit_is_nonfatal():
     """Real tool-availability edge case: if mkvpropedit can't be found, the rip itself
     must still succeed and still return the real output_path (same non-fatal philosophy
@@ -671,6 +910,8 @@ def _self_test_tagging_missing_mkvpropedit_is_nonfatal():
     from unittest import mock
 
     def fake_popen(cmd, **kwargs):
+        if "disc:9999" in cmd:
+            return _FakeProc(_drv_lines([("0", "Z:")]))
         if "info" in cmd:
             return _FakeProc(_info_lines([(0, "1:00:00")]))
         if "mkv" in cmd:
@@ -684,6 +925,8 @@ def _self_test_tagging_missing_mkvpropedit_is_nonfatal():
          mock.patch.object(sys.modules[__name__], "_find_makemkvcon", return_value="makemkvcon.exe"), \
          mock.patch.object(sys.modules[__name__], "_find_mkvpropedit", return_value=None), \
          mock.patch.object(sys.modules[__name__], "_apply_stereo_mode_tag") as mock_tag, \
+         mock.patch.object(sys.modules[__name__], "mount_iso", return_value=("Z:\\", True)), \
+         mock.patch.object(sys.modules[__name__], "dismount_iso"), \
          mock.patch("subprocess.Popen", side_effect=fake_popen):
         iso_path = path.join(tmp_dir, "movie.iso")
         open(iso_path, "wb").close()
@@ -706,7 +949,10 @@ def _run_self_tests():
     _self_test_no_titles_raises()
     _self_test_progress_forwarded()
     _self_test_cancel_raises()
+    _self_test_resolve_disc_index()
+    _self_test_resolve_disc_index_not_found_raises()
     _self_test_mocked_end_to_end()
+    _self_test_mount_not_dismounted_if_already_mounted()
     _self_test_tagging_missing_mkvpropedit_is_nonfatal()
     print("ALL PASS")
 

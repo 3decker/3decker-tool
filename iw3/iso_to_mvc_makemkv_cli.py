@@ -37,6 +37,13 @@ A real 3D Blu-ray ISO usually has one long main-feature title plus several short
 extras/trailers -- this module scans with `info` first and rips ONLY the title with the
 longest real duration (not `all`), so the result is always the movie, never a guess among
 several output files.
+
+After a successful rip, `convert()` also tags the result's video track with Matroska
+StereoMode=13 via mkvpropedit (real bug found on decker's own real MOONED_3D.iso rip:
+MakeMKV's own raw output had no StereoMode property at all, so no 3D-aware player/TV
+had anything to auto-detect 3D from). This reuses the exact same value/mechanism this
+project's own real MVC-producing tools already proved on real hardware -- see ADR-284
+and sbs_to_mvc_cli.py's `_mux_mkv_via_mkvmerge()`.
 """
 import argparse
 import csv
@@ -56,7 +63,7 @@ from os import path
 import nunif.gui.subprocess_patch  # noqa
 
 from .mvc_extract_cli import Cancelled
-from .utils import log_subprocess_cmd
+from .utils import log_subprocess_cmd, _find_mkvpropedit, _apply_stereo_mode_tag
 
 # Confirmed real registry location MakeMKV's own Windows installer registers its CLI exe
 # under (the standard "App Paths" mechanism many Windows installers use) -- verified live
@@ -349,6 +356,33 @@ def convert(iso_path, output_path, work_dir=None, cache_mb=1024, keep_temp=False
                 f"MakeMKV reported success but did not leave exactly one .mkv file in "
                 f"{work_dir} (found: {ripped or 'none'})")
         os.replace(path.join(work_dir, ripped[0]), output_path)
+
+        # MakeMKV's own raw rip does not always carry a Matroska StereoMode tag (confirmed:
+        # a real rip of decker's own MOONED_3D.iso had none at all), so a 3D-aware
+        # player/TV has nothing to auto-detect 3D from. Tag it the same way this project's
+        # OWN real MVC-producing tools already do (ADR-284, sbs_to_mvc_cli.py's
+        # _mux_mkv_via_mkvmerge): StereoMode 13 ("both eyes in one Block, left eye first"),
+        # the de facto convention real players key off for MVC content (no dedicated
+        # Matroska enum exists for "H.264 MVC"). Unconditional, not gated on a per-title
+        # MVC signal -- this entire tool's only real purpose is ripping real 3D Blu-ray MVC
+        # content (its caller always hands it this project's own ISO/BD-folder MVC output,
+        # or a real third-party 3D Blu-ray image), and MakeMKV's own robot-mode title scan
+        # exposes no cheap, reliable per-title "is this genuinely MVC" attribute to gate on.
+        # Base view = left eye is the real Blu-ray 3D spec convention (unlike this
+        # project's own encode path, there is no swap_eyes here to account for -- MakeMKV
+        # is ripping an already-authored disc, not re-packing eyes itself). Never fatal:
+        # same as sbs_to_mvc_cli.py, a missing mkvpropedit or a failed tag attempt is
+        # printed and left as a non-fatal note -- the file MakeMKV already produced is
+        # still returned, just not auto-detected as 3D by every player.
+        from types import SimpleNamespace
+        mkvpropedit = _find_mkvpropedit()
+        if mkvpropedit is None:
+            print(f"[makemkv] note: mkvpropedit not found -- "
+                  f"{path.basename(str(output_path))} was NOT tagged with a StereoMode; a "
+                  f"3D-aware player may not auto-detect it as 3D", file=sys.stderr)
+        else:
+            _apply_stereo_mode_tag(output_path, SimpleNamespace(stereo_mode_tag=True, vr180=False),
+                                   mkvpropedit_bin=mkvpropedit, value_override=13)
         return output_path
     finally:
         if not keep_temp:
@@ -576,8 +610,14 @@ def _self_test_mocked_end_to_end():
     """No real MakeMKV/ISO: subprocess.Popen is mocked for both the info scan and the rip
     itself (which 'creates' a fake .mkv file in the work directory, the same way the real
     makemkvcon would). Proves: the main (longest) title is selected and passed to the real
-    `mkv` command, the ripped file is atomically moved to output_path, and the work
-    directory is cleaned up afterward."""
+    `mkv` command, the ripped file is atomically moved to output_path, the work directory
+    is cleaned up afterward, and the real StereoMode-tagging step (added for the real
+    "missing stereo tag" bug, see module docstring) runs with StereoMode 13 after a
+    successful rip. _find_mkvpropedit/_apply_stereo_mode_tag are mocked here (not real
+    mkvpropedit) so this test stays fast/deterministic regardless of whether a real
+    mkvpropedit happens to be installed on the machine running this suite -- the real,
+    hands-on mkvpropedit/mkvmerge check against decker's own actual ripped file is done
+    separately, outside this self-test suite."""
     import tempfile
     from unittest import mock
 
@@ -596,6 +636,8 @@ def _self_test_mocked_end_to_end():
 
     with tempfile.TemporaryDirectory() as tmp_dir, \
          mock.patch.object(sys.modules[__name__], "_find_makemkvcon", return_value="makemkvcon.exe"), \
+         mock.patch.object(sys.modules[__name__], "_find_mkvpropedit", return_value="mkvpropedit.exe"), \
+         mock.patch.object(sys.modules[__name__], "_apply_stereo_mode_tag", return_value=True) as mock_tag, \
          mock.patch("subprocess.Popen", side_effect=fake_popen):
         iso_path = path.join(tmp_dir, "movie.iso")
         open(iso_path, "wb").close()
@@ -608,9 +650,50 @@ def _self_test_mocked_end_to_end():
         assert rip_calls and rip_calls[0][rip_calls[0].index("mkv") + 2] == "1", rip_calls
         assert not path.exists(path.join(tmp_dir, "_makemkv_work_movie")), \
             "the work directory must be cleaned up after a successful run"
+
+        mock_tag.assert_called_once()
+        tag_call_args, tag_call_kwargs = mock_tag.call_args
+        assert tag_call_args[0] == out_path, tag_call_args
+        assert tag_call_kwargs["value_override"] == 13, tag_call_kwargs
+        assert tag_call_kwargs["mkvpropedit_bin"] == "mkvpropedit.exe", tag_call_kwargs
+        assert getattr(tag_call_args[1], "stereo_mode_tag", False) is True, tag_call_args[1]
         assert ("scan", 0, 1) in progress and ("scan", 1, 1) in progress
         assert ("rip", 65536.0, 65536.0) in progress
     print("_self_test_mocked_end_to_end: PASS")
+
+
+def _self_test_tagging_missing_mkvpropedit_is_nonfatal():
+    """Real tool-availability edge case: if mkvpropedit can't be found, the rip itself
+    must still succeed and still return the real output_path (same non-fatal philosophy
+    as sbs_to_mvc_cli.py's own StereoMode-tagging step) -- a missing optional tagging tool
+    must never turn an otherwise-successful rip into a failure."""
+    import tempfile
+    from unittest import mock
+
+    def fake_popen(cmd, **kwargs):
+        if "info" in cmd:
+            return _FakeProc(_info_lines([(0, "1:00:00")]))
+        if "mkv" in cmd:
+            work_dir = cmd[-1]
+            with open(path.join(work_dir, "the_movie_t00.mkv"), "wb") as f:
+                f.write(b"fake-mkv-data")
+            return _FakeProc([l + "\n" for l in ["PRGV:65536,65536,65536"]])
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with tempfile.TemporaryDirectory() as tmp_dir, \
+         mock.patch.object(sys.modules[__name__], "_find_makemkvcon", return_value="makemkvcon.exe"), \
+         mock.patch.object(sys.modules[__name__], "_find_mkvpropedit", return_value=None), \
+         mock.patch.object(sys.modules[__name__], "_apply_stereo_mode_tag") as mock_tag, \
+         mock.patch("subprocess.Popen", side_effect=fake_popen):
+        iso_path = path.join(tmp_dir, "movie.iso")
+        open(iso_path, "wb").close()
+        out_path = path.join(tmp_dir, "movie.mkv")
+        result = convert(iso_path, out_path)
+
+        assert result == out_path
+        assert path.exists(out_path)
+        mock_tag.assert_not_called()
+    print("_self_test_tagging_missing_mkvpropedit_is_nonfatal: PASS")
 
 
 def _run_self_tests():
@@ -624,6 +707,7 @@ def _run_self_tests():
     _self_test_progress_forwarded()
     _self_test_cancel_raises()
     _self_test_mocked_end_to_end()
+    _self_test_tagging_missing_mkvpropedit_is_nonfatal()
     print("ALL PASS")
 
 

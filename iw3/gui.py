@@ -6061,6 +6061,30 @@ class MainFrame(wx.Frame):
               "Retroactive HDR/DV Reinjection tool afterward -- then pick libx265 (works everywhere) or "
               "hevc_nvenc (faster, if your GPU supports it)."))
 
+        # ADR-331: exposes rife_cli.py's --fp16 flag (ADR-327, GPU-crash fix
+        # confirmed working end-to-end on real hardware ADR-329) in the GUI, now
+        # that it is hardware-verified. Same conceptual group as Output Codec
+        # above (both are real encoding/inference options for this Run), so it
+        # sits right next to it rather than in its own row.
+        self.chk_rife_standalone_fp16 = wx.CheckBox(self.cpn_rife_standalone.GetPane(), label=T("Half Precision (FP16)"),
+                                                      name="chk_rife_standalone_fp16")
+        self.chk_rife_standalone_fp16.SetValue(False)
+        self.chk_rife_standalone_fp16.SetToolTip(
+            T("What it's for: runs RIFE's own AI interpolation step in half precision (FP16) instead of "
+              "the default full precision (FP32).\n"
+              "Why you would change it: can speed up the RIFE pass on a real CUDA GPU -- confirmed "
+              "2026-10-04 to work correctly on real hardware (no crash, correct HEVC/10-bit output, "
+              "Dolby Vision reinjection afterward still works) after an earlier crash bug was found and "
+              "fixed. A real measured speed comparison hasn't come back yet, so this is described only "
+              "as \"can speed up\", not a specific number.\n"
+              "Con: only has any effect with an actual CUDA GPU selected in the GPU dropdown above -- on "
+              "CPU it's automatically ignored with a logged warning, so leaving this checked while GPU is "
+              "set to CPU does nothing harmful, just nothing useful either. Half precision is also a real "
+              "precision trade-off, occasionally reported as less stable for flow-estimation models in "
+              "some RIFE setups.\n"
+              "Recommended: leave unchecked (the default, zero behavior change) unless you specifically "
+              "want to try it for extra speed on a CUDA GPU."))
+
         # Optional: re-attach Dolby Vision after RIFE (ADR-193 follow-up)
         self.lbl_rife_standalone_dv_source = wx.StaticText(self.cpn_rife_standalone.GetPane(),
                                                              label=T("Original DV Source (optional)"))
@@ -6165,6 +6189,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_rife_standalone_gpu, (h, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_standalone_codec, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_rife_standalone_fp16, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_rife_standalone_dv_source, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_dv_source, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_dv_source, (h, 3), flag=wx.EXPAND)
@@ -14655,6 +14680,12 @@ class MainFrame(wx.Frame):
         # backward-compat guarantee.
         if video_codec:
             cmd += ["--video-codec", str(video_codec)]
+        # ADR-331: opt-in only (unchecked by default), same backward-compat
+        # convention as --video-codec just above -- omitted entirely unless the
+        # checkbox is checked, so anyone who doesn't touch it gets today's exact
+        # existing command.
+        if self.chk_rife_standalone_fp16.GetValue():
+            cmd += ["--fp16"]
 
         self.txt_rife_standalone_log.SetValue(T("Running...\n"))
         self.gauge_rife_standalone.SetRange(1)
@@ -19232,9 +19263,14 @@ def _self_test_rife_standalone_panel():
         for name in ("txt_rife_standalone_input", "txt_rife_standalone_output",
                      "cbo_rife_standalone_model", "cbo_rife_standalone_mode",
                      "txt_rife_standalone_target_fps", "cbo_rife_standalone_gpu",
-                     "cbo_rife_standalone_codec", "btn_rife_standalone_run"):
+                     "cbo_rife_standalone_codec", "chk_rife_standalone_fp16",
+                     "btn_rife_standalone_run"):
             ctrl = getattr(frame, name)
             assert ctrl.GetParent() is frame.cpn_rife_standalone.GetPane(), name
+
+        # ADR-331: --fp16 is opt-in only -- unchecked by default, zero behavior
+        # change for anyone who doesn't touch it (same guarantee as ADR-327).
+        assert frame.chk_rife_standalone_fp16.GetValue() is False
         # ADR-250: txt_rife_standalone_log is now a plain alias to the one shared
         # txt_standalone_log, parented to grp_standalone_log at the bottom of the
         # whole tab -- not inside this tool's own pane like the fields above.
@@ -19364,6 +19400,24 @@ def _self_test_rife_standalone_panel():
             frame.on_click_btn_rife_standalone_run(None)
             cmd = captured["cmd"]
             assert "--video-codec" not in cmd, cmd
+
+            # ADR-331: --fp16 checkbox, unchecked by default -> must be absent
+            # (byte-for-byte the same command as above, zero behavior change).
+            assert "--fp16" not in cmd, cmd
+
+            # Checked -> --fp16 appended, matching rife_cli.py's real flag name.
+            captured.clear()
+            frame.chk_rife_standalone_fp16.SetValue(True)
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert "--fp16" in cmd, cmd
+
+            # Unchecked again -> --fp16 disappears (not sticky/broken).
+            captured.clear()
+            frame.chk_rife_standalone_fp16.SetValue(False)
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert "--fp16" not in cmd, cmd
     finally:
         gui_mod.startWorker = orig_start_worker
         if frame is not None:

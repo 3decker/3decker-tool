@@ -7852,11 +7852,13 @@ class MainFrame(wx.Frame):
         # (each owns its own StaticBoxSizer(s) via the SetSizer() calls above) -- the
         # only thing left is composing them onto the visible pnl_options area, which is
         # the one part that differs between Tabbed and Single Page.
-        # "?" help buttons for every tooltipped setting in these two panels (see
-        # add_help_buttons). Done before composing, so the pinned MinSize that
-        # compose sets already accounts for them.
-        add_help_buttons(self.tab_processor)
-        add_help_buttons(self.tab_video_enc)
+        # "?" help buttons for every tooltipped setting in every tab (see
+        # add_help_buttons; it walks each tab recursively, so this includes the
+        # group boxes and collapsible sections inside it). Done before composing, so
+        # the pinned MinSize that compose sets already accounts for them.
+        for tab in (self.tab_stereo, self.tab_depth_blend, self.tab_video_filter, self.tab_video_dec,
+                    self.tab_video_enc, self.tab_processor, self.tab_tools):
+            add_help_buttons(tab)
 
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
             self._compose_options_layout_single_page()
@@ -19376,17 +19378,38 @@ def _self_test_auto_ema_relocated_and_disables_ema_fields():
         assert frame.cbo_scene_batch_auto_ema_model.GetParent() is frame.cpn_stereo_stability_flicker.GetPane()
         assert frame.btn_scene_batch_auto_ema_edit.GetParent() is frame.cpn_stereo_stability_flicker.GetPane()
 
-        stereo_grid = frame.cbo_ema_buffer.GetContainingSizer()
+        # A control with a "?" button (add_help_buttons) sits in a small row sizer that
+        # is itself the grid item, so look one level down for the control's grid item.
+        def grid_item_of(grid, widget):
+            for item in grid.GetChildren():
+                if item.GetWindow() is widget:
+                    return item
+                sub = item.GetSizer()
+                if sub is not None and any(c.GetWindow() is widget for c in sub.GetChildren()):
+                    return item
+            return None
+
+        def grid_holding(sizer, widget):
+            if isinstance(sizer, wx.GridBagSizer) and grid_item_of(sizer, widget) is not None:
+                return sizer
+            for item in sizer.GetChildren():
+                sub = item.GetSizer()
+                found = grid_holding(sub, widget) if sub is not None else None
+                if found is not None:
+                    return found
+            return None
+
+        stereo_grid = grid_holding(frame.cpn_stereo_stability_flicker.GetPane().GetSizer(), frame.cbo_ema_buffer)
         assert isinstance(stereo_grid, wx.GridBagSizer), "Flicker Reduction's own layout must be a GridBagSizer"
-        assert frame.chk_scene_batch_auto_ema.GetContainingSizer() is stereo_grid, \
-            "chk_scene_batch_auto_ema must be laid out in the same grid as Flicker Reduction's fields"
-        assert frame.cbo_scene_batch_auto_ema_model.GetContainingSizer() is stereo_grid
-        assert frame.btn_scene_batch_auto_ema_edit.GetContainingSizer() is stereo_grid
+        for widget in (frame.chk_scene_batch_auto_ema, frame.cbo_scene_batch_auto_ema_model,
+                       frame.btn_scene_batch_auto_ema_edit):
+            assert grid_item_of(stereo_grid, widget) is not None, \
+                f"{widget.GetName()} must be laid out in the same grid as Flicker Reduction's fields"
 
         # Sits directly under (a larger grid row index than) the Decay Rate/Buffer
         # row it visually relates to, in that same underlying GridBagSizer.
-        buffer_pos = stereo_grid.GetItem(frame.cbo_ema_buffer).GetPos()
-        auto_ema_pos = stereo_grid.GetItem(frame.chk_scene_batch_auto_ema).GetPos()
+        buffer_pos = grid_item_of(stereo_grid, frame.cbo_ema_buffer).GetPos()
+        auto_ema_pos = grid_item_of(stereo_grid, frame.chk_scene_batch_auto_ema).GetPos()
         assert auto_ema_pos.GetRow() > buffer_pos.GetRow(), \
             "Auto EMA by Scene Length must sit below the Decay Rate/Buffer row"
 
@@ -29931,6 +29954,70 @@ def _self_test_help_buttons():
     print("_self_test_help_buttons: PASS")
 
 
+def _self_test_help_buttons_all_tabs():
+    """"?" help buttons cover EVERY tab (not only Processor / Video Encoding). Walks each of
+    the 7 tabs recursively, in both layout modes: every tooltipped control of a type
+    add_help_buttons handles gets exactly one "?" in its own parent; every tooltipped control of
+    any other type must be one of the kinds deliberately left out (buttons, labels, progress bar,
+    results list); StaticText and wx.Button get no "?"; and the total "?" count matches the
+    covered controls. Synthetic: no GPU, no media, no Notepad."""
+    from nunif.gui import common as gui_common
+
+    tooltip_attr = gui_common._TOOLTIP_FULL_TEXT_ATTR
+    help_attr = gui_common._HELP_BUTTON_ATTR
+    help_types = gui_common._HELP_BUTTON_CONTROL_TYPES
+    excluded_types = (wx.Button, wx.StaticText, wx.Gauge, wx.ListCtrl)
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        tabs = (frame.tab_stereo, frame.tab_depth_blend, frame.tab_video_filter, frame.tab_video_dec,
+                frame.tab_video_enc, frame.tab_processor, frame.tab_tools)
+
+        def walk(window, visit):
+            visit(window)
+            for child in window.GetChildren():
+                walk(child, visit)
+
+        for mode in (LAYOUT_MODE_TABS, LAYOUT_MODE_SINGLE_PAGE):
+            frame.switch_layout_mode(mode)
+            covered = 0
+            for tab in tabs:
+                def check(w, tab=tab):
+                    nonlocal covered
+                    btn = getattr(w, help_attr, None)
+                    if isinstance(w, (wx.StaticText, wx.Button)):
+                        assert btn is None, f"{mode}: {type(w).__name__} {w.GetName()!r} got a '?'"
+                    elif isinstance(w, help_types) and getattr(w, tooltip_attr, None):
+                        assert isinstance(btn, wx.Button), \
+                            f"{mode}: {w.GetName()!r} ({type(w).__name__}) has a tooltip but no '?'"
+                        assert btn.GetParent() is w.GetParent(), f"{mode}: {w.GetName()!r}: '?' in a different parent"
+                        assert btn.GetLabel() == "?"
+                        covered += 1
+                    elif getattr(w, tooltip_attr, None) and not isinstance(w, excluded_types):
+                        raise AssertionError(
+                            f"{mode}: {w.GetName()!r} ({type(w).__name__}) has a tooltip but its type "
+                            "is neither covered nor deliberately excluded")
+                walk(tab, check)
+
+            # every "?" in the frame belongs to a covered control (no stray buttons)
+            all_question = []
+            walk(frame, lambda w: all_question.append(w) if isinstance(w, wx.Button) and w.GetLabel() == "?" else None)
+            assert len(all_question) == covered, \
+                f"{mode}: {len(all_question)} '?' buttons in the frame but {covered} covered controls in the tabs"
+            assert covered > 0, f"{mode}: no tooltipped control in any tab got a '?'"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_help_buttons_all_tabs: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -30007,6 +30094,7 @@ def _run_self_tests():
         _self_test_label_tooltips_propagated,
         _self_test_video_encoding_layout_fits,
         _self_test_help_buttons,
+        _self_test_help_buttons_all_tabs,
         _self_test_resolution_preset_quick_fill,
         _self_test_convergence_bias_preset_quick_fill,
         _self_test_free_vram_on_job_finish,

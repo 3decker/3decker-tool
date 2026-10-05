@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Improved: the "?" help buttons now appear on every settings tab.** Before, only some sections had one. Now every setting with a description has a small "?" next to it across all tabs, including the Standalone Tools. Click it to open that setting's full description in a text file.
+
 **Fixed: the update could stop with "ffmpeg update FAILED" when the download was incomplete.** The updater now retries the ffmpeg checksum download once. If it still fails, it keeps the ffmpeg you already have and shows a warning, instead of stopping the whole update.
 
 **Improved: the Video Encoding section fits on first open, and settings have "?" help buttons.** The Video Encoding box no longer gets cut off on the right when the window first opens. Many settings now have a small "?" next to them. Click it to open that setting's full description in a text file, instead of right-clicking. Right-click still works too.

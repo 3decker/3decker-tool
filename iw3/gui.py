@@ -4156,6 +4156,23 @@ class MainFrame(wx.Frame):
               "another GPU job and want to keep them on separate devices.\n"
               "Recommended: your main GPU (the first entry) unless you have a specific reason to "
               "pick otherwise."))
+        self.chk_rife_fp16 = wx.CheckBox(self.grp_postprocess, label=T("Half Precision (FP16)"),
+                                         name="chk_rife_fp16")
+        self.chk_rife_fp16.SetValue(False)
+        self.chk_rife_fp16.SetToolTip(
+            T("What it's for: runs the RIFE interpolation step in half precision (FP16) instead of the "
+              "default full precision (FP32). This only affects the RIFE step above -- the depth model has "
+              "its own separate FP16 checkbox in the Processor tab, which is unrelated.\n"
+              "Default: off (FP32). FP32 is the default and the recommended setting for accuracy.\n"
+              "Pro: on a CUDA NVIDIA GPU, FP16 can speed up RIFE -- the developer measured about 2x faster "
+              "on one full real conversion.\n"
+              "Con: the picture-quality impact of FP16 has not been independently reviewed, so it is not "
+              "guaranteed to be equally accurate as FP32. Some RIFE models can also be less stable in "
+              "half precision.\n"
+              "CPU: ignored, with a warning in the log, when RIFE runs on CPU (RIFE Device set to CPU) -- "
+              "half precision only helps on a CUDA GPU.\n"
+              "Recommended: leave it off (FP32) unless speed matters more to you than the unreviewed "
+              "quality tradeoff."))
 
         self.cbo_rife_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_mode)
         self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
@@ -4539,6 +4556,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_rife_target_fps, (j, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_gpu, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_gpu, (j, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_rife_fp16, (j, 2), flag=wx.ALIGN_CENTER_VERTICAL)
 
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -10141,6 +10159,7 @@ class MainFrame(wx.Frame):
         self.cbo_rife_model.Enable(enabled)
         self.cbo_rife_mode.Enable(enabled)
         self.cbo_rife_gpu.Enable(enabled)
+        self.chk_rife_fp16.Enable(enabled)
         self.txt_rife_target_fps.Enable(enabled and self.cbo_rife_mode.GetValue() == "Custom FPS...")
 
     def on_changed_chk_rife_interpolate(self, event):
@@ -10882,6 +10901,7 @@ class MainFrame(wx.Frame):
             rife_gpu=int(self.cbo_rife_gpu.GetClientData(self.cbo_rife_gpu.GetSelection())),
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
+            rife_fp16=self.chk_rife_fp16.GetValue(),
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
             restore_dual_eye_subtitles=self.chk_restore_dual_eye_subtitles.GetValue(),
             convert_to_mvc=self._mvc_mode() == "alongside",
@@ -12232,6 +12252,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_waifu2x_target, args.waifu2x_upscale_target)
 
         self.chk_rife_interpolate.SetValue(bool(args.rife_interpolate))
+        self.chk_rife_fp16.SetValue(bool(getattr(args, "rife_fp16", False)))
         _apply_combo_value(self.cbo_rife_model, args.rife_model)
         # cbo_rife_gpu is a non-editable ComboBox keyed by integer ClientData (device
         # index, or -1 for CPU) -- not a plain string value _apply_combo_value can
@@ -25161,6 +25182,96 @@ def _self_test_rife_scene_cut_times_plumbing():
     print("_self_test_rife_scene_cut_times_plumbing: PASS")
 
 
+def _self_test_rife_fp16_processor_checkbox():
+    """Main Processor tab RIFE FP16 opt-in (chk_rife_fp16). Deliberately separate from the depth
+    model's own chk_fp16 and the Standalone RIFE Tool's chk_rife_standalone_fp16. Checks: the
+    checkbox exists under grp_postprocess, is unchecked by default (FP32), its tooltip states the
+    FP32 default and the CPU behavior, it is enabled only while RIFE Interpolate is on, parse_args()
+    carries rife_fp16 (False by default, True when checked), apply_parsed_args_to_gui() restores it
+    (including from an args object with no rife_fp16 attribute at all), and
+    utils._run_rife_interpolation() appends --fp16 to the real iw3.rife_cli command only when set,
+    leaving the command otherwise identical to the unset case. Subprocess is mocked; no GPU, no movie."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.chk_rife_fp16.GetParent() is frame.grp_postprocess
+        assert frame.chk_rife_fp16.GetValue() is False
+        tip = frame.chk_rife_fp16.GetToolTip().GetTip()
+        assert "FP32" in tip and "CPU" in tip and "2x" in tip, tip
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        frame.chk_rife_interpolate.SetValue(False)
+        frame.update_rife_interpolate()
+        assert not frame.chk_rife_fp16.IsEnabled()
+        frame.chk_rife_interpolate.SetValue(True)
+        frame.update_rife_interpolate()
+        assert frame.chk_rife_fp16.IsEnabled()
+
+        assert frame.parse_args(skip_set_state=True).rife_fp16 is False
+        frame.chk_rife_fp16.SetValue(True)
+        args_on = frame.parse_args(skip_set_state=True)
+        assert args_on.rife_fp16 is True
+
+        frame.chk_rife_fp16.SetValue(False)
+        frame.apply_parsed_args_to_gui(args_on)
+        assert frame.chk_rife_fp16.GetValue() is True
+        del args_on.rife_fp16
+        frame.chk_rife_fp16.SetValue(True)
+        frame.apply_parsed_args_to_gui(args_on)
+        assert frame.chk_rife_fp16.GetValue() is False, "old config without rife_fp16 must default to FP32"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    captured = []
+
+    def fake_run_cli(cmd, cwd, args, prefix, desc):
+        captured.append(list(cmd))
+        with open(cmd[cmd.index("-o") + 1], "wb") as f:
+            f.write(b"fake rife output")
+        return 0, "", False
+
+    base = dict(rife_interpolate=True, state={}, rife_model=None,
+                rife_multiplier=None, rife_target_fps=None, rife_gpu=0)
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x")
+        real_run_cli = U._run_cli_with_progress
+        U._run_cli_with_progress = fake_run_cli
+        try:
+            with mock.patch.object(U, "_load_rife_scene_cut_times", lambda p, a: None):
+                for a in (types.SimpleNamespace(**base),
+                          types.SimpleNamespace(**base, rife_fp16=False),
+                          types.SimpleNamespace(**base, rife_fp16=True)):
+                    result = U._run_rife_interpolation(src, a)
+                    assert result is not None and path.exists(result), result
+                    os.remove(result)
+        finally:
+            U._run_cli_with_progress = real_run_cli
+
+    legacy_cmd, off_cmd, on_cmd = captured
+    assert "--fp16" not in legacy_cmd and "--fp16" not in off_cmd, captured
+    assert legacy_cmd == off_cmd, "unset must be byte-for-byte identical to the pre-change command"
+    assert "--fp16" in on_cmd, on_cmd
+    assert [x for x in on_cmd if x != "--fp16"] == off_cmd, on_cmd
+
+    print("_self_test_rife_fp16_processor_checkbox: PASS")
+
+
 def _self_test_dolby_vision_step_progress():
     """The Dolby Vision step after RIFE used to show no frames / FPS / ETA. reinject_hdr_cli prints
     "IW3_REINJECT_PROGRESS <stage> <done> <total>" (seconds for the two decode passes, BYTES of a growing temp file
@@ -28806,6 +28917,7 @@ def _run_self_tests():
         _self_test_utils_hdr_to_sdr_gpu_decode,
         _self_test_hdr_to_sdr_tonemap_progress_is_incremental,
         _self_test_rife_standalone_dv_and_cancel,
+        _self_test_rife_fp16_processor_checkbox,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_truehd_eac3_audio_handling,
         _self_test_sbs2mvc_allow_lossless_eac3_on_disc,

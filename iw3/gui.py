@@ -23729,6 +23729,162 @@ def _self_test_bitrate_cap_post_step():
     print("_self_test_bitrate_cap_post_step: PASS")
 
 
+def _self_test_bitrate_cap_reports_progress():
+    """Step 7 (Limit Bitrate re-encode) feeds the job's bar from ffmpeg's -progress pipe:1 out_time_ms
+    lines, can be cancelled via stop_event (ffmpeg killed, original kept), falls back to no bar when the
+    duration is unknown, and keeps the original blocking call with no job bar (CLI). A real 4-second
+    CPU-only synthetic clip supplies the duration; ffmpeg itself is faked, so no GPU encode runs."""
+    import io
+    import tempfile
+    import threading
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    class FakeBar:
+        def __init__(self, **kw):
+            self.kw = kw
+            self.updates = []
+            self.closed = False
+
+        def update(self, n):
+            self.updates.append(n)
+
+        def close(self):
+            self.closed = True
+
+    created_bars = []
+
+    def fake_tqdm_fn(**kw):
+        bar = FakeBar(**kw)
+        created_bars.append(bar)
+        return bar
+
+    def make_fake_popen(on_line=None):
+        procs = []
+
+        class FakeProc:
+            def __init__(self, cmd, stdout=None, stderr=None, text=None, **kw):
+                self.cmd = cmd
+                self.killed = False
+                self.returncode = None
+                self.stderr = io.StringIO("")
+                self.stdout = self._lines()
+                procs.append(self)
+
+            def _lines(self):
+                for i, line in enumerate(["out_time_ms=1000000\n", "progress=continue\n",
+                                          "out_time_ms=2000000\n", "progress=continue\n",
+                                          "out_time_ms=4000000\n", "progress=end\n"]):
+                    if on_line is not None:
+                        on_line(i)
+                    if self.killed:
+                        return
+                    yield line
+                with open(self.cmd[-1], "wb") as f:
+                    f.write(b"capped")
+                self.returncode = 0
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    self.returncode = 0
+                return self.returncode
+
+        return FakeProc, procs
+
+    def args_for(state):
+        return types.SimpleNamespace(limit_bitrate=True, video_codec="hevc_nvenc", video_bitrate="20M",
+                                     crf=15, pix_fmt="yuv420p", gpu=[-1], state=state)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        def read_bytes(file_path):
+            with open(file_path, "rb") as f:
+                return f.read()
+
+        def write_bytes(file_path, data):
+            with open(file_path, "wb") as f:
+                f.write(data)
+
+        ffmpeg = U._get_ffmpeg_bin()
+        clip = path.join(tmp, "clip.mkv")
+        subprocess.run([ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=4",
+                        "-c:v", "mpeg4", clip], check=True, capture_output=True)
+        clip_bytes = read_bytes(clip)
+        unknown = path.join(tmp, "unknown.mkv")
+        write_bytes(unknown, b"not a video")
+
+        # 1. with a job bar: progress drives the bar as a percentage, and the encode arguments are unchanged
+        FakeProc, procs = make_fake_popen()
+        with mock.patch.object(U, "_measure_peak_window_bitrate_bps", return_value=120_000_000), \
+                mock.patch.object(U.subprocess, "Popen", FakeProc), \
+                mock.patch.object(U, "_notify_stage"):
+            result = U._run_bitrate_cap(clip, args_for({"tqdm_fn": fake_tqdm_fn, "stop_event": threading.Event()}))
+        assert result == clip, result
+        assert read_bytes(clip) == b"capped", "the re-encode must replace the file"
+        cmd = procs[0].cmd
+        flag = cmd.index("-progress")
+        assert cmd[flag + 1] == "pipe:1", cmd
+        stripped = cmd[:flag] + cmd[flag + 2:]
+        assert stripped[1:] == [
+            "-y", "-v", "error", "-i", clip, "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
+            "-c:v", "hevc_nvenc", "-rc", "vbr", "-cq", "15", "-b:v", "0", "-maxrate", "20M", "-bufsize", "20M",
+            "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-c:a", "copy", "-c:s", "copy",
+            f"{path.splitext(clip)[0]}_capping_tmp.mkv"], stripped
+        assert len(created_bars) == 1, created_bars
+        bar = created_bars[0]
+        assert bar.kw["total"] == 1000 and bar.kw["desc"].startswith("@PCT ") \
+            and "Capping Peak Bitrate" in bar.kw["desc"], bar.kw
+        assert bar.updates[0] == 250 and bar.updates[1] == 250 and sum(bar.updates) == 1000, bar.updates
+        assert bar.closed
+
+        # 2. Cancel: stop_event set mid-run kills ffmpeg, keeps the original, leaves no temp file
+        write_bytes(clip, clip_bytes)
+        stop = threading.Event()
+        FakeProc, procs = make_fake_popen(on_line=lambda i: stop.set() if i == 1 else None)
+        replace_calls = []
+        with mock.patch.object(U, "_measure_peak_window_bitrate_bps", return_value=120_000_000), \
+                mock.patch.object(U.subprocess, "Popen", FakeProc), \
+                mock.patch.object(U, "_notify_stage"), \
+                mock.patch.object(U.os, "replace", side_effect=lambda *a: replace_calls.append(a)):
+            result = U._run_bitrate_cap(clip, args_for({"tqdm_fn": fake_tqdm_fn, "stop_event": stop}))
+        assert result is None, result
+        assert procs[0].killed, "Cancel must kill the ffmpeg process"
+        assert not replace_calls, "a cancelled re-encode must never replace the file"
+        assert read_bytes(clip) == clip_bytes, "the original file must be kept on Cancel"
+        assert not path.exists(f"{path.splitext(clip)[0]}_capping_tmp.mkv")
+
+        # 3. unknown duration: no bar is made (no fake percentage), the re-encode still completes
+        created_bars.clear()
+        FakeProc, procs = make_fake_popen()
+        with mock.patch.object(U, "_measure_peak_window_bitrate_bps", return_value=120_000_000), \
+                mock.patch.object(U.subprocess, "Popen", FakeProc), \
+                mock.patch.object(U, "_notify_stage"):
+            result = U._run_bitrate_cap(unknown, args_for({"tqdm_fn": fake_tqdm_fn, "stop_event": None}))
+        assert result == unknown and read_bytes(unknown) == b"capped"
+        assert not created_bars, "no bar may be made when the duration is unknown"
+
+        # 4. no job bar (CLI): the original blocking subprocess.run call, no Popen, no bar
+        write_bytes(clip, clip_bytes)
+
+        def fake_run(cmd, capture_output=None, text=None):
+            write_bytes(cmd[-1], b"capped-cli")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(U, "_measure_peak_window_bitrate_bps", return_value=120_000_000), \
+                mock.patch.object(U.subprocess, "run", side_effect=fake_run) as m_run, \
+                mock.patch.object(U.subprocess, "Popen") as m_popen, \
+                mock.patch.object(U, "_notify_stage"):
+            result = U._run_bitrate_cap(clip, args_for({}))
+        assert result == clip and read_bytes(clip) == b"capped-cli"
+        assert m_run.call_count == 1 and not m_popen.called
+        assert m_run.call_args[1] == {"capture_output": True, "text": True}, m_run.call_args
+    print("_self_test_bitrate_cap_reports_progress: PASS")
+
+
 def _self_test_preview_peak_bitrate():
     """Preview Peak Bitrate (ADR-338): converts a short sample with the user's current settings
     and reports whether Limit Bitrate would likely trigger on a full run. Fully mocked (no GPU,
@@ -31021,6 +31177,7 @@ def _run_self_tests():
         _self_test_nvenc_bitrate_cap,
         _self_test_bitrate_cap_stage_in_job_stages,
         _self_test_bitrate_cap_post_step,
+        _self_test_bitrate_cap_reports_progress,
         _self_test_preview_peak_bitrate,
         _self_test_bitrate_cap_preserves_dv,
         _self_test_bitrate_cap_rife_manifest_dv,

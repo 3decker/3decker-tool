@@ -1172,22 +1172,68 @@ def _run_bitrate_cap(video_path, args, dv_source=None, rife_manifest=None):
     # correctly refused rather than risk misaligning RPU data -- so DV still silently vanished,
     # just one step further downstream. "-fps_mode passthrough" tells ffmpeg to carry every real
     # input frame straight through unchanged, same fix, same reasoning, different call site.
-    cmd = [ffmpeg, "-y", "-v", "error", "-i", str(video_path),
+    # -progress pipe:1 only adds machine-readable progress lines on stdout; the encode arguments are unchanged.
+    cmd = [ffmpeg, "-y", "-v", "error", "-progress", "pipe:1", "-i", str(video_path),
            "-map", "0:v:0", "-map", "0:a?", "-map", "0:s?",
            "-c:v", args.video_codec, "-rc", "vbr", "-cq", str(args.crf), "-b:v", "0",
            "-maxrate", str(args.video_bitrate), "-bufsize", str(args.video_bitrate),
            "-pix_fmt", pix_fmt, "-fps_mode", "passthrough", "-c:a", "copy", "-c:s", "copy", tmp_path]
     if torch.cuda.is_available() and args.gpu[0] >= 0:
         cmd += ["-gpu", str(args.gpu[0])]
+    tqdm_fn = (getattr(args, "state", None) or {}).get("tqdm_fn")
+    stop_event = (getattr(args, "state", None) or {}).get("stop_event")
+    cancelled = False
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        if tqdm_fn is None:
+            # No job bar (command line use): exactly the original blocking call.
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            returncode, stderr_text = r.returncode, r.stderr
+        else:
+            # Same progress mechanism as the HDR-to-SDR pass: out_time_ms= lines from -progress pipe:1 drive the
+            # job's bar, and Cancel kills ffmpeg. Source duration comes from the container, as the HDR pass does.
+            # If it can't be read, no bar is made (no fake percentage); the stage's own elapsed-time pulse remains.
+            total_sec = None
+            try:
+                import av as _av
+                with _av.open(str(video_path), metadata_errors="ignore") as _c:
+                    total_sec = float(_c.duration) / 1000000.0 if _c.duration else None
+            except Exception:
+                total_sec = None
+            bar = _StageBar(args if total_sec else None, f"{path.basename(video_path)}: Capping Peak Bitrate",
+                            1000, "pct")
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            err_chunks = []
+            drain = threading.Thread(target=lambda: err_chunks.append(proc.stderr.read()), daemon=True)
+            drain.start()
+            try:
+                for line in proc.stdout:
+                    if stop_event is not None and stop_event.is_set():
+                        proc.kill()
+                        cancelled = True
+                        break
+                    line = line.strip()
+                    if line.startswith("out_time_ms=") and total_sec:
+                        try:
+                            done_sec = int(line.split("=", 1)[1]) / 1000000.0  # microseconds despite the name
+                            bar.set(min(max(done_sec, 0.0) / total_sec, 1.0) * 1000)
+                        except ValueError:
+                            pass
+            finally:
+                proc.wait()
+                drain.join(timeout=5)
+                bar.close(complete=proc.returncode == 0 and not cancelled)
+            returncode, stderr_text = proc.returncode, "".join(err_chunks)
     except Exception as e:
         print(f"[iw3] Limit Bitrate re-encode failed to start, keeping the original file: {e}",
               file=sys.stderr)
         return None
-    if r.returncode != 0 or not path.exists(tmp_path):
-        print(f"[iw3] Limit Bitrate re-encode failed, keeping the original (uncapped) file: "
-              f"{r.stderr.strip()[-400:]}", file=sys.stderr)
+    if cancelled or returncode != 0 or not path.exists(tmp_path):
+        if cancelled:
+            print("[iw3] Limit Bitrate re-encode stopped by Cancel, keeping the original (uncapped) file.",
+                  file=sys.stderr)
+        else:
+            print(f"[iw3] Limit Bitrate re-encode failed, keeping the original (uncapped) file: "
+                  f"{stderr_text.strip()[-400:]}", file=sys.stderr)
         try:
             if path.exists(tmp_path):
                 os.remove(tmp_path)

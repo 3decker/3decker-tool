@@ -4168,8 +4168,8 @@ class MainFrame(wx.Frame):
               "Default: off (FP32). FP32 is the default and the recommended setting for accuracy.\n"
               "Pro: on a CUDA NVIDIA GPU, FP16 can speed up RIFE -- the developer measured about 2x faster "
               "on one full real conversion.\n"
-              "Con: the picture-quality impact of FP16 has not been independently reviewed, so it is not "
-              "guaranteed to be equally accurate as FP32. Some RIFE models can also be less stable in "
+              "Con: FP16 can show ghosting in fast scenes -- ghosted or doubled edges where the motion is "
+              "quick -- so it is not as accurate as FP32. Some RIFE models can also be less stable in "
               "half precision.\n"
               "CPU: ignored, with a warning in the log, when RIFE runs on CPU (RIFE Device set to CPU) -- "
               "half precision only helps on a CUDA GPU.\n"
@@ -6116,16 +6116,12 @@ class MainFrame(wx.Frame):
               "Dolby Vision reinjection afterward still works) after an earlier crash bug was found and "
               "fixed. decker's own real-world test on a full conversion measured roughly 2x faster -- "
               "your own real speedup will vary by GPU and content, but this is a genuine, confirmed win, "
-              "not just a theoretical one. Picture-quality impact of the lower precision hasn't been "
-              "visually reviewed yet (only speed and technical correctness so far), so keep an eye out "
-              "the first time you use it.\n"
-              "Con: only has any effect with an actual CUDA GPU selected in the GPU dropdown above -- on "
-              "CPU it's automatically ignored with a logged warning, so leaving this checked while GPU is "
-              "set to CPU does nothing harmful, just nothing useful either. Half precision is also a real "
-              "precision trade-off, occasionally reported as less stable for flow-estimation models in "
-              "some RIFE setups.\n"
-              "Recommended: leave unchecked (the default, zero behavior change) unless you specifically "
-              "want to try it for extra speed on a CUDA GPU."))
+              "not just a theoretical one.\n"
+              "Con: FP16 can show ghosting in fast scenes -- ghosted or doubled edges where the motion is "
+              "quick -- so it is not as accurate as FP32. Only has an effect with a CUDA GPU selected in "
+              "the GPU dropdown above; on CPU it is ignored with a logged warning.\n"
+              "Recommended: leave unchecked (FP32, the default) for the best picture. Turn it on only when "
+              "speed matters more to you than the ghosting risk in fast scenes."))
 
         # Optional: re-attach Dolby Vision after RIFE (ADR-193 follow-up)
         self.lbl_rife_standalone_dv_source = wx.StaticText(self.cpn_rife_standalone.GetPane(),

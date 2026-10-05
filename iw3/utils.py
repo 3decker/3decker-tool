@@ -1289,7 +1289,7 @@ def preview_peak_bitrate(source_path, args, sample_seconds=PREVIEW_PEAK_SAMPLE_S
     }
 
 
-def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_path=None):
+def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_path=None, restore_source_path=None):
     """ADR-209: the steps that run after the conversion, CHAINED so each one works on the previous one's result:
     waifu2x upscale -> RIFE -> Dolby Vision re-attach (only when RIFE actually ran and `dv_source` is given, i.e.
     RIFE + Preserve Dolby Vision) -> Restore Audio & Subtitles -> Limit Bitrate. Before this every step started
@@ -1313,7 +1313,10 @@ def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_pa
     `scene_source_path` (real bug fix, 2026-10-03): the real per-file original 2D source this job converted --
     passed straight through to _run_rife_interpolation() so it can reuse an already-detected scene-boundary cache
     for RIFE's own scene-cut protection (see that function's docstring). Distinct from `dv_source`, which is only
-    ever set when DV preservation is actually wanted -- this needs the real source path unconditionally."""
+    ever set when DV preservation is actually wanted -- this needs the real source path unconditionally.
+
+    `restore_source_path`: the real per-file original source for Restore Audio & Subtitles, given by batch/folder
+    runs (where args.input is the folder or list file, not this video). None means args.input, as for a single file."""
     current = video_path
     if _should_use_stereo_upscale(args):
         upscaled = _run_waifu2x_upscale_stereo(current, args)
@@ -1328,11 +1331,12 @@ def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_pa
     if rife_output_path:
         current = rife_output_path
     # Restore audio/subtitles onto the file the user will actually keep (the last one in the chain).
-    restored = _run_audio_subtitle_restore(current, args)
+    restored = _run_audio_subtitle_restore(current, args, source_path=restore_source_path)
     if restored:
         # `current` is either the plain converted file or an upscale/RIFE output this job just wrote -- never
         # the source. ADR-346: the restored copy has every track `current` has, so the intermediate is removed.
-        _remove_intermediate_after_restore(current, restored, (getattr(args, "input", None), dv_source, scene_source_path))
+        _remove_intermediate_after_restore(current, restored, (restore_source_path or getattr(args, "input", None),
+                                                               dv_source, scene_source_path))
         current = restored
     # ADR-298: checks/re-encodes the fully-assembled file (audio already restored, if
     # that ran) so the real bitrate check reflects what the user will actually keep --
@@ -1395,7 +1399,7 @@ def _remove_intermediate_after_restore(intermediate_path, restored_path, source_
     return True
 
 
-def _run_audio_subtitle_restore(output_path, args):
+def _run_audio_subtitle_restore(output_path, args, source_path=None):
     """Optionally invokes iw3.av_restore_cli as a subprocess against a
     just-finished iw3 output, when the user explicitly opted in (GUI: "Restore
     Audio & Subtitles from Source after conversion" / --restore-audio-subtitles).
@@ -1412,9 +1416,12 @@ def _run_audio_subtitle_restore(output_path, args):
     the conversion itself having failed -- the original output is always left
     untouched either way.
 
-    args.input is the ORIGINAL SOURCE the whole conversion ran against -- already
-    known, no separate file picker needed (the entire point of this being an
-    automatic checkbox rather than a manual standalone-tool run). If
+    `source_path` is the ORIGINAL SOURCE file this job's own conversion ran against
+    (the per-file input, passed by _run_post_conversion_steps()). When it is not
+    given, args.input is used -- correct for a single file, but in folder/list batch
+    runs args.input is the folder or list file, so each batch job passes its own
+    video instead. Already known, no separate file picker needed (the entire point of
+    this being an automatic checkbox rather than a manual standalone-tool run). If
     args.start_time/args.end_time were set for this conversion (a clip of a
     longer source, not the whole file), the exact same range is forwarded as
     --source-start-time/--source-end-time so the restored audio/subtitles line
@@ -1433,7 +1440,7 @@ def _run_audio_subtitle_restore(output_path, args):
     base, ext = path.splitext(str(output_path))
     restored_path = f"{base}_alldub{ext}"
     cmd = [sys.executable, "-m", "iw3.av_restore_cli",
-           "-i", str(output_path), "-s", str(args.input), "-o", restored_path]
+           "-i", str(output_path), "-s", str(source_path or args.input), "-o", restored_path]
     start_time = getattr(args, "start_time", None)
     end_time = getattr(args, "end_time", None)
     if start_time:
@@ -6439,7 +6446,7 @@ def process_video_keyframes(input_filename, output_path, args, depth_model, side
             f.result()
 
 
-def process_video(input_filename, output_path, args, depth_model, side_model):
+def process_video(input_filename, output_path, args, depth_model, side_model, restore_source_path=None):
     # disable ema minmax for each process
     depth_model.reset()
     depth_model.disable_ema()
@@ -6523,7 +6530,8 @@ def process_video(input_filename, output_path, args, depth_model, side_model):
             # function's own docstring.
             dv_preserve_source = original_input_filename if _dv_preserve_wanted(args) else None
             _run_post_conversion_steps(final_output_path, args, dv_source=dv_preserve_source,
-                                        scene_source_path=original_input_filename)
+                                        scene_source_path=original_input_filename,
+                                        restore_source_path=restore_source_path)
         finally:
             if needs_vram_release:
                 _reload_pause_vram(args)
@@ -7477,7 +7485,7 @@ def create_parser(required_true=True):
                         help="overwrite output files")
     parser.add_argument("--pad", type=float, help="pad_size = round(width * pad) // 2")
     parser.add_argument("--pad-mode", type=str, default="tblr", choices=["tblr", "tb", "lr", "16:9", "top"], help="padding mode")
-    parser.add_argument("--depth-model", type=str, default="ZoeD_Any_N",
+    parser.add_argument("--depth-model", type=str, default="Any_V3_Mono",
                         choices=["ZoeD_N", "ZoeD_K", "ZoeD_NK",
                                  "Any_S", "Any_B", "Any_L",
                                  "ZoeD_Any_N", "ZoeD_Any_K",
@@ -8516,7 +8524,8 @@ def iw3_main(args):
                     if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                         return args
                     try:
-                        _process_video_with_job_log(video_file, args.output, args, depth_model, side_model)
+                        _process_video_with_job_log(video_file, args.output, args, depth_model, side_model,
+                                                    restore_source_path=video_file)
                     except KeyboardInterrupt:
                         raise
                     except: # noqa
@@ -8540,7 +8549,8 @@ def iw3_main(args):
                         if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                             return args
                         try:
-                            _process_video_with_job_log(video_file, output_dir, args, depth_model, side_model)
+                            _process_video_with_job_log(video_file, output_dir, args, depth_model, side_model,
+                                                        restore_source_path=video_file)
                         except KeyboardInterrupt:
                             raise
                         except: # noqa
@@ -8577,7 +8587,8 @@ def iw3_main(args):
             for video_file in video_files:
                 if args.state["stop_event"] is not None and args.state["stop_event"].is_set():
                     return args
-                _process_video_with_job_log(video_file, args.output, args, depth_model, side_model)
+                _process_video_with_job_log(video_file, args.output, args, depth_model, side_model,
+                                            restore_source_path=video_file)
                 gc_collect()
     elif is_video(args.input):
         if not depth_model.is_video_supported():
@@ -8797,7 +8808,7 @@ def _job_log_scope(args, log_path, input_display, output_display):
         print(f"[iw3] Job log written: {log_path}", file=sys.stderr)
 
 
-def _process_video_with_job_log(video_file, output_target, args, depth_model, side_model):
+def _process_video_with_job_log(video_file, output_target, args, depth_model, side_model, restore_source_path=None):
     """ADR-279: real user request -- "each movie will have their own log," for real
     batch/folder conversions (decker: "i do batches or folder sometimes"). Before
     this, directory/batch input got exactly one combined log for the whole run
@@ -8807,11 +8818,13 @@ def _process_video_with_job_log(video_file, output_target, args, depth_model, si
     gets. No-ops straight through to process_video() when logging is off --
     identical to today's behavior whenever --write-job-log isn't set."""
     if not getattr(args, "write_job_log", False):
-        return process_video(video_file, output_target, args, depth_model, side_model)
+        return process_video(video_file, output_target, args, depth_model, side_model,
+                             restore_source_path=restore_source_path)
 
     log_path = _resolve_single_file_log_path(args, video_file, output_target)
     with _job_log_scope(args, log_path, video_file, output_target):
-        return process_video(video_file, output_target, args, depth_model, side_model)
+        return process_video(video_file, output_target, args, depth_model, side_model,
+                             restore_source_path=restore_source_path)
 
 
 def run_iw3_main_with_job_log(args):

@@ -1891,14 +1891,14 @@ class MainFrame(wx.Frame):
                                            choices=self.get_depth_models(),
                                            name="cbo_depth_model")
         self.cbo_depth_model.SetEditable(False)
-        self.cbo_depth_model.SetSelection(3)
+        self.cbo_depth_model.SetStringSelection("Any_V3_Mono")
         self.cbo_depth_model.SetToolTip(
             T("What it's for: which AI model looks at your image/video and estimates what's near vs far. "
               "This is the foundation everything else builds on — probably the single most important "
               "choice in the whole app.\n"
               "VDA_* (Video Depth Anything): built specifically for video — has real memory across frames, "
               "so depth stays steady/flicker-free without needing extra smoothing settings. Best choice "
-              "for movies/video by default.\n"
+              "for movies/video.\n"
               "Any_V2_* / Any_V3_* / Distill_Any_*: single-image models — often sharper/more detailed on "
               "a single photo, but have NO memory between frames, so used on video they can flicker unless "
               "you also turn on EMA smoothing and/or Object Stability.\n"
@@ -4248,7 +4248,8 @@ class MainFrame(wx.Frame):
               "the rest silently. Once this job's output is fully written, this restores every "
               "audio and subtitle track from the ORIGINAL SOURCE file automatically -- no need to "
               "pick files again, this job already knows Input (the source) and its own finished "
-              "output. If Start Time/End Time above were used for this conversion, the same range "
+              "output. In a folder run, each video is restored from its own source file automatically. "
+              "If Start Time/End Time above were used for this conversion, the same range "
               "is applied to the source's audio/subtitles automatically so they line up with the "
               "finished clip.\n"
               "How it's safe: saved to a separate '_alldub' file -- the original conversion output "
@@ -23910,7 +23911,7 @@ def _self_test_bitrate_cap_rife_manifest_dv():
                 mock.patch.object(U, "_run_rife_interpolation",
                                   lambda p, a, force_hevc=False, scene_source_path=None: rife_out), \
                 mock.patch.object(U, "_reinject_dv_after_rife", lambda *a, **k: True), \
-                mock.patch.object(U, "_run_audio_subtitle_restore", lambda p, a: p[:-4] + "_alldub.mkv"), \
+                mock.patch.object(U, "_run_audio_subtitle_restore", lambda p, a, **k: p[:-4] + "_alldub.mkv"), \
                 mock.patch.object(U, "_run_bitrate_cap", fake_cap), \
                 mock.patch.object(U, "_run_mvc_conversion", lambda p, a: None):
             U._run_post_conversion_steps("m.mkv", _args(rife_interpolate=bool(rife_out)), dv_source="orig.mkv")
@@ -25436,7 +25437,7 @@ def _self_test_post_steps_are_chained():
             calls.append(("dv", src, p))
             return True
 
-        def rs(p, a):
+        def rs(p, a, **k):
             calls.append(("restore", p))
             return restored
 
@@ -25523,8 +25524,8 @@ def _self_test_intermediate_removed_after_restore():
             args = types.SimpleNamespace(rife_interpolate=False, restore_audio_subtitles=restore_on,
                                          input=inp if source_is_input else src)
             # restore off uses the REAL function, which returns None on its own when the flag is off
-            restore = real_restore if not restore_on else ((lambda p, a: None) if restore_returns_none
-                                                           else (lambda p, a: alldub))
+            restore = real_restore if not restore_on else ((lambda p, a, **k: None) if restore_returns_none
+                                                           else (lambda p, a, **k: alldub))
             with mock.patch.object(U, "_should_use_stereo_upscale", lambda a: False), \
                     mock.patch.object(U, "_run_waifu2x_upscale", lambda p, a: None), \
                     mock.patch.object(U, "_run_rife_interpolation", lambda p, a, **k: None), \
@@ -27209,6 +27210,144 @@ def _self_test_audio_subtitle_restore_dual_eye_flag():
             assert "--dual-eye-subtitles" in captured["cmd"], captured["cmd"]
 
     print("_self_test_audio_subtitle_restore_dual_eye_flag: PASS")
+
+
+def _self_test_default_depth_model_is_any_v3_mono():
+    """The first-run default Depth Model is Any_V3_Mono in both the CLI (--depth-model with
+    no value given) and the GUI combo. The GUI check points every config file at an empty
+    temp folder, so a fresh start is really the first-run default and the real nunif/tmp
+    config is never read or written."""
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+
+    args = U.create_parser(required_true=False).parse_args([])
+    assert args.depth_model == "Any_V3_Mono", args.depth_model
+
+    config_names = ["CONFIG_PATH", "LAST_PRESET_CONFIG_PATH", "LAYOUT_CONFIG_PATH",
+                    "THEME_CONFIG_PATH", "ZOOM_CONFIG_PATH", "WINDOW_CONFIG_PATH", "LANG_CONFIG_PATH"]
+    app = None
+    frame = None
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        patched = {name: path.join(tmp_dir, name.lower() + ".cfg") for name in config_names}
+        with mock.patch.dict(globals(), patched):
+            try:
+                app = wx.App()
+                frame = MainFrame()
+                assert frame.cbo_depth_model.GetValue() == "Any_V3_Mono", frame.cbo_depth_model.GetValue()
+            finally:
+                if frame is not None:
+                    frame.Destroy()
+                    wx.SafeYield()
+                if app is not None:
+                    app.Destroy()
+
+    print("_self_test_default_depth_model_is_any_v3_mono: PASS")
+
+
+def _self_test_restore_audio_uses_per_file_source_in_folder():
+    """Restore Audio & Subtitles in a folder run: every video's restore must read ITS OWN
+    source file, not the folder (args.input). Drives the real iw3_main() folder loop with
+    the parser's real defaults. The conversion, upscale/RIFE/bitrate/MVC steps and the
+    restore subprocess are replaced with fakes, so nothing touches the GPU or real media.
+    A single-file run must still restore from args.input, unchanged."""
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+
+    class FakeDepth:
+        device = "cpu"
+
+        def reset(self):
+            pass
+
+        def disable_ema(self):
+            pass
+
+        def loaded(self):
+            return True
+
+        def move_to(self, device):
+            pass
+
+        def is_metric(self):
+            return False
+
+        def is_image_supported(self):
+            return False
+
+        def is_video_supported(self):
+            return True
+
+        def force_update(self):
+            pass
+
+    restore_cmds = []
+
+    def fake_restore(cmd, cwd, a):
+        restore_cmds.append(cmd)
+        open(cmd[cmd.index("-o") + 1], "wb").close()
+
+    def fake_convert(input_filename, output_path, a, dm, sm):
+        out = path.join(output_path, path.splitext(path.basename(input_filename))[0] + "_conv.mkv")
+        open(out, "wb").close()
+        return out
+
+    parser = U.create_parser(required_true=False)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        src_dir = path.join(tmp_dir, "src")
+        out_dir = path.join(tmp_dir, "out")
+        os.makedirs(src_dir)
+        os.makedirs(out_dir)
+        videos = [path.join(src_dir, "movie_a.mkv"), path.join(src_dir, "movie_b.mkv")]
+        for video in videos:
+            open(video, "wb").close()
+
+        def make_args(input_path):
+            args = parser.parse_args(["-i", input_path, "-o", out_dir, "--restore-audio-subtitles"])
+            args.state = {"depth_model": FakeDepth(), "side_model": None, "convergence_model": None,
+                          "stop_event": None, "suspend_event": None, "tqdm_fn": None}
+            return args
+
+        patches = [
+            mock.patch.object(U, "create_stereo_model", lambda *a, **k: None),
+            mock.patch.object(U, "process_video_with_resume", fake_convert),
+            mock.patch.object(U, "_run_av_restore_with_progress", fake_restore),
+            mock.patch.object(U, "_tonemap_hdr_to_sdr", lambda p, a: (p, None)),
+            mock.patch.object(U, "_denoise_preprocess", lambda p, a: (p, None)),
+            mock.patch.object(U, "_dv_preserve_wanted", lambda a: False),
+            mock.patch.object(U, "_dv_after_rife_wanted", lambda a: False),
+            mock.patch.object(U, "_should_use_stereo_upscale", lambda a: False),
+            mock.patch.object(U, "_run_waifu2x_upscale", lambda p, a: None),
+            mock.patch.object(U, "_run_rife_interpolation", lambda p, a, **k: None),
+            mock.patch.object(U, "_run_bitrate_cap", lambda *a, **k: None),
+            mock.patch.object(U, "_run_mvc_conversion", lambda *a, **k: False),
+            mock.patch.object(U, "_remove_intermediate_after_restore", lambda *a, **k: False),
+            mock.patch.object(U, "_apply_stereo_mode_tag", lambda *a, **k: None),
+            mock.patch.object(U, "_notify_stage", lambda *a, **k: None),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            # folder run: one restore per video, each reading that video's own source
+            U.iw3_main(make_args(src_dir))
+            sources = sorted(cmd[cmd.index("-s") + 1] for cmd in restore_cmds)
+            assert sources == sorted(videos), sources
+            assert sorted(os.listdir(out_dir)) == ["movie_a_conv.mkv", "movie_a_conv_alldub.mkv",
+                                                   "movie_b_conv.mkv", "movie_b_conv_alldub.mkv"], os.listdir(out_dir)
+
+            # single-file run: source is still args.input, exactly as before
+            restore_cmds.clear()
+            single_args = make_args(videos[0])
+            U.iw3_main(single_args)
+            assert len(restore_cmds) == 1, restore_cmds
+            assert restore_cmds[0][restore_cmds[0].index("-s") + 1] == videos[0], restore_cmds[0]
+        finally:
+            for p in patches:
+                p.stop()
+
+    print("_self_test_restore_audio_uses_per_file_source_in_folder: PASS")
 
 
 def _self_test_run_iw3_main_with_job_log():
@@ -30848,6 +30987,8 @@ def _run_self_tests():
         _self_test_auto_divergence_metadata_tags,
         _self_test_auto_divergence_cut_smooth,
         _self_test_audio_subtitle_restore_dual_eye_flag,
+        _self_test_restore_audio_uses_per_file_source_in_folder,
+        _self_test_default_depth_model_is_any_v3_mono,
         _self_test_write_job_log_checkbox,
         _self_test_standalone_write_job_log,
         _self_test_run_iw3_main_with_job_log,

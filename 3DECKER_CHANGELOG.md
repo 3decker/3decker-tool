@@ -15,6 +15,10 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Changed: the default Depth Model is now Any_V3_Mono.** A fresh start (no saved settings yet) now begins with Any_V3_Mono instead of ZoeD_Any_N. It is the sharpest choice for single photos, but it has no memory between video frames, so for video turn on EMA smoothing or pick a VDA_* model. Your saved settings are not changed. The model downloads automatically the first time you use it.
+
+**Fixed: Restore Audio & Subtitles now works for every video in a folder.** Before, a folder conversion tried to restore audio and subtitles from the folder itself, so it could not find each video's original file. Each video now gets its own restored file (its name ends in _alldub), taken from its own original. Converting a single movie works as before.
+
 **Changed: Preserve Dolby Vision is greyed out for H.264 output.** Dolby Vision can only be kept in HEVC output, so the checkbox is now disabled whenever Video Codec is an H.264 choice (libx264, libopenh264, h264_nvenc, h264_qsv). Switch to an HEVC codec and it becomes available again, still set the way you left it.
 
 **Improved: clearer tooltips for Stereo Format, Pixel Format, Limit Bitrate, Auto Resume, and the post-conversion steps.** Stereo Format now recommends Full SBS for 1080p sources and Half SBS for 4K sources, because Full SBS at 4K makes an 8K-wide file that some devices cannot play. Pixel Format recommends yuv420p10le for 10-bit HDR sources and yuv420p for everything else. Limit Bitrate now says that the Bitrate value is used directly as the peak cap. Auto Resume now says that each interruption adds one seam, and that clips of 60 seconds or less are not checkpointed. The waifu2x upscale, RIFE, 3D Blu-ray MVC and Limit Bitrate tooltips now say they also run for each video when you convert a folder. No settings or defaults changed.

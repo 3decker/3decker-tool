@@ -25020,6 +25020,76 @@ def _self_test_post_steps_are_chained():
     print("_self_test_post_steps_are_chained: PASS")
 
 
+def _self_test_intermediate_removed_after_restore():
+    """ADR-346: after Restore Audio & Subtitles succeeds, the intermediate it read from is deleted only when every
+    safety check passes; the restored '_alldub' file is always kept. Real temp files, synthetic durations/DV."""
+    import types
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+
+    real_restore = U._run_audio_subtitle_restore
+
+    class FakeMeta:
+        durations = {}
+
+        @classmethod
+        def from_file(cls, p):
+            m = FakeMeta()
+            m.dur = cls.durations[path.basename(p)]
+            return m
+
+        def get_duration(self):
+            return self.dur
+
+    def run(input_dur, restored_dur, restore_on=True, restored_empty=False, restore_returns_none=False,
+            input_dv=False, restored_dv=False, source_is_input=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = path.join(tmp, "source.mkv")
+            inp = path.join(tmp, "movie_w2x_rife.mkv")
+            alldub = path.join(tmp, "movie_w2x_rife_alldub.mkv")
+            for p in (src, inp):
+                with open(p, "wb") as f:
+                    f.write(b"x" * 16)
+            if restore_on and not restore_returns_none:
+                with open(alldub, "wb") as f:
+                    f.write(b"" if restored_empty else b"y" * 16)
+            FakeMeta.durations = {"movie_w2x_rife.mkv": input_dur, "movie_w2x_rife_alldub.mkv": restored_dur}
+            dv = {"movie_w2x_rife.mkv": input_dv, "movie_w2x_rife_alldub.mkv": restored_dv}
+            args = types.SimpleNamespace(rife_interpolate=False, restore_audio_subtitles=restore_on,
+                                         input=inp if source_is_input else src)
+            # restore off uses the REAL function, which returns None on its own when the flag is off
+            restore = real_restore if not restore_on else ((lambda p, a: None) if restore_returns_none
+                                                           else (lambda p, a: alldub))
+            with mock.patch.object(U, "_should_use_stereo_upscale", lambda a: False), \
+                    mock.patch.object(U, "_run_waifu2x_upscale", lambda p, a: None), \
+                    mock.patch.object(U, "_run_rife_interpolation", lambda p, a, **k: None), \
+                    mock.patch.object(U, "_run_bitrate_cap", lambda *a, **k: None), \
+                    mock.patch.object(U, "_run_mvc_conversion", lambda *a, **k: False), \
+                    mock.patch.object(U, "_run_audio_subtitle_restore", restore), \
+                    mock.patch.object(U.VU, "VideoMetadata", FakeMeta), \
+                    mock.patch.object(U, "_detect_hdr_types", lambda p, f: {"dv": dv[path.basename(p)]}):
+                result = U._run_post_conversion_steps(inp, args, dv_source=src if input_dv else None,
+                                                      scene_source_path=src)
+            return path.exists(inp), path.exists(alldub), result == alldub
+
+    # all checks pass: the intermediate is removed, the _alldub copy kept and returned
+    assert run(100.0, 100.4) == (False, True, True)
+    # duration mismatch: nothing deleted
+    assert run(100.0, 90.0) == (True, True, True)
+    # restore returned None (failed): nothing deleted, the chain keeps the intermediate
+    assert run(100.0, 100.0, restore_returns_none=True) == (True, False, False)
+    # restore off: nothing deleted
+    assert run(100.0, 100.0, restore_on=False) == (True, False, False)
+    # the restored file is empty: nothing deleted
+    assert run(100.0, 100.0, restored_empty=True) == (True, True, True)
+    # the intermediate is the original source file: nothing deleted
+    assert run(100.0, 100.0, source_is_input=True) == (True, True, True)
+    # Dolby Vision present in the intermediate but lost by the restore: nothing deleted
+    assert run(100.0, 100.0, input_dv=True, restored_dv=False) == (True, True, True)
+    print("_self_test_intermediate_removed_after_restore: PASS")
+
+
 def _self_test_mvc_conversion_step():
     """ADR-246: U._run_mvc_conversion()'s own layout-detection and command-building
     logic, independent of the GUI checkbox (this exact defensive re-check matters
@@ -30171,6 +30241,7 @@ def _run_self_tests():
         _self_test_extract_and_reencode_mvc,
         _self_test_pop_panes_collapse_independently,
         _self_test_post_steps_are_chained,
+        _self_test_intermediate_removed_after_restore,
         _self_test_mvc_conversion_step,
         _self_test_makemkv_mvc_chain_step,
         _self_test_mvc_notes_shown_after_job,

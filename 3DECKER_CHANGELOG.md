@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Improved: the leftover pre-audio file is removed automatically after Restore Audio & Subtitles.** When a job ends with an `_alldub` file, the earlier file it was built from (the same video with fewer audio/subtitle tracks) is deleted automatically, so you keep just the `_alldub` version. The earlier file is only deleted when every check passes (same length, Dolby Vision still there, and the restored file is real). If any check fails, nothing is deleted and the log says why.
+
 **Improved: the "?" help buttons now appear on every settings tab.** Before, only some sections had one. Now every setting with a description has a small "?" next to it across all tabs, including the Standalone Tools. Click it to open that setting's full description in a text file.
 
 **Fixed: the update could stop with "ffmpeg update FAILED" when the download was incomplete.** The updater now retries the ffmpeg checksum download once. If it still fails, it keeps the ffmpeg you already have and shows a warning, instead of stopping the whole update.

@@ -1330,6 +1330,9 @@ def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_pa
     # Restore audio/subtitles onto the file the user will actually keep (the last one in the chain).
     restored = _run_audio_subtitle_restore(current, args)
     if restored:
+        # `current` is either the plain converted file or an upscale/RIFE output this job just wrote -- never
+        # the source. ADR-346: the restored copy has every track `current` has, so the intermediate is removed.
+        _remove_intermediate_after_restore(current, restored, (getattr(args, "input", None), dv_source, scene_source_path))
         current = restored
     # ADR-298: checks/re-encodes the fully-assembled file (audio already restored, if
     # that ran) so the real bitrate check reflects what the user will actually keep --
@@ -1344,6 +1347,52 @@ def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_pa
     # never changes `current`/the file this function returns as "the one to keep".
     _run_mvc_conversion(current, args)
     return current
+
+
+def _remove_intermediate_after_restore(intermediate_path, restored_path, source_paths):
+    """ADR-346: once Restore Audio & Subtitles has written '<name>_alldub<ext>', the file it read from
+    (`intermediate_path`) is the same video with fewer tracks, so it is deleted and only the restored copy is
+    kept. Deleted ONLY when every check passes; otherwise nothing is removed and a line says why. The checks:
+    the intermediate is not one of `source_paths` (the user's original source) and not the restored file itself;
+    the restored file exists with nonzero size; both files report a video duration within 1 second of each other;
+    both agree on whether Dolby Vision is present (losing DV would be permanent, since the intermediate is the
+    only other copy)."""
+    def _norm(p):
+        return path.normcase(path.abspath(str(p)))
+
+    name, kept = path.basename(intermediate_path), path.basename(restored_path)
+    reason = None
+    if any(p and _norm(p) == _norm(intermediate_path) for p in source_paths):
+        reason = "it is the original source file"
+    elif _norm(intermediate_path) == _norm(restored_path):
+        reason = "it is the same file as the restored output"
+    elif not (path.exists(restored_path) and os.path.getsize(restored_path) > 0):
+        reason = "the restored file is missing or empty"
+    else:
+        try:
+            in_dur = VU.VideoMetadata.from_file(intermediate_path).get_duration()
+            out_dur = VU.VideoMetadata.from_file(restored_path).get_duration()
+        except Exception as e:
+            reason = f"could not read the video durations ({e})"
+        else:
+            if in_dur <= 0 or out_dur <= 0:
+                reason = "a video duration could not be read"
+            elif abs(in_dur - out_dur) > 1.0:
+                reason = f"durations differ ({in_dur:.2f}s vs {out_dur:.2f}s)"
+            else:
+                ffprobe = _find_ffprobe()
+                if _detect_hdr_types(intermediate_path, ffprobe)["dv"] != _detect_hdr_types(restored_path, ffprobe)["dv"]:
+                    reason = "Dolby Vision is not the same in both files"
+    if reason:
+        print(f"[iw3] Kept intermediate {name} (not removed): {reason}. Output kept: {kept}", file=sys.stderr)
+        return False
+    try:
+        os.remove(intermediate_path)
+    except Exception as e:
+        print(f"[iw3] Kept intermediate {name}: could not remove it ({e}). Output kept: {kept}", file=sys.stderr)
+        return False
+    print(f"[iw3] Removed intermediate {name}; kept {kept}", file=sys.stderr)
+    return True
 
 
 def _run_audio_subtitle_restore(output_path, args):

@@ -42,6 +42,7 @@ from nunif.utils.video import (
     VIDEO_EXTENSIONS as KNOWN_VIDEO_EXTENSIONS,
     has_nvenc,
     has_qsv,
+    list_videos,
     pyav_init_cuda_primary_context,
 )
 from nunif.utils.video.metadata import parse_time
@@ -5959,6 +5960,12 @@ class MainFrame(wx.Frame):
               "accepted tradeoff as the in-pipeline RIFE step above).\n"
               "Recommended: the direct iw3 output file you already made."))
         self.btn_rife_standalone_input = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("..."))
+        self.btn_rife_standalone_input_folder = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Folder..."))
+        self.btn_rife_standalone_input_folder.SetToolTip(
+            T("Pick a whole folder instead of one file: every video file directly inside it is smoothed "
+              "one after another, in filename order (subfolders are skipped). Each result is saved next to "
+              "its input as '<name>_rife<ext>', or into Output File if that is set to a folder. A file whose "
+              "'<name>_rife<ext>' already exists is skipped, never overwritten."))
 
         self.lbl_rife_standalone_output = wx.StaticText(self.cpn_rife_standalone.GetPane(), label=T("Output File"))
         self.txt_rife_standalone_output = wx.TextCtrl(self.cpn_rife_standalone.GetPane(),
@@ -6180,6 +6187,8 @@ class MainFrame(wx.Frame):
         self.rife_standalone_proc = None
         self.rife_standalone_cancelled = False
         self.rife_standalone_stage = "rife"
+        # Folder mode only: "File 2 of 5: name.mkv -- " prefixed onto every progress label.
+        self.rife_standalone_batch_prefix = ""
 
         # ADR-250: shared with every other Standalone Tool -- see its construction above.
         self.txt_rife_standalone_log = self.txt_standalone_log
@@ -6201,6 +6210,7 @@ class MainFrame(wx.Frame):
         self.lbl_rife_standalone_progress = wx.StaticText(self.cpn_rife_standalone.GetPane(), label="")
 
         self.btn_rife_standalone_input.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_input)
+        self.btn_rife_standalone_input_folder.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_input_folder)
         self.btn_rife_standalone_output.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_output)
         self.cbo_rife_standalone_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_standalone_mode)
         self.btn_rife_standalone_run.Bind(wx.EVT_BUTTON, self.on_click_btn_rife_standalone_run)
@@ -6214,6 +6224,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_rife_standalone_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_input, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_input, (h, 3), flag=wx.EXPAND)
+        layout.Add(self.btn_rife_standalone_input_folder, (h := h + 1, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_output, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_output, (h, 3), flag=wx.EXPAND)
@@ -14466,7 +14477,27 @@ class MainFrame(wx.Frame):
                     base, ext = path.splitext(input_path)
                     self.txt_rife_standalone_output.SetValue(f"{base}_rife{ext}")
 
+    def on_click_btn_rife_standalone_input_folder(self, event):
+        with wx.DirDialog(self, message=T("Select the folder of videos to smooth"),
+                          style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST) as dlg:
+            if self.txt_rife_standalone_input.GetValue() and path.isdir(self.txt_rife_standalone_input.GetValue()):
+                dlg.SetPath(self.txt_rife_standalone_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_rife_standalone_input.SetValue(dlg.GetPath())
+                # Folder mode's Output File is a folder (or empty); a single-file name left over from
+                # an earlier pick would only make the run refuse, so drop it.
+                if not path.isdir(self.txt_rife_standalone_output.GetValue().strip()):
+                    self.txt_rife_standalone_output.SetValue("")
+
     def on_click_btn_rife_standalone_output(self, event):
+        if path.isdir(self.txt_rife_standalone_input.GetValue().strip()):
+            with wx.DirDialog(self, message=T("Select the folder to save the smoothed videos into"),
+                              style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST) as dlg:
+                if self.txt_rife_standalone_output.GetValue() and path.isdir(self.txt_rife_standalone_output.GetValue()):
+                    dlg.SetPath(self.txt_rife_standalone_output.GetValue())
+                if dlg.ShowModal() == wx.ID_OK:
+                    self.txt_rife_standalone_output.SetValue(dlg.GetPath())
+            return
         with wx.FileDialog(self, message=T("Save RIFE-Interpolated Output As"),
                            wildcard=VIDEO_EXTENSIONS,
                            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
@@ -14485,6 +14516,11 @@ class MainFrame(wx.Frame):
     def on_changed_cbo_rife_standalone_mode(self, event):
         self.update_rife_standalone_mode()
 
+    def _set_rife_standalone_label(self, text):
+        # Every progress-label write goes through here so folder mode can prefix "File 2 of 5: name -- ".
+        # The prefix is empty for a single-file run, so its label text is unchanged.
+        self.lbl_rife_standalone_progress.SetLabel(self.rife_standalone_batch_prefix + text)
+
     def _update_rife_standalone_progress(self, done, total):
         # Called via wx.CallAfter from run_rife_standalone's background thread --
         # never touch these widgets directly from that thread. Unlike Sharpen's
@@ -14502,17 +14538,17 @@ class MainFrame(wx.Frame):
             if fps > 0 and done > 0:
                 eta = self._format_duration((total - done) / fps)
                 elapsed_str = self._format_duration(elapsed)
-                self.lbl_rife_standalone_progress.SetLabel(
+                self._set_rife_standalone_label(
                     f"{done}/{total} {T('frames')} ({percent}%) "
                     f"[{fps:.2f} FPS, {T('elapsed')} {elapsed_str}, ETA {eta}]")
             else:
-                self.lbl_rife_standalone_progress.SetLabel(f"{done}/{total} {T('frames')} ({percent}%)")
+                self._set_rife_standalone_label(f"{done}/{total} {T('frames')} ({percent}%)")
         else:
             # total unknown -- still shows real per-frame movement via a pulsing bar
             # rather than a stuck one, same fallback Sharpen's own bar uses.
             self.gauge_rife_standalone.Pulse()
             elapsed_str = self._format_duration(time() - self.rife_standalone_start_time)
-            self.lbl_rife_standalone_progress.SetLabel(
+            self._set_rife_standalone_label(
                 f"{done} {T('frames')} [{T('elapsed')} {elapsed_str}]")
 
     def on_click_btn_rife_standalone_dv_source(self, event):
@@ -14536,11 +14572,14 @@ class MainFrame(wx.Frame):
         files this run created. A cancel during the Dolby Vision step keeps the finished smoothed file."""
         if self.rife_standalone_stage != "rife":
             return
-        output_path = self.txt_rife_standalone_output.GetValue().strip()
+        self._remove_partial_rife_output(self.txt_rife_standalone_output.GetValue().strip(),
+                                         self.rife_standalone_start_time)
+
+    def _remove_partial_rife_output(self, output_path, start_time):
+        # File operations only (no widgets), so the folder-mode worker thread can call it too.
         for candidate in (output_path, output_path + ".rife_manifest.json"):
             try:
-                if (candidate and path.exists(candidate)
-                        and path.getmtime(candidate) >= self.rife_standalone_start_time - 1):
+                if candidate and path.exists(candidate) and path.getmtime(candidate) >= start_time - 1:
                     os.remove(candidate)
             except OSError:
                 pass
@@ -14562,7 +14601,7 @@ class MainFrame(wx.Frame):
         if done > 0 and fps > 0:
             text += (f" [{fps:.1f} FPS, {T('elapsed')} {self._format_duration(elapsed)}, "
                      f"ETA {self._format_duration((total - done) / fps)}]")
-        self.lbl_rife_standalone_progress.SetLabel(text)
+        self._set_rife_standalone_label(text)
 
     def run_rife_standalone(self, cmd, dv=None):
         # Runs on a background thread via startWorker -- never blocks the GUI thread.
@@ -14611,7 +14650,7 @@ class MainFrame(wx.Frame):
             import types
             from . import utils as iw3_utils
             self.rife_standalone_stage = "dv"
-            wx.CallAfter(self.lbl_rife_standalone_progress.SetLabel, T("Re-attaching Dolby Vision..."))
+            wx.CallAfter(self._set_rife_standalone_label, T("Re-attaching Dolby Vision..."))
             self.rife_standalone_dv_stage = None
             dv_lines = []
 
@@ -14650,7 +14689,7 @@ class MainFrame(wx.Frame):
         if self.rife_standalone_cancelled:
             self._cleanup_after_rife_standalone_cancel()
             kept = self.rife_standalone_stage != "rife"
-            self.lbl_rife_standalone_progress.SetLabel(
+            self._set_rife_standalone_label(
                 T("Cancelled -- the smoothed file was kept, without Dolby Vision") if kept else T("Cancelled"))
             self.SetStatusText(T("RIFE interpolation cancelled"))
         elif returncode == 0:
@@ -14662,7 +14701,7 @@ class MainFrame(wx.Frame):
             if total > 0:
                 self.gauge_rife_standalone.SetValue(total)
                 elapsed_str = self._format_duration(time() - self.rife_standalone_start_time)
-                self.lbl_rife_standalone_progress.SetLabel(
+                self._set_rife_standalone_label(
                     f"{total}/{total} {T('frames')} (100%) [{T('elapsed')} {elapsed_str}]")
             if "Dolby Vision after RIFE FAILED" in output or "Dolby Vision after RIFE skipped" in output:
                 self.SetStatusText(T("RIFE done, but Dolby Vision could not be re-attached -- see the log"))
@@ -14685,14 +14724,36 @@ class MainFrame(wx.Frame):
             wx.MessageBox(T("Select a valid Converted 3D Video file first."),
                           T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
             return
-        if not output_path:
-            wx.MessageBox(T("Set an Output File path first."),
-                          T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
-            return
-        if path.abspath(output_path) == path.abspath(input_path):
-            wx.MessageBox(T("Output File must be different from the input video."),
-                          T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
-            return
+
+        # Folder mode: a folder as Input runs every video file directly inside it, one after another.
+        folder_mode = path.isdir(input_path)
+        if folder_mode:
+            video_files = sorted((f for f in list_videos(input_path) if path.isfile(f)),
+                                 key=lambda f: path.basename(f).lower())
+            if not video_files:
+                wx.MessageBox(T("No video files were found directly inside the selected folder."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
+            if output_path and not path.isdir(output_path):
+                wx.MessageBox(T("When a whole folder is selected, Output File must be an existing folder, or empty "
+                                "to save each smoothed video next to its input."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
+            if self.txt_rife_standalone_dv_source.GetValue().strip():
+                wx.MessageBox(T("Original DV Source is for a single movie, so it can't be used when a whole folder "
+                                "is selected. Empty it first -- each file's own Dolby Vision is handled per file "
+                                "by its prompt."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
+        else:
+            if not output_path:
+                wx.MessageBox(T("Set an Output File path first."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
+            if path.abspath(output_path) == path.abspath(input_path):
+                wx.MessageBox(T("Output File must be different from the input video."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
 
         rife_mode = self.cbo_rife_standalone_mode.GetValue()
         if rife_mode == "Custom FPS...":
@@ -14700,6 +14761,44 @@ class MainFrame(wx.Frame):
                                     allow_empty=False):
                 self.show_validation_error_message(T("RIFE Rate: Custom FPS"), 0.1, 1000.0)
                 return
+
+        if folder_mode:
+            jobs, skipped = self._plan_rife_standalone_folder(input_path, output_path, video_files)
+            if not jobs:
+                wx.MessageBox(T("Nothing to run: every video in the folder was skipped.") + "\n\n"
+                              + "\n".join(f"- {name}: {reason}" for name, reason in skipped),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_INFORMATION)
+                return
+        else:
+            job = self._build_rife_standalone_job(input_path, output_path)
+            if job is None:
+                return
+            cmd, dv = job
+
+        self.txt_rife_standalone_log.SetValue(T("Running...\n"))
+        self.gauge_rife_standalone.SetRange(1)
+        self.gauge_rife_standalone.SetValue(0)
+        self.rife_standalone_batch_prefix = ""
+        self._set_rife_standalone_label("")
+        self.rife_standalone_start_time = time()
+        self.btn_rife_standalone_run.Disable()
+        self.btn_rife_standalone_clear.Disable()
+        self.rife_standalone_cancelled = False
+        self.rife_standalone_stage = "rife"
+        self.btn_rife_standalone_cancel.Enable()
+        self.SetStatusText(T("Applying RIFE interpolation..."))
+        if folder_mode:
+            startWorker(self.on_exit_rife_standalone_batch, self.run_rife_standalone_batch, wargs=(jobs, skipped))
+        else:
+            startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd, dv))
+
+    def _build_rife_standalone_job(self, input_path, output_path):
+        """Builds the one RIFE run for input_path -> output_path from the panel's current options. Shared by
+        single-file and folder mode, so every file in a folder gets exactly the same options. Includes the
+        optional Dolby Vision job and the ADR-330 pre-flight prompts. Returns (cmd, dv), or None when the run
+        must not start (a refusal was shown, or the H.264 warning was answered No)."""
+        rife_mode = self.cbo_rife_standalone_mode.GetValue()
+        if rife_mode == "Custom FPS...":
             rife_multiplier = None
             rife_target_fps = float(self.txt_rife_standalone_target_fps.GetValue())
         else:
@@ -14796,18 +14895,92 @@ class MainFrame(wx.Frame):
         if self.chk_rife_standalone_fp16.GetValue():
             cmd += ["--fp16"]
 
-        self.txt_rife_standalone_log.SetValue(T("Running...\n"))
-        self.gauge_rife_standalone.SetRange(1)
-        self.gauge_rife_standalone.SetValue(0)
-        self.lbl_rife_standalone_progress.SetLabel("")
-        self.rife_standalone_start_time = time()
-        self.btn_rife_standalone_run.Disable()
-        self.btn_rife_standalone_clear.Disable()
-        self.rife_standalone_cancelled = False
-        self.rife_standalone_stage = "rife"
-        self.btn_rife_standalone_cancel.Enable()
-        self.SetStatusText(T("Applying RIFE interpolation..."))
-        startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd, dv))
+        return cmd, dv
+
+    def _plan_rife_standalone_folder(self, input_dir, output_dir, video_files):
+        """Folder mode: works out each file's own RIFE run before anything starts, so every ADR-330
+        Dolby Vision/HDR prompt is answered up front instead of popping up in the middle of the batch. A file is
+        skipped, never overwritten, when its '<name>_rife<ext>' output already exists, or when its H.264 warning
+        was answered No. Returns (jobs, skipped): jobs = [(input, output, cmd, dv)], skipped = [(name, reason)]."""
+        jobs = []
+        skipped = []
+        for input_file in video_files:
+            name = path.basename(input_file)
+            base, ext = path.splitext(name)
+            output_file = path.join(output_dir or input_dir, f"{base}_rife{ext}")
+            if path.exists(output_file):
+                skipped.append((name, T("output already exists, so it was left alone")))
+                continue
+            job = self._build_rife_standalone_job(input_file, output_file)
+            if job is None:
+                skipped.append((name, T("Dolby Vision/HDR warning answered No")))
+                continue
+            cmd, dv = job
+            jobs.append((input_file, output_file, cmd, dv))
+        return jobs, skipped
+
+    def run_rife_standalone_batch(self, jobs, skipped):
+        # Runs on a background thread via startWorker. One file at a time: each file is the unchanged single-file
+        # run_rife_standalone (its own process, progress and Dolby Vision step). Cancel stops the file being run
+        # (the Cancel handler kills its process) and the files after it are not started. A cancelled file's
+        # half-written output is removed here with file operations only -- no widgets are touched from this thread.
+        results = []
+        for index, (input_file, output_file, cmd, dv) in enumerate(jobs, 1):
+            if self.rife_standalone_cancelled:
+                results.append((input_file, output_file, "not_started", ""))
+                continue
+            self.rife_standalone_batch_prefix = (f"{T('File')} {index} {T('of')} {len(jobs)}: "
+                                                 f"{path.basename(input_file)} -- ")
+            wx.CallAfter(self.gauge_rife_standalone.SetValue, 0)
+            self.rife_standalone_start_time = time()
+            returncode, output = self.run_rife_standalone(cmd, dv)
+            if self.rife_standalone_cancelled:
+                if self.rife_standalone_stage == "rife" and returncode != 0:
+                    self._remove_partial_rife_output(output_file, self.rife_standalone_start_time)
+                results.append((input_file, output_file, "cancelled", output))
+            else:
+                results.append((input_file, output_file, "done" if returncode == 0 else "failed", output))
+        return results, skipped
+
+    def on_exit_rife_standalone_batch(self, result):
+        self.btn_rife_standalone_run.Enable()
+        self.btn_rife_standalone_clear.Enable()
+        self.btn_rife_standalone_cancel.Disable()
+        self.rife_standalone_proc = None
+        self.rife_standalone_batch_prefix = ""
+        try:
+            results, skipped = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_rife_standalone_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        status_labels = {"done": T("done"), "failed": T("FAILED"), "cancelled": T("cancelled"),
+                         "not_started": T("not started")}
+        counts = {"done": 0, "failed": 0, "cancelled": 0, "not_started": 0}
+        sections = [f"--- {name}: {T('SKIPPED')} -- {reason} ---" for name, reason in skipped]
+        for index, (input_file, output_file, status, output) in enumerate(results, 1):
+            counts[status] += 1
+            sections.append(f"--- {T('File')} {index} {T('of')} {len(results)}: "
+                            f"{path.basename(input_file)} ({status_labels[status]}) ---")
+            if status != "not_started":
+                sections.append(output)
+                self._write_standalone_job_log(T("RIFE Interpolation"), output_file, output)
+        summary = f"{T('Done')}: {counts['done']}, {T('Skipped')}: {len(skipped)}, {T('Failed')}: {counts['failed']}"
+        if counts["cancelled"] or counts["not_started"]:
+            summary += f", {T('Cancelled')}: {counts['cancelled']}, {T('not started')}: {counts['not_started']}"
+
+        self.txt_rife_standalone_log.SetValue("\n".join(sections) + "\n\n" + summary)
+        self.txt_rife_standalone_log.ShowPosition(self.txt_rife_standalone_log.GetLastPosition())
+        self.lbl_rife_standalone_progress.SetLabel(summary)
+        self.SetStatusText(summary)
+        icon = wx.ICON_WARNING if (counts["failed"] or skipped or counts["cancelled"]) else wx.ICON_INFORMATION
+        wx.MessageBox(summary + "\n\n" + T("See the log box for each file's result."),
+                      T("RIFE Frame Interpolation"), wx.OK | icon)
 
     # --- 3D Blu-ray Import (standalone tool, see ADR-182) ---
 
@@ -24880,6 +25053,213 @@ def _self_test_hdr_to_sdr_tonemap_progress_is_incremental():
     print("_self_test_rife_with_preserve_dolby_vision: PASS")
 
 
+def _self_test_rife_standalone_folder_batch():
+    """Standalone RIFE tool, folder mode (on_click_btn_rife_standalone_run, _plan_rife_standalone_folder,
+    run_rife_standalone_batch). Mocked end to end: subprocess.Popen is replaced by a fake that records every
+    rife_cli command and behaves per file name, _detect_hdr_types and _reinject_dv_after_rife are replaced, and
+    the wx dialogs are answered in a fixed order. startWorker is replaced so the worker function and its on_exit
+    handler run synchronously here. Nothing real runs, no GPU, no real movie. Confirms: only video files directly
+    inside the folder run, in sorted filename order, one at a time; a '<name>_rife<ext>' that already exists is
+    skipped and never overwritten; a Dolby Vision prompt answered No skips only that file, while Yes keeps it; a
+    failing file does not stop the rest; Cancel stops after the current file and removes that file's half-written
+    output; the summary adds up; a Dolby Vision Source in folder mode is refused; single-file mode still builds
+    exactly the same single command."""
+    import io
+    import tempfile
+    from . import utils as iw3_utils
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_popen = subprocess.Popen
+    orig_box = wx.MessageBox
+    orig_detect = iw3_utils._detect_hdr_types
+    orig_reinject = iw3_utils._reinject_dv_after_rife
+    try:
+        frame = gui_mod.MainFrame()
+        captured = {}
+        gui_mod.startWorker = lambda on_exit, fn, wargs=(), **kw: captured.update(on_exit=on_exit, fn=fn, wargs=wargs)
+
+        class _Result:
+            def __init__(self, value):
+                self._value = value
+
+            def get(self):
+                return self._value
+
+        def run_like_worker():
+            # What startWorker does for real: run the worker function, then hand its result to on_exit.
+            captured["on_exit"](_Result(captured["fn"](*captured["wargs"])))
+
+        popen_calls = []
+        active = {"now": 0, "max": 0}
+        behaviour = {}
+
+        class _FakeRifeProc:
+            def __init__(self, cmd, **kwargs):
+                name = path.basename(cmd[cmd.index("--input") + 1])
+                self.returncode = 0
+                self.stdout = io.StringIO("IW3_RIFE_PROGRESS 1 2\n")
+                self.stderr = io.StringIO(f"fake rife run for {name}\n")
+                self.pid = 7000 + len(popen_calls)
+                popen_calls.append(cmd)
+                active["now"] += 1
+                active["max"] = max(active["max"], active["now"])
+                if name in behaviour:
+                    behaviour[name](self, cmd[cmd.index("--output") + 1])
+
+            def wait(self):
+                active["now"] -= 1
+
+            def poll(self):
+                return self.returncode
+
+        reattached = []
+        box_answers = []
+        box_messages = []
+
+        def fake_box(message, *args, **kwargs):
+            box_messages.append(message)
+            return box_answers.pop(0) if box_answers else wx.OK
+
+        def fake_detect(input_path, ffprobe):
+            return {"dv": path.basename(input_path).startswith(("d_", "e_")), "hdr10plus": False}
+
+        def fake_reinject(source, output, args, log=None, proc_hook=None, progress_cb=None):
+            reattached.append((source, output))
+
+        def input_names():
+            return [path.basename(c[c.index("--input") + 1]) for c in popen_calls]
+
+        def reset_run_state():
+            popen_calls.clear()
+            active["now"] = active["max"] = 0
+            reattached.clear()
+            box_messages.clear()
+
+        subprocess.Popen = _FakeRifeProc
+        wx.MessageBox = fake_box
+        iw3_utils._detect_hdr_types = fake_detect
+        iw3_utils._reinject_dv_after_rife = fake_reinject
+        frame.cbo_rife_standalone_mode.SetValue("2x")
+        frame.update_rife_standalone_mode()
+        frame.chk_rife_standalone_fp16.SetValue(False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 1. Folder with 3 videos, a non-video file and a subfolder named like a video; no Output folder.
+            folder1 = path.join(tmp, "in1")
+            os.makedirs(path.join(folder1, "sub.mkv"))
+            for name in ("c.mkv", "a.mkv", "b.mp4", "notes.txt"):
+                with open(path.join(folder1, name), "wb") as f:
+                    f.write(b"x")
+            frame.txt_rife_standalone_input.SetValue(folder1)
+            frame.txt_rife_standalone_output.SetValue("")
+            frame.txt_rife_standalone_dv_source.SetValue("")
+            reset_run_state()
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["fn"] == frame.run_rife_standalone_batch, captured
+            assert captured["on_exit"] == frame.on_exit_rife_standalone_batch, captured
+            run_like_worker()
+            assert input_names() == ["a.mkv", "b.mp4", "c.mkv"], input_names()
+            assert [c[c.index("--output") + 1] for c in popen_calls] == [
+                path.join(folder1, "a_rife.mkv"), path.join(folder1, "b_rife.mp4"), path.join(folder1, "c_rife.mkv")]
+            assert active["max"] == 1, "RIFE runs must never overlap"
+            assert all("--fp16" not in c and c[c.index("--rife-multiplier") + 1] == "2" for c in popen_calls)
+
+            # 2. Mixed folder with an Output folder: skip existing, DV No skips one file, DV Yes keeps it,
+            #    a failure continues, Cancel stops and removes the half-written output.
+            folder2 = path.join(tmp, "in2")
+            outdir = path.join(tmp, "out2")
+            os.makedirs(folder2)
+            os.makedirs(outdir)
+            for name in ("a_fail.mkv", "b_plain.mkv", "c_exists.mkv", "d_dvno.mkv", "e_dvkeep.mkv",
+                         "f_stop.mkv", "g_after.mkv"):
+                with open(path.join(folder2, name), "wb") as f:
+                    f.write(b"x")
+            with open(path.join(outdir, "c_exists_rife.mkv"), "wb") as f:
+                f.write(b"keep me")
+
+            def fail_file(proc, out):
+                proc.returncode = 1
+
+            def cancel_mid_file(proc, out):
+                with open(out, "wb") as f:
+                    f.write(b"half written")
+                frame.rife_standalone_cancelled = True
+                proc.returncode = -15
+
+            behaviour["a_fail.mkv"] = fail_file
+            behaviour["f_stop.mkv"] = cancel_mid_file
+            frame.txt_rife_standalone_input.SetValue(folder2)
+            frame.txt_rife_standalone_output.SetValue(outdir)
+            # Prompts are asked in filename order: d_dvno (keep? No, then H.264 warning No), e_dvkeep (keep? Yes).
+            box_answers[:] = [wx.NO, wx.NO, wx.YES]
+            reset_run_state()
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            run_like_worker()
+            assert box_answers == [], "every per-file prompt must have been asked, in order"
+            assert input_names() == ["a_fail.mkv", "b_plain.mkv", "e_dvkeep.mkv", "f_stop.mkv"], input_names()
+            assert reattached == [(path.join(folder2, "e_dvkeep.mkv"), path.join(outdir, "e_dvkeep_rife.mkv"))], reattached
+            e_cmd = popen_calls[2]
+            assert "--video-codec" in e_cmd, e_cmd
+            with open(path.join(outdir, "c_exists_rife.mkv"), "rb") as f:
+                assert f.read() == b"keep me", "an existing output must never be overwritten"
+            assert not path.exists(path.join(outdir, "f_stop_rife.mkv")), "cancelled file's partial output removed"
+            assert not path.exists(path.join(outdir, "g_after_rife.mkv")), "files after Cancel must not start"
+            log = frame.txt_rife_standalone_log.GetValue()
+            assert T("output already exists, so it was left alone") in log, log
+            assert T("Dolby Vision/HDR warning answered No") in log, log
+            summary = (f"{T('Done')}: 2, {T('Skipped')}: 2, {T('Failed')}: 1, "
+                       f"{T('Cancelled')}: 1, {T('not started')}: 1")
+            assert summary in log, log
+            assert frame.btn_rife_standalone_run.IsEnabled() and not frame.btn_rife_standalone_cancel.IsEnabled()
+
+            # 3. Original DV Source is for one movie only: refused before any run starts.
+            captured.clear()
+            frame.txt_rife_standalone_dv_source.SetValue(path.join(folder2, "b_plain.mkv"))
+            frame.on_click_btn_rife_standalone_run(None)
+            assert not captured, "folder mode with an Original DV Source must refuse before starting"
+            frame.txt_rife_standalone_dv_source.SetValue("")
+
+            # 4. Output File that is not an existing folder is refused in folder mode.
+            frame.txt_rife_standalone_output.SetValue(path.join(outdir, "single.mkv"))
+            frame.on_click_btn_rife_standalone_run(None)
+            assert not captured, "folder mode needs an Output folder, not a file name"
+            frame.txt_rife_standalone_output.SetValue(outdir)
+
+            # 5. Single-file mode: exactly one command, same worker and arguments as before.
+            single_in = path.join(folder2, "b_plain.mkv")
+            single_out = path.join(tmp, "single_rife.mkv")
+            frame.txt_rife_standalone_input.SetValue(single_in)
+            frame.txt_rife_standalone_output.SetValue(single_out)
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["fn"] == frame.run_rife_standalone, captured
+            assert captured["on_exit"] == frame.on_exit_rife_standalone_worker, captured
+            gpu_id = int(frame.cbo_rife_standalone_gpu.GetClientData(frame.cbo_rife_standalone_gpu.GetSelection()))
+            cmd, dv = captured["wargs"]
+            assert cmd == [sys.executable, "-m", "iw3.rife_cli",
+                           "--input", single_in, "--output", single_out,
+                           "--rife-model", frame.cbo_rife_standalone_model.GetValue(),
+                           "--gpu", str(gpu_id), "--rife-multiplier", "2"], cmd
+            assert dv is None
+    finally:
+        subprocess.Popen = orig_popen
+        wx.MessageBox = orig_box
+        gui_mod.startWorker = orig_start_worker
+        iw3_utils._detect_hdr_types = orig_detect
+        iw3_utils._reinject_dv_after_rife = orig_reinject
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_folder_batch: PASS")
+
+
 def _self_test_rife_standalone_dv_and_cancel():
     """Standalone RIFE tool: optional Original DV Source (forces HEVC, passes the DV job to the worker) and the
     Cancel button (kills the running process, removes a half-written output only when cancelled during RIFE).
@@ -28917,6 +29297,7 @@ def _run_self_tests():
         _self_test_utils_hdr_to_sdr_gpu_decode,
         _self_test_hdr_to_sdr_tonemap_progress_is_incremental,
         _self_test_rife_standalone_dv_and_cancel,
+        _self_test_rife_standalone_folder_batch,
         _self_test_rife_fp16_processor_checkbox,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_truehd_eac3_audio_handling,

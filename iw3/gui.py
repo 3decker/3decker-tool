@@ -9312,6 +9312,9 @@ class MainFrame(wx.Frame):
         self.update_splat_blend_temperature()
         self.update_pad_mode()
         self.update_compile(probe=probe_compile)
+        # Preset/config restore sets cbo_mvc_mode via SetSelection() (no change event), so
+        # the MVC sub-option greying must be re-applied here, not only in the handlers.
+        self.update_mvc_mode()
         self._repin_options_min_size()
 
     def get_depth_models(self):
@@ -28456,6 +28459,67 @@ def _self_test_last_preset_auto_load():
     print("_self_test_last_preset_auto_load: PASS")
 
 
+def _self_test_preset_restore_alongside_enables_mvc_controls():
+    """Real user report (Steve): saving a preset with 3D Blu-ray MVC Output set to
+    Alongside SBS/TAB, then restarting 3DECKER, left every MVC sub-option greyed out
+    even though the mode itself showed Alongside. Switching to Off and back to Alongside
+    by hand fixed it, and a later restart greyed it out again. Restoring the saved
+    cbo_mvc_mode choice goes through the persistence manager's own SetSelection(), which
+    fires no change event, and update_controls() (the startup/preset-load refresh) never
+    re-ran update_mvc_mode() -- so the greying was left at the widget's default (Off).
+    Reproduces the real restart path: save a real Alongside preset via save_preset(),
+    then construct a fresh MainFrame() that auto-applies it through LAST_PRESET_CONFIG_PATH,
+    and check every MVC sub-option is enabled. Uses a temp PRESET_DIR so no real preset
+    file is touched."""
+    import tempfile
+    from unittest import mock
+
+    mvc_sub_options = ("lbl_mvc_output_type", "cbo_mvc_output_type", "txt_mvc_bitrate",
+                       "chk_convert_to_mvc_hdr_to_sdr", "chk_mvc_allow_lossless_eac3",
+                       "chk_mvc_makemkv_to_mkv", "lbl_mvc_autocrop", "cbo_mvc_autocrop",
+                       "lbl_mvc_fill_mode", "cbo_mvc_fill_mode")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        preset_dir = path.join(tmp_dir, "presets")
+        os.makedirs(preset_dir)
+        last_preset_path = path.join(tmp_dir, "last-preset.cfg")
+        preset_name = "SelfTestMvcAlongsideRestorePreset"
+
+        with mock.patch(f"{__name__}.PRESET_DIR", preset_dir), \
+                mock.patch(f"{__name__}.LAST_PRESET_CONFIG_PATH", last_preset_path):
+            app = None
+            frame = None
+            try:
+                app = wx.App()
+                probe_frame = MainFrame()
+                probe_frame._set_mvc_mode("alongside")
+                probe_frame.update_mvc_mode()
+                probe_frame.cbo_mvc_output_type.SetSelection(0)  # iso
+                probe_frame.cbo_mvc_autocrop.SetSelection(1)  # real crop choice, so Fill Mode can be enabled
+                probe_frame.save_preset(preset_name)
+                probe_frame.Destroy()
+                app.Destroy()
+
+                _save_last_preset_name(last_preset_path, preset_name)
+                app = wx.App()
+                frame = MainFrame()
+                assert frame.cbo_app_preset.GetValue() == preset_name, \
+                    f"expected the saved preset auto-applied, got {frame.cbo_app_preset.GetValue()!r}"
+                assert frame._mvc_mode() == "alongside", \
+                    f"expected restored MVC mode 'alongside', got {frame._mvc_mode()!r}"
+                for name in mvc_sub_options:
+                    widget = getattr(frame, name)
+                    assert widget.IsEnabled(), \
+                        f"{name} must be enabled after restoring an Alongside preset on startup"
+            finally:
+                if frame is not None:
+                    frame.Destroy()
+                if app is not None:
+                    app.Destroy()
+
+    print("_self_test_preset_restore_alongside_enables_mvc_controls: PASS")
+
+
 def _self_test_sbs2mvc_fix_frame_rate():
     """A 25fps (or any non-23.976/24) input to sbs_to_mvc_cli.convert(): by default still
     refused (ADR-182's original 'never silently change your movie's speed' rule, untouched);
@@ -30217,6 +30281,7 @@ def _run_self_tests():
         _self_test_interleave_mvc_strips_frim_delimiter,
         _self_test_iso_to_bd_folder,
         _self_test_last_preset_auto_load,
+        _self_test_preset_restore_alongside_enables_mvc_controls,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_folder_detection_ignores_stray_dots,
         _self_test_sbs2mvc_mkv_output_uses_mkvmerge_not_tsmuxer,

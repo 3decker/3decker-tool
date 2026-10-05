@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Fixed: the 3D Blu-ray MVC options stayed greyed out after restarting with a preset set to "Alongside SBS/TAB output".** Switching the mode to Off and back was the only way to get them back. They now enable correctly on startup and when loading a preset.
+
 **Improved: the leftover pre-audio file is removed automatically after Restore Audio & Subtitles.** When a job ends with an `_alldub` file, the earlier file it was built from (the same video with fewer audio/subtitle tracks) is deleted automatically, so you keep just the `_alldub` version. The earlier file is only deleted when every check passes (same length, Dolby Vision still there, and the restored file is real). If any check fails, nothing is deleted and the log says why.
 
 **Improved: the "?" help buttons now appear on every settings tab.** Before, only some sections had one. Now every setting with a description has a small "?" next to it across all tabs, including the Standalone Tools. Click it to open that setting's full description in a text file.

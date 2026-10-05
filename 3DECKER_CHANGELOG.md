@@ -15,6 +15,10 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Fixed: Limit Bitrate could switch itself off when you changed the Video Format or Video Codec.** On the NVIDIA codecs (H.264 and H.265 NVENC), changing the format or codec, or loading saved settings, could untick Limit Bitrate and hide the Preview Peak Bitrate button. It now stays on, as you set it.
+
+**Fixed: the 3D Blu-ray ISO Extract tool's MVC Bitrate was capped at 40 Mbps.** The "MVC .mkv, Auto-crop applied" layout now accepts up to 62.5 Mbps, the same combined ceiling the other 3D Blu-ray MVC tools already use. The number is the combined total for both eyes together, and the tooltip now says so. This layout always writes a .mkv file, so the higher limit applies there.
+
 **Changed: the Half Precision (FP16) tooltips now warn about ghosting.** Testing showed FP16 can produce ghosting in fast scenes. FP32 (off) remains the recommended setting for the best picture. FP16 is still there for speed when you want it.
 
 **Fixed: the 3D Blu-ray MVC options stayed greyed out after restarting with a preset set to "Alongside SBS/TAB output".** Switching the mode to Off and back was the only way to get them back. They now enable correctly on startup and when loading a preset.

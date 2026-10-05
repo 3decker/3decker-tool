@@ -341,7 +341,11 @@ class VideoEncodingBox():
         self.update_video_format()
 
     def on_selected_index_changed_cbo_video_codec(self, event):
-        self.update_video_codec()
+        # update_video_format() calls SetItems(), which clears the list first and fires an EVT_TEXT
+        # with an empty value before the real codec is re-selected. An empty codec is never valid,
+        # and acting on it would switch Limit Bitrate off for NVENC codecs.
+        if self.cbo_video_codec.GetValue():
+            self.update_video_codec()
 
     def on_changed_chk_limit_bitrate(self, event):
         self.update_bitrate_cap_visibility()

@@ -6671,8 +6671,9 @@ class MainFrame(wx.Frame):
             T("What it's for: only with the 'MVC .mkv, Auto-crop applied' layout -- target Mbps for the "
               "fresh MVC re-encode (FRIMEncode), same meaning as the standalone 'SBS to 3D Blu-ray MVC' "
               "tool's own Bitrate field.\n"
-              "Values: 2-40. 20 (default) is a solid, widely-used middle ground; 3D Blu-ray allows up to "
-              "about 40 combined (both eyes together) -- the highest quality this format can hold.\n"
+              "Values: 2-62.5. This is the COMBINED bitrate for both eyes together, not per eye. 20 (default) is "
+              "a solid, widely-used middle ground. This layout always writes .mkv, so the ceiling is 62.5 (the most "
+              "this encode can declare as a real AVC Level 4.1 stream).\n"
               "Recommended: 20 for a good balance; 40 if you want as close to the source quality as this "
               "format allows and don't mind a bigger file and a longer encode."))
 
@@ -11986,7 +11987,7 @@ class MainFrame(wx.Frame):
     _STANDALONE_TOOL_GROUP_NAMES = (
         "grp_quick_convert",
         "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone", "grp_bitrate_cap_standalone",
-        "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_makemkv", "grp_upscale",
+        "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_makemkv", "grp_upscale", "grp_vobsub",
         "grp_standalone_log",
     )
 
@@ -15589,9 +15590,12 @@ class MainFrame(wx.Frame):
         if self._bluray_uses_flat_encoder() and not validate_number(
                 self.txt_bluray_quality.GetValue(), 0, 51, allow_empty=False):
             return None, T("Quality must be a number between 0 and 51 (18 recommended).")
-        if self._bluray_is_mvc_cropped_layout() and not validate_number(
-                self.txt_bluray_bitrate.GetValue(), 2, 40, allow_empty=False):
-            return None, T("MVC Bitrate must be a number between 2 and 40 Mbps (20 recommended).")
+        if self._bluray_is_mvc_cropped_layout():
+            # Same ADR-337 combined ceiling the CLI enforces, chosen by this output's own extension
+            from .mvc_extract_cli import _mvc_bitrate_ceiling_mbps
+            bitrate_ceiling = _mvc_bitrate_ceiling_mbps(disc_legal=wanted_ext == ".iso")
+            if not validate_number(self.txt_bluray_bitrate.GetValue(), 2, bitrate_ceiling, allow_empty=False):
+                return None, T("MVC Bitrate must be a number between 2 and %s Mbps (20 recommended).") % bitrate_ceiling
         layout = self.cbo_bluray_layout.GetClientData(self.cbo_bluray_layout.GetSelection())
         codec = self.cbo_bluray_codec.GetClientData(self.cbo_bluray_codec.GetSelection())
         is_lossless = self._bluray_is_lossless_layout()
@@ -23765,9 +23769,16 @@ def _self_test_bluray_import_panel():
             cmd, err = frame.build_bluray_command()
             assert cmd[cmd.index("--speed") + 1] == "7", cmd
             frame.cbo_bluray_speed.SetSelection(1)  # back to Balanced
-            frame.txt_bluray_bitrate.SetValue("1")  # below the real 2-40 range
+            frame.txt_bluray_bitrate.SetValue("1")  # below the real 2-62.5 range
             cmd, err = frame.build_bluray_command()
             assert cmd is None and err, "an out-of-range Bitrate must be refused, not silently sent"
+            # .mkv output (the only output this layout writes) allows up to the 62.5 ADR-337 ceiling
+            frame.txt_bluray_bitrate.SetValue("50")
+            cmd, err = frame.build_bluray_command()
+            assert err is None and cmd[cmd.index("--bitrate") + 1] == "50.0", (cmd, err)
+            frame.txt_bluray_bitrate.SetValue("62.6")
+            cmd, err = frame.build_bluray_command()
+            assert cmd is None and err and "62.5" in err, (cmd, err)
             frame.txt_bluray_bitrate.SetValue("20")
             frame.txt_bluray_output.SetValue(iso_out)
             cmd, err = frame.build_bluray_command()
@@ -25947,7 +25958,11 @@ def _self_test_rife_standalone_dv_and_cancel():
                 frame.txt_rife_standalone_dv_source.SetValue("")
                 for answer, expect_dv in ((wx.YES, True), (wx.NO, False)):
                     captured.clear()
-                    wx.MessageBox = lambda *a, _ans=answer, **kw: _ans
+                    # Keep-DV No leaves Output Codec on H.264, so the ADR-330 H.264 pre-flight warning also pops
+                    # up here. Answer it Yes (proceed) so the job runs: this step checks the Keep-DV answer only,
+                    # and a No on the H.264 warning would return early with no job (no "wargs").
+                    wx.MessageBox = lambda *a, _ans=answer, **kw: (
+                        wx.YES if a[1] == T("HDR Source, H.264 Output Selected") else _ans)
                     frame.on_click_btn_rife_standalone_run(None)
                     cmd, dv = captured["wargs"]
                     assert (dv is not None) is expect_dv, (answer, dv)
@@ -30018,6 +30033,51 @@ def _self_test_video_encoding_layout_fits():
     print("_self_test_video_encoding_layout_fits: PASS")
 
 
+def _self_test_limit_bitrate_survives_codec_repopulate():
+    """Limit Bitrate on an NVENC codec must stay checked when the Video Format / Video Codec lists are
+    repopulated. update_video_format() calls SetItems() on the codec combo, which fires an EVT_TEXT with an
+    empty value first; that used to switch Limit Bitrate off (and hide the Preview Peak Bitrate button after a
+    settings restore). Synthetic: real UI events via ProcessEvent, no GPU, no media."""
+    import av
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        grp = frame.grp_video
+
+        def fire(ctrl, event_type):
+            ctrl.GetEventHandler().ProcessEvent(wx.CommandEvent(event_type, ctrl.GetId()))
+
+        assert "hevc_nvenc" in av.codec.codecs_available, \
+            "hevc_nvenc is not offered on this machine, so Limit Bitrate cannot be checked"
+        for container in ("mkv", "mp4"):
+            grp.cbo_video_format.SetValue(container)
+            fire(grp.cbo_video_format, wx.wxEVT_TEXT)
+            grp.cbo_video_codec.SetValue("hevc_nvenc")
+            fire(grp.cbo_video_codec, wx.wxEVT_TEXT)
+            grp.chk_limit_bitrate.SetValue(True)
+            fire(grp.chk_limit_bitrate, wx.wxEVT_CHECKBOX)
+            wx.SafeYield()
+
+            # Repopulate via the same path as a Video Format change, then a plain update_controls()
+            # (what a settings restore calls).
+            fire(grp.cbo_video_format, wx.wxEVT_TEXT)
+            assert grp.cbo_video_codec.GetValue() == "hevc_nvenc", (container, grp.cbo_video_codec.GetValue())
+            assert grp.chk_limit_bitrate.GetValue(), f"{container}: Limit Bitrate was unchecked by a format repopulate"
+            grp.update_controls()
+            assert grp.chk_limit_bitrate.GetValue(), f"{container}: Limit Bitrate was unchecked by update_controls()"
+            assert grp.limit_bitrate, f"{container}: limit_bitrate is off after repopulate"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_limit_bitrate_survives_codec_repopulate: PASS")
+
+
 def _self_test_help_buttons():
     """"?" help buttons (add_help_buttons in nunif/gui/common.py): every sampled tooltipped
     control in Processor / Video Encoding gets a "?" wx.Button in the same parent; clicking it
@@ -30223,6 +30283,7 @@ def _run_self_tests():
         _self_test_device_dropdown_no_torch_cuda_touch,
         _self_test_label_tooltips_propagated,
         _self_test_video_encoding_layout_fits,
+        _self_test_limit_bitrate_survives_codec_repopulate,
         _self_test_help_buttons,
         _self_test_help_buttons_all_tabs,
         _self_test_resolution_preset_quick_fill,

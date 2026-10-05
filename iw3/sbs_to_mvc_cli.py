@@ -43,7 +43,7 @@ from os import path
 import nunif.gui.subprocess_patch  # noqa
 
 from .mvc_extract_cli import (AUTOCROP_MODES, Cancelled, detect_eye_crop, iso_to_bd_folder,
-                              _remove_stale_temp, interleave_mvc)
+                              _remove_stale_temp, interleave_mvc, _mvc_bitrate_ceiling_mbps)
 from .mvc_codec_private import extract_first_nals, build_mvc_codec_private, patch_mkv_codec_private
 from .utils import (_find_tsmuxer, _get_ffmpeg_bin, log_subprocess_cmd, _find_mkvmerge,
                     _find_mkvpropedit, _apply_stereo_mode_tag)
@@ -970,36 +970,6 @@ def _mux_mkv_via_mkvmerge(base_es, dep_es, fps_text, av_lines, output_path, work
     else:
         _apply_stereo_mode_tag(output_path, SimpleNamespace(stereo_mode_tag=True, vr180=False),
                                mkvpropedit_bin=mkvpropedit, value_override=13)
-
-
-# Real research finding (2026-10-04, cross-checked against several independent doom9.org
-# community sources -- the same community FRIM itself came from -- the official BDA spec text
-# is paywalled): FRIMEncode's own -vbr target in -o:mvc mode below is the COMBINED bitrate for
-# both views together, not "per eye". The old 40 Mbps ceiling here was the real BD-ROM 2D/
-# base-view-ONLY limit, misapplied to this 3D combined case -- the real BD-3D combined MVC
-# ceiling is 60 Mbps. That figure is a genuine hardware/compliance concern only for a real
-# disc-structured target (.iso/BD-folder) played on certified Blu-ray hardware; it doesn't
-# meaningfully apply to a plain .mkv/.m2ts file read by an ordinary software player (VLC,
-# MPC-HC, ...) with no certified-hardware decoder-buffer model to honor.
-#
-# The encode below still declares "-profile high -level 4.1" for every output type regardless,
-# though, so AVC Level 4.1 High Profile's own formally-defined max bitrate is the real next
-# ceiling if the non-disc case is pushed arbitrarily far past BD's own number: Table A-1 of the
-# H.264/AVC spec gives MaxBR=50000 (kbit/s) for Baseline/Main/Extended at Level 4.1, and High
-# Profile's cpbBrVclFactor of 1.25 scales that to 62500 kbit/s = 62.5 Mbps (confirmed against
-# ffmpeg's own h264_levels.c level-limits table) -- the non-disc ceiling stops just under that
-# real formal limit instead of picking an arbitrary large number.
-_DISC_BITRATE_CEILING_MBPS = 60.0
-_NONDISC_BITRATE_CEILING_MBPS = 62.5
-
-
-def _mvc_bitrate_ceiling_mbps(disc_legal):
-    """The real upper bound for --bitrate, by output type -- see the real research finding
-    above. disc_legal=True (.iso/BD-folder, same grouping convert()/convert_direct() already
-    use for audio-codec legality) gets the real BD-3D combined-MVC ceiling; disc_legal=False
-    (.mkv/.m2ts, no certified-hardware compliance to honor) gets the higher ceiling grounded in
-    this encode's own fixed AVC Level 4.1 High Profile declaration instead."""
-    return _DISC_BITRATE_CEILING_MBPS if disc_legal else _NONDISC_BITRATE_CEILING_MBPS
 
 
 def convert(input_path, output_iso, layout="full_sbs", bitrate_mbps=20.0, swap_eyes=False,

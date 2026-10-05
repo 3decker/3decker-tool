@@ -939,6 +939,37 @@ def mux_lossless_mvc_mkv(ssif_path, avc_track, mvc_track, out_mkv, include_av=Tr
                                *((video_only,) if include_av else ()))
 
 
+# Real research finding (2026-10-04, cross-checked against several independent doom9.org
+# community sources -- the same community FRIM itself came from -- the official BDA spec text
+# is paywalled): FRIMEncode's own -vbr target in -o:mvc mode below is the COMBINED bitrate for
+# both views together, not "per eye". The old 40 Mbps ceiling here was the real BD-ROM 2D/
+# base-view-ONLY limit, misapplied to this 3D combined case -- the real BD-3D combined MVC
+# ceiling is 60 Mbps. That figure is a genuine hardware/compliance concern only for a real
+# disc-structured target (.iso/BD-folder) played on certified Blu-ray hardware; it doesn't
+# meaningfully apply to a plain .mkv/.m2ts file read by an ordinary software player (VLC,
+# MPC-HC, ...) with no certified-hardware decoder-buffer model to honor.
+#
+# The encode below still declares "-profile high -level 4.1" for every output type regardless,
+# though, so AVC Level 4.1 High Profile's own formally-defined max bitrate is the real next
+# ceiling if the non-disc case is pushed arbitrarily far past BD's own number: Table A-1 of the
+# H.264/AVC spec gives MaxBR=50000 (kbit/s) for Baseline/Main/Extended at Level 4.1, and High
+# Profile's cpbBrVclFactor of 1.25 scales that to 62500 kbit/s = 62.5 Mbps (confirmed against
+# ffmpeg's own h264_levels.c level-limits table) -- the non-disc ceiling stops just under that
+# real formal limit instead of picking an arbitrary large number.
+_DISC_BITRATE_CEILING_MBPS = 60.0
+_NONDISC_BITRATE_CEILING_MBPS = 62.5
+
+
+def _mvc_bitrate_ceiling_mbps(disc_legal):
+    """The real upper bound for --bitrate, by output type -- see the real research finding
+    above. disc_legal=True (.iso/BD-folder, same grouping convert()/convert_direct() already
+    use for audio-codec legality) gets the real BD-3D combined-MVC ceiling; disc_legal=False
+    (.mkv/.m2ts, no certified-hardware compliance to honor) gets the higher ceiling grounded in
+    this encode's own fixed AVC Level 4.1 High Profile declaration instead."""
+    return _DISC_BITRATE_CEILING_MBPS if disc_legal else _NONDISC_BITRATE_CEILING_MBPS
+
+
+
 def _find_frim():
     """Local copy of sbs_to_mvc_cli.py's own find_frim() -- duplicated rather than
     imported: sbs_to_mvc_cli.py already imports FROM this module (AUTOCROP_MODES,
@@ -1031,8 +1062,10 @@ def extract_and_reencode_mvc(ssif_path, avc_track, mvc_track, cut_start, cut_end
         raise RuntimeError("FRIMEncode not found -- run `python -m iw3.install_mvc_tools`")
     if path.splitext(output_path)[1].lower() != ".mkv":
         raise ValueError("this direct-to-MVC output must be saved as an .mkv file")
-    if not 2 <= bitrate_mbps <= 40:
-        raise ValueError("bitrate must be between 2 and 40 Mbps (3D Blu-ray allows about 40 combined)")
+    # .mkv output only (checked just above), so the non-disc ceiling applies (ADR-337 helper)
+    bitrate_ceiling = _mvc_bitrate_ceiling_mbps(disc_legal=False)
+    if not 2 <= bitrate_mbps <= bitrate_ceiling:
+        raise ValueError(f"bitrate must be between 2 and {bitrate_ceiling:g} Mbps (combined limit for .mkv output)")
     if not 1 <= target_usage <= 7:
         raise ValueError("speed (FRIMEncode target usage) must be between 1 (quality) and 7 (speed)")
 
@@ -1502,7 +1535,7 @@ def main():
                               "--layout bd3d_iso or --layout mvc_mkv (both copy the disc's video untouched).")
     parser.add_argument("--bitrate", type=float, default=20.0,
                          help="only with --layout mvc_mkv_cropped: target Mbps for the fresh FRIMEncode MVC "
-                              "re-encode (2-40; 3D Blu-ray allows about 40 combined) -- same meaning as "
+                              "re-encode, combined for both eyes (2-62.5 for this .mkv output) -- same meaning as "
                               "sbs_to_mvc_cli's own --bitrate.")
     parser.add_argument("--speed", type=int, default=4, choices=range(1, 8), metavar="1-7",
                          help="only with --layout mvc_mkv_cropped: FRIMEncode's own quality/speed tradeoff "

@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Fixed: the update could stop with "ffmpeg update FAILED" when the download was incomplete.** The updater now retries the ffmpeg checksum download once. If it still fails, it keeps the ffmpeg you already have and shows a warning, instead of stopping the whole update.
+
 **Improved: the Video Encoding section fits on first open, and settings have "?" help buttons.** The Video Encoding box no longer gets cut off on the right when the window first opens. Many settings now have a small "?" next to them. Click it to open that setting's full description in a text file, instead of right-clicking. Right-click still works too.
 
 **New: Limit Bitrate can now be applied to a finished video.** A new Standalone Tool lets you pick an existing file, set a bitrate limit, and get a capped copy next to it, without redoing the whole conversion. Your original is never changed. If the file has Dolby Vision, you can give the original source so the Dolby Vision is put back afterward. There's also a command-line version.

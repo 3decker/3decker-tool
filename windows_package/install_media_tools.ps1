@@ -92,7 +92,22 @@ function Install-Ffmpeg {
     }
 
     $matchLine = Select-String -Path $checksumsPath -Pattern ([regex]::Escape($script:FfmpegZipName)) | Select-Object -First 1
-    if (-not $matchLine) { throw "could not find $($script:FfmpegZipName) listed in the downloaded checksums.sha256" }
+    if (-not $matchLine) {
+        # A truncated download or an error page instead of the real list looks exactly like
+        # "name not listed". Retry once, then say what was actually received.
+        Remove-Item $checksumsPath -Force -ErrorAction SilentlyContinue
+        try { Get-File $checksumsUrl $checksumsPath } catch { }
+        $matchLine = if (Test-Path $checksumsPath) { Select-String -Path $checksumsPath -Pattern ([regex]::Escape($script:FfmpegZipName)) | Select-Object -First 1 }
+    }
+    if (-not $matchLine) {
+        $received = if (Test-Path $checksumsPath) { @(Get-Content $checksumsPath -TotalCount 3) -join ' | ' } else { '(nothing received)' }
+        $msg = "could not find $($script:FfmpegZipName) in the downloaded checksums.sha256 (after one retry). First lines received: $received"
+        if ((Test-Path $ffmpegExe) -and (Test-Path $ffprobeExe)) {
+            Write-Host "  $msg -- keeping the existing ffmpeg." -ForegroundColor Yellow
+            return
+        }
+        throw $msg
+    }
     $currentHash = (($matchLine.Line -split '\s+')[0]).ToUpper()
 
     $storedHash = $null

@@ -3610,9 +3610,9 @@ class MainFrame(wx.Frame):
               "nearest real frame's data). Only Dolby Vision is carried over that way -- HDR10+ is skipped "
               "with RIFE. If re-attaching fails, the RIFE file still plays but has no Dolby Vision, and the "
               "log says why.\n"
-              "Greyed out while Video Codec is an H.264 choice (libx264, libopenh264, h264_nvenc, h264_qsv): "
-              "this metadata has no H.264 form, so the checkbox would do nothing. Switch Video Codec to an "
-              "HEVC choice to turn it on again; its own on/off setting is kept in the meantime.\n"
+              "Greyed out while Video Codec is a non-HEVC choice (libx264, libopenh264, h264_nvenc, h264_qsv, "
+              "utvideo, ffv1): this metadata has no form in those codecs, so the checkbox would do nothing. "
+              "Switch Video Codec to an HEVC choice to turn it on again; its own on/off setting is kept in the meantime.\n"
               "Recommended: on for any Dolby Vision or HDR10+ source you want to keep looking correct on "
               "an HDR display after conversion."))
 
@@ -10723,13 +10723,14 @@ class MainFrame(wx.Frame):
             self.update_input_option_state()
 
     def update_preserve_dowi(self):
-        """Greys out Preserve Dolby Vision while Video Codec is an H.264 choice, since the
-        Dolby Vision re-attach only supports HEVC output (see that checkbox's tooltip). Only
-        Enable/Disable changes: the checkbox keeps its own on/off value, so switching back to
-        HEVC restores whatever it was set to. Called from update_controls() (preset/config
-        restore sets the codec without firing change events) and _on_video_encoding_changed()."""
+        """Greys out Preserve Dolby Vision while Video Codec is a non-HEVC choice (H.264, utvideo,
+        ffv1), since the Dolby Vision re-attach only supports HEVC output (see that checkbox's
+        tooltip). Only Enable/Disable changes: the checkbox keeps its own on/off value, so
+        switching back to HEVC restores whatever it was set to. Called from update_controls()
+        (preset/config restore sets the codec without firing change events) and
+        _on_video_encoding_changed()."""
         codec = self.grp_video.cbo_video_codec.GetValue()
-        self.chk_preserve_dowi.Enable(codec not in {"libx264", "libopenh264", "h264_nvenc", "h264_qsv"})
+        self.chk_preserve_dowi.Enable(codec not in {"libx264", "libopenh264", "h264_nvenc", "h264_qsv", "utvideo", "ffv1"})
 
     def update_temporal_stabilize(self):
         if self.chk_temporal_stabilize.IsChecked():
@@ -30684,21 +30685,23 @@ def _self_test_preserve_dv_greyed_for_h264():
         frame = MainFrame()
 
         frame.chk_preserve_dowi.SetValue(True)
-        for codec in ("libx264", "libopenh264", "h264_nvenc"):
+        non_hevc = ("libx264", "libopenh264", "h264_nvenc", "h264_qsv", "utvideo", "ffv1")
+        for codec in non_hevc:
             frame.grp_video.cbo_video_codec.SetStringSelection(codec)
             frame.update_preserve_dowi()
             assert not frame.chk_preserve_dowi.IsEnabled(), f"Preserve Dolby Vision must be greyed out for {codec}"
             assert frame.chk_preserve_dowi.GetValue() is True
 
-        for codec in ("hevc_nvenc", "libx265"):
+        for codec in ("hevc_nvenc", "libx265", "hevc_qsv"):
             frame.grp_video.cbo_video_codec.SetStringSelection(codec)
             frame.update_controls(probe_compile=False)
             assert frame.chk_preserve_dowi.IsEnabled(), f"Preserve Dolby Vision must be enabled for {codec}"
             assert frame.chk_preserve_dowi.GetValue() is True, "its on/off value must be kept when re-enabled"
 
-        frame.grp_video.cbo_video_codec.SetStringSelection("h264_nvenc")
-        frame.update_controls(probe_compile=False)
-        assert not frame.chk_preserve_dowi.IsEnabled(), "restore path must not re-enable it for H.264"
+        for codec in ("h264_nvenc", "utvideo", "ffv1"):
+            frame.grp_video.cbo_video_codec.SetStringSelection(codec)
+            frame.update_controls(probe_compile=False)
+            assert not frame.chk_preserve_dowi.IsEnabled(), f"restore path must not re-enable it for {codec}"
     finally:
         if frame is not None:
             frame.Destroy()

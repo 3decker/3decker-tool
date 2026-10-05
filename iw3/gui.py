@@ -3113,8 +3113,9 @@ class MainFrame(wx.Frame):
               "resolution (bigger file), Half squeezes both into the original frame size (smaller file, "
               "common for streaming/playback compatibility). VR90 is for VR headsets. Cross Eyed is for "
               "viewing without any equipment. Anaglyph is the red/cyan glasses look. RGB-D / Export save "
-              "the depth data itself instead of a finished 3D image. Recommended: Half SBS for most TVs "
-              "and 3D players, unless you know you need a different format.\n"
+              "the depth data itself instead of a finished 3D image. Recommended: Full SBS for 1080p sources, "
+              "Half SBS for 4K sources. Full SBS at 4K makes an 8K-wide file (7680 x 2160), which some devices "
+              "cannot play.\n"
               "Bonus for Half SBS/Half TB specifically: when Video Codec is H.264 (libx264), the file "
               "also gets a real \"Frame Packing\" 3D signal embedded in it — the same standard real "
               "3D Blu-rays and TVs use to auto-detect 3D and switch modes on their own, without you "
@@ -3609,6 +3610,9 @@ class MainFrame(wx.Frame):
               "nearest real frame's data). Only Dolby Vision is carried over that way -- HDR10+ is skipped "
               "with RIFE. If re-attaching fails, the RIFE file still plays but has no Dolby Vision, and the "
               "log says why.\n"
+              "Greyed out while Video Codec is an H.264 choice (libx264, libopenh264, h264_nvenc, h264_qsv): "
+              "this metadata has no H.264 form, so the checkbox would do nothing. Switch Video Codec to an "
+              "HEVC choice to turn it on again; its own on/off setting is kept in the meantime.\n"
               "Recommended: on for any Dolby Vision or HDR10+ source you want to keep looking correct on "
               "an HDR display after conversion."))
 
@@ -3635,8 +3639,11 @@ class MainFrame(wx.Frame):
                                           "split it into fixed-size pieces on a schedule. A new piece is only "
                                           "ever created at the exact point an interruption actually happened, "
                                           "so a normal, uninterrupted run has zero seams, identical to not "
-                                          "using this option at all. If interrupted, you get exactly one seam "
-                                          "at that point, not many. Recommended: on for any long/overnight "
+                                          "using this option at all. Each interruption adds one seam at the "
+                                          "point it happened, so a movie interrupted three times can have up to "
+                                          "three seams. "
+                                          "Clips of 60 seconds or less are not checkpointed and always restart "
+                                          "from the beginning if interrupted. Recommended: on for any long/overnight "
                                           "conversion."))
 
         self.chk_denoise = wx.CheckBox(self.grp_video_filter, label=T("Denoise"), name="chk_denoise")
@@ -4011,8 +4018,8 @@ class MainFrame(wx.Frame):
                                                name="chk_waifu2x_upscale")
         self.chk_waifu2x_upscale.SetValue(False)
         self.chk_waifu2x_upscale.SetToolTip(
-            T("What it's for (single video and Dual-Pass Depth Blend jobs only): once this job's finished "
-              "output is fully written, automatically runs it through waifu2x (a separate, dedicated AI "
+            T("What it's for (a single video, each video when converting a folder, and Dual-Pass Depth Blend "
+              "jobs): once this job's finished output is fully written, automatically runs it through waifu2x (a separate, dedicated AI "
               "upscaler bundled with this app) as one extra step, so you don't need to run waifu2x by hand "
               "afterward.\n"
               "How it's safe: saved to a separate '_w2x' file — the original conversion output is always "
@@ -4091,8 +4098,8 @@ class MainFrame(wx.Frame):
                                                 name="chk_rife_interpolate")
         self.chk_rife_interpolate.SetValue(False)
         self.chk_rife_interpolate.SetToolTip(
-            T("What it's for (single video and Dual-Pass Depth Blend jobs only): once this job's finished "
-              "output is fully written, runs it through RIFE (a separate AI frame-interpolation model) as "
+            T("What it's for (a single video, each video when converting a folder, and Dual-Pass Depth Blend "
+              "jobs): once this job's finished output is fully written, runs it through RIFE (a separate AI frame-interpolation model) as "
               "one extra step, generating new in-between frames for smoother-looking motion. How many/where "
               "is controlled by the Rate mode dropdown below (2x by default).\n"
               "How it's safe: saved to a separate '_rife' file -- the original conversion output is always "
@@ -4307,7 +4314,8 @@ class MainFrame(wx.Frame):
               "automatically, with no separate manual step through the standalone 'SBS to 3D Blu-ray "
               "MVC' tool -- a plain 2D movie in, BOTH a plain converted file and a separate "
               "'<name>_MVC.iso'/'<name>_MVC'(BD Folder)/'<name>_MVC.mkv'/'<name>_MVC.m2ts' out. The "
-              "plain converted output is always left untouched either way.\n"
+              "plain converted output is always left untouched either way. When converting a folder, this "
+              "runs for each video in it.\n"
               "Con (Alongside): MVC encoding is real extra processing time after the main conversion "
               "already finished -- it re-encodes the video through a separate program (FRIMEncode), "
               "CPU-only, not a quick remux like Restore Audio & Subtitles.\n"
@@ -9008,6 +9016,7 @@ class MainFrame(wx.Frame):
 
     def _on_video_encoding_changed(self, event):
         event.Skip()
+        self.update_preserve_dowi()
         # CallAfter so VideoEncodingBox's own handler has already shown/hidden its rows.
         wx.CallAfter(self._repin_options_min_size)
 
@@ -9395,6 +9404,7 @@ class MainFrame(wx.Frame):
         # Preset/config restore sets cbo_mvc_mode via SetSelection() (no change event), so
         # the MVC sub-option greying must be re-applied here, not only in the handlers.
         self.update_mvc_mode()
+        self.update_preserve_dowi()
         self._repin_options_min_size()
 
     def get_depth_models(self):
@@ -10711,6 +10721,15 @@ class MainFrame(wx.Frame):
             # rather than leaving it force-enabled regardless of input type.
             self.update_input_option_state()
 
+    def update_preserve_dowi(self):
+        """Greys out Preserve Dolby Vision while Video Codec is an H.264 choice, since the
+        Dolby Vision re-attach only supports HEVC output (see that checkbox's tooltip). Only
+        Enable/Disable changes: the checkbox keeps its own on/off value, so switching back to
+        HEVC restores whatever it was set to. Called from update_controls() (preset/config
+        restore sets the codec without firing change events) and _on_video_encoding_changed()."""
+        codec = self.grp_video.cbo_video_codec.GetValue()
+        self.chk_preserve_dowi.Enable(codec not in {"libx264", "libopenh264", "h264_nvenc", "h264_qsv"})
+
     def update_temporal_stabilize(self):
         if self.chk_temporal_stabilize.IsChecked():
             self.cbo_temporal_stabilize_strength.Enable()
@@ -11916,6 +11935,7 @@ class MainFrame(wx.Frame):
             if self.grp_video.has_nvenc:
                 self.grp_video.cbo_video_codec.SetStringSelection("hevc_nvenc")
                 self.grp_video.update_video_codec()
+                self.update_preserve_dowi()
                 self.grp_video.cbo_tune.SetValue("uhq")
             self.grp_video.cbo_fps.SetValue("1000.0")
             self.grp_video.cbo_crf.SetValue("15")
@@ -30512,6 +30532,44 @@ def _self_test_limit_bitrate_survives_codec_repopulate():
     print("_self_test_limit_bitrate_survives_codec_repopulate: PASS")
 
 
+def _self_test_preserve_dv_greyed_for_h264():
+    """Preserve Dolby Vision is greyed out while Video Codec is an H.264 choice (the
+    Dolby Vision re-attach only supports HEVC output), re-enabled for HEVC, and keeps its
+    own on/off value across both changes. Covers the codec change path
+    (_on_video_encoding_changed -> update_preserve_dowi) and the restore path
+    (update_controls), since preset/config restore sets the codec without change events."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        frame.chk_preserve_dowi.SetValue(True)
+        for codec in ("libx264", "libopenh264", "h264_nvenc"):
+            frame.grp_video.cbo_video_codec.SetStringSelection(codec)
+            frame.update_preserve_dowi()
+            assert not frame.chk_preserve_dowi.IsEnabled(), f"Preserve Dolby Vision must be greyed out for {codec}"
+            assert frame.chk_preserve_dowi.GetValue() is True
+
+        for codec in ("hevc_nvenc", "libx265"):
+            frame.grp_video.cbo_video_codec.SetStringSelection(codec)
+            frame.update_controls(probe_compile=False)
+            assert frame.chk_preserve_dowi.IsEnabled(), f"Preserve Dolby Vision must be enabled for {codec}"
+            assert frame.chk_preserve_dowi.GetValue() is True, "its on/off value must be kept when re-enabled"
+
+        frame.grp_video.cbo_video_codec.SetStringSelection("h264_nvenc")
+        frame.update_controls(probe_compile=False)
+        assert not frame.chk_preserve_dowi.IsEnabled(), "restore path must not re-enable it for H.264"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_preserve_dv_greyed_for_h264: PASS")
+
+
 def _self_test_help_buttons():
     """"?" help buttons (add_help_buttons in nunif/gui/common.py): every sampled tooltipped
     control in Processor / Video Encoding gets a "?" wx.Button in the same parent; clicking it
@@ -30825,6 +30883,7 @@ def _run_self_tests():
         _self_test_default_output_dir_name_is_3decker,
         _self_test_mvc_mode_checkbox_config_migration,
         _self_test_mvc_mode_greys_out_subordinate_controls_when_off,
+        _self_test_preserve_dv_greyed_for_h264,
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,

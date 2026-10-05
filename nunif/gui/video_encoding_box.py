@@ -106,7 +106,8 @@ class VideoEncodingBox():
               "compatible default. yuv420p10le adds the precision-boosting benefit described under Bit "
               "Depth Upgrade (where available, that setting can apply on top of this). yuv444p/rgb24/gbrp* "
               "avoid color-detail loss around sharp red/edge areas, at a larger file size — see this "
-              "project's README for when that matters. Recommended: yuv420p10le for most uses."))
+              "project's README for when that matters. Recommended: yuv420p10le for 10-bit HDR sources, "
+              "yuv420p for everything else."))
 
         self.lbl_colorspace = wx.StaticText(self.grp_video, label=T("Colorspace"))
         self.cbo_colorspace = wx.ComboBox(
@@ -173,9 +174,11 @@ class VideoEncodingBox():
               "content exactly as CRF produced it. Cons: the capped stretch itself may look slightly "
               "softer than an uncapped CRF encode would there, since detail gets sacrificed once the cap "
               "is hit; the real-peak check reads the whole file's packet data, which takes a little extra "
-              "time after encoding. Recommended: leave unchecked normally; turn on (with a Bitrate around "
-              "1.5-2x what you'd normally expect the file to average) for movies you know have a few "
-              "heavily grainy/dark/bursty scenes and you want playback to stay smooth everywhere."))
+              "time after encoding. The Bitrate field above is used directly as this peak cap, so set it to "
+              "the peak you will allow: for example about 1.5 times the average bitrate you expect, or a fixed "
+              "cap such as 80M for 4K UHD. Recommended: leave unchecked normally; turn on for movies you know "
+              "have a few heavily grainy/dark/bursty scenes and you want playback to stay smooth everywhere. "
+              "When converting a folder, this also applies to each video in it."))
 
         self.lbl_profile_level = wx.StaticText(self.grp_video, label=T("Level"))
         self.cbo_profile_level = EditableComboBox(self.grp_video, choices=LEVEL_ALL, name=f"{prefix}cbo_profile_level")

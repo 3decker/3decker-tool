@@ -15,6 +15,10 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Changed: Preserve Dolby Vision is greyed out for H.264 output.** Dolby Vision can only be kept in HEVC output, so the checkbox is now disabled whenever Video Codec is an H.264 choice (libx264, libopenh264, h264_nvenc, h264_qsv). Switch to an HEVC codec and it becomes available again, still set the way you left it.
+
+**Improved: clearer tooltips for Stereo Format, Pixel Format, Limit Bitrate, Auto Resume, and the post-conversion steps.** Stereo Format now recommends Full SBS for 1080p sources and Half SBS for 4K sources, because Full SBS at 4K makes an 8K-wide file that some devices cannot play. Pixel Format recommends yuv420p10le for 10-bit HDR sources and yuv420p for everything else. Limit Bitrate now says that the Bitrate value is used directly as the peak cap. Auto Resume now says that each interruption adds one seam, and that clips of 60 seconds or less are not checkpointed. The waifu2x upscale, RIFE, 3D Blu-ray MVC and Limit Bitrate tooltips now say they also run for each video when you convert a folder. No settings or defaults changed.
+
 **Fixed: the window now remembers its size and position when you restart 3DECKER.** When you close the window, its size and where it sits on screen are saved, and the next start puts it back the same way. If the saved spot is no longer on a connected monitor, or the saved file is damaged, it falls back to the normal default size and position.
 
 **Fixed: the settings no longer jump back to the far left when you change one while the window is narrow and scrolled right.** Changing a setting such as the Method dropdown could snap the sideways scroll back to the left edge and lose your place. The view now stays where you were.

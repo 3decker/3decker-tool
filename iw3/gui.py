@@ -4,6 +4,7 @@ import sys
 import os
 from os import path
 import re
+import json
 import traceback
 import functools
 import tempfile
@@ -202,6 +203,40 @@ ZOOM_LEVELS = (50, 60, 70, 80, 90, 100, 110, 125, 150, 175, 200)
 DEFAULT_ZOOM_LEVEL = 100
 BASE_NORMAL_FONT_PT = 10
 BASE_WARNING_FONT_PT = 8
+
+# ADR-350: real user report (Steve, via decker) -- the window did not remember its
+# size or location across restarts, because startup's Fit() always re-sized it to its
+# natural content size. Saved on close and restored after startup's own Fit()+clamp
+# (see IW3App.OnInit and MainFrame.restore_window_geometry()). Stored as JSON in its own
+# small file, the same way Layout/Theme/Zoom are stored above, so presets (iw3-gui.cfg)
+# never move the window.
+WINDOW_CONFIG_PATH = path.join(CONFIG_DIR, "iw3-gui-window.cfg")
+
+
+def _load_window_geometry(config_path):
+    """Returns the saved window geometry dict, or None if the file is missing, not
+    valid JSON, or does not have the expected integer fields."""
+    if not path.exists(config_path):
+        return None
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            data = json.load(f)
+        geometry = {key: int(data[key]) for key in ("x", "y", "width", "height")}
+        geometry["maximized"] = bool(data["maximized"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if geometry["width"] <= 0 or geometry["height"] <= 0:
+        return None
+    return geometry
+
+
+def _save_window_geometry(config_path, geometry):
+    # CS-IO-001: write a temp file and os.replace() it in, so a crash mid-write can
+    # never leave a half-written config behind.
+    tmp_path = config_path + ".tmp"
+    with open(tmp_path, mode="w", encoding="utf-8") as f:
+        json.dump(geometry, f)
+    os.replace(tmp_path, config_path)
 
 
 def _load_zoom_level(config_path):
@@ -1015,6 +1050,8 @@ class IW3App(wx.App):
         # MainFrame._clamp_frame_to_screen() for why that can push the progress bar
         # row off-screen, and why shrinking is safe here.
         main_frame._clamp_frame_to_screen()
+        # ADR-350: after Fit()+clamp, which would otherwise overwrite the saved size.
+        main_frame.restore_window_geometry()
         self.SetTopWindow(main_frame)
         # ADR-107: silent background check for a 3DECKER update, once per launch --
         # startWorker schedules this on a background thread and returns immediately, so
@@ -9097,6 +9134,41 @@ class MainFrame(wx.Frame):
         if (new_x, new_y) != (x, y):
             self.SetPosition((new_x, new_y))
 
+    def save_window_geometry(self, config_path=WINDOW_CONFIG_PATH):
+        """ADR-350: saves this window's position, size and maximized state. Skipped while
+        minimized, because Windows reports a meaningless off-screen position then."""
+        if self.IsIconized():
+            return
+        rect = self.GetRect()
+        _save_window_geometry(config_path, {
+            "x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height,
+            "maximized": self.IsMaximized()})
+
+    def restore_window_geometry(self, config_path=WINDOW_CONFIG_PATH):
+        """ADR-350: applies the saved position and size, returning False (and leaving the
+        default size/position from Fit() untouched) when there is no usable saved value.
+        Clamp rule: the saved rectangle's centre must sit on a currently connected
+        monitor (otherwise the window would reappear off-screen, so it is ignored); the
+        size is then limited to that monitor's work area and the position is pushed back
+        inside it, so the window is always fully visible."""
+        geometry = _load_window_geometry(config_path)
+        if geometry is None:
+            return False
+        centre = (geometry["x"] + geometry["width"] // 2, geometry["y"] + geometry["height"] // 2)
+        display_index = wx.Display.GetFromPoint(centre)
+        if display_index == wx.NOT_FOUND:
+            return False
+        work_area = wx.Display(display_index).GetClientArea()
+        width = min(geometry["width"], work_area.GetWidth())
+        height = min(geometry["height"], work_area.GetHeight())
+        x = min(max(geometry["x"], work_area.GetX()), work_area.GetX() + work_area.GetWidth() - width)
+        y = min(max(geometry["y"], work_area.GetY()), work_area.GetY() + work_area.GetHeight() - height)
+        self.SetSize((width, height))
+        self.SetPosition((x, y))
+        if geometry["maximized"]:
+            self.Maximize(True)
+        return True
+
     def _set_font_recursive(self, window, font):
         window.SetFont(font)
         # ADR-133: real user-reported bug -- changing Zoom left every field
@@ -9486,6 +9558,36 @@ class MainFrame(wx.Frame):
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
+    def _scroll_panels(self):
+        return (self.pnl_single, self.tab_wrap_stereo, self.tab_wrap_depth_blend,
+                self.tab_wrap_video_filter, self.tab_wrap_video_dec, self.tab_wrap_video_enc,
+                self.tab_wrap_processor, self.tab_wrap_tools)
+
+    def Fit(self):
+        """ADR-350: real user report (Steve, via decker) -- with the window narrower
+        than a tab's natural width and scrolled right, changing an ordinary field (e.g.
+        a Method dropdown) snapped the horizontal scroll back to the left edge. Root
+        cause, confirmed by measurement: every field-change handler runs Layout(),
+        Fit(), then _clamp_frame_to_screen(). Fit() grows the frame to its full natural
+        width, which removes the horizontal scroll range for a moment, and wx then resets
+        the scroll origin to (0, 0). The clamp shrinks the frame back to the screen, but
+        the origin stays at 0. Focus is not the cause: focusing a control that is already
+        visible does not move the view.
+
+        So Fit() keeps each scroll panel's origin: it records the origins, runs the real
+        Fit(), runs the same clamp every caller already runs afterward (the scroll range
+        only returns once the frame is back on-screen), then restores the origins. Before
+        the frame is shown there is no screen to clamp against and no scroll position to
+        keep, so this is a plain Fit() in that case."""
+        if not self.IsShown():
+            super().Fit()
+            return
+        views = [(scroller, scroller.GetViewStart()) for scroller in self._scroll_panels()]
+        super().Fit()
+        self._clamp_frame_to_screen()
+        for scroller, view in views:
+            scroller.Scroll(*view)
+
     def _on_idle_remember_scroll_positions(self, event):
         """ADR-240: real user report -- expanding a Standalone Tools pane while
         scrolled right (a window narrower than the tab's full natural width, i.e.
@@ -9506,9 +9608,7 @@ class MainFrame(wx.Frame):
         real click, so the memory always holds the last genuine position, immune to
         the pane's own reset. on_toggled_*_collapsible_pane() reads the pre-toggle
         position from here instead of from the (already-reset) live widget."""
-        for scroller in (self.pnl_single, self.tab_wrap_stereo, self.tab_wrap_depth_blend,
-                          self.tab_wrap_video_filter, self.tab_wrap_video_dec, self.tab_wrap_video_enc,
-                          self.tab_wrap_processor, self.tab_wrap_tools):
+        for scroller in self._scroll_panels():
             self._scroller_view_memory[scroller] = scroller.GetViewStart()
         event.Skip()
 
@@ -9881,6 +9981,7 @@ class MainFrame(wx.Frame):
             # else: fall through and close immediately, accepting the data loss
 
         self.save_preset()
+        self.save_window_geometry()
         event.Skip()
 
     def _wait_then_close(self):
@@ -9888,6 +9989,7 @@ class MainFrame(wx.Frame):
             wx.CallLater(200, self._wait_then_close)
             return
         self.save_preset()
+        self.save_window_geometry()
         self.Destroy()
 
     def on_drop_files(self, x, y, filenames):
@@ -17846,6 +17948,176 @@ def _self_test_collapsible_pane_toggle_preserves_scroll():
             app.Destroy()
 
     print("_self_test_collapsible_pane_toggle_preserves_scroll: PASS")
+
+
+def _self_test_field_change_keeps_scroll_position():
+    """ADR-350: real user report (Steve, via decker) -- with the window narrower than the
+    tab's natural width and scrolled right, changing an ordinary field (a Method dropdown)
+    snapped the horizontal scroll back to the left edge. Root cause (measured, see
+    MainFrame.Fit()'s docstring): the field-change handler's Fit() widens the frame to its
+    natural width for a moment, wx resets the scroll origin to (0, 0) while there is
+    nothing to scroll, and the follow-up clamp shrinks the frame again without restoring it.
+    Also checks focus: moving focus to a control that is already fully visible must not
+    move the view (focus was not the cause, but it is the everyday action the report
+    describes, so it is kept as a guard). Simulates a 400px-wide screen so the scroll range
+    really exists. The simulated screen matches the test window's own size (300x1000) so
+    the clamp returns the frame to exactly the width it had: the scroll range is then
+    unchanged and the origin must come back exactly, not merely clamped to a new maximum."""
+    import iw3.gui as gui_mod
+    from unittest import mock
+
+    orig_load = gui_mod._load_layout_mode
+    app = wx.App()
+    frame = None
+    small_area = wx.Rect(0, 0, 300, 1040)
+    with mock.patch.object(wx.Display, "GetClientArea", return_value=small_area):
+        try:
+            gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+            frame = gui_mod.MainFrame()
+            frame.Show()
+            idx = next(i for i in range(frame.nb_options.GetPageCount())
+                       if frame.nb_options.GetPage(i) is frame.tab_wrap_stereo)
+            frame.nb_options.SetSelection(idx)
+            wx.SafeYield()
+
+            wrap = frame.tab_wrap_stereo
+            frame.SetSize((300, 1000))
+            frame.Layout()
+            wx.SafeYield()
+            width_before = frame.GetSize().width
+
+            ppu_x, _ = wrap.GetScrollPixelsPerUnit()
+            vsize, csize = wrap.GetVirtualSize(), wrap.GetClientSize()
+            assert vsize[0] > csize[0], "test setup failed to create a horizontal scroll deficit"
+            assert csize[1] > 100, "test setup left the scrolled viewport too short to show any control"
+            wrap.Scroll(max(1, (vsize[0] - csize[0]) // max(ppu_x, 1)), 0)
+            for _ in range(5):
+                wx.SafeYield()
+            before = wrap.GetViewStart()
+            assert before[0] > 0, "test setup failed to actually scroll right"
+
+            frame.Raise()
+            frame.Show()
+            wx.SafeYield()
+            screen_origin = wrap.GetScreenPosition()
+            client = wrap.GetClientSize()
+            visible = []
+
+            def collect_fully_visible(window):
+                for child in window.GetChildren():
+                    if isinstance(child, (wx.ComboBox, wx.TextCtrl, wx.CheckBox, wx.Choice)) and child.IsShown():
+                        r = child.GetScreenRect()
+                        rel = wx.Rect(r.x - screen_origin.x, r.y - screen_origin.y, r.width, r.height)
+                        if rel.x >= 0 and rel.y >= 0 and rel.right < client.width and rel.bottom < client.height:
+                            visible.append(child)
+                    collect_fully_visible(child)
+
+            collect_fully_visible(wrap)
+            assert visible, "test setup found no fully visible control to focus"
+            visible[0].SetFocus()
+            for _ in range(5):
+                wx.SafeYield()
+            assert visible[0].HasFocus(), "could not move focus to the visible control"
+            after_focus = wrap.GetViewStart()
+            assert after_focus == before, \
+                f"focusing an already-visible control moved the scroll ({before} -> {after_focus})"
+
+            # A real field change through its real handler (Layout + Fit + clamp inside).
+            frame.cbo_method.SetValue("forward_inpaint")
+            frame.on_selected_index_changed_cbo_method(None)
+            for _ in range(5):
+                wx.SafeYield()
+            assert frame.GetSize().width == width_before, \
+                f"frame width changed ({width_before} -> {frame.GetSize().width}); test setup is invalid"
+            after = wrap.GetViewStart()
+            assert after == before, \
+                f"a Method change reset the horizontal scroll ({before} -> {after}) -- ADR-350 regression"
+        finally:
+            gui_mod._load_layout_mode = orig_load
+            if frame is not None:
+                frame.Destroy()
+                wx.SafeYield()
+            app.Destroy()
+
+    print("_self_test_field_change_keeps_scroll_position: PASS")
+
+
+def _self_test_window_geometry_restore():
+    """ADR-350: the window remembers its size and position across restarts.
+    (a) a saved rectangle is restored on a fresh frame, after the same Fit()+clamp startup
+        runs (which is what used to erase it);
+    (b) a saved position with its centre off every connected monitor is ignored, leaving
+        the default size and position;
+    (c) a corrupt file is ignored;
+    (d) a saved size larger than the monitor is clamped to fit it.
+    Uses a temp file only -- never the real iw3-gui-window.cfg."""
+    import tempfile
+    import shutil
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    tmp_dir = tempfile.mkdtemp(prefix="iw3-window-geometry-test-")
+    config_path = path.join(tmp_dir, "iw3-gui-window.cfg")
+    try:
+        area = wx.Display(0).GetClientArea()
+        want_w, want_h = min(760, area.width - 80), min(620, area.height - 60)
+        want_x, want_y = area.x + 40, area.y + 30
+
+        frame = gui_mod.MainFrame()
+        frame.Show()
+        frame.SetSize((want_w, want_h))
+        frame.SetPosition((want_x, want_y))
+        wx.SafeYield()
+        frame.save_window_geometry(config_path)
+        frame.Destroy()
+        wx.SafeYield()
+        frame = None
+        assert path.exists(config_path), "save_window_geometry did not write the config file"
+
+        # Startup order as in IW3App.OnInit: Show, Fit(), clamp, then restore.
+        frame = gui_mod.MainFrame()
+        frame.Show()
+        frame.Fit()
+        frame._clamp_frame_to_screen()
+        assert frame.restore_window_geometry(config_path) is True, "saved geometry was not restored"
+        wx.SafeYield()
+        rect = frame.GetRect()
+        assert (rect.width, rect.height) == (want_w, want_h), \
+            f"restored size {(rect.width, rect.height)} != saved {(want_w, want_h)}"
+        assert (rect.x, rect.y) == (want_x, want_y), \
+            f"restored position {(rect.x, rect.y)} != saved {(want_x, want_y)}"
+
+        default_rect = frame.GetRect()
+        gui_mod._save_window_geometry(config_path, {"x": 50000, "y": 50000, "width": 700,
+                                                    "height": 500, "maximized": False})
+        assert frame.restore_window_geometry(config_path) is False, \
+            "an off-screen saved position was applied instead of ignored"
+        assert frame.GetRect() == default_rect, "off-screen saved position moved the window"
+
+        with open(config_path, mode="w", encoding="utf-8") as f:
+            f.write("{not valid json")
+        assert frame.restore_window_geometry(config_path) is False, "a corrupt file was applied"
+        assert frame.GetRect() == default_rect, "a corrupt file moved the window"
+
+        gui_mod._save_window_geometry(config_path, {"x": area.x + 10, "y": area.y + 10,
+                                                    "width": area.width + 500, "height": area.height + 500,
+                                                    "maximized": False})
+        assert frame.restore_window_geometry(config_path) is True
+        wx.SafeYield()
+        rect = frame.GetRect()
+        assert rect.width <= area.width and rect.height <= area.height, \
+            f"oversized saved window {(rect.width, rect.height)} was not clamped to {(area.width, area.height)}"
+        assert rect.x >= area.x and rect.y >= area.y and rect.right <= area.right \
+            and rect.bottom <= area.bottom, f"restored window {rect} is not fully inside the work area {area}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    print("_self_test_window_geometry_restore: PASS")
 
 
 def _self_test_stereo_sliders_sync():
@@ -30236,6 +30508,8 @@ def _run_self_tests():
         _self_test_layout_mode_live_switch,
         _self_test_tabbed_scrolling,
         _self_test_collapsible_pane_toggle_preserves_scroll,
+        _self_test_field_change_keeps_scroll_position,
+        _self_test_window_geometry_restore,
         _self_test_stereo_sliders_sync,
         _self_test_depth_blend_and_processor_sliders_sync,
         _self_test_stereo_collapsible_sections,

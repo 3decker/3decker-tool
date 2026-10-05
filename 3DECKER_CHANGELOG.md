@@ -15,6 +15,10 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**Fixed: the window now remembers its size and position when you restart 3DECKER.** When you close the window, its size and where it sits on screen are saved, and the next start puts it back the same way. If the saved spot is no longer on a connected monitor, or the saved file is damaged, it falls back to the normal default size and position.
+
+**Fixed: the settings no longer jump back to the far left when you change one while the window is narrow and scrolled right.** Changing a setting such as the Method dropdown could snap the sideways scroll back to the left edge and lose your place. The view now stays where you were.
+
 **Fixed: Limit Bitrate could switch itself off when you changed the Video Format or Video Codec.** On the NVIDIA codecs (H.264 and H.265 NVENC), changing the format or codec, or loading saved settings, could untick Limit Bitrate and hide the Preview Peak Bitrate button. It now stays on, as you set it.
 
 **Fixed: the 3D Blu-ray ISO Extract tool's MVC Bitrate was capped at 40 Mbps.** The "MVC .mkv, Auto-crop applied" layout now accepts up to 62.5 Mbps, the same combined ceiling the other 3D Blu-ray MVC tools already use. The number is the combined total for both eyes together, and the tooltip now says so. This layout always writes a .mkv file, so the higher limit applies there.

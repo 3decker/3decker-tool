@@ -11,6 +11,7 @@ import tempfile
 import shutil
 import subprocess
 import copy
+import contextlib
 from time import time
 from datetime import datetime
 import threading
@@ -8320,6 +8321,10 @@ class MainFrame(wx.Frame):
         # the real pre-toggle position from the (already-reset) live widget itself.
         self._scroller_view_memory = {}
         self.Bind(wx.EVT_IDLE, self._on_idle_remember_scroll_positions)
+        # ADR-351: the width the user chose by hand -- see _on_idle_remember_user_width().
+        self._size_baseline = None
+        self._user_width = None
+        self.Bind(wx.EVT_IDLE, self._on_idle_remember_user_width)
 
         editable_comboboxes = self.get_editable_comboboxes()
 
@@ -9123,7 +9128,8 @@ class MainFrame(wx.Frame):
         new_width = min(width, work_area.GetWidth())
         new_height = min(height, work_area.GetHeight())
         if (new_width, new_height) != (width, height):
-            self.SetSize((new_width, new_height))
+            with self._programmatic_resize():
+                self.SetSize((new_width, new_height))
         x, y = self.GetPosition()
         # wx.Rect.GetRight()/GetBottom() are INCLUSIVE (x+width-1), so "bottom - height" is one pixel too
         # small and asks for y=-1 when the frame is as tall as the work area -- a position the frame
@@ -9163,10 +9169,15 @@ class MainFrame(wx.Frame):
         height = min(geometry["height"], work_area.GetHeight())
         x = min(max(geometry["x"], work_area.GetX()), work_area.GetX() + work_area.GetWidth() - width)
         y = min(max(geometry["y"], work_area.GetY()), work_area.GetY() + work_area.GetHeight() - height)
-        self.SetSize((width, height))
+        with self._programmatic_resize():
+            self.SetSize((width, height))
         self.SetPosition((x, y))
+        # ADR-351: the saved size is the user's own choice from their last session, so it
+        # is kept for this session too (a maximized save has no meaningful width to keep).
         if geometry["maximized"]:
             self.Maximize(True)
+        else:
+            self._user_width = width
         return True
 
     def _set_font_recursive(self, window, font):
@@ -9578,15 +9589,65 @@ class MainFrame(wx.Frame):
         Fit(), runs the same clamp every caller already runs afterward (the scroll range
         only returns once the frame is back on-screen), then restores the origins. Before
         the frame is shown there is no screen to clamp against and no scroll position to
-        keep, so this is a plain Fit() in that case."""
+        keep, so this is a plain Fit() in that case.
+
+        ADR-351: once the user has resized the window by hand (see _on_frame_size()), the
+        width they chose is kept here too -- Fit() still re-lays out the content to its
+        natural size, but the frame is put back to the user's width afterward, and the
+        existing scrolling absorbs the overflow. Height still follows the content."""
         if not self.IsShown():
-            super().Fit()
+            with self._programmatic_resize():
+                super().Fit()
             return
         views = [(scroller, scroller.GetViewStart()) for scroller in self._scroll_panels()]
-        super().Fit()
-        self._clamp_frame_to_screen()
+        with self._programmatic_resize():
+            super().Fit()
+            if self._user_width is not None and not self.IsMaximized():
+                # ADR-177: Fit() (and a pane's native Collapse()/Expand()) may have just
+                # raised the drag-resize floor to the natural width, which would refuse the
+                # SetSize below -- reset it to the small floor first, as the callers do.
+                self._update_frame_min_size()
+                width, height = self.GetSize()
+                if width != self._user_width:
+                    self.SetSize((self._user_width, height))
+            self._clamp_frame_to_screen()
         for scroller, view in views:
             scroller.Scroll(*view)
+
+    @contextlib.contextmanager
+    def _programmatic_resize(self):
+        """ADR-351: wraps every size change the program makes to this frame, and records
+        the resulting size as the baseline that _on_idle_remember_user_width() compares
+        against, so the program's own resizes are never taken for a user resize."""
+        try:
+            yield
+        finally:
+            self._size_baseline = tuple(self.GetSize())
+
+    def _on_idle_remember_user_width(self, event):
+        """ADR-351: real user report (Steve, via decker) -- a window the user had resized
+        to half width snapped back to full width whenever a collapsible section opened or
+        closed, because every such change runs Fit(), which grows the frame to its natural
+        content width. Fix: remember the width the user chose, and have Fit() put it back.
+
+        How a user resize is told apart from a program resize: every program resize of this
+        frame goes through _programmatic_resize(), which records the resulting size as the
+        baseline. A size that differs from the baseline and is still there at idle time is a
+        user resize. Idle is the deciding point because a collapsible pane's own native
+        Collapse()/Expand() also grows the frame, but it happens inside the same click
+        dispatch as our on_toggled_*_collapsible_pane() handler, which runs its Fit() (and
+        so restores the chosen width) before any idle pass -- a real drag always outlasts
+        the event that starts it, so it does reach idle. Maximized and minimized sizes are
+        not recorded, since they are not a width the user picked."""
+        event.Skip()
+        if self._size_baseline is None:
+            return
+        size = tuple(self.GetSize())
+        if size == self._size_baseline:
+            return
+        self._size_baseline = size
+        if not (self.IsMaximized() or self.IsIconized()):
+            self._user_width = size[0]
 
     def _on_idle_remember_scroll_positions(self, event):
         """ADR-240: real user report -- expanding a Standalone Tools pane while
@@ -18118,6 +18179,107 @@ def _self_test_window_geometry_restore():
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     print("_self_test_window_geometry_restore: PASS")
+
+
+def _self_test_user_width_kept_across_section_toggle():
+    """ADR-351: real user report (Steve, via decker) -- with the window resized by hand to
+    half width and scrolled left, clicking a collapsible section's arrow (Depth Pop) snapped
+    it back to full screen width, because every section open/close (and tab switch, and
+    field change) runs Fit(), which grows the frame to its natural content width. Once the
+    user has resized the window, that width must survive those programmatic Fit() calls:
+    the content lays out inside it and the existing scrolling absorbs the overflow. Also
+    checks that the user's width is the one written to the window geometry file (ADR-350)."""
+    import tempfile
+    import shutil
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+    app = wx.App()
+    frame = None
+    tmp_dir = tempfile.mkdtemp(prefix="iw3-user-width-test-")
+    config_path = path.join(tmp_dir, "iw3-gui-window.cfg")
+    try:
+        frame = gui_mod.MainFrame()
+        frame.Show()
+        frame.Fit()
+        wx.SafeYield()
+        natural_w = frame.GetSize().width
+        half_w = max(300, natural_w // 2)
+        assert half_w < natural_w, "test setup failed to make the window narrower than its natural width"
+
+        # A real user resize, simulated the same way the existing resize/floor tests do it.
+        frame.SetSize((half_w, frame.GetSize().height))
+        frame.Layout()
+        wx.SafeYield()
+        assert frame.GetSize().width == half_w, "test setup: the simulated user resize did not take"
+
+        pane = frame.cpn_stereo_pop_divergence
+        for _ in range(2):
+            pane.Collapse(not pane.IsCollapsed())
+            frame.on_toggled_stereo_collapsible_pane(
+                wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+            wx.SafeYield()
+            assert frame.GetSize().width == half_w, \
+                f"opening/closing {pane.GetName()} changed the user's width ({half_w} -> {frame.GetSize().width})"
+
+        frame.nb_options.SetSelection(4)
+        frame.on_notebook_page_changed(wx.CommandEvent())
+        wx.SafeYield()
+        assert frame.GetSize().width == half_w, \
+            f"switching tabs changed the user's width ({half_w} -> {frame.GetSize().width})"
+
+        frame.save_window_geometry(config_path)
+        saved = gui_mod._load_window_geometry(config_path)
+        assert saved is not None and saved["width"] == half_w, \
+            f"saved width {saved and saved['width']} != the user's chosen width {half_w}"
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    print("_self_test_user_width_kept_across_section_toggle: PASS")
+
+
+def _self_test_fresh_frame_still_auto_fits():
+    """ADR-351 guard: with no user resize at all, opening a section on a fresh window
+    still auto-fits the frame to its content (ADR-176 / pre-ADR-351 behavior), i.e. the
+    width moves away from the startup auto-fit width. A fresh window must never be pinned
+    at its startup width."""
+    import iw3.gui as gui_mod
+
+    orig_load = gui_mod._load_layout_mode
+    gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        frame.Show()
+        frame.Fit()
+        wx.SafeYield()
+        startup_w = frame.GetSize().width
+
+        pane = frame.cpn_stereo_pop_divergence
+        pane.Collapse(not pane.IsCollapsed())
+        frame.on_toggled_stereo_collapsible_pane(
+            wx.CollapsiblePaneEvent(pane, wx.wxEVT_COLLAPSIBLEPANE_CHANGED, pane.GetId()))
+        wx.SafeYield()
+        frame.Fit()
+        wx.SafeYield()
+        assert frame.GetSize().width != startup_w, \
+            f"a fresh window did not auto-fit to its content after opening {pane.GetName()} " \
+            f"(stayed at startup width {startup_w})"
+    finally:
+        gui_mod._load_layout_mode = orig_load
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_fresh_frame_still_auto_fits: PASS")
 
 
 def _self_test_stereo_sliders_sync():
@@ -30510,6 +30672,8 @@ def _run_self_tests():
         _self_test_collapsible_pane_toggle_preserves_scroll,
         _self_test_field_change_keeps_scroll_position,
         _self_test_window_geometry_restore,
+        _self_test_user_width_kept_across_section_toggle,
+        _self_test_fresh_frame_still_auto_fits,
         _self_test_stereo_sliders_sync,
         _self_test_depth_blend_and_processor_sliders_sync,
         _self_test_stereo_collapsible_sections,

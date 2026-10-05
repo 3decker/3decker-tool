@@ -23,6 +23,7 @@ from .common import (
     refresh_layouts,
     set_tooltip_long_hover,
     enable_persistent_tooltips,
+    add_help_buttons,
 )
 from .video_encoding_box import VideoEncodingBox
 from .video_decoding_box import VideoDecodingBox
@@ -60,4 +61,5 @@ __all__ = [
     "refresh_layouts",
     "set_tooltip_long_hover",
     "enable_persistent_tooltips",
+    "add_help_buttons",
 ]

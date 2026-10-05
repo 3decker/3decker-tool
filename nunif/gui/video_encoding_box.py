@@ -242,10 +242,12 @@ class VideoEncodingBox():
         layout.Add(self.cbo_crf, (5, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_bitrate, (6, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_bitrate, (6, 1), flag=wx.EXPAND)
-        limit_row = wx.BoxSizer(wx.HORIZONTAL)
-        limit_row.Add(self.chk_limit_bitrate, 1, wx.ALIGN_CENTER_VERTICAL)
+        # Preview Peak Bitrate sits on its own line under the checkbox (not beside it), so it
+        # never widens this grid column past the combo boxes' width.
+        limit_row = wx.BoxSizer(wx.VERTICAL)
+        limit_row.Add(self.chk_limit_bitrate, 0)
         if self.btn_preview_peak_bitrate is not None:
-            limit_row.Add(self.btn_preview_peak_bitrate, 0, wx.LEFT, 4)
+            limit_row.Add(self.btn_preview_peak_bitrate, 0, wx.TOP, 4)
         layout.Add(limit_row, (7, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_profile_level, (8, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_profile_level, (8, 1), flag=wx.EXPAND)

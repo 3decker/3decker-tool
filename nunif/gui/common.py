@@ -560,6 +560,77 @@ def _open_tooltip_full_text(widget, text):
     os.startfile(file_path)
 
 
+HELP_BUTTON_TOOLTIP = "Open the full description in Notepad"
+_HELP_BUTTON_ATTR = "_nunif_help_button"
+_HELP_BUTTON_CONTROL_TYPES = (wx.CheckBox, wx.Choice, wx.ComboBox, wx.TextCtrl, wx.Slider,
+                              wx.SpinCtrl, wx.SpinCtrlDouble, wx.RadioBox)
+
+
+def _attach_help_button(widget, sizer):
+    # Read every value from the widget's sizer item BEFORE Detach(): the item is
+    # destroyed by Detach() and must not be touched afterwards.
+    item = sizer.GetItem(widget)
+    proportion, flag, border = item.GetProportion(), item.GetFlag(), item.GetBorder()
+    grid_pos, grid_span = (item.GetPos(), item.GetSpan()) if isinstance(sizer, wx.GridBagSizer) else (None, None)
+    index = None
+    if grid_pos is None:
+        index = next(i for i, child in enumerate(sizer.GetChildren()) if child.GetWindow() == widget)
+
+    # The widget and its "?" go into a small horizontal row that takes the
+    # widget's exact place (same grid cell or box slot, same flags), so the rest
+    # of the layout is unchanged. A window can only belong to one sizer, so the
+    # widget must leave the old sizer before it joins the row.
+    sizer.Detach(widget)
+    row = wx.BoxSizer(wx.HORIZONTAL)
+    stretch = proportion > 0 or bool(flag & wx.EXPAND)
+    row.Add(widget, 1 if stretch else 0, wx.EXPAND if flag & wx.EXPAND else wx.ALIGN_CENTER_VERTICAL)
+    help_button = wx.Button(widget.GetParent(), label="?", style=wx.BU_EXACTFIT)
+    help_button.SetToolTip(HELP_BUTTON_TOOLTIP)
+    help_button.Bind(wx.EVT_BUTTON,
+                     lambda evt, w=widget: _open_tooltip_full_text(w, getattr(w, _TOOLTIP_FULL_TEXT_ATTR)))
+    row.Add(help_button, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 4)
+
+    if grid_pos is not None:
+        sizer.Add(row, grid_pos, grid_span, flag, border)
+    else:
+        sizer.Insert(index, row, proportion, flag, border)
+
+    # Hiding/showing the control (e.g. Video Encoding's CRF/Bitrate rows) must also
+    # hide/show its "?", otherwise a stray button stays visible next to nothing.
+    def _mirror_show(event):
+        sizer.Show(row, event.IsShown())
+        help_button.Show(event.IsShown())
+        event.Skip()
+
+    widget.Bind(wx.EVT_SHOW, _mirror_show)
+    if not widget.IsShown():
+        sizer.Show(row, False)
+        help_button.Show(False)
+    setattr(widget, _HELP_BUTTON_ATTR, help_button)
+
+
+def add_help_buttons(window):
+    """Adds a small "?" button right after every control under `window` that has a
+    tooltip. Clicking it opens that control's full tooltip text in Notepad, the same
+    as right-click > View Full Help Text. Controls without tooltip text, buttons and
+    labels get no "?". Call once, after the controls exist and before the window's
+    first layout pass."""
+    controls = []
+
+    def _collect(w):
+        if (isinstance(w, _HELP_BUTTON_CONTROL_TYPES) and getattr(w, _TOOLTIP_FULL_TEXT_ATTR, None)
+                and getattr(w, _HELP_BUTTON_ATTR, None) is None):
+            controls.append(w)
+        for child in w.GetChildren():
+            _collect(child)
+
+    _collect(window)
+    for widget in controls:
+        sizer = widget.GetContainingSizer()
+        if sizer is not None:
+            _attach_help_button(widget, sizer)
+
+
 def _build_tooltip_context_menu(widget, text):
     menu = wx.Menu()
     if isinstance(widget, wx.TextEntry):

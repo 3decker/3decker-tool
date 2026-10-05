@@ -64,6 +64,7 @@ from nunif.gui import (
     refresh_layouts,
     set_tooltip_long_hover,
     enable_persistent_tooltips,
+    add_help_buttons,
 )
 from .locales import LOCALES, load_language_setting, save_language_setting
 from . import models # noqa
@@ -7851,10 +7852,24 @@ class MainFrame(wx.Frame):
         # (each owns its own StaticBoxSizer(s) via the SetSizer() calls above) -- the
         # only thing left is composing them onto the visible pnl_options area, which is
         # the one part that differs between Tabbed and Single Page.
+        # "?" help buttons for every tooltipped setting in these two panels (see
+        # add_help_buttons). Done before composing, so the pinned MinSize that
+        # compose sets already accounts for them.
+        add_help_buttons(self.tab_processor)
+        add_help_buttons(self.tab_video_enc)
+
         if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
             self._compose_options_layout_single_page()
         else:
             self._compose_options_layout_tabbed()
+
+        # Video Encoding's Limit Bitrate / codec choices can show or hide rows (e.g. the
+        # Preview Peak Bitrate button). That changes the group's real width after the
+        # options panel was already pinned to its minimum size, so re-pin on each change.
+        self.grp_video.chk_limit_bitrate.Bind(wx.EVT_CHECKBOX, self._on_video_encoding_changed)
+        for cbo in (self.grp_video.cbo_video_format, self.grp_video.cbo_video_codec):
+            cbo.Bind(wx.EVT_COMBOBOX, self._on_video_encoding_changed)
+            cbo.Bind(wx.EVT_TEXT, self._on_video_encoding_changed)
 
         # preset panel
         self.pnl_preset = wx.Panel(self)
@@ -8950,6 +8965,26 @@ class MainFrame(wx.Frame):
         event.Skip()
         self._relayout_process_row()
 
+    def _on_video_encoding_changed(self, event):
+        event.Skip()
+        # CallAfter so VideoEncodingBox's own handler has already shown/hidden its rows.
+        wx.CallAfter(self._repin_options_min_size)
+
+    def _repin_options_min_size(self):
+        """Re-pins the options panel's MinSize to the Video Encoding group's real
+        current size. The options panel's MinSize is set once from CalcMin() when it
+        is composed (see _compose_options_layout_*), and Video Encoding's Preview Peak
+        Bitrate button (ADR-338) is hidden at that point. When a restored/loaded setting
+        or a codec change shows it, the pinned MinSize is stale and the group is clipped
+        on the right until something else re-pins it (e.g. collapsing a section).
+        Only the Video Encoding container is touched here: no refresh_layouts() Fit(),
+        which would resize the whole window on every preset load or codec keystroke."""
+        if self.layout_mode == LAYOUT_MODE_SINGLE_PAGE:
+            self.pnl_single.SetMinSize(self.pnl_single.GetSizer().CalcMin())
+        else:
+            self.tab_wrap_video_enc.SetMinSize(self.tab_wrap_video_enc.GetSizer().CalcMin())
+        self.Layout()
+
     def _update_frame_min_size(self):
         """Real user report: the window has an effective minimum size the user
         can't drag below, in both directions, and they want it genuinely
@@ -9275,6 +9310,7 @@ class MainFrame(wx.Frame):
         self.update_splat_blend_temperature()
         self.update_pad_mode()
         self.update_compile(probe=probe_compile)
+        self._repin_options_min_size()
 
     def get_depth_models(self):
         depth_models = [
@@ -29773,6 +29809,128 @@ def _self_test_pop_feather():
     print("_self_test_pop_feather: PASS")
 
 
+def _self_test_video_encoding_layout_fits():
+    """Video Encoding's group must fit inside the options panel's pinned MinSize even when
+    the Preview Peak Bitrate button (ADR-338) is shown AFTER the panel was composed, which is
+    what a restored/loaded NVENC + Limit Bitrate setting does on startup. Checks both layout
+    modes. Synthetic: no GPU, no media. Needs an NVENC-capable ffmpeg codec list, as the
+    Video Encoding combo offers hevc_nvenc only when one is available."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        grp = frame.grp_video
+        for mode in (LAYOUT_MODE_TABS, LAYOUT_MODE_SINGLE_PAGE):
+            frame.switch_layout_mode(mode)
+            # First open: libx264 + Limit Bitrate off, so the Preview button is hidden.
+            # Real UI events are delivered with ProcessEvent: wx's Command() would also rewrite
+            # the control's value from the (empty) event, e.g. selecting item 0 of the codec list.
+            def fire(ctrl, event_type):
+                ctrl.GetEventHandler().ProcessEvent(wx.CommandEvent(event_type, ctrl.GetId()))
+
+            grp.cbo_video_codec.SetValue("libx264")
+            fire(grp.cbo_video_codec, wx.wxEVT_TEXT)
+            grp.chk_limit_bitrate.SetValue(False)
+            fire(grp.chk_limit_bitrate, wx.wxEVT_CHECKBOX)
+            wx.SafeYield()
+            refresh_layouts(frame)
+            # The user picks hevc_nvenc and ticks Limit Bitrate, which shows the Preview button.
+            grp.cbo_video_codec.SetValue("hevc_nvenc")
+            fire(grp.cbo_video_codec, wx.wxEVT_TEXT)
+            grp.chk_limit_bitrate.SetValue(True)
+            fire(grp.chk_limit_bitrate, wx.wxEVT_CHECKBOX)
+            wx.SafeYield()
+            frame.Layout()
+            assert grp.btn_preview_peak_bitrate.IsShown(), \
+                "hevc_nvenc is not offered on this machine, so the Preview button cannot be shown"
+
+            pinned = frame.pnl_single if mode == LAYOUT_MODE_SINGLE_PAGE else frame.tab_wrap_video_enc
+            assert pinned.GetMinSize().width >= grp.sizer.CalcMin().width, \
+                f"{mode}: options panel pinned min width is smaller than the Video Encoding group"
+            assert grp.grp_video.GetSize().width <= pinned.GetSize().width, \
+                f"{mode}: Video Encoding group is wider than its panel (clipped on the right)"
+            for ctrl in (grp.cbo_video_codec, grp.cbo_crf, grp.cbo_bitrate,
+                         grp.chk_limit_bitrate, grp.btn_preview_peak_bitrate):
+                right_edge = ctrl.GetPosition().x + ctrl.GetSize().width
+                assert right_edge <= grp.grp_video.GetClientSize().width, \
+                    f"{mode}: {ctrl.GetName()} is clipped inside Video Encoding"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_video_encoding_layout_fits: PASS")
+
+
+def _self_test_help_buttons():
+    """"?" help buttons (add_help_buttons in nunif/gui/common.py): every sampled tooltipped
+    control in Processor / Video Encoding gets a "?" wx.Button in the same parent; clicking it
+    passes that control's exact tooltip text to _open_tooltip_full_text; hiding the control also
+    hides its "?"; controls with no tooltip, buttons and labels get none; a second call adds
+    nothing. Synthetic: _open_tooltip_full_text is mocked, so Notepad is never launched."""
+    import unittest.mock as mock
+    from nunif.gui import common as gui_common
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        grp = frame.grp_video
+        samples = (grp.chk_limit_bitrate, grp.cbo_video_codec, grp.cbo_crf, frame.chk_tta, frame.cbo_batch_size)
+        for widget in samples:
+            text = widget.GetToolTip().GetTip() if widget.GetToolTip() is not None else None
+            assert text, f"test assumption broken: {widget.GetName()} has no tooltip"
+            btn = getattr(widget, "_nunif_help_button", None)
+            assert isinstance(btn, wx.Button), f"{widget.GetName()} has no '?' button"
+            assert btn.GetParent() is widget.GetParent(), f"{widget.GetName()}: '?' is in a different parent"
+            assert btn.GetLabel() == "?"
+            assert btn.GetToolTip().GetTip() == gui_common.HELP_BUTTON_TOOLTIP
+            with mock.patch.object(gui_common, "_open_tooltip_full_text") as m_open:
+                btn.Command(wx.CommandEvent(wx.wxEVT_BUTTON, btn.GetId()))
+            assert m_open.call_count == 1, f"{widget.GetName()}: '?' click did not open the text once"
+            called_widget, called_text = m_open.call_args[0]
+            assert called_widget is widget and called_text == text, \
+                f"{widget.GetName()}: '?' click passed the wrong widget/text"
+
+        # hiding the control hides its "?", showing it again brings the "?" back
+        help_btn = grp.cbo_bitrate._nunif_help_button
+        grp.cbo_bitrate.Hide()
+        assert not help_btn.IsShown(), "'?' stayed visible after its control was hidden"
+        grp.cbo_bitrate.Show()
+        assert help_btn.IsShown(), "'?' did not come back after its control was shown"
+
+        # the Preview button (a wx.Button, not a setting) gets no "?"
+        assert getattr(grp.btn_preview_peak_bitrate, "_nunif_help_button", None) is None
+
+        # synthetic panel: only the control with a tooltip gets a "?"; a second call adds nothing
+        panel = wx.Panel(frame)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        with_tip = wx.CheckBox(panel, label="with tip")
+        with_tip.SetToolTip("A synthetic tooltip.")
+        no_tip = wx.CheckBox(panel, label="no tip")
+        sizer.Add(with_tip, 0)
+        sizer.Add(no_tip, 0)
+        panel.SetSizer(sizer)
+        gui_common.add_help_buttons(panel)
+        gui_common.add_help_buttons(panel)
+        assert isinstance(getattr(with_tip, "_nunif_help_button", None), wx.Button)
+        assert getattr(no_tip, "_nunif_help_button", None) is None
+        buttons = [w for w in panel.GetChildren() if isinstance(w, wx.Button)]
+        assert len(buttons) == 1, f"expected exactly one '?' in the synthetic panel, got {len(buttons)}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_help_buttons: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -29847,6 +30005,8 @@ def _run_self_tests():
         _self_test_import_command_round_trip,
         _self_test_device_dropdown_no_torch_cuda_touch,
         _self_test_label_tooltips_propagated,
+        _self_test_video_encoding_layout_fits,
+        _self_test_help_buttons,
         _self_test_resolution_preset_quick_fill,
         _self_test_convergence_bias_preset_quick_fill,
         _self_test_free_vram_on_job_finish,

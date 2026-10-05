@@ -23424,6 +23424,82 @@ def _self_test_frame_packing_sei():
     print("_self_test_frame_packing_sei: PASS")
 
 
+def _self_test_hevc_frame_packing_tag():
+    """HEVC Half SBS / Half TB output gets the 3D TV frame-packing SEI added after encoding
+    (iw3/hevc_frame_packing.py). Checks, all on a short synthetic CPU-only clip: the gating
+    (libx264 and non-half HEVC never touch the file), the tagged HEVC case, the fail-safe
+    (a forced verification failure keeps the original byte-identical and leaves no temp
+    file), and that process_video_full() actually calls the hook."""
+    import types
+    import hashlib
+    import inspect
+    import tempfile
+    import subprocess
+    import shutil
+    import iw3.utils as iw3_utils
+    import iw3.hevc_frame_packing as hfp
+
+    def _sha(p):
+        with open(p, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def _args(**kw):
+        base = dict(video_codec="libx265", half_sbs=False, half_tb=False)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    tdir = tempfile.mkdtemp(prefix="hevc_fp_gui_test_")
+    try:
+        ffmpeg = iw3_utils._get_ffmpeg_bin()
+        assert ffmpeg, "ffmpeg not found"
+        src = os.path.join(tdir, "clip.mp4")
+        subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=1",
+                        "-c:v", "libx265", "-x265-params", "log-level=warning",
+                        "-pix_fmt", "yuv420p", src], check=True, capture_output=True, timeout=300)
+
+        # Gating: none of these may touch the file.
+        for args in (_args(video_codec="libx264", half_sbs=True),
+                     _args(video_codec="libx264", half_tb=True),
+                     _args(video_codec="libx265"),
+                     _args(video_codec="utvideo", half_sbs=True)):
+            before = _sha(src)
+            assert iw3_utils._tag_hevc_frame_packing_if_needed(src, args) is False
+            assert _sha(src) == before, f"file was modified for {args.video_codec}"
+
+        # Tagged case: HEVC + Half SBS and HEVC + Half TB.
+        for layout, args in (("half_sbs", _args(half_sbs=True)), ("half_tb", _args(half_tb=True))):
+            work = os.path.join(tdir, f"tag_{layout}.mp4")
+            shutil.copyfile(src, work)
+            assert iw3_utils._tag_hevc_frame_packing_if_needed(work, args) is True, layout
+            assert _sha(work) != _sha(src), layout
+            assert not os.path.exists(os.path.splitext(work)[0] + ".fp_tmp.mp4"), "temp file left behind"
+
+        # Fail-safe: force the verification step to fail; the original must be unchanged.
+        forced = os.path.join(tdir, "forced.mp4")
+        shutil.copyfile(src, forced)
+        before = _sha(forced)
+        real_verify = hfp._verify_output
+
+        def _boom(*a, **k):
+            raise ValueError("forced test failure")
+        hfp._verify_output = _boom
+        try:
+            assert iw3_utils._tag_hevc_frame_packing_if_needed(forced, _args(half_sbs=True)) is False
+        finally:
+            hfp._verify_output = real_verify
+        assert _sha(forced) == before, "original changed after a forced failure"
+        assert not os.path.exists(os.path.splitext(forced)[0] + ".fp_tmp.mp4"), "temp left after failure"
+
+        # Call site: the hook must run in process_video_full() after encoding.
+        assert "_tag_hevc_frame_packing_if_needed(output_filename, args)" in \
+            inspect.getsource(iw3_utils.process_video_full), "process_video_full does not call the frame-packing hook"
+    finally:
+        shutil.rmtree(tdir, ignore_errors=True)
+
+    print("_self_test_hevc_frame_packing_tag: PASS")
+
+
 def _self_test_nvenc_bitrate_cap():
     """ADR-294/ADR-298: a real user report (The Craft 1996, a dark/grainy 4K source)
     found that hevc_nvenc's default rate control (constqp) has no size ceiling at all
@@ -31028,6 +31104,7 @@ def _run_self_tests():
         _self_test_mvc_mode_checkbox_config_migration,
         _self_test_mvc_mode_greys_out_subordinate_controls_when_off,
         _self_test_preserve_dv_greyed_for_h264,
+        _self_test_hevc_frame_packing_tag,
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,

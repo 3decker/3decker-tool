@@ -5308,6 +5308,25 @@ def _write_scene_ema_report_html(html_path, rows, scene_count, distinct_count, s
     return html_path
 
 
+HEVC_FRAME_PACKING_CODECS = {"libx265", "hevc_nvenc"}
+
+
+def _tag_hevc_frame_packing_if_needed(output_path, args):
+    """3D TV auto-detect tag for HEVC Half SBS / Half TB output (see iw3/hevc_frame_packing.py).
+    libx264 gets the same signal from x264 itself (make_video_codec_option), so it is never
+    touched here. Fail-safe: a failure leaves the original file unchanged and is only logged."""
+    if getattr(args, "video_codec", None) not in HEVC_FRAME_PACKING_CODECS:
+        return False
+    if getattr(args, "half_sbs", False):
+        layout = "half_sbs"
+    elif getattr(args, "half_tb", False):
+        layout = "half_tb"
+    else:
+        return False
+    from .hevc_frame_packing import tag_hevc_frame_packing
+    return tag_hevc_frame_packing(output_path, layout)
+
+
 def process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
     is_preview = getattr(args, "preview", False)
     scene_cache_max_fps = args.max_fps  # capture before --preview clamps it, so cache key stays stable
@@ -5733,6 +5752,9 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                 )
         finally:
             frame_callback.shutdown()
+
+    if path.exists(output_filename):
+        _tag_hevc_frame_packing_if_needed(output_filename, args)
 
     # HDR metadata injection (DV RPU + HDR10+) after encoding
     if (_hdr_rpu_path or _hdr_h10p_path) and path.exists(output_filename):

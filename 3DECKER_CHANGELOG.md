@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 4, 2026
 
+**New: Limit Bitrate can now be applied to a finished video.** A new Standalone Tool lets you pick an existing file, set a bitrate limit, and get a capped copy next to it, without redoing the whole conversion. Your original is never changed. If the file has Dolby Vision, you can give the original source so the Dolby Vision is put back afterward. There's also a command-line version.
+
 **Fixed: Dolby Vision could be lost in a job that used RIFE, Restore Audio & Subtitles, and Limit Bitrate together.** The Limit Bitrate re-encode ran after RIFE and then could not re-attach the Dolby Vision, because it compared frame counts against the original movie. RIFE doubles the frames, so the check always refused and the final file had no DV. The re-attach now uses RIFE's own frame map, so Dolby Vision survives that combination. Jobs without RIFE are unchanged. Re-run any affected job to get a file with Dolby Vision.
 
 **New: the Standalone RIFE Tool can process a whole folder.** Choose a folder instead of a single file and every video in it gets RIFE-interpolated, one after another, with no need to pick each file. Files that already have a RIFE output are skipped rather than overwritten. Each file still gets its own Dolby Vision and codec warning before the batch starts, so you can skip just the ones you don't want. If one file fails, the rest keep going, and a summary at the end lists what was done, skipped, or failed.

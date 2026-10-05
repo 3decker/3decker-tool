@@ -6259,6 +6259,188 @@ class MainFrame(wx.Frame):
         sizer_rife_standalone = wx.StaticBoxSizer(self.grp_rife_standalone, wx.VERTICAL)
         sizer_rife_standalone.Add(pane_header_row_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone tool: Limit Bitrate an Existing File ---
+        # Applies the same Limit Bitrate re-encode the conversion uses (iw3.utils._run_bitrate_cap) to a finished
+        # video, through iw3.bitrate_cap_cli as a separate background process (same convention as the Standalone
+        # RIFE Tool above). The CLI copies the input and caps only the copy, so the original is never modified.
+        self.grp_bitrate_cap_standalone = wx.StaticBox(
+            self.tab_tools, label=T("Limit Bitrate an Existing File (Standalone Tool)"))
+        self.cpn_bitrate_cap_standalone = wx.CollapsiblePane(
+            self.grp_bitrate_cap_standalone, label=T("Settings"), name="cpn_bitrate_cap_standalone")
+        self.cpn_bitrate_cap_standalone.Collapse(True)
+        self.cpn_bitrate_cap_standalone.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                              self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_bitrate_cap_standalone.GetPane().SetName("cpn_bitrate_cap_standalone_pane")
+        bitrate_cap_pane = self.cpn_bitrate_cap_standalone.GetPane()
+
+        self.lbl_bitrate_cap_standalone_input = wx.StaticText(bitrate_cap_pane, label=T("Finished Video"))
+        self.txt_bitrate_cap_standalone_input = wx.TextCtrl(bitrate_cap_pane, name="txt_bitrate_cap_standalone_input")
+        self.txt_bitrate_cap_standalone_input.SetToolTip(
+            T("What it's for: the finished video file that came out over the bitrate limit, for example a "
+              "conversion with a short bitrate burst that you forgot to limit. Only a single file is accepted "
+              "here -- a folder is refused.\n"
+              "How it's safe: the original is never modified. This tool copies it first and only ever "
+              "re-encodes that copy.\n"
+              "Recommended: the converted file you already made."))
+        self.btn_bitrate_cap_standalone_input = wx.Button(bitrate_cap_pane, label=T("..."))
+
+        self.lbl_bitrate_cap_standalone_output = wx.StaticText(bitrate_cap_pane, label=T("Output File (optional)"))
+        self.txt_bitrate_cap_standalone_output = wx.TextCtrl(bitrate_cap_pane, name="txt_bitrate_cap_standalone_output")
+        self.txt_bitrate_cap_standalone_output.SetToolTip(
+            T("Where the fixed copy is written. Leave it empty to save '<name>_capped<ext>' next to the input. "
+              "You can also type or pick a folder here, and the same name is used inside it.\n"
+              "How it's safe: an existing file is never overwritten. If the output name already exists, Run "
+              "refuses and the log says so.\n"
+              "Recommended: leave it empty."))
+        self.btn_bitrate_cap_standalone_output = wx.Button(bitrate_cap_pane, label=T("..."))
+
+        self.lbl_bitrate_cap_standalone_limit = wx.StaticText(bitrate_cap_pane, label=T("Limit (Mbps)"))
+        self.txt_bitrate_cap_standalone_limit = wx.TextCtrl(bitrate_cap_pane, name="txt_bitrate_cap_standalone_limit")
+        self.txt_bitrate_cap_standalone_limit.SetToolTip(
+            T("What it's for: the highest peak bitrate, in Mbps (millions of bits per second), allowed for any "
+              "1-second stretch of the video. Type a plain number of Mbps, such as 80.\n"
+              "Why: a short burst above what your playback link or device can keep up with stutters, even when "
+              "the average bitrate looks fine.\n"
+              "Values: a number from 0.1 to 1000. Use the same limit you set, or would set, for the conversion's "
+              "own Limit Bitrate.\n"
+              "Recommended: the limit you use for this movie's conversion."))
+
+        self.lbl_bitrate_cap_standalone_crf = wx.StaticText(bitrate_cap_pane, label=T("Quality (CRF)"))
+        self.txt_bitrate_cap_standalone_crf = wx.TextCtrl(bitrate_cap_pane, value="15",
+                                                           name="txt_bitrate_cap_standalone_crf")
+        self.txt_bitrate_cap_standalone_crf.SetToolTip(
+            T("What it's for: the picture-quality value the re-encode aims for (NVENC's -cq setting). Lower "
+              "numbers mean better quality and a bigger file.\n"
+              "Values: a whole number from 0 to 51.\n"
+              "Recommended: the value this movie was converted with. 15 is the default used here."))
+
+        self.lbl_bitrate_cap_standalone_codec = wx.StaticText(bitrate_cap_pane, label=T("Output Codec"))
+        self.cbo_bitrate_cap_standalone_codec = wx.ComboBox(bitrate_cap_pane,
+                                                              name="cbo_bitrate_cap_standalone_codec")
+        self.cbo_bitrate_cap_standalone_codec.SetEditable(False)
+        # ClientData carries the real --codec value each choice maps to. Only NVENC codecs: the Limit Bitrate
+        # step only runs with NVENC (see iw3.bitrate_cap_cli.CODECS).
+        self.cbo_bitrate_cap_standalone_codec.Append(T("H.265/HEVC -- hevc_nvenc (GPU)"), "hevc_nvenc")
+        self.cbo_bitrate_cap_standalone_codec.Append(T("H.264 -- h264_nvenc (GPU)"), "h264_nvenc")
+        self.cbo_bitrate_cap_standalone_codec.SetSelection(0)
+        self.cbo_bitrate_cap_standalone_codec.SetToolTip(
+            T("What it's for: the video format of the fixed copy. Only NVIDIA hardware encoders are offered, "
+              "because this tool only runs with NVENC.\n"
+              "H.265/HEVC -- hevc_nvenc: the normal choice. Smaller file for the same quality, and the one "
+              "Dolby Vision needs.\n"
+              "H.264 -- h264_nvenc: wider device compatibility, but 8-bit only and a larger file for the same "
+              "quality. A 10-bit source is converted to 8-bit for it.\n"
+              "Recommended: H.265/HEVC, the same as the conversion's usual output."))
+
+        self.lbl_bitrate_cap_standalone_dv_source = wx.StaticText(bitrate_cap_pane,
+                                                                    label=T("Original DV Source (optional)"))
+        self.txt_bitrate_cap_standalone_dv_source = wx.TextCtrl(bitrate_cap_pane,
+                                                                  name="txt_bitrate_cap_standalone_dv_source")
+        self.txt_bitrate_cap_standalone_dv_source.SetToolTip(
+            T("What it's for: leave it EMPTY unless the finished video has Dolby Vision. Pick the ORIGINAL movie "
+              "it was converted from, and the Dolby Vision is put back after the re-encode.\n"
+              "Why: the re-encode itself removes Dolby Vision. Without this, it is lost. With it empty, the log "
+              "says Dolby Vision is not being re-attached.\n"
+              "How it's safe: if re-attaching fails, the log says why and the fixed copy is kept without Dolby "
+              "Vision.\n"
+              "Con: it only works for a file that covers the whole movie. A file from only part of the movie "
+              "won't match the source's frame count, so the re-attach is refused safely.\n"
+              "Recommended: the original movie file, when the finished video has Dolby Vision."))
+        self.btn_bitrate_cap_standalone_dv_source = wx.Button(bitrate_cap_pane, label=T("..."))
+
+        self.lbl_bitrate_cap_standalone_rife_manifest = wx.StaticText(bitrate_cap_pane,
+                                                                        label=T("RIFE Manifest (optional)"))
+        self.txt_bitrate_cap_standalone_rife_manifest = wx.TextCtrl(bitrate_cap_pane,
+                                                                      name="txt_bitrate_cap_standalone_rife_manifest")
+        self.txt_bitrate_cap_standalone_rife_manifest.SetToolTip(
+            T("What it's for: only if this video came from a RIFE (frame smoothing) job. Pick its "
+              "'<name>.rife_manifest.json' file.\n"
+              "Why: RIFE added frames, and the Dolby Vision re-attach needs that frame list to line up.\n"
+              "Only used together with Original DV Source above. Ignored otherwise.\n"
+              "Recommended: leave it empty unless both of those apply."))
+        self.btn_bitrate_cap_standalone_rife_manifest = wx.Button(bitrate_cap_pane, label=T("..."))
+
+        self.btn_bitrate_cap_standalone_run = wx.Button(bitrate_cap_pane, label=T("Run"))
+        self.btn_bitrate_cap_standalone_run.SetToolTip(
+            T("What it's for: runs the Limit Bitrate step on this file as a separate background process "
+              "(python -m iw3.bitrate_cap_cli).\n"
+              "If the file is already within the limit, the output is an unchanged copy and nothing is "
+              "re-encoded. If it is over the limit, it is re-encoded to bring the peak bitrate down.\n"
+              "How it's safe: the original is never modified, and an existing output is never overwritten. If "
+              "the re-encode fails, the partial copy is removed.\n"
+              "Con: re-encoding a long movie takes a long time on the GPU.\n"
+              "Recommended: check the log box afterward for the real peak-versus-limit line."))
+
+        self.btn_bitrate_cap_standalone_cancel = wx.Button(bitrate_cap_pane, label=T("Cancel"))
+        self.btn_bitrate_cap_standalone_cancel.Disable()
+        self.btn_bitrate_cap_standalone_cancel.SetToolTip(
+            T("Stops the running Limit Bitrate job and the programs it started. The partial copy this run made "
+              "is removed. The original file is never touched."))
+        self.bitrate_cap_standalone_proc = None
+        self.bitrate_cap_standalone_cancelled = False
+        self.bitrate_cap_standalone_start_time = 0.0
+        self.bitrate_cap_standalone_output_path = None
+        self.bitrate_cap_standalone_created_output = False
+
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_bitrate_cap_standalone_log = self.txt_standalone_log
+        self.btn_bitrate_cap_standalone_clear = self.btn_standalone_log_clear
+
+        self.gauge_bitrate_cap_standalone = wx.Gauge(bitrate_cap_pane, style=wx.GA_HORIZONTAL)
+        self.gauge_bitrate_cap_standalone.SetToolTip(
+            T("Shows that the Limit Bitrate job is working. This step does not report a frame count, so the bar "
+              "moves back and forth while the job runs, with the elapsed time beside it."))
+        self.lbl_bitrate_cap_standalone_progress = wx.StaticText(bitrate_cap_pane, label="")
+
+        self.btn_bitrate_cap_standalone_input.Bind(wx.EVT_BUTTON, self.on_click_btn_bitrate_cap_standalone_input)
+        self.btn_bitrate_cap_standalone_output.Bind(wx.EVT_BUTTON, self.on_click_btn_bitrate_cap_standalone_output)
+        self.btn_bitrate_cap_standalone_dv_source.Bind(wx.EVT_BUTTON,
+                                                        self.on_click_btn_bitrate_cap_standalone_dv_source)
+        self.btn_bitrate_cap_standalone_rife_manifest.Bind(wx.EVT_BUTTON,
+                                                            self.on_click_btn_bitrate_cap_standalone_rife_manifest)
+        self.btn_bitrate_cap_standalone_run.Bind(wx.EVT_BUTTON, self.on_click_btn_bitrate_cap_standalone_run)
+        self.btn_bitrate_cap_standalone_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_bitrate_cap_standalone_cancel)
+
+        layout_bitrate_cap = wx.GridBagSizer(vgap=4, hgap=4)
+        layout_bitrate_cap.SetEmptyCellSize((0, 0))
+        h = -1
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.txt_bitrate_cap_standalone_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.btn_bitrate_cap_standalone_input, (h, 3), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.txt_bitrate_cap_standalone_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.btn_bitrate_cap_standalone_output, (h, 3), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_limit, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.txt_bitrate_cap_standalone_limit, (h, 1), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_crf, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.txt_bitrate_cap_standalone_crf, (h, 3), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.cbo_bitrate_cap_standalone_codec, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_dv_source, (h := h + 1, 0),
+                               flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.txt_bitrate_cap_standalone_dv_source, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.btn_bitrate_cap_standalone_dv_source, (h, 3), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_rife_manifest, (h := h + 1, 0),
+                               flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.txt_bitrate_cap_standalone_rife_manifest, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.btn_bitrate_cap_standalone_rife_manifest, (h, 3), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.gauge_bitrate_cap_standalone, (h := h + 1, 0), (0, 2),
+                               flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout_bitrate_cap.Add(self.btn_bitrate_cap_standalone_run, (h, 2), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.btn_bitrate_cap_standalone_cancel, (h, 3), flag=wx.EXPAND)
+        layout_bitrate_cap.Add(self.lbl_bitrate_cap_standalone_progress, (h := h + 1, 0), (0, 4),
+                               flag=wx.ALIGN_CENTER_VERTICAL)
+        bitrate_cap_pane.SetSizer(layout_bitrate_cap)
+
+        self.pnl_bitrate_cap_standalone_dot = wx.Panel(self.grp_bitrate_cap_standalone, size=self.FromDIP((10, 10)))
+        self.pnl_bitrate_cap_standalone_dot.SetBackgroundColour(wx.Colour(251, 113, 133))
+        pane_header_row_bitrate_cap = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_bitrate_cap.Add(self.pnl_bitrate_cap_standalone_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_bitrate_cap.Add(self.cpn_bitrate_cap_standalone, 1, wx.EXPAND)
+
+        sizer_bitrate_cap_standalone = wx.StaticBoxSizer(self.grp_bitrate_cap_standalone, wx.VERTICAL)
+        sizer_bitrate_cap_standalone.Add(pane_header_row_bitrate_cap, 0, wx.ALL | wx.EXPAND, 4)
+
         # --- standalone tool: 3D Blu-ray Import (ADR-182) ---
         # Turns a real 3D Blu-ray (ISO or ripped disc folder) into an ordinary 3D video
         # file (SBS/TB) with the disc's own audio and subtitles, via
@@ -7655,6 +7837,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_stereotag, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_sharpen, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_rife_standalone, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_bitrate_cap_standalone, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_bluray, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_sbs2mvc, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_hdr_to_sdr, 0, wx.ALL | wx.EXPAND, 4)
@@ -9035,6 +9218,7 @@ class MainFrame(wx.Frame):
             self.cpn_stereotag.GetPane(),
             self.cpn_sharpen.GetPane(),
             self.cpn_rife_standalone.GetPane(),
+            self.cpn_bitrate_cap_standalone.GetPane(),
         ):
             panel.SetBackgroundColour(panel_bg)
 
@@ -9049,7 +9233,7 @@ class MainFrame(wx.Frame):
             self.cpn_stereo_stability_flicker, self.cpn_video_filter_scene_batch,
             self.cpn_depth_blend, self.cpn_hdr_reinject, self.cpn_subsearch,
             self.cpn_submux, self.cpn_audiomux, self.cpn_stereotag,
-            self.cpn_sharpen, self.cpn_rife_standalone,
+            self.cpn_sharpen, self.cpn_rife_standalone, self.cpn_bitrate_cap_standalone,
         ):
             cpn.SetFont(box_font)
 
@@ -9258,6 +9442,7 @@ class MainFrame(wx.Frame):
         only the tool actually in use needs to be expanded."""
         pane_attrs = ("cpn_hdr_reinject", "cpn_subsearch", "cpn_submux", "cpn_audiomux",
                       "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
+                      "cpn_bitrate_cap_standalone",
                       "cpn_bluray", "cpn_sbs2mvc", "cpn_hdr_to_sdr", "cpn_makemkv", "cpn_vobsub",
                       "cpn_upscale")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
@@ -11763,7 +11948,7 @@ class MainFrame(wx.Frame):
     # A tool missing from this list keeps the default black title, unreadable on the dark theme.
     _STANDALONE_TOOL_GROUP_NAMES = (
         "grp_quick_convert",
-        "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone",
+        "grp_audiomux", "grp_audiorestore", "grp_sharpen", "grp_rife_standalone", "grp_bitrate_cap_standalone",
         "grp_bluray", "grp_sbs2mvc", "grp_hdr_to_sdr", "grp_makemkv", "grp_upscale",
         "grp_standalone_log",
     )
@@ -11787,6 +11972,9 @@ class MainFrame(wx.Frame):
         "txt_rife_standalone_input", "txt_rife_standalone_output",
         "txt_rife_standalone_target_fps",
         "txt_rife_standalone_dv_source", "txt_rife_standalone_dv_start", "txt_rife_standalone_dv_end",
+        "txt_bitrate_cap_standalone_input", "txt_bitrate_cap_standalone_output", "txt_bitrate_cap_standalone_limit",
+        "txt_bitrate_cap_standalone_crf", "txt_bitrate_cap_standalone_dv_source",
+        "txt_bitrate_cap_standalone_rife_manifest",
         "txt_bluray_disc", "txt_bluray_output",
         "txt_sbs2mvc_input", "txt_sbs2mvc_output",
         "txt_hdr_to_sdr_input", "txt_hdr_to_sdr_output",
@@ -11797,7 +11985,7 @@ class MainFrame(wx.Frame):
     )
     # The one field in that list whose real default isn't blank -- confirmed
     # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
-    _CLEAR_ALL_STANDALONE_TEXT_DEFAULTS = {"txt_submux_language": "en"}
+    _CLEAR_ALL_STANDALONE_TEXT_DEFAULTS = {"txt_submux_language": "en", "txt_bitrate_cap_standalone_crf": "15"}
 
     def _clear_standalone_tool_logs(self):
         """ADR-249: empties every Standalone Tools *_log box -- reuses
@@ -14792,6 +14980,182 @@ class MainFrame(wx.Frame):
         else:
             startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd, dv))
 
+    def on_click_btn_bitrate_cap_standalone_input(self, event):
+        with wx.FileDialog(self, message=T("Select the finished video to limit"),
+                           wildcard="Video files (*.mkv;*.mp4;*.m2ts;*.ts)|*.mkv;*.mp4;*.m2ts;*.ts|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_bitrate_cap_standalone_input.GetValue():
+                dlg.SetPath(self.txt_bitrate_cap_standalone_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_bitrate_cap_standalone_input.SetValue(dlg.GetPath())
+
+    def on_click_btn_bitrate_cap_standalone_output(self, event):
+        with wx.FileDialog(self, message=T("Select where to save the limited copy"),
+                           wildcard="Video files (*.mkv;*.mp4;*.m2ts;*.ts)|*.mkv;*.mp4;*.m2ts;*.ts|All files (*.*)|*.*",
+                           style=wx.FD_SAVE) as dlg:
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_bitrate_cap_standalone_output.SetValue(dlg.GetPath())
+
+    def on_click_btn_bitrate_cap_standalone_dv_source(self, event):
+        with wx.FileDialog(self, message=T("Select the ORIGINAL Dolby Vision movie"),
+                           wildcard="Video files (*.mkv;*.mp4;*.m2ts;*.ts)|*.mkv;*.mp4;*.m2ts;*.ts|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_bitrate_cap_standalone_dv_source.GetValue():
+                dlg.SetPath(self.txt_bitrate_cap_standalone_dv_source.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_bitrate_cap_standalone_dv_source.SetValue(dlg.GetPath())
+
+    def on_click_btn_bitrate_cap_standalone_rife_manifest(self, event):
+        with wx.FileDialog(self, message=T("Select the RIFE manifest file"),
+                           wildcard="RIFE manifest (*.rife_manifest.json)|*.rife_manifest.json|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_bitrate_cap_standalone_rife_manifest.GetValue():
+                dlg.SetPath(self.txt_bitrate_cap_standalone_rife_manifest.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_bitrate_cap_standalone_rife_manifest.SetValue(dlg.GetPath())
+
+    def on_click_btn_bitrate_cap_standalone_cancel(self, event):
+        proc = self.bitrate_cap_standalone_proc
+        if proc is not None and proc.poll() is None:
+            self.bitrate_cap_standalone_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_bitrate_cap_standalone_cancel.Disable()
+
+    def _remove_partial_bitrate_cap_outputs(self):
+        """Cancel only: removes the copy this run created, plus its re-encode temp file. Never the original, and
+        never an output that already existed before this run (bitrate_cap_standalone_created_output is False then)."""
+        from .bitrate_cap_cli import capping_tmp_path
+        if not self.bitrate_cap_standalone_created_output:
+            return
+        output = self.bitrate_cap_standalone_output_path
+        for candidate in (output, output + ".copying", capping_tmp_path(output)):
+            try:
+                if path.exists(candidate) and path.getmtime(candidate) >= self.bitrate_cap_standalone_start_time - 1:
+                    os.remove(candidate)
+            except OSError:
+                pass
+
+    def _pulse_bitrate_cap_standalone(self, elapsed):
+        self.gauge_bitrate_cap_standalone.Pulse()
+        self.lbl_bitrate_cap_standalone_progress.SetLabel(
+            f"{T('Working')} -- {T('elapsed')} {self._format_duration(elapsed)}")
+
+    def run_bitrate_cap_standalone(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread. Out-of-process, same
+        # convention as the Standalone RIFE Tool. The CLI prints no frame progress, so this only pulses the bar
+        # and shows elapsed time while the process is alive.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace")
+        self.bitrate_cap_standalone_proc = proc
+        chunks = []
+
+        def _drain_output():
+            for line in proc.stdout:
+                chunks.append(line)
+
+        reader = threading.Thread(target=_drain_output, daemon=True)
+        reader.start()
+        while True:
+            try:
+                proc.wait(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                wx.CallAfter(self._pulse_bitrate_cap_standalone, time() - self.bitrate_cap_standalone_start_time)
+        reader.join(timeout=5)
+        return proc.returncode, "".join(chunks)
+
+    def on_exit_bitrate_cap_standalone_worker(self, result):
+        self.btn_bitrate_cap_standalone_run.Enable()
+        self.btn_bitrate_cap_standalone_clear.Enable()
+        self.btn_bitrate_cap_standalone_cancel.Disable()
+        self.bitrate_cap_standalone_proc = None
+        try:
+            returncode, output = result.get()
+        except: # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_bitrate_cap_standalone_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self._write_standalone_job_log(T("Limit Bitrate an Existing File"),
+                                       self.bitrate_cap_standalone_output_path, output)
+        self.txt_bitrate_cap_standalone_log.SetValue(output)
+        self.txt_bitrate_cap_standalone_log.ShowPosition(self.txt_bitrate_cap_standalone_log.GetLastPosition())
+        if self.bitrate_cap_standalone_cancelled:
+            self._remove_partial_bitrate_cap_outputs()
+            self.lbl_bitrate_cap_standalone_progress.SetLabel(
+                T("Cancelled -- the original file was not modified"))
+            self.SetStatusText(T("Limit Bitrate cancelled"))
+        elif returncode == 0:
+            self.gauge_bitrate_cap_standalone.SetRange(1)
+            self.gauge_bitrate_cap_standalone.SetValue(1)
+            self.lbl_bitrate_cap_standalone_progress.SetLabel(
+                T("Done -- the original file was not modified"))
+            self.SetStatusText(T("Limit Bitrate applied successfully"))
+        else:
+            self.gauge_bitrate_cap_standalone.SetValue(0)
+            self.lbl_bitrate_cap_standalone_progress.SetLabel(T("Failed or refused -- see the log box"))
+            self.SetStatusText(T("Limit Bitrate failed or refused -- see the log below"))
+            wx.MessageBox(T("Limit Bitrate failed or refused -- see the log box for the exact reason. The "
+                            "original file was not modified."),
+                          T("Limit Bitrate an Existing File"), wx.OK | wx.ICON_ERROR)
+
+    def _build_bitrate_cap_standalone_cmd(self, input_path, output_path, limit, crf, codec, dv_source, rife_manifest):
+        """The one CLI command for a Run. Optional flags are only added when filled in."""
+        cmd = [sys.executable, "-m", "iw3.bitrate_cap_cli",
+               "--input", input_path, "--limit", limit, "--crf", crf, "--codec", codec]
+        if output_path:
+            cmd += ["--output", output_path]
+        if dv_source:
+            cmd += ["--dv-source", dv_source]
+        if rife_manifest:
+            cmd += ["--rife-manifest", rife_manifest]
+        return cmd
+
+    def on_click_btn_bitrate_cap_standalone_run(self, event):
+        from .bitrate_cap_cli import resolve_output_path
+        input_path = self.txt_bitrate_cap_standalone_input.GetValue().strip()
+        output_path = self.txt_bitrate_cap_standalone_output.GetValue().strip()
+        limit = self.txt_bitrate_cap_standalone_limit.GetValue().strip()
+        crf = self.txt_bitrate_cap_standalone_crf.GetValue().strip()
+        codec = self.cbo_bitrate_cap_standalone_codec.GetClientData(self.cbo_bitrate_cap_standalone_codec.GetSelection())
+        dv_source = self.txt_bitrate_cap_standalone_dv_source.GetValue().strip()
+        rife_manifest = self.txt_bitrate_cap_standalone_rife_manifest.GetValue().strip()
+
+        if not input_path or not path.isfile(input_path):
+            wx.MessageBox(T("Select a valid finished video file first (a folder can't be used here)."),
+                          T("Limit Bitrate an Existing File"), wx.OK | wx.ICON_WARNING)
+            return
+        if not validate_number(limit, 0.1, 1000.0):
+            self.show_validation_error_message(T("Limit (Mbps)"), 0.1, 1000.0)
+            return
+        if not validate_number(crf, 0, 51, is_int=True):
+            self.show_validation_error_message(T("Quality (CRF)"), 0, 51)
+            return
+
+        # Remember what this run would write, so Cancel removes only that. If the output already exists the CLI
+        # refuses the run, and nothing is marked as created.
+        resolved_output = resolve_output_path(input_path, output_path)
+        self.bitrate_cap_standalone_output_path = resolved_output
+        self.bitrate_cap_standalone_created_output = not path.exists(resolved_output)
+
+        cmd = self._build_bitrate_cap_standalone_cmd(input_path, output_path, limit, crf, codec,
+                                                     dv_source, rife_manifest)
+        self.txt_bitrate_cap_standalone_log.SetValue(T("Running...\n"))
+        self.gauge_bitrate_cap_standalone.SetRange(1)
+        self.gauge_bitrate_cap_standalone.SetValue(0)
+        self.lbl_bitrate_cap_standalone_progress.SetLabel("")
+        self.bitrate_cap_standalone_start_time = time()
+        self.btn_bitrate_cap_standalone_run.Disable()
+        self.btn_bitrate_cap_standalone_clear.Disable()
+        self.bitrate_cap_standalone_cancelled = False
+        self.btn_bitrate_cap_standalone_cancel.Enable()
+        self.SetStatusText(T("Limiting bitrate..."))
+        startWorker(self.on_exit_bitrate_cap_standalone_worker, self.run_bitrate_cap_standalone, wargs=(cmd,))
+
     def _build_rife_standalone_job(self, input_path, output_path):
         """Builds the one RIFE run for input_path -> output_path from the panel's current options. Shared by
         single-file and folder mode, so every file in a folder gets exactly the same options. Includes the
@@ -17756,9 +18120,9 @@ def _self_test_standalone_tools_collapsible_sections():
         frame = gui_mod.MainFrame()
         panes = frame.get_standalone_tools_sliders_and_panes()
         panes = [p for p in panes if isinstance(p, wx.CollapsiblePane)]
-        assert len(panes) == 14, f"expected 14 Standalone Tools panes, found {len(panes)}"
+        assert len(panes) == 15, f"expected 15 Standalone Tools panes, found {len(panes)}"
         names = [p.GetName() for p in panes]
-        assert len(set(names)) == 14, f"pane names are not all unique: {names}"
+        assert len(set(names)) == 15, f"pane names are not all unique: {names}"
         for p in panes:
             assert p.IsCollapsed(), f"{p.GetName()} should start collapsed by default"
 
@@ -25507,6 +25871,118 @@ def _self_test_rife_standalone_dv_and_cancel():
     print("_self_test_rife_standalone_dv_and_cancel: PASS")
 
 
+def _self_test_bitrate_cap_standalone_panel():
+    """Standalone Limit Bitrate panel: every control lives in its own collapsible pane, the codec dropdown offers
+    only the two NVENC codecs, Run builds the real iw3.bitrate_cap_cli command (startWorker is monkeypatched, so
+    nothing runs and no GPU is used), and Cancel removes only the copy a run created."""
+    import tempfile
+    from time import time as now
+    import iw3.gui as gui_mod
+    from .bitrate_cap_cli import capping_tmp_path
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_box = wx.MessageBox
+    try:
+        frame = gui_mod.MainFrame()
+        pane = frame.cpn_bitrate_cap_standalone.GetPane()
+        for name in ("txt_bitrate_cap_standalone_input", "txt_bitrate_cap_standalone_output",
+                     "txt_bitrate_cap_standalone_limit", "txt_bitrate_cap_standalone_crf",
+                     "cbo_bitrate_cap_standalone_codec", "txt_bitrate_cap_standalone_dv_source",
+                     "txt_bitrate_cap_standalone_rife_manifest", "btn_bitrate_cap_standalone_run",
+                     "btn_bitrate_cap_standalone_cancel", "gauge_bitrate_cap_standalone"):
+            assert getattr(frame, name).GetParent() is pane, name
+        assert frame.grp_bitrate_cap_standalone.GetParent() is frame.tab_tools
+        assert not frame.btn_bitrate_cap_standalone_cancel.IsEnabled()
+
+        codec_box = frame.cbo_bitrate_cap_standalone_codec
+        codecs = [codec_box.GetClientData(i) for i in range(codec_box.GetCount())]
+        assert codecs == ["hevc_nvenc", "h264_nvenc"], codecs
+
+        captured = {}
+        gui_mod.startWorker = lambda on_exit, fn, wargs=(), **kw: captured.update(wargs=wargs)
+        boxes = []
+        wx.MessageBox = lambda *a, **kw: boxes.append(a[0])
+        frame.show_validation_error_message = lambda *a: boxes.append("validation")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = path.join(tmp, "movie.mkv")
+            dv_path = path.join(tmp, "original.mkv")
+            manifest_path = path.join(tmp, "movie.rife_manifest.json")
+            for p_ in (input_path, dv_path, manifest_path):
+                with open(p_, "wb") as f:
+                    f.write(b"synthetic")
+
+            # 1. Run builds the real CLI command with every optional field filled in
+            frame.txt_bitrate_cap_standalone_input.SetValue(input_path)
+            frame.txt_bitrate_cap_standalone_limit.SetValue("80")
+            frame.txt_bitrate_cap_standalone_crf.SetValue("15")
+            codec_box.SetSelection(1)
+            frame.txt_bitrate_cap_standalone_dv_source.SetValue(dv_path)
+            frame.txt_bitrate_cap_standalone_rife_manifest.SetValue(manifest_path)
+            frame.on_click_btn_bitrate_cap_standalone_run(None)
+            assert captured["wargs"][0] == [
+                sys.executable, "-m", "iw3.bitrate_cap_cli",
+                "--input", input_path, "--limit", "80", "--crf", "15", "--codec", "h264_nvenc",
+                "--dv-source", dv_path, "--rife-manifest", manifest_path], captured
+            assert frame.bitrate_cap_standalone_created_output is True
+            assert frame.bitrate_cap_standalone_output_path == path.join(tmp, "movie_capped.mkv")
+            frame.btn_bitrate_cap_standalone_run.Enable()
+            frame.btn_bitrate_cap_standalone_cancel.Disable()
+
+            # 2. Minimal Run: no output, no DV, no manifest -> no optional flags added
+            captured.clear()
+            frame.txt_bitrate_cap_standalone_dv_source.SetValue("")
+            frame.txt_bitrate_cap_standalone_rife_manifest.SetValue("")
+            frame.txt_bitrate_cap_standalone_output.SetValue("")
+            codec_box.SetSelection(0)
+            frame.txt_bitrate_cap_standalone_limit.SetValue("80")
+            frame.on_click_btn_bitrate_cap_standalone_run(None)
+            assert captured["wargs"][0] == [
+                sys.executable, "-m", "iw3.bitrate_cap_cli",
+                "--input", input_path, "--limit", "80", "--crf", "15", "--codec", "hevc_nvenc"], captured
+            frame.btn_bitrate_cap_standalone_run.Enable()
+            frame.btn_bitrate_cap_standalone_cancel.Disable()
+
+            # 3. Invalid limit and missing input are refused before anything starts
+            captured.clear()
+            frame.txt_bitrate_cap_standalone_limit.SetValue("abc")
+            frame.on_click_btn_bitrate_cap_standalone_run(None)
+            assert not captured and boxes[-1] == "validation", (captured, boxes)
+            frame.txt_bitrate_cap_standalone_limit.SetValue("80")
+            frame.txt_bitrate_cap_standalone_input.SetValue(path.join(tmp, "missing.mkv"))
+            frame.on_click_btn_bitrate_cap_standalone_run(None)
+            assert not captured and boxes[-1].startswith("Select a valid finished video"), (captured, boxes)
+
+            # 4. Cancel cleanup removes only the copy this run created (plus its temp file), never a file that
+            #    already existed before the run
+            output = path.join(tmp, "movie_capped.mkv")
+            frame.bitrate_cap_standalone_output_path = output
+            frame.bitrate_cap_standalone_start_time = now() - 5
+            frame.bitrate_cap_standalone_created_output = True
+            for p_ in (output, output + ".copying", capping_tmp_path(output)):
+                with open(p_, "wb") as f:
+                    f.write(b"partial")
+            frame._remove_partial_bitrate_cap_outputs()
+            assert not any(path.exists(p_) for p_ in (output, output + ".copying", capping_tmp_path(output)))
+            with open(output, "wb") as f:
+                f.write(b"someone else's file")
+            frame.bitrate_cap_standalone_created_output = False
+            frame._remove_partial_bitrate_cap_outputs()
+            assert path.exists(output), "a pre-existing output must never be removed by Cancel"
+            assert path.exists(input_path) and path.exists(dv_path), "originals must never be touched"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        wx.MessageBox = orig_box
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_bitrate_cap_standalone_panel: PASS")
+
+
 def _self_test_rife_progress_reaches_job_bar():
     """The post-conversion RIFE step used to discard the helper's output, so the progress bar showed only
     "running MM:SS". Its "IW3_RIFE_PROGRESS <done> <total>" lines now drive the job's tqdm bar (frames/FPS/ETA in
@@ -29395,6 +29871,7 @@ def _run_self_tests():
         _self_test_preview_peak_bitrate,
         _self_test_bitrate_cap_preserves_dv,
         _self_test_bitrate_cap_rife_manifest_dv,
+        _self_test_bitrate_cap_standalone_panel,
         _self_test_mvc_muxopt_new_audio_pes,
         _self_test_analyze_source_video,
         _self_test_bluray_import_panel,

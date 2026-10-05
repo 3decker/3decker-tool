@@ -22994,6 +22994,118 @@ def _self_test_bitrate_cap_preserves_dv():
     print("_self_test_bitrate_cap_preserves_dv: PASS")
 
 
+def _self_test_bitrate_cap_rife_manifest_dv():
+    """Real, confirmed incident: a RIFE + Limit Bitrate + Preserve Dolby Vision job lost its DV for good.
+    RIFE doubled the frame count. The bitrate cap works on the Restore Audio & Subtitles '_alldub' copy, and
+    the RIFE manifest ('<rife output>.rife_manifest.json') sits next to the RIFE output, not next to that copy.
+    The cap's re-attach used the one-to-one path (use_manifest=False), which correctly refused the 2x frame
+    count, so the file was left without DV. Covers: (1) _run_post_conversion_steps hands the cap the RIFE
+    output's manifest, and None when RIFE did not run; (2) _run_bitrate_cap with that manifest re-attaches
+    through the manifest path (--rife-manifest, no one-to-one check) for a real file on disk; (3) without a
+    manifest the plain one-to-one re-attach is unchanged; (4) a failed re-attach leaves the file unchanged and
+    reports FAILED; (5) a missing manifest is reported as skipped, not refused by the wrong check."""
+    import contextlib
+    import io
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def _args(**kw):
+        base = dict(limit_bitrate=True, video_codec="hevc_nvenc", video_bitrate="20M",
+                    crf=15, pix_fmt="yuv420p", gpu=[-1], start_time=None, end_time=None)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    # (1) the post-steps chain passes the RIFE output's manifest (not the _alldub copy's) to the cap
+    for rife_out, expect_manifest in (("m_rife.mkv", "m_rife.mkv.rife_manifest.json"), (None, None)):
+        seen = {}
+
+        def fake_cap(p, a, dv_source=None, rife_manifest=None):
+            seen["cap"] = (p, dv_source, rife_manifest)
+            return None
+
+        with mock.patch.object(U, "_should_use_stereo_upscale", lambda a: False), \
+                mock.patch.object(U, "_run_waifu2x_upscale", lambda p, a: None), \
+                mock.patch.object(U, "_run_rife_interpolation",
+                                  lambda p, a, force_hevc=False, scene_source_path=None: rife_out), \
+                mock.patch.object(U, "_reinject_dv_after_rife", lambda *a, **k: True), \
+                mock.patch.object(U, "_run_audio_subtitle_restore", lambda p, a: p[:-4] + "_alldub.mkv"), \
+                mock.patch.object(U, "_run_bitrate_cap", fake_cap), \
+                mock.patch.object(U, "_run_mvc_conversion", lambda p, a: None):
+            U._run_post_conversion_steps("m.mkv", _args(rife_interpolate=bool(rife_out)), dv_source="orig.mkv")
+        expect_file = "m_rife_alldub.mkv" if rife_out else "m_alldub.mkv"
+        assert seen["cap"] == (expect_file, "orig.mkv", expect_manifest), seen
+
+    def _fake_run_factory(reinject_rc=0):
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            if "iw3.reinject_hdr_cli" in cmd:
+                if reinject_rc == 0:
+                    with open(cmd[cmd.index("--output") + 1], "w") as f:
+                        f.write("reinjected")
+                return types.SimpleNamespace(returncode=reinject_rc, stdout=b"",
+                                             stderr=b"" if reinject_rc == 0 else b"frame count mismatch")
+            with open(cmd[-1], "w") as f:
+                f.write("capped")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return calls, fake_run
+
+    def _run_cap(tmp, name, rife_manifest, reinject_rc=0, write_manifest=True):
+        # real files on disk: the RIFE output with its manifest, and the _alldub copy the cap works on
+        rife = path.join(tmp, f"{name}_rife.mkv")
+        alldub = path.join(tmp, f"{name}_rife_alldub.mkv")
+        manifest = rife + ".rife_manifest.json"
+        with open(alldub, "w") as f:
+            f.write("original")
+        if write_manifest:
+            with open(manifest, "w") as f:
+                f.write("{}")
+        calls, fake_run = _fake_run_factory(reinject_rc)
+        out = io.StringIO()
+        with mock.patch.object(U, "_measure_peak_window_bitrate_bps", lambda p: 40_000_000), \
+                mock.patch.object(U, "_get_ffmpeg_bin", lambda: "ffmpeg"), \
+                mock.patch.object(U, "_find_ffprobe", lambda: "ffprobe"), \
+                mock.patch.object(U, "_detect_hdr_types", lambda s, f: {"dv": True, "hdr10plus": False}), \
+                mock.patch("subprocess.run", fake_run), \
+                contextlib.redirect_stderr(out):
+            result = U._run_bitrate_cap(alldub, _args(), dv_source="src.mkv",
+                                        rife_manifest=(manifest if rife_manifest else None))
+        with open(alldub) as f:
+            content = f.read()
+        reinject_cmds = [c for c in calls if "iw3.reinject_hdr_cli" in c]
+        return result, content, reinject_cmds, out.getvalue(), manifest
+
+    with tempfile.TemporaryDirectory(prefix="iw3_capdv_rife_selftest_") as tmp:
+        # (2) RIFE ran: the cap re-encodes, then re-attaches through the RIFE manifest and succeeds
+        result, content, cmds, log, manifest = _run_cap(tmp, "a", rife_manifest=True)
+        assert result is not None and content == "reinjected", (content, log)
+        assert len(cmds) == 1, cmds
+        assert "--rife-manifest" in cmds[0] and cmds[0][cmds[0].index("--rife-manifest") + 1] == manifest, cmds[0]
+        assert "--skip-rife-guard" not in cmds[0], cmds[0]
+        assert "re-attached" in log, log
+
+        # (3) no manifest (RIFE did not run): the plain one-to-one re-attach, exactly as before
+        result, content, cmds, log, _ = _run_cap(tmp, "b", rife_manifest=False)
+        assert content == "reinjected", (content, log)
+        assert len(cmds) == 1, cmds
+        assert "--rife-manifest" not in cmds[0] and "--skip-rife-guard" in cmds[0], cmds[0]
+
+        # (4) a failed re-attach leaves the capped file as it was and says FAILED
+        result, content, cmds, log, _ = _run_cap(tmp, "c", rife_manifest=True, reinject_rc=1)
+        assert content == "capped", content
+        assert "FAILED" in log and "left unchanged" in log, log
+
+        # (5) RIFE ran but its manifest is gone: skipped with a clear message, no re-attach attempted
+        result, content, cmds, log, _ = _run_cap(tmp, "d", rife_manifest=True, write_manifest=False)
+        assert content == "capped" and cmds == [], (content, cmds)
+        assert "RIFE's frame list is missing" in log, log
+
+    print("_self_test_bitrate_cap_rife_manifest_dv: PASS")
+
+
 def _self_test_analyze_source_video():
     """ADR-297: real, measured source facts (resolution/codec/bitrate/HDR, plus best-effort
     CRF detection for x264/x265 sources) so a user picking Limit Bitrate/CRF has a real
@@ -29282,6 +29394,7 @@ def _run_self_tests():
         _self_test_bitrate_cap_post_step,
         _self_test_preview_peak_bitrate,
         _self_test_bitrate_cap_preserves_dv,
+        _self_test_bitrate_cap_rife_manifest_dv,
         _self_test_mvc_muxopt_new_audio_pes,
         _self_test_analyze_source_video,
         _self_test_bluray_import_panel,

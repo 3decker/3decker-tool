@@ -584,7 +584,7 @@ def _rife_manifest_frame_counts(manifest_path):
 
 
 def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None, progress_cb=None,
-                            use_manifest=True, what="RIFE output", trim_source=True):
+                            use_manifest=True, what="RIFE output", trim_source=True, manifest_path=None):
     """ADR-192: after RIFE, re-attach the ORIGINAL source's Dolby Vision RPU to RIFE's output through
     iw3.reinject_hdr_cli --rife-manifest (each in-between frame gets a copy of its nearest real frame's entry).
     The RIFE file is only replaced when the injection fully succeeded; otherwise it is left as it was
@@ -594,6 +594,9 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
     the RPU is re-attached one-to-one and there is no RIFE frame list. `what` is only used in the messages.
     trim_source=False: do not cut the source to args.start_time/end_time (the upscaled file was made from the already
     cut conversion output, not from the original movie).
+    manifest_path (optional, use_manifest=True only): the RIFE manifest to read when it is not simply
+    '<rife_path>.rife_manifest.json' -- needed when rife_path is a copy made after RIFE (the Restore Audio &
+    Subtitles '_alldub' file the bitrate cap works on), whose manifest still sits next to the RIFE output.
 
     `log` (optional callable) receives the messages instead of stderr -- used by the standalone RIFE tool's
     log box. `proc_hook` (optional callable) receives the running Popen so a Cancel button can kill it.
@@ -613,7 +616,7 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
         # failed), so skipping is correct -- it just needs to say so.
         say(f"[iw3] Dolby Vision re-attach skipped: no {what} file to attach it to (cancelled or failed).")
         return False
-    manifest = rife_path + ".rife_manifest.json"
+    manifest = manifest_path or (rife_path + ".rife_manifest.json")
     try:
         hdr_types = _detect_hdr_types(source_path, _find_ffprobe())
     except Exception as e:
@@ -1065,7 +1068,7 @@ def _bitrate_cap_exceeded(peak_bps, target_mbps):
     return peak_bps > target_mbps * 1_000_000 * 1.05
 
 
-def _run_bitrate_cap(video_path, args, dv_source=None):
+def _run_bitrate_cap(video_path, args, dv_source=None, rife_manifest=None):
     """ADR-298/peak-redesign: the real, reliable implementation of "Limit Bitrate" --
     a genuine second pass, run only when actually needed. See make_video_codec_option()'s
     own comment for why a single-pass NVENC mode can't do this as the MAIN encode's own
@@ -1125,7 +1128,13 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
     changes compression only, never frame count/timing, so the DV data still lines
     up exactly). If re-attaching fails for a real reason, _reinject_dv_after_rife()
     already prints a clear FAILED message naming the file as left without DV --
-    never a silent loss."""
+    never a silent loss.
+
+    rife_manifest (optional): the '<rife output>.rife_manifest.json' of the RIFE output this file came from, when
+    RIFE ran earlier in this same chain. RIFE doubles the frame count, so the one-to-one re-attach above would
+    always refuse the frame-count check (a real confirmed incident: Dolby Vision silently lost after a RIFE +
+    Limit Bitrate job). The capped file keeps RIFE's exact frame list (the audio restore and this re-encode both
+    keep the video frames 1:1), so the manifest-based re-attach applies instead."""
     if not getattr(args, "limit_bitrate", False):
         return None
     if getattr(args, "video_codec", None) not in ("hevc_nvenc", "h264_nvenc"):
@@ -1193,8 +1202,12 @@ def _run_bitrate_cap(video_path, args, dv_source=None):
         # in this same chain) before it gets silently left out. use_manifest=False/trim_source=True:
         # same frame count/timing as before (a bitrate re-encode never drops/duplicates frames), so
         # the exact-frame-count-matched re-attach _reinject_dv_after_upscale() uses applies here too.
-        _reinject_dv_after_rife(dv_source, video_path, args, use_manifest=False,
-                                what="bitrate-capped video", trim_source=True)
+        if rife_manifest:
+            _reinject_dv_after_rife(dv_source, video_path, args, use_manifest=True, manifest_path=rife_manifest,
+                                    what="bitrate-capped video", trim_source=True)
+        else:
+            _reinject_dv_after_rife(dv_source, video_path, args, use_manifest=False,
+                                    what="bitrate-capped video", trim_source=True)
     return video_path
 
 
@@ -1323,7 +1336,10 @@ def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_pa
     # an in-place fix (see _run_bitrate_cap()'s own docstring for why), so `current`
     # doesn't change, just what's sitting at that same path. ADR-318: dv_source is forwarded
     # so this step can re-attach DV it would otherwise silently destroy (see its own docstring).
-    _run_bitrate_cap(current, args, dv_source=dv_source)
+    # rife_manifest: the RIFE output's own frame list (only when RIFE actually produced `rife_output_path`), so the
+    # cap's DV re-attach can map frames correctly after the RIFE frame doubling (see _run_bitrate_cap's docstring).
+    rife_manifest = rife_output_path + ".rife_manifest.json" if rife_output_path else None
+    _run_bitrate_cap(current, args, dv_source=dv_source, rife_manifest=rife_manifest)
     # ADR-246: MVC conversion is a side effect (its own separate file), not a chain link -- it
     # never changes `current`/the file this function returns as "the one to keep".
     _run_mvc_conversion(current, args)

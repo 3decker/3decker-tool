@@ -8311,7 +8311,8 @@ class _PauseVramSuspendEvent():
         return result
 
 
-def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None, stage_fn=None):
+def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None, stage_fn=None,
+                   output_sink=None):
     if depth_model is None:
         depth_model = create_depth_model(args.depth_model)
     depth_model.enable_refine(getattr(args, "depth_refine", False),
@@ -8405,6 +8406,7 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         "suspend_event": suspend_event,
         "tqdm_fn": tqdm_fn,
         "stage_fn": stage_fn,
+        "output_sink": output_sink,
         "depth_model": depth_model,
         "convergence_model": convergence_model,
         "device": create_device(args.gpu),
@@ -8716,30 +8718,50 @@ class _TeeStream:
     currently are (a real console under raw CLI use, os.devnull under the real GUI
     per nunif/pythonw_fix.py) AND a real job log file, so turning this feature on
     never changes any existing print()-based behavior anywhere in the pipeline,
-    it only adds a second destination."""
-    def __init__(self, original, log_file):
+    it only adds a second destination.
+
+    ADR-356: `sink` (optional) is a second extra destination -- the GUI's Output
+    panel. Carriage-return progress updates are split into separate lines before
+    they reach the log file or the sink, so the file and the panel show the same
+    lines. The original stream still gets the raw data, unchanged."""
+    def __init__(self, original, log_file=None, sink=None):
         self._original = original
         self._log_file = log_file
+        self._sink = sink
 
     def write(self, data):
         try:
             self._original.write(data)
         except Exception:
             pass
-        try:
-            self._log_file.write(data)
-        except Exception:
-            pass
+        text = data.replace("\r\n", "\n").replace("\r", "\n")
+        if self._log_file is not None:
+            try:
+                self._log_file.write(text)
+            except Exception:
+                pass
+        if self._sink is not None:
+            try:
+                self._sink(text)
+            except Exception:
+                pass
 
     def flush(self):
         try:
             self._original.flush()
         except Exception:
             pass
-        try:
-            self._log_file.flush()
-        except Exception:
-            pass
+        if self._log_file is not None:
+            try:
+                self._log_file.flush()
+            except Exception:
+                pass
+
+
+def _output_sink(args):
+    """ADR-356: the GUI's Output panel append function (thread-safe, see gui.py's
+    _main_output_sink()), or None on the command line and in tests."""
+    return (getattr(args, "state", None) or {}).get("output_sink")
 
 
 def _resolve_direct_mvc_output_path(args):
@@ -8815,7 +8837,14 @@ def _job_log_scope(args, log_path, input_display, output_display):
     logs in batch/directory mode, ADR-279) so both write logs in the identical
     format. `input_display`/`output_display` are shown in the log's own
     "Input:"/"Output:" header lines -- the real per-file paths in batch mode, not
-    the batch-level directory args.input/args.output would otherwise show."""
+    the batch-level directory args.input/args.output would otherwise show.
+
+    ADR-356: the header and start/finish markers also go to the GUI Output panel
+    (args.state["output_sink"]). The printed lines do not come from here: the stream
+    tee below writes to the file only, and the panel gets printed lines from
+    output_panel_scope(), which run_iw3_main_with_job_log() always wraps around the
+    whole run -- so no line reaches the panel twice."""
+    sink = _output_sink(args)
     try:
         os.makedirs(path.dirname(log_path) or ".", exist_ok=True)
         log_file = open(log_path, "a", encoding="utf-8")
@@ -8825,8 +8854,20 @@ def _job_log_scope(args, log_path, input_display, output_display):
         yield
         return
 
-    log_file.write(f"\n---- iw3 job started {datetime.now().isoformat(timespec='seconds')} ----\n")
-    log_file.write(f"Input: {input_display}\nOutput: {output_display}\n")
+    def _log_write(text):
+        # A failed write must never raise into the job (ADR-256/ADR-356).
+        try:
+            log_file.write(text)
+        except Exception:
+            pass
+        if sink is not None:
+            try:
+                sink(text)
+            except Exception:
+                pass
+
+    _log_write(f"\n---- iw3 job started {datetime.now().isoformat(timespec='seconds')} ----\n")
+    _log_write(f"Input: {input_display}\nOutput: {output_display}\n")
     # ADR-268: real user report -- the log had no record of which settings were
     # actually used for the job, just paths and the live progress text. Reuses
     # _build_iw3_comment_metadata() (the exact same settings string already embedded
@@ -8843,9 +8884,9 @@ def _job_log_scope(args, log_path, input_display, output_display):
         # args object without every field _build_iw3_comment_metadata() expects.
         settings = None
     if settings:
-        log_file.write("Settings:\n")
+        _log_write("Settings:\n")
         for token in settings.split():
-            log_file.write(f"  {token}\n")
+            _log_write(f"  {token}\n")
     # ADR-272: real user request, via decker -- not an interactive CLI, just a
     # readable record of "what would be in a CLI as it ran the job". Reuses the
     # exact same reconstruction iw3.gui's own "Copy Command" button already uses
@@ -8858,17 +8899,17 @@ def _job_log_scope(args, log_path, input_display, output_display):
     except Exception:
         command = None
     if command:
-        log_file.write(f"Command:\n  {command}\n")
-    log_file.write("\n")
+        _log_write(f"Command:\n  {command}\n")
+    _log_write("\n")
     log_file.flush()
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
     sys.stdout = _TeeStream(orig_stdout, log_file)
     sys.stderr = _TeeStream(orig_stderr, log_file)
     try:
         yield
-        log_file.write(f"\n---- iw3 job finished {datetime.now().isoformat(timespec='seconds')} ----\n")
+        _log_write(f"\n---- iw3 job finished {datetime.now().isoformat(timespec='seconds')} ----\n")
     except BaseException as e:
-        log_file.write(f"\n---- iw3 job FAILED: {e!r} ----\n")
+        _log_write(f"\n---- iw3 job FAILED: {e!r} ----\n")
         raise
     finally:
         sys.stdout, sys.stderr = orig_stdout, orig_stderr
@@ -8913,15 +8954,35 @@ def run_iw3_main_with_job_log(args):
     real single-file conversion already gets. This function now only opens its
     own whole-run log for the cases where there's exactly one real output to log
     against up front (a single video/image, or a YAML export-config resume)."""
-    if not getattr(args, "write_job_log", False):
-        return iw3_main(args)
+    with output_panel_scope(args):
+        if not getattr(args, "write_job_log", False):
+            return iw3_main(args)
 
-    if path.isdir(str(args.input)) or is_text(args.input):
-        return iw3_main(args)
+        if path.isdir(str(args.input)) or is_text(args.input):
+            return iw3_main(args)
 
-    log_path = _job_log_path(args)
-    with _job_log_scope(args, log_path, args.input, args.output):
-        return iw3_main(args)
+        log_path = _job_log_path(args)
+        with _job_log_scope(args, log_path, args.input, args.output):
+            return iw3_main(args)
+
+
+@contextlib.contextmanager
+def output_panel_scope(args):
+    """ADR-356: sends everything this block prints (stdout and stderr) to the GUI's
+    Output panel, via args.state["output_sink"]. Wraps the whole run, so batch and
+    single-file runs both show every line once. A no-op when no sink is set (command
+    line, tests), so the CLI behaves exactly as before."""
+    sink = _output_sink(args)
+    if sink is None:
+        yield
+        return
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = _TeeStream(orig_stdout, None, sink)
+    sys.stderr = _TeeStream(orig_stderr, None, sink)
+    try:
+        yield
+    finally:
+        sys.stdout, sys.stderr = orig_stdout, orig_stderr
 
 
 def find_param(args, depth_model, side_model):

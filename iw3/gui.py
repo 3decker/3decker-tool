@@ -22,7 +22,7 @@ import wx.lib.stattext as stattext
 import wx.lib.scrolledpanel as scrolledpanel
 import torch
 from .utils import (
-    create_parser, set_state_args, iw3_main, run_iw3_main_with_job_log, preview_peak_bitrate,
+    create_parser, set_state_args, iw3_main, run_iw3_main_with_job_log, output_panel_scope, preview_peak_bitrate,
     is_text, is_video, is_image, is_output_dir, is_yaml, make_output_filename,
     _get_ffmpeg_bin, _find_mkvmerge, _release_pause_vram, build_cli_command_from_args,
     analyze_source_video, format_source_analysis,
@@ -1066,6 +1066,21 @@ def run_preview_peak_bitrate(args):
     """Worker-thread body for Preview Peak Bitrate. Returns the args too, so the GUI can keep
     the depth model this run loaded (same reuse as test_quick_preview())."""
     return preview_peak_bitrate(args.input, args), args
+
+
+class _StandaloneOutputBox(wx.TextCtrl):
+    """ADR-356: the shared Standalone Tools output box (txt_standalone_log). Every
+    AppendText() also goes to `mirror` (the main tab's Output panel), so live standalone
+    messages show there too. SetValue() is deliberately not mirrored: tools use it to
+    replace the box with a whole run's text, and that full text reaches the Output panel
+    once, with a run header, from _write_standalone_job_log(). Mirroring SetValue as well
+    would show every run's text twice."""
+    mirror = None
+
+    def AppendText(self, text):
+        super().AppendText(text)
+        if self.mirror is not None:
+            self.mirror(text)
 
 
 class MainFrame(wx.Frame):
@@ -4571,21 +4586,9 @@ class MainFrame(wx.Frame):
         # asks, delivered directly: opt-in checkbox, saved to the output folder, and (since
         # it's wired through build_command()/apply_parsed_args_to_gui() the same as every
         # other checkbox here) automatically included whenever a preset is saved.
-        self.chk_write_job_log = wx.CheckBox(
-            self.grp_postprocess, label=T("Write a Log File for This Job"),
-            name="chk_write_job_log")
-        self.chk_write_job_log.SetValue(False)
-        self.chk_write_job_log.SetToolTip(
-            T("What it's for: saves everything this job prints -- every stage, warning, and note "
-              "from the main conversion and every post-processing step below (Upscale, RIFE, "
-              "Restore Audio & Subtitles, Convert to MVC, ...) -- into a real text file next to the "
-              "output, named '<output name>_log.txt'. Lets you check what actually happened with a "
-              "specific job later, even after this window's own on-screen output has moved on to a "
-              "different job, or the app has been closed and reopened entirely.\n"
-              "Con: one small extra text file per job -- never affects the converted video/audio "
-              "itself in any way.\n"
-              "Recommended: on if you convert enough movies that you'd otherwise lose track of which "
-              "settings/warnings applied to which file."))
+        # ADR-356: the "Write a Log File for This Job" tick box is gone -- a job log is
+        # now always written (see _process_video_with_job_log() / run_iw3_main_with_job_log()
+        # in utils.py, the GUI always passes write_job_log=True from parse_args()).
 
         layout = wx.GridBagSizer(vgap=5, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -4633,10 +4636,6 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_mvc_allow_lossless_eac3, (j := j + 1, 0), (0, 3),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
 
-        layout.Add((0, 6), (j := j + 1, 0))
-        layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
-        layout.Add((0, 4), (j := j + 1, 0))
-        layout.Add(self.chk_write_job_log, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         sizer_postprocess = wx.StaticBoxSizer(self.grp_postprocess, wx.VERTICAL)
         sizer_postprocess.Add(layout, 1, wx.ALL | wx.EXPAND, 4)
 
@@ -4656,7 +4655,7 @@ class MainFrame(wx.Frame):
         # runs at a time" for free: whichever tool is running owns this one real
         # box until it finishes, exactly like today, just no longer duplicated.
         self.grp_standalone_log = wx.StaticBox(self.tab_tools, label=T("Output"))
-        self.txt_standalone_log = wx.TextCtrl(
+        self.txt_standalone_log = _StandaloneOutputBox(
             self.grp_standalone_log, style=wx.TE_MULTILINE | wx.TE_READONLY,
             size=self.FromDIP((-1, 150)), name="txt_standalone_log")
         self.txt_standalone_log.SetToolTip(
@@ -4665,6 +4664,8 @@ class MainFrame(wx.Frame):
               "Shared by every tool on this tab, since only one of them can ever be running at a "
               "time -- starting a new tool's job always replaces this with that tool's own fresh "
               "output.\n"
+              "Also shown in the Output panel on the main tab (ADR-356): live messages appear there as "
+              "they happen, and the full output appears there when the run finishes.\n"
               "Recommended: check this after any Standalone Tool run, especially one that failed."))
         self.btn_standalone_log_clear = wx.Button(self.grp_standalone_log, label=T("Clear"))
         self.btn_standalone_log_clear.SetToolTip(
@@ -4672,38 +4673,56 @@ class MainFrame(wx.Frame):
               "while a job is running so it can't wipe output you may still be reading mid-run; "
               "re-enabled once the job finishes."))
         self.btn_standalone_log_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_standalone_log.Clear())
-        # ADR-266: real user request -- "Write a Log File for This Job" (main tab) only
-        # ever covered the main conversion's own single run, never a Standalone Tool run
-        # afterward (RIFE, Restore Audio & Subtitles, etc. each launch their own separate
-        # program). One shared checkbox here covers every tool on this tab instead of
-        # adding twelve separate ones -- see _write_standalone_job_log()'s own docstring
-        # for how it picks each tool's own output path.
-        self.chk_standalone_write_job_log = wx.CheckBox(
-            self.grp_standalone_log, label=T("Write a Log File for Standalone Tool Runs"),
-            name="chk_standalone_write_job_log")
-        self.chk_standalone_write_job_log.SetValue(False)
-        self.chk_standalone_write_job_log.SetToolTip(
-            T("What it's for: saves whichever Standalone Tool you run below's own output -- every "
-              "stage, warning, and the exact reason if it failed -- into a real text file next to "
-              "THAT tool's own output file, named '<output name>_log.txt'. Separate from \"Write a "
-              "Log File for This Job\" on the main tab, which only ever covers the main conversion's "
-              "own single run -- RIFE, Restore Audio & Subtitles, and every other tool here run as "
-              "their own separate program, so they need this of their own to get a persistent log.\n"
-              "How it works: applies to whichever tool you run, every time, while checked -- lets you "
-              "check what actually happened with a specific standalone run later, even after this "
-              "box above has moved on to a different tool's output, or the app has been closed and "
-              "reopened entirely.\n"
-              "Con: one small extra text file per run -- never affects the tool's own real output "
-              "file in any way.\n"
-              "Recommended: on if you chain several Standalone Tools together (e.g. RIFE, then "
-              "Restore Audio & Subtitles) and want a record of each step."))
+        # ADR-356: the "Write a Log File for Standalone Tool Runs" tick box is gone -- every
+        # Standalone Tool run now always gets a "<output name>_log.txt" next to its output
+        # (see _write_standalone_job_log()). This box is also mirrored into the main tab's
+        # Output panel below.
         sizer_standalone_log = wx.StaticBoxSizer(self.grp_standalone_log, wx.VERTICAL)
         sizer_standalone_log.Add(self.txt_standalone_log, 1, wx.ALL | wx.EXPAND, 4)
         sizer_standalone_log_row = wx.BoxSizer(wx.HORIZONTAL)
-        sizer_standalone_log_row.Add(self.chk_standalone_write_job_log, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
         sizer_standalone_log_row.AddStretchSpacer(1)
         sizer_standalone_log_row.Add(self.btn_standalone_log_clear, 0, wx.ALL, 4)
         sizer_standalone_log.Add(sizer_standalone_log_row, 0, wx.EXPAND)
+
+        # --- ADR-356: Output panel on the main tab, below the Start row ---
+        # One text box for EVERYTHING 3DECKER does: the main conversion's own messages
+        # (fed by output_panel_scope() in utils.py through self._main_output_sink) and every
+        # Standalone Tool's output (mirrored here by _StandaloneOutputBox and by
+        # _write_standalone_job_log()). Same widget style as the standalone box above.
+        self.grp_main_output = wx.StaticBox(self, label=T("Output"))
+        self.txt_main_output = wx.TextCtrl(
+            self.grp_main_output, style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=self.FromDIP((-1, 150)), name="txt_main_output")
+        self.txt_main_output.SetToolTip(
+            T("What it's for: shows what 3DECKER is doing -- the main 2D-to-3D conversion's own "
+              "messages, warnings and errors, and the output of every Standalone Tool (live messages "
+              "as they happen, the full output when a run finishes). The same lines are saved to the "
+              "run's log file, so what you see here is what gets saved.\n"
+              "Why it's here: a conversion can run for hours, and the progress bar only shows a "
+              "percentage. This box shows the actual reason if something goes wrong.\n"
+              "Log files: every run now always saves a log file, named '<output name>_log.txt', next "
+              "to its output file. This is automatic -- there is no tick box for it any more. It "
+              "records the same lines, plus a start/finish line with the time and the settings used.\n"
+              "Pros: one place to look, nothing to turn on, a saved record of every run.\n"
+              "Con: it keeps growing during a long session -- press Clear to empty it. It shows only "
+              "what 3DECKER itself prints; the live output of helper programs (ffmpeg, RIFE, MVC) while "
+              "they run is not shown here, only the progress bar.\n"
+              "Recommended: leave it visible, and check it first if a job fails."))
+        self.btn_main_output_clear = wx.Button(self.grp_main_output, label=T("Clear"))
+        self.btn_main_output_clear.SetToolTip(
+            T("Empties the Output panel above. It does not delete any log file on disk, and it does "
+              "not touch the Standalone Tools box.\n"
+              "Pros: a clean view before the next job.\n"
+              "Con: whatever you have not copied yet is gone from the panel (the log files still have it).\n"
+              "Recommended: press it before a new job if the panel has grown long."))
+        self.btn_main_output_clear.Bind(wx.EVT_BUTTON, lambda event: self.txt_main_output.Clear())
+        self.sizer_main_output = wx.StaticBoxSizer(self.grp_main_output, wx.VERTICAL)
+        self.sizer_main_output.Add(self.txt_main_output, 1, wx.ALL | wx.EXPAND, 4)
+        sizer_main_output_row = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_main_output_row.AddStretchSpacer(1)
+        sizer_main_output_row.Add(self.btn_main_output_clear, 0, wx.ALL, 4)
+        self.sizer_main_output.Add(sizer_main_output_row, 0, wx.EXPAND)
+        self.txt_standalone_log.mirror = self._append_main_output
 
         # --- standalone utility: retroactive DV/HDR RPU reinjection (ADR-031) ---
         # NOT part of the main conversion pipeline -- a separate tool that takes an
@@ -8216,6 +8235,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.pnl_file_option, 0, wx.ALL | wx.EXPAND, 4)
         layout.Add(self.pnl_options, 1, wx.ALL | wx.EXPAND, 8)
         layout.Add(self.pnl_process, 0, wx.ALL | wx.EXPAND, 8)
+        layout.Add(self.sizer_main_output, 0, wx.ALL | wx.EXPAND, 8)
         self.SetSizer(layout)
 
         # bind
@@ -10805,22 +10825,21 @@ class MainFrame(wx.Frame):
             dlg.ShowModal()
 
     def _write_standalone_job_log(self, tool_label, output_path, log_text):
-        """ADR-266: real user request -- "Write a Log File for This Job" (main tab) only
-        ever covered the main conversion's own single run; every Standalone Tool (RIFE,
-        Restore Audio & Subtitles, etc.) launches its own separate program and was never
-        covered at all. Mirrors utils.py's own _job_log_path() naming ("<output>_log.txt"
-        next to the real output file) so both kinds of log land in the same familiar
-        place, but lives here in gui.py rather than utils.py since every Standalone Tool
-        is always launched from the GUI as its own subprocess -- there is no CLI-only
-        entry point for any of them that would need this too.
+        """ADR-266: every Standalone Tool (RIFE, Restore Audio & Subtitles, etc.) launches
+        its own separate program, so each one gets its own "<output>_log.txt" next to the
+        real output file, same naming as utils.py's _job_log_path(). Lives here in gui.py
+        rather than utils.py since every Standalone Tool is launched from the GUI.
 
-        No-ops silently if the checkbox is off, or if `output_path` is blank (nothing
-        was actually configured to run against yet) -- never raises up into a caller's
-        own exit-handler flow; a failed log write is reported to stderr (reaches the
-        shared Standalone Tools output box next run) and otherwise ignored, exactly
-        like utils.py's own version does for the main job's log."""
-        if not self.chk_standalone_write_job_log.GetValue():
-            return
+        ADR-356: always on -- the "Write a Log File for Standalone Tool Runs" tick box is
+        gone. The same run block is also appended to the main tab's Output panel, so the
+        panel and the log file show identical lines (with the same run header line).
+
+        Never raises up into a caller's exit-handler flow. A blank `output_path` (nothing
+        configured to run against) skips only the file, not the panel. A failed file
+        write is reported to stderr (reaches the Output panel) and otherwise ignored."""
+        run_block = (f"\n---- {tool_label} run {datetime.now().isoformat(timespec='seconds')} ----\n"
+                     + (log_text.replace("\r", "\n") if log_text else "") + "\n")
+        self._append_main_output(run_block)
         output_path = (output_path or "").strip()
         if not output_path:
             return
@@ -10829,12 +10848,23 @@ class MainFrame(wx.Frame):
         try:
             os.makedirs(path.dirname(log_path) or ".", exist_ok=True)
             with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"\n---- {tool_label} run {datetime.now().isoformat(timespec='seconds')} ----\n")
-                f.write(log_text.replace("\r", "\n") if log_text else "")
-                f.write("\n")
+                f.write(run_block)
             print(f"[iw3] Standalone job log written: {log_path}", file=sys.stderr)
-        except OSError as e:
+        except Exception as e:
             print(f"[iw3] Could not write standalone job log ({log_path}): {e}", file=sys.stderr)
+
+    def _append_main_output(self, text):
+        """ADR-356: appends to the main tab's Output panel and keeps it scrolled to the
+        newest line. GUI thread only -- worker threads go through _main_output_sink()."""
+        self.txt_main_output.AppendText(text)
+        self.txt_main_output.ShowPosition(self.txt_main_output.GetLastPosition())
+
+    def _main_output_sink(self, text):
+        """ADR-356: thread-safe entry point for the Output panel, passed to the job as
+        args.state["output_sink"]. The job runs on a worker thread, so the write is
+        deferred to the GUI thread with wx.CallAfter (same pattern as the other
+        worker-to-GUI updates in this file)."""
+        wx.CallAfter(self._append_main_output, text)
 
     def scene_auto_ema_gate_ok(self):
         """`Auto EMA by Scene Length` is meaningless without scene boundaries to key
@@ -11331,7 +11361,7 @@ class MainFrame(wx.Frame):
             mvc_fill_mode=self.cbo_mvc_fill_mode.GetClientData(self.cbo_mvc_fill_mode.GetSelection()) or "fit",
             mvc_allow_lossless_eac3_on_disc=self.chk_mvc_allow_lossless_eac3.GetValue(),
             mvc_makemkv_to_mkv=self.chk_mvc_makemkv_to_mkv.GetValue(),
-            write_job_log=self.chk_write_job_log.GetValue(),
+            write_job_log=True,  # ADR-356: always on in the GUI, no tick box
             scene_detect=scene_detect,
             disable_scene_cache=disable_scene_cache,
 
@@ -11413,7 +11443,8 @@ class MainFrame(wx.Frame):
                 suspend_event=self.suspend_event,
                 tqdm_fn=functools.partial(TQDMGUI, self),
                 stage_fn=functools.partial(_post_stage_change, self),
-                depth_model=self.depth_model)
+                depth_model=self.depth_model,
+                output_sink=self._main_output_sink)
         return args
 
     def _compute_job_stages(self, args):
@@ -12736,7 +12767,6 @@ class MainFrame(wx.Frame):
         self.update_mvc_allow_lossless_eac3()
         self.update_mvc_fill_mode()
         self.update_mvc_makemkv_to_mkv()
-        self.chk_write_job_log.SetValue(bool(getattr(args, "write_job_log", False)))
 
         self.chk_scene_detect.SetValue(bool(args.scene_detect))
         self.chk_scene_detect_cache.SetValue(not args.disable_scene_cache)
@@ -13410,7 +13440,8 @@ class MainFrame(wx.Frame):
                 # ensure_cuda_context() already ran at the top of this function,
                 # before parse_args() -- see ADR-218. Left out here (idempotent,
                 # harmless if called twice), do not add it back.
-                preview_args = iw3_main(preview_args)
+                with output_panel_scope(preview_args):
+                    preview_args = iw3_main(preview_args)
                 self.depth_model = preview_args.state["depth_model"]
                 self.depth_model_type = preview_args.depth_model
                 self.depth_model_device_id = preview_args.gpu
@@ -18043,16 +18074,20 @@ def _self_test_field_change_keeps_scroll_position():
     Also checks focus: moving focus to a control that is already fully visible must not
     move the view (focus was not the cause, but it is the everyday action the report
     describes, so it is kept as a guard). Simulates a 400px-wide screen so the scroll range
-    really exists. The simulated screen matches the test window's own size (300x1000) so
+    really exists. The simulated screen matches the test window's own size (see ADR-356 below) so
     the clamp returns the frame to exactly the width it had: the scroll range is then
-    unchanged and the origin must come back exactly, not merely clamped to a new maximum."""
+    unchanged and the origin must come back exactly, not merely clamped to a new maximum.
+    ADR-356: the simulated window is 300x1300 (was 300x1000). The Output panel added below
+    the Start row takes about 200px of height, which left the tab area under the 100px
+    viewport floor this test checks for at 1000px. The taller height only gives the tab area
+    back its room; the horizontal scroll being tested is unchanged."""
     import iw3.gui as gui_mod
     from unittest import mock
 
     orig_load = gui_mod._load_layout_mode
     app = wx.App()
     frame = None
-    small_area = wx.Rect(0, 0, 300, 1040)
+    small_area = wx.Rect(0, 0, 300, 1340)
     with mock.patch.object(wx.Display, "GetClientArea", return_value=small_area):
         try:
             gui_mod._load_layout_mode = lambda config_path: gui_mod.LAYOUT_MODE_TABS
@@ -18064,7 +18099,7 @@ def _self_test_field_change_keeps_scroll_position():
             wx.SafeYield()
 
             wrap = frame.tab_wrap_stereo
-            frame.SetSize((300, 1000))
+            frame.SetSize((300, 1300))
             frame.Layout()
             wx.SafeYield()
             width_before = frame.GetSize().width
@@ -27302,36 +27337,27 @@ def _self_test_stereo_tag_survives_post_steps():
 
 
 def _self_test_write_job_log_checkbox():
-    """ADR-256: real user request -- "have it write a log file for each job into
-    the output folder... maybe even make it optional and that option could be
-    saved with your presets." Confirms the new checkbox exists/parented/defaults
-    off, and get_cli_command() round-trips --write-job-log correctly in both
-    directions -- the same round trip presets themselves rely on, so "saved with
-    your presets" is automatic, not a separate thing to build."""
+    """ADR-256 added the "Write a Log File for This Job" tick box (default off). ADR-356
+    removed it: a job log is always written in the GUI. Adapted expectation (the old
+    checkbox assertions are obsolete): the tick box no longer exists, parse_args() always
+    sets write_job_log=True, and get_cli_command() carries --write-job-log so a command-line
+    rerun of the same settings writes the same log."""
     app = None
     frame = None
     try:
         app = wx.App()
         frame = MainFrame()
 
-        assert frame.chk_write_job_log.GetParent() is frame.grp_postprocess
-        assert frame.chk_write_job_log.GetValue() is False
+        assert not hasattr(frame, "chk_write_job_log")
 
         frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
         frame.pnl_file.set_output_path("C:\\test output dir")
 
-        args_off = frame.parse_args(skip_set_state=True)
-        assert args_off.write_job_log is False
+        args = frame.parse_args(skip_set_state=True)
+        assert args.write_job_log is True
 
-        frame.chk_write_job_log.SetValue(True)
-        args_on = frame.parse_args(skip_set_state=True)
-        assert args_on.write_job_log is True
-
-        command_on = frame.get_cli_command()
-        assert "--write-job-log" in command_on, command_on
-        frame.chk_write_job_log.SetValue(False)
-        command_off = frame.get_cli_command()
-        assert "--write-job-log" not in command_off, command_off
+        command = frame.get_cli_command()
+        assert "--write-job-log" in command, command
     finally:
         if frame is not None:
             frame.Destroy()
@@ -27364,25 +27390,20 @@ def _self_test_standalone_write_job_log():
         app = wx.App()
         frame = MainFrame()
 
-        assert frame.chk_standalone_write_job_log.GetParent() is frame.grp_standalone_log
-        assert frame.chk_standalone_write_job_log.GetValue() is False
+        # ADR-356: the tick box is gone, so there is no "off" state any more -- adapted
+        # expectation: a real output path always gets a log file (see the next block).
+        assert not hasattr(frame, "chk_standalone_write_job_log")
 
         with tempfile.TemporaryDirectory(prefix="iw3_standalone_log_selftest_") as tmpdir:
             out_path = path.join(tmpdir, "movie_3D.mkv")
             log_path = path.join(tmpdir, "movie_3D_log.txt")
 
-            # off (default): no file, regardless of a real path being given.
-            frame._write_standalone_job_log("Sharpen", out_path, "some real output text")
-            assert not path.exists(log_path), "must not write anything while the checkbox is off"
-
-            frame.chk_standalone_write_job_log.SetValue(True)
-
-            # on, but blank output path (nothing configured yet) -> still no file, no crash.
+            # blank output path (nothing configured yet) -> no file, no crash.
             frame._write_standalone_job_log("Sharpen", "", "text")
             frame._write_standalone_job_log("Sharpen", "   ", "text")
             assert not path.exists(log_path)
 
-            # on, real path -> a real file, containing the tool label and the real text.
+            # real path -> a real file, containing the tool label and the real text.
             frame._write_standalone_job_log("Sharpen", out_path, "first run output")
             assert path.exists(log_path)
             content = open(log_path, encoding="utf-8").read()
@@ -27402,6 +27423,220 @@ def _self_test_standalone_write_job_log():
             app.Destroy()
 
     print("_self_test_standalone_write_job_log: PASS")
+
+
+def _self_test_output_panel_main_run_lines():
+    """ADR-356: lines printed by the main conversion appear in the Output panel on the main
+    tab, and in the job log, each exactly once. Synthetic: iw3_main() is replaced by a fake
+    that prints, but run_iw3_main_with_job_log() is real, fed the GUI's own parse_args()
+    output with the real sink (no GPU, no real movie)."""
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        with tempfile.TemporaryDirectory(prefix="iw3_output_panel_selftest_") as tmpdir:
+            frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+            frame.pnl_file.set_output_path(tmpdir)
+            args = frame.parse_args(skip_set_state=True)
+            args.video_extension = ".mkv"  # normally set by set_state_args(); needed for the folder-output log name
+            args.state = {"output_sink": frame._main_output_sink}
+
+            def fake_iw3_main(a):
+                print("PANEL_TEST_STEP_ONE")
+                print("PANEL_TEST_WARNING", file=sys.stderr)
+                return a
+
+            with mock.patch.object(U, "iw3_main", side_effect=fake_iw3_main):
+                U.run_iw3_main_with_job_log(args)
+            wx.SafeYield()
+
+            panel_text = frame.txt_main_output.GetValue()
+            assert panel_text.count("PANEL_TEST_STEP_ONE") == 1, panel_text
+            assert panel_text.count("PANEL_TEST_WARNING") == 1, panel_text
+            assert "iw3 job started" in panel_text and "iw3 job finished" in panel_text, panel_text
+
+            logs = [f for f in os.listdir(tmpdir) if f.endswith("_log.txt")]
+            assert len(logs) == 1, logs
+            log_text = open(path.join(tmpdir, logs[0]), encoding="utf-8").read()
+            assert log_text.count("PANEL_TEST_STEP_ONE") == 1, log_text
+            assert "iw3 job started" in log_text, log_text
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_output_panel_main_run_lines: PASS")
+
+
+def _self_test_output_panel_standalone_lines():
+    """ADR-356: a Standalone Tool's output reaches the same Output panel as well as its own
+    log file. Live AppendText() on the shared box is mirrored at once; a finished run's text
+    is appended with its run header (same text as the log file). SetValue() is not mirrored
+    (it would show each run's text twice)."""
+    import tempfile
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        with tempfile.TemporaryDirectory(prefix="iw3_output_panel_standalone_selftest_") as tmpdir:
+            out_path = path.join(tmpdir, "movie_3D.mkv")
+            log_path = path.join(tmpdir, "movie_3D_log.txt")
+
+            frame.txt_standalone_log.AppendText("STANDALONE_LIVE_LINE\n")
+            assert frame.txt_main_output.GetValue().count("STANDALONE_LIVE_LINE") == 1
+            assert frame.txt_standalone_log.GetValue().count("STANDALONE_LIVE_LINE") == 1
+
+            frame.txt_standalone_log.SetValue("STANDALONE_SETVALUE_ONLY")
+            assert "STANDALONE_SETVALUE_ONLY" not in frame.txt_main_output.GetValue()
+
+            frame._write_standalone_job_log("Sharpen", out_path, "SHARPEN_RUN_LINE_A\nSHARPEN_RUN_LINE_B")
+            panel_text = frame.txt_main_output.GetValue()
+            assert "---- Sharpen run " in panel_text, panel_text
+            assert panel_text.count("SHARPEN_RUN_LINE_A") == 1, panel_text
+            log_text = open(log_path, encoding="utf-8").read()
+            assert "SHARPEN_RUN_LINE_A" in log_text and "SHARPEN_RUN_LINE_B" in log_text, log_text
+            assert "---- Sharpen run " in log_text, log_text
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_output_panel_standalone_lines: PASS")
+
+
+def _self_test_job_log_always_on():
+    """ADR-356: a job log is written for every run with no tick box and no Output panel
+    needed. Runs the real run_iw3_main_with_job_log() with a GUI-built args object that has
+    no sink at all (command-line-like state), and checks "<output>_log.txt" appears next to
+    the explicit output file, with the start/finish markers."""
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        with tempfile.TemporaryDirectory(prefix="iw3_job_log_always_on_selftest_") as tmpdir:
+            frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+            frame.pnl_file.set_output_path(path.join(tmpdir, "movie_3D.mkv"))
+            args = frame.parse_args(skip_set_state=True)
+            assert args.write_job_log is True
+            args.state = {}
+
+            with mock.patch.object(U, "iw3_main", side_effect=lambda a: a):
+                U.run_iw3_main_with_job_log(args)
+
+            log_path = path.join(tmpdir, "movie_3D_log.txt")
+            assert path.exists(log_path), os.listdir(tmpdir)
+            log_text = open(log_path, encoding="utf-8").read()
+            assert "iw3 job started" in log_text and "iw3 job finished" in log_text, log_text
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_job_log_always_on: PASS")
+
+
+def _self_test_job_log_write_failure_does_not_raise():
+    """ADR-356 (CS-IO-001 log rule): a log file that cannot be written must never raise into
+    the job. Synthetic: a regular FILE is placed where the log's folder would be, so the
+    log's makedirs() fails. The job must still run and return, and the Output panel must
+    still receive the job's own printed lines. The standalone log write must also not raise."""
+    import tempfile
+    from unittest import mock
+    from . import utils as U
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        with tempfile.TemporaryDirectory(prefix="iw3_job_log_fail_selftest_") as tmpdir:
+            blocker = path.join(tmpdir, "blocker")
+            with open(blocker, "w", encoding="utf-8") as f:
+                f.write("not a folder")
+            out_path = path.join(blocker, "movie_3D.mkv")
+
+            frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+            frame.pnl_file.set_output_path(out_path)
+            args = frame.parse_args(skip_set_state=True)
+            args.state = {"output_sink": frame._main_output_sink}
+
+            calls = []
+
+            def fake_iw3_main(a):
+                calls.append(a)
+                print("PANEL_TEST_SURVIVES_LOG_FAILURE")
+                return a
+
+            with mock.patch.object(U, "iw3_main", side_effect=fake_iw3_main):
+                result = U.run_iw3_main_with_job_log(args)
+            wx.SafeYield()
+            assert calls and result is args, calls
+            assert "PANEL_TEST_SURVIVES_LOG_FAILURE" in frame.txt_main_output.GetValue()
+
+            frame._write_standalone_job_log("Sharpen", out_path, "text that cannot be saved")
+            wx.SafeYield()
+            assert "text that cannot be saved" in frame.txt_main_output.GetValue()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_job_log_write_failure_does_not_raise: PASS")
+
+
+def _self_test_output_panel_worker_thread():
+    """ADR-356: the job runs on a worker thread, so the Output panel must accept lines from
+    a non-GUI thread without error and show every one of them. Two threads, 25 lines each."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        errors = []
+        sink = frame._main_output_sink
+
+        def worker(tag):
+            try:
+                for i in range(25):
+                    sink(f"PANEL_WORKER_{tag}_{i}\n")
+            except Exception as e:  # noqa
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(tag,)) for tag in ("A", "B")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for _ in range(3):
+            wx.SafeYield()
+        assert not errors, errors
+        text = frame.txt_main_output.GetValue()
+        assert text.count("PANEL_WORKER_") == 50, text.count("PANEL_WORKER_")
+        assert "PANEL_WORKER_A_24" in text and "PANEL_WORKER_B_24" in text, text
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_output_panel_worker_thread: PASS")
 
 
 def _self_test_audio_subtitle_restore_dual_eye_flag():
@@ -31227,6 +31462,11 @@ def _run_self_tests():
         _self_test_default_depth_model_is_any_v3_mono,
         _self_test_write_job_log_checkbox,
         _self_test_standalone_write_job_log,
+        _self_test_output_panel_main_run_lines,
+        _self_test_output_panel_standalone_lines,
+        _self_test_job_log_always_on,
+        _self_test_job_log_write_failure_does_not_raise,
+        _self_test_output_panel_worker_thread,
         _self_test_run_iw3_main_with_job_log,
         _self_test_job_log_path_folder_output,
         _self_test_process_video_with_job_log_per_movie,

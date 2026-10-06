@@ -177,6 +177,21 @@ if (Test-Path (Join-Path $nunifDir ".git")) {
 }
 
 # ---------------------------------------------------------------------------
+Write-Step "Python libs + include folders (needed by MoGe-3 / Triton's compiler)"
+
+# The embeddable Python zip has no libs\ or include\ folders. Lives in nunif\ (so it
+# can only run after the clone above), and is non-fatal: only the MoGe-3 depth model
+# needs these, so a failed download must not fail the whole install. See the script's
+# own header for the full reason.
+. (Join-Path $nunifDir "windows_package\install_python_dev_files.ps1")
+try {
+    Install-PythonDevFiles -PythonDir $pythonDir -TmpDir $tmpDir
+} catch {
+    Write-Host "  Python libs/include update FAILED -- $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  MoGe-3 depth model will fail until this is fixed. Re-run setup (or update) to retry." -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
 Write-Step "Torch variant"
 
 # Real user report (fresh install, RTX 50-series GPU): auto-detect failed because

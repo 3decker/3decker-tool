@@ -45,6 +45,12 @@ if not exist "%NUNIF_DIR%" (
 @rem update update-installer.bat
 copy /y "%NUNIF_DIR%\windows_package\update-installer.bat" "%~dp0\update-installer.bat"
 
+@rem Adds python\libs and python\include (needed by MoGe-3 / Triton's compiler). The
+@rem embeddable Python zip does not ship them, and existing installs never re-run
+@rem :install_python, so this runs on every update. Idempotent (no-op once present) and
+@rem deliberately NOT fatal -- only the optional MoGe-3 depth model needs them.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%NUNIF_DIR%\windows_package\install_python_dev_files.ps1"
+
 @rem Real bug fixed here (2026-09-22): a working GTX 1060 (Pascal) install broke
 @rem after an update because this step used to always pull the plain,
 @rem hardcoded requirements-torch.txt (pinned to cu130), which does not

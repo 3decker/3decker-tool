@@ -19,6 +19,8 @@ it matters.
 
 **Improved: the Output panel and the log file now also show what the helper programs print during a main conversion (ffmpeg, RIFE, MVC, Dolby Vision and the bitrate step).** Before, you only saw their progress bars. The progress bars still work exactly as before, and the constant percentage and frame-counter lines are left out so the panel stays readable.
 
+**Fixed: the MoGe-3 depth model could crash on a fresh install.** Some installs were missing two Python folders (libs and include) that a part of the MoGe-3 model needs while it runs. Setup and Update now add them automatically, and existing installs get them the next time you update.
+
 ## Update — October 4, 2026
 
 **Changed: the default Depth Model is now Any_V3_Mono.** A fresh start (no saved settings yet) now begins with Any_V3_Mono instead of ZoeD_Any_N. It is the sharpest choice for single photos, but it has no memory between video frames, so for video turn on EMA smoothing or pick a VDA_* model. Your saved settings are not changed. The model downloads automatically the first time you use it.

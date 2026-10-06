@@ -105,6 +105,13 @@ pushd "%NUNIF_DIR%" && python -m iw3.install_mvc_tools & popd
 @rem so a flaky ffmpeg/MKVToolNix download can never fail the whole update.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%NUNIF_DIR%\windows_package\install_media_tools.ps1"
 
+@rem Adds python\libs and python\include (needed by MoGe-3 / Triton's compiler). The
+@rem embeddable Python zip does not ship them, and existing installs never run
+@rem install_python, so this is how they get them. This is the GUI's own update path,
+@rem so it is the one that actually reaches existing installs. Idempotent (no-op once
+@rem present) and deliberately NOT fatal, same as the media tools call above.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%NUNIF_DIR%\windows_package\install_python_dev_files.ps1"
+
 
 @rem warmup, create pyc
 pushd "%NUNIF_DIR%" && python -m iw3.gui --help > nul && popd

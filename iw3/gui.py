@@ -31309,6 +31309,202 @@ def _self_test_help_buttons_all_tabs():
     print("_self_test_help_buttons_all_tabs: PASS")
 
 
+def _self_test_helper_text_capture_after():
+    """ADR-357: a captured helper's own text reaches the Output panel sink and the job log exactly once each.
+    Progress noise is dropped, and the caller still gets the untouched stdout/stderr and return code.
+    Synthetic child process only -- no GPU, no real media."""
+    import types
+    import tempfile
+    from . import utils as U
+    child = (
+        "import sys\n"
+        "print('IW3_TEST_PROGRESS 1 2')\n"
+        "print('HELPER_TEST_STDOUT_LINE')\n"
+        "print('frame=  10 fps=0.0 time=00:00:01.00', file=sys.stderr)\n"
+        "print('HELPER_TEST_WARNING', file=sys.stderr)\n"
+    )
+    collected = []
+    with tempfile.TemporaryDirectory(prefix="iw3_helper_text_selftest_") as tmpdir:
+        log_path = path.join(tmpdir, "job_log.txt")
+        args = types.SimpleNamespace(state={"output_sink": collected.append})
+        with U.output_panel_scope(args), U._job_log_scope(args, log_path, "in.mkv", "out.mkv"):
+            result = U._run_captured_helper([sys.executable, "-c", child], check=True)
+        panel_text = "".join(collected)
+        with open(log_path, encoding="utf-8") as f:
+            log_text = f.read()
+    for text, label in ((panel_text, "panel"), (log_text, "log")):
+        assert text.count("HELPER_TEST_STDOUT_LINE") == 1, (label, text)
+        assert text.count("HELPER_TEST_WARNING") == 1, (label, text)
+        assert "IW3_TEST_PROGRESS" not in text and "frame=" not in text, (label, text)
+    assert result.returncode == 0, result.returncode
+    assert result.stdout.replace(b"\r\n", b"\n") == b"IW3_TEST_PROGRESS 1 2\nHELPER_TEST_STDOUT_LINE\n", result.stdout
+    assert b"frame=  10" in result.stderr, result.stderr
+
+    print("_self_test_helper_text_capture_after: PASS")
+
+
+def _self_test_helper_text_streaming():
+    """ADR-357: lines a streaming helper prints are mirrored as they arrive (RIFE's
+    _run_cli_with_progress and MVC's _run_mvc_with_progress): the text reaches the panel sink exactly once, the
+    progress lines still drive the bar, and the returned stderr text is untouched. Synthetic child process only."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    class _FakeBar:
+        updates = []
+
+        def __init__(self, **kw):
+            pass
+
+        def update(self, n):
+            _FakeBar.updates.append(n)
+
+        def close(self, *a, **kw):
+            pass
+
+    def fake_tqdm(**kw):
+        return _FakeBar(**kw)
+
+    rife_child = (
+        "import sys\n"
+        "print('IW3_TEST_PROGRESS 1 2', flush=True)\n"
+        "print('HELPER_TEST_STREAM_LINE', flush=True)\n"
+        "print('IW3_TEST_PROGRESS 2 2', flush=True)\n"
+        "print('HELPER_TEST_STREAM_ERR', file=sys.stderr, flush=True)\n"
+    )
+    collected = []
+    args = types.SimpleNamespace(state={"tqdm_fn": fake_tqdm, "stop_event": None, "output_sink": collected.append})
+    with U.output_panel_scope(args):
+        code, err, cancelled = U._run_cli_with_progress([sys.executable, "-c", rife_child], ".", args,
+                                                        "IW3_TEST_PROGRESS", "test bar")
+    panel_text = "".join(collected)
+    assert code == 0 and not cancelled, (code, cancelled)
+    assert sum(_FakeBar.updates) == 2, _FakeBar.updates
+    assert panel_text.count("HELPER_TEST_STREAM_LINE") == 1, panel_text
+    assert panel_text.count("HELPER_TEST_STREAM_ERR") == 1, panel_text
+    assert "IW3_TEST_PROGRESS" not in panel_text, panel_text
+    assert "HELPER_TEST_STREAM_ERR" in err, err
+
+    _FakeBar.updates = []
+    mvc_child = (
+        "import sys\n"
+        "print('IW3_MVC_PROGRESS encode 1 2', flush=True)\n"
+        "print('HELPER_MVC_STREAM_LINE', flush=True)\n"
+        "print('IW3_MVC_PROGRESS encode 2 2', flush=True)\n"
+        "print('HELPER_MVC_STREAM_ERR', file=sys.stderr, flush=True)\n"
+    )
+    collected = []
+    args = types.SimpleNamespace(state={"tqdm_fn": fake_tqdm, "stop_event": None, "output_sink": collected.append})
+    with U.output_panel_scope(args):
+        result = U._run_mvc_with_progress([sys.executable, "-c", mvc_child], ".", args)
+    panel_text = "".join(collected)
+    assert result.returncode == 0, result.returncode
+    assert sum(_FakeBar.updates) == 1000, _FakeBar.updates
+    assert panel_text.count("HELPER_MVC_STREAM_LINE") == 1, panel_text
+    assert panel_text.count("HELPER_MVC_STREAM_ERR") == 1, panel_text
+    assert "IW3_MVC_PROGRESS" not in panel_text, panel_text
+    assert b"HELPER_MVC_STREAM_ERR" in result.stderr, result.stderr
+
+    print("_self_test_helper_text_streaming: PASS")
+
+
+def _self_test_helper_text_no_sink_unchanged():
+    """ADR-357: with no Output panel sink and no job log, a captured helper runs exactly as before -- the same
+    subprocess.run() call, the same result object, and nothing extra printed. Mocked subprocess, no real process."""
+    import io
+    import contextlib
+    from unittest import mock
+    from . import utils as U
+    cmd = ["fake_helper", "--flag"]
+    fake_result = subprocess.CompletedProcess(cmd, 0, b"HELPER_OUT\n", b"HELPER_ERR\n")
+    buf = io.StringIO()
+    with mock.patch.object(U.subprocess, "run", return_value=fake_result) as run_mock, \
+            contextlib.redirect_stderr(buf):
+        result = U._run_captured_helper(cmd, check=True, cwd="C:/x")
+        U._forward_helper_text("should not appear", cmd)
+    assert result is fake_result
+    run_mock.assert_called_once_with(cmd, capture_output=True, check=True, cwd="C:/x")
+    assert buf.getvalue() == "", repr(buf.getvalue())
+
+    print("_self_test_helper_text_no_sink_unchanged: PASS")
+
+
+def _self_test_helper_text_failure_forwarded_and_reraised():
+    """ADR-357: when a captured helper fails, its text is still mirrored to the panel, and the very same
+    CalledProcessError reaches the caller unchanged (the caller's error handling still runs)."""
+    import types
+    from unittest import mock
+    from . import utils as U
+    cmd = ["fake_helper"]
+    failure = subprocess.CalledProcessError(2, cmd, b"HELPER_FAIL_OUT\n", b"HELPER_FAIL_ERR\n")
+    collected = []
+    args = types.SimpleNamespace(state={"output_sink": collected.append})
+    with mock.patch.object(U.subprocess, "run", side_effect=failure):
+        with U.output_panel_scope(args):
+            try:
+                U._run_captured_helper(cmd, check=True)
+                raise AssertionError("expected CalledProcessError")
+            except subprocess.CalledProcessError as e:
+                assert e is failure
+    panel_text = "".join(collected)
+    assert panel_text.count("HELPER_FAIL_OUT") == 1, panel_text
+    assert panel_text.count("HELPER_FAIL_ERR") == 1, panel_text
+
+    print("_self_test_helper_text_failure_forwarded_and_reraised: PASS")
+
+
+def _self_test_helper_text_sink_failure_never_raises():
+    """ADR-357: a sink that raises must never break the job -- the helper still runs and returns normally."""
+    import types
+    from . import utils as U
+
+    def broken_sink(text):
+        raise RuntimeError("sink down")
+
+    args = types.SimpleNamespace(state={"output_sink": broken_sink})
+    with U.output_panel_scope(args):
+        result = U._run_captured_helper([sys.executable, "-c", "print('HELPER_SINK_TEST')"], check=True)
+        U._forward_helper_text("still no raise", [sys.executable])
+    assert result.returncode == 0, result.returncode
+
+    print("_self_test_helper_text_sink_failure_never_raises: PASS")
+
+
+def _self_test_helper_text_filter_rules():
+    """ADR-357: progress noise is dropped (IW3 progress lines, ffmpeg -progress key=value and stats lines, ffmpeg
+    banner and stream listing, mkvmerge percent, tqdm bars, carriage-return redraws), consecutive duplicates are
+    collapsed, and warnings and errors always come through."""
+    import types
+    from . import utils as U
+    text = (
+        "ffmpeg version 7.0 Copyright (c) 2000-2024\n"
+        "  configuration: --enable-x\n"
+        "  libavutil      59. 39.100 / 59. 39.100\n"
+        "Input #0, matroska,webm, from 'in.mkv':\n"
+        "  Stream #0:0: Video: h264\n"
+        "Press [q] to stop\n"
+        "out_time_ms=1000\n"
+        "progress=continue\n"
+        "frame=  100 fps=25.0 q=-0.0 size=N/A time=00:00:04.00 bitrate=N/A speed=1.2x\n"
+        "  45%|####| 12/340 [00:05<00:10,  3.1it/s]\n"
+        "IW3_RIFE_PROGRESS 1 2\n"
+        "Progress: 10%\rProgress: 20%\rkept after cr\n"
+        "dup line\ndup line\n"
+        "[Error] real problem: boom\n"
+        "Warning: keep me\n"
+    )
+    collected = []
+    args = types.SimpleNamespace(state={"output_sink": collected.append})
+    with U.output_panel_scope(args):
+        U._forward_helper_text(text, ["ffmpeg", "-y"])
+    lines = [ln for ln in "".join(collected).splitlines() if ln.strip()]
+    assert lines == ["[ffmpeg] kept after cr", "[ffmpeg] dup line",
+                     "[ffmpeg] [Error] real problem: boom", "[ffmpeg] Warning: keep me"], lines
+
+    print("_self_test_helper_text_filter_rules: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -31467,6 +31663,12 @@ def _run_self_tests():
         _self_test_job_log_always_on,
         _self_test_job_log_write_failure_does_not_raise,
         _self_test_output_panel_worker_thread,
+        _self_test_helper_text_capture_after,
+        _self_test_helper_text_streaming,
+        _self_test_helper_text_no_sink_unchanged,
+        _self_test_helper_text_failure_forwarded_and_reraised,
+        _self_test_helper_text_sink_failure_never_raises,
+        _self_test_helper_text_filter_rules,
         _self_test_run_iw3_main_with_job_log,
         _self_test_job_log_path_folder_output,
         _self_test_process_video_with_job_log_per_movie,

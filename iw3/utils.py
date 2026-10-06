@@ -263,6 +263,63 @@ class _StageBar:
         self.bar = None
 
 
+# ADR-357: the text a helper program prints (ffmpeg, RIFE, MVC, DV tools...) is mirrored into the
+# job log and the GUI Output panel. These lines are progress noise and are never mirrored: the
+# IW3_*_PROGRESS lines the callers parse, ffmpeg's -progress key=value lines, mkvmerge's
+# "Progress: N%", tqdm bars, and ffmpeg's startup banner and stream listing. Warnings and errors
+# are never matched by these, so they always come through.
+_HELPER_NOISE_RE = re.compile(
+    r"^IW3_\w*PROGRESS\b"
+    r"|^[a-z][a-z0-9_]*=|^Progress:\s*\d"
+    r"|^(ffmpeg version|built with |configuration:|lib[a-z0-9]+\s+\d+\.|Press \[q\]|mkvmerge v\d|The file is being analyzed)"
+    r"|^(Input #|Output #|Stream mapping:|Stream #|Duration:|Side data:|Chapter|Metadata:)"
+    r"|^(encoder|handler_name|major_brand|minor_version|compatible_brands|creation_time|title|language)\s*:"
+    r"|\d+(\.\d+)?%\||\d+/\d+ \[|\b(it|s)/(it|s)\]")
+
+
+def _helper_tag(cmd):
+    """Short name for a helper in the Output panel: 'iw3.rife_cli' -> 'rife_cli', 'ffmpeg.exe' -> 'ffmpeg'."""
+    if len(cmd) >= 3 and cmd[1] == "-m":
+        return str(cmd[2]).rsplit(".", 1)[-1]
+    return path.splitext(path.basename(str(cmd[0])))[0]
+
+
+def _forward_helper_text(data, cmd):
+    """ADR-357: mirrors text a helper printed (str, bytes, or a single streamed line) into the job log and the
+    GUI Output panel, with progress noise removed (see _HELPER_NOISE_RE). Only acts while this process's stderr
+    is teed (output_panel_scope() / _job_log_scope()), so with no Output panel and no job log it does nothing at
+    all. The caller still gets the untouched text. Never raises -- a failed mirror must never break the job."""
+    if not isinstance(sys.stderr, _TeeStream):
+        return
+    try:
+        text = data.decode(errors="replace") if isinstance(data, bytes) else (data or "")
+        tag = _helper_tag(cmd)
+        last = None
+        for raw in re.split(r"[\r\n]+", text):
+            line = raw.strip()
+            if not line or line == last or _HELPER_NOISE_RE.search(line):
+                continue
+            last = line
+            print(f"[{tag}] {line}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
+def _run_captured_helper(cmd, **kwargs):
+    """subprocess.run(cmd, capture_output=True, **kwargs) with the same arguments, result and exceptions (ADR-357).
+    The only addition: the captured text is mirrored into the job log / Output panel once the helper has
+    finished -- on failure too, just before the CalledProcessError propagates to the caller."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, **kwargs)
+    except subprocess.CalledProcessError as e:
+        _forward_helper_text(e.stdout, cmd)
+        _forward_helper_text(e.stderr, cmd)
+        raise
+    _forward_helper_text(result.stdout, cmd)
+    _forward_helper_text(result.stderr, cmd)
+    return result
+
+
 def _run_watched(cmd, desc, *, total_bytes=0, paths=(), reads=False, check=True, cwd=None):
     """subprocess.run(cmd, check=..., capture_output=True) that also feeds the job's bar in MB: progress is the
     combined size of `paths` (a file the command is writing) or, with reads=True, how many bytes the command has
@@ -270,7 +327,7 @@ def _run_watched(cmd, desc, *, total_bytes=0, paths=(), reads=False, check=True,
     args = _STAGE_ARGS["args"]
     has_bar = args is not None and (getattr(args, "state", None) or {}).get("tqdm_fn") is not None
     if not has_bar or total_bytes <= 0 or not (paths or reads):
-        return subprocess.run(cmd, check=check, capture_output=True, cwd=cwd)
+        return _run_captured_helper(cmd, check=check, cwd=cwd)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
     out, err = [], []
     readers = [threading.Thread(target=lambda: out.append(proc.stdout.read()), daemon=True),
@@ -312,6 +369,8 @@ def _run_watched(cmd, desc, *, total_bytes=0, paths=(), reads=False, check=True,
             r.join(timeout=5)
         bar.close(complete=proc.returncode == 0)
     result = subprocess.CompletedProcess(cmd, proc.returncode, b"".join(out), b"".join(err))
+    _forward_helper_text(result.stdout, cmd)
+    _forward_helper_text(result.stderr, cmd)
     if check and proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
     return result
@@ -329,7 +388,7 @@ def _run_stderr_progress(cmd, cwd, args, desc, forward=False):
     them. Before this they were swallowed and the biggest step of the stereo-aware upscale showed no progress."""
     has_bar = (getattr(args, "state", None) or {}).get("tqdm_fn") is not None
     if not has_bar and not forward:
-        return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
+        return _run_captured_helper(cmd, check=True, cwd=cwd)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
     out = []
     reader = threading.Thread(target=lambda: out.append(proc.stdout.read()), daemon=True)
@@ -360,6 +419,7 @@ def _run_stderr_progress(cmd, cwd, args, desc, forward=False):
                         bar = _StageBar(args, desc, total, "frames")
                     bar.set(int(pm.group(1)))
                 elif text:
+                    _forward_helper_text(text, cmd)
                     tail.append(text)
                     del tail[:-40]
     finally:
@@ -367,6 +427,7 @@ def _run_stderr_progress(cmd, cwd, args, desc, forward=False):
         reader.join(timeout=5)
         if bar is not None:
             bar.close(complete=proc.returncode == 0)
+    _forward_helper_text(b"".join(out), cmd)
     result = subprocess.CompletedProcess(cmd, proc.returncode, b"".join(out), "\n".join(tail).encode())
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
@@ -394,7 +455,7 @@ def _run_mvc_with_progress(cmd, cwd, args, label_prefix="Converting to MVC: "):
     _run_makemkv_mvc_to_mkv(), running iw3.iso_to_mvc_makemkv_cli -- reuse this unchanged, just with an
     accurate bar label instead of the sbs_to_mvc_cli-specific default."""
     if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
-        return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
+        return _run_captured_helper(cmd, check=True, cwd=cwd)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
     err = []
     drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
@@ -402,6 +463,7 @@ def _run_mvc_with_progress(cmd, cwd, args, label_prefix="Converting to MVC: "):
     bar, stage = None, None
     try:
         for raw in iter(proc.stdout.readline, b""):
+            _forward_helper_text(raw, cmd)
             parts = raw.decode(errors="replace").split()
             if len(parts) != 4 or parts[0] != "IW3_MVC_PROGRESS":
                 continue
@@ -422,6 +484,7 @@ def _run_mvc_with_progress(cmd, cwd, args, label_prefix="Converting to MVC: "):
         drain.join(timeout=5)
         if bar is not None:
             bar.close(complete=proc.returncode == 0)
+    _forward_helper_text(b"".join(err), cmd)
     result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err))
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
@@ -432,7 +495,7 @@ def _run_av_restore_with_progress(cmd, cwd, args):
     """iw3.av_restore_cli with live progress from its "IW3_AVRESTORE_PROGRESS <stage> <cur> <total>" lines
     (ffmpeg's time= while reading, mkvmerge's percent while writing), shown as percent / elapsed / ETA."""
     if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
-        return subprocess.run(cmd, check=True, capture_output=True, cwd=cwd)
+        return _run_captured_helper(cmd, check=True, cwd=cwd)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
     err = []
     drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
@@ -440,6 +503,7 @@ def _run_av_restore_with_progress(cmd, cwd, args):
     bar, stage = None, None
     try:
         for raw in iter(proc.stdout.readline, b""):
+            _forward_helper_text(raw, cmd)
             parts = raw.decode(errors="replace").split()
             if len(parts) != 4 or parts[0] != "IW3_AVRESTORE_PROGRESS":
                 continue
@@ -460,6 +524,7 @@ def _run_av_restore_with_progress(cmd, cwd, args):
         drain.join(timeout=5)
         if bar is not None:
             bar.close(complete=proc.returncode == 0)
+    _forward_helper_text(b"".join(err), cmd)
     result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err))
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
@@ -650,7 +715,7 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
     have_bar = progress_cb is not None or (getattr(args, "state", None) or {}).get("tqdm_fn") is not None
     try:
         if proc_hook is None and not have_bar:
-            result = subprocess.run(cmd, capture_output=True, cwd=nunif_dir)
+            result = _run_captured_helper(cmd, cwd=nunif_dir)
         else:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=nunif_dir)
             if proc_hook is not None:
@@ -668,11 +733,13 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
                                   new_video_name="smoothed video" if use_manifest else what)
             try:
                 for raw_line in iter(proc.stdout.readline, b""):
+                    _forward_helper_text(raw_line, cmd)
                     tracker.feed(raw_line.decode(errors="replace"))
             finally:
                 proc.wait()
                 drain.join(timeout=5)
                 tracker.close(completed=proc.returncode == 0)
+            _forward_helper_text(b"".join(err_chunks), cmd)
             result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err_chunks))
         ok = result.returncode == 0 and path.exists(tmp_out)
         if ok:
@@ -805,6 +872,7 @@ def _run_cli_with_progress(cmd, cwd, args, progress_prefix, desc):
     bar, last_done, cancelled = None, 0, False
     try:
         for line in proc.stdout:
+            _forward_helper_text(line, cmd)
             if stop_event is not None and stop_event.is_set():
                 proc.kill()
                 cancelled = True
@@ -829,6 +897,7 @@ def _run_cli_with_progress(cmd, cwd, args, progress_prefix, desc):
     finally:
         proc.wait()
         drain.join(timeout=5)
+        _forward_helper_text("".join(stderr_chunks), cmd)
         if bar is not None:
             try:
                 bar.close()
@@ -1186,7 +1255,7 @@ def _run_bitrate_cap(video_path, args, dv_source=None, rife_manifest=None):
     try:
         if tqdm_fn is None:
             # No job bar (command line use): exactly the original blocking call.
-            r = subprocess.run(cmd, capture_output=True, text=True)
+            r = _run_captured_helper(cmd, text=True)
             returncode, stderr_text = r.returncode, r.stderr
         else:
             # Same progress mechanism as the HDR-to-SDR pass: out_time_ms= lines from -progress pipe:1 drive the
@@ -1207,6 +1276,7 @@ def _run_bitrate_cap(video_path, args, dv_source=None, rife_manifest=None):
             drain.start()
             try:
                 for line in proc.stdout:
+                    _forward_helper_text(line, cmd)
                     if stop_event is not None and stop_event.is_set():
                         proc.kill()
                         cancelled = True
@@ -1221,6 +1291,7 @@ def _run_bitrate_cap(video_path, args, dv_source=None, rife_manifest=None):
             finally:
                 proc.wait()
                 drain.join(timeout=5)
+                _forward_helper_text("".join(err_chunks), cmd)
                 bar.close(complete=proc.returncode == 0 and not cancelled)
             returncode, stderr_text = proc.returncode, "".join(err_chunks)
     except Exception as e:
@@ -2278,10 +2349,10 @@ def _apply_stereo_mode_tag(output_path, args, mkvpropedit_bin=None, value_overri
               "skipping MKV StereoMode tagging.", file=sys.stderr)
         return False
     try:
-        subprocess.run(
+        _run_captured_helper(
             [mkvpropedit_bin, str(output_path), "--edit", "track:v1",
              "--set", f"stereo-mode={stereo_value}"],
-            check=True, capture_output=True,
+            check=True,
         )
     except subprocess.CalledProcessError as e:
         print(f"[iw3] StereoMode tagging failed: {e.stderr.decode(errors='replace').strip()}",
@@ -2605,6 +2676,7 @@ def _tonemap_hdr_to_sdr(input_filename, args):
         stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
         stderr_thread.start()
         for line in proc.stdout:
+            _forward_helper_text(line, cmd)
             line = line.strip()
             if line.startswith("out_time_ms=") and total_sec:
                 try:
@@ -2614,6 +2686,7 @@ def _tonemap_hdr_to_sdr(input_filename, args):
                     pass
         proc.wait()
         stderr_thread.join(timeout=5)
+        _forward_helper_text("".join(err_lines), cmd)
         if proc.returncode != 0:
             err = subprocess.CalledProcessError(proc.returncode, cmd)
             err.stderr = "".join(err_lines).encode()
@@ -2749,6 +2822,7 @@ def _denoise_preprocess(input_filename, args):
         )
         last_pct = 0
         for line in proc.stderr:
+            _forward_helper_text(line, proc.args)
             if stop_event is not None and stop_event.is_set():
                 proc.terminate()
                 break
@@ -2935,9 +3009,9 @@ def _inject_hdr_rpu(output_path, rpu_path, hdr10plus_json, ffmpeg_bin, dovi_bin,
             current = hevc_dv
 
         if hdr10plus_json and path.exists(str(hdr10plus_json)):
-            subprocess.run(
+            _run_captured_helper(
                 [hdr10plus_bin, "inject", "-i", current, "-j", str(hdr10plus_json), "-o", hevc_h10p],
-                check=True, capture_output=True,
+                check=True,
             )
             current = hevc_h10p
     finally:
@@ -5632,9 +5706,9 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     if _hdr_hdr10plus_bin:
                         _hdr_h10p_path = path.join(_hdr_out_dir, "_iw3_hdr10plus.json")
                         try:
-                            subprocess.run(
+                            _run_captured_helper(
                                 [_hdr_hdr10plus_bin, "extract", "-i", _hdr_tmp_hevc, "-o", _hdr_h10p_path],
-                                check=True, capture_output=True,
+                                check=True,
                             )
                         except subprocess.CalledProcessError as e:
                             print(f"--preserve-dowi: HDR10+ extraction failed: "
@@ -6280,7 +6354,7 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
         mkvmerge_args = [mkvmerge_bin, "-o", video_only_filename, "--no-audio", segment_files[0]]
         for cf in segment_files[1:]:
             mkvmerge_args += ["+", "--no-audio", cf]
-        result = subprocess.run(mkvmerge_args, capture_output=True)
+        result = _run_captured_helper(mkvmerge_args)
         # mkvmerge exit code: 0 = ok, 1 = warnings (output still produced), 2 = error
         if result.returncode in (0, 1) and path.exists(video_only_filename):
             concat_ok = True
@@ -6305,10 +6379,10 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
                 f.write("file '{}'\n".format(cf.replace("'", "'\\''")))
 
         try:
-            subprocess.run(
+            _run_captured_helper(
                 [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
                  "-i", concat_list, "-map", "0:v", "-c", "copy", "-an", video_only_filename],
-                check=True, capture_output=True,
+                check=True,
             )
         except subprocess.CalledProcessError as e:
             print(f"[auto-resume] concat failed: {e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
@@ -6367,15 +6441,15 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
             # discard any deliberate leading gap export_audio() preserved for sources whose
             # audio elementary stream doesn't truly start at the video's pts=0 (see the
             # frame.pts handling in export_audio()).
-            subprocess.run(
+            _run_captured_helper(
                 [ffmpeg_bin, "-y", "-i", video_only_filename, "-i", audio_tmp,
                  "-map", "0:v", "-map", "1:a", "-c", "copy", "-copyts", "-shortest", output_filename],
-                check=True, capture_output=True,
+                check=True,
             )
         else:
-            subprocess.run(
+            _run_captured_helper(
                 [ffmpeg_bin, "-y", "-i", video_only_filename, "-map", "0:v", "-c", "copy", output_filename],
-                check=True, capture_output=True,
+                check=True,
             )
     except subprocess.CalledProcessError as e:
         print(f"[auto-resume] final mux failed: {e.stderr.decode(errors='replace').strip()}", file=sys.stderr)
@@ -6419,9 +6493,9 @@ def process_video_with_resume(input_filename, output_path, args, depth_model, si
                         [dovi_b, "extract-rpu", "-i", tmp_hevc, "-o", rpu_path],
                         "[HDR] extracting the Dolby Vision data", total_bytes=_sz(tmp_hevc), reads=True)
                 if h10p_path and h10p_b:
-                    subprocess.run(
+                    _run_captured_helper(
                         [h10p_b, "extract", "-i", tmp_hevc, "-o", h10p_path],
-                        check=True, capture_output=True,
+                        check=True,
                     )
             except subprocess.CalledProcessError as e:
                 print(f"--preserve-dowi: HDR extraction failed: "

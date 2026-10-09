@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 6, 2026
+## Latest Update — October 9, 2026
+
+**Fixed: Dolby Vision/HDR10+ reinjection could show a confusing "frame counts don't match" error that wasn't the real problem.** On some systems, a recent update to the bundled video tool could crash while counting a video's frames -- but the crash looked like a normal result instead of an error, so Reinjection (both the standalone tool and the automatic one after RIFE) reported a frame-count mismatch instead of the real cause. It now recognizes a real crash for what it is, shows the actual error, and automatically retries with a slower but more reliable counting method before giving up. A normal, working run is not slowed down at all -- the retry only ever happens after a real failure.
+
+## Update — October 6, 2026
 
 **Added: one Output panel for everything 3DECKER does, and a log file for every run -- always on.** A new "Output" box under the Start button shows what 3DECKER is doing: the messages, warnings and errors from your main conversion, and the full output of each Standalone Tool when it finishes. The same lines are saved to a log file next to each output file, named "<output name>_log.txt". Logs are no longer optional, so the "Write a Log File" tick boxes (on the main tab and on the Standalone Tools tab) are gone. Each Standalone Tool still has its own output box, exactly as before.
 

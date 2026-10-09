@@ -342,9 +342,24 @@ _REINJECT_PROGRESS_MIN_INTERVAL_SEC = 0.1
 
 
 def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time=None, timeout=3600,
-                                stage=None, total_seconds_hint=None):
+                                stage=None, total_seconds_hint=None, probe_result=None):
     """Decoded (not estimated) frame count + best-effort duration for input_path, trimmed
     to [start_time, end_time] when given.
+
+    `probe_result` (ADR-359): an optional dict the caller provides to receive the RAW
+    outcome of the underlying ffmpeg process -- `probe_result["returncode"]` (the real
+    exit code, or None if the process never completed, e.g. a timeout) and
+    `probe_result["stderr"]` (the full captured stderr text). This is purely an OUT-param
+    with a None default -- every existing caller that doesn't pass it sees byte-for-byte
+    unchanged behavior and this function's return signature/value is unchanged either way.
+    It exists so a caller can tell a genuine PROBE FAILURE (ffmpeg crashed or exited
+    non-zero, e.g. the real 2026-10-06 ffmpeg nightly regression on certain HEVC/Dolby
+    Vision content -- "[vf#0:0] Task finished with error: File exists" / "Could not open
+    encoder before EOF") apart from an ordinary frame-count MISMATCH -- a crash can still
+    leave a non-None, non-zero `frame_count` here (whatever partial progress was printed
+    to -stats before it died), which would otherwise silently look like a real but wrong
+    frame count instead of the real cause. See `_probe_frames_and_duration_with_fallback`,
+    which uses this.
 
     Uses `ffmpeg -f null -` (full decode, frame count parsed from its own -stats output)
     rather than ffprobe -count_frames, which this function used until real, direct timing
@@ -386,10 +401,12 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
 
     frame_count = None
     duration = None
+    returncode = None
     if stage is None:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             stderr = proc.stderr or ""
+            returncode = proc.returncode
         except Exception:
             stderr = ""
     else:
@@ -413,10 +430,15 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
                 if m:
                     h, mnt, s = m.groups()
                     _emit(int(h) * 3600 + int(mnt) * 60 + float(s))
-            proc.wait(timeout=timeout)
+            returncode = proc.wait(timeout=timeout)
         except Exception:
             pass
         stderr = "".join(stderr_chunks)
+
+    if probe_result is not None:
+        probe_result["returncode"] = returncode
+        probe_result["stderr"] = stderr
+        probe_result["cmd"] = cmd
 
     try:
         frame_matches = _FFMPEG_FRAME_RE.findall(stderr)
@@ -439,6 +461,148 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
         print(f"IW3_REINJECT_PROGRESS {stage} {final_current:.2f} {total_str}", flush=True)
 
     return frame_count, duration, cmd
+
+
+# ADR-359: real production incident -- a recent ffmpeg nightly build (dated 2026-10-06)
+# crashes near-instantly on certain real HEVC/Dolby Vision 4K content with
+# "[vf#0:0] Task finished with error: File exists" / "Could not open encoder before
+# EOF" (confirmed reproducible against a real file). _probe_frames_and_duration's old
+# behavior only ever looked at ffmpeg's stderr for frame=/time= numbers and never
+# checked the return code, so this crash either silently produced frame_count=None
+# (generic "could not determine a frame count" message, with no real cause shown) or,
+# worse, a PARTIAL non-None frame count (whatever -stats had printed before the
+# crash) that then looked exactly like an ordinary frame-count MISMATCH against the
+# RIFE manifest / --source, hiding the real cause completely. The two helpers below
+# distinguish a genuine PROBE FAILURE from both a real mismatch and a legitimate
+# zero-frame probe, and fall back to the slower `ffprobe -count_frames` method (what
+# this function used before ADR-163's speed switch) only when the fast path actually
+# failed.
+_FFMPEG_STATS_LINE_RE = re.compile(r"frame=\s*\d+.*time=\d+:\d\d:\d\d")
+
+
+def _summarize_probe_stderr(stderr, max_lines=8):
+    """Last few MEANINGFUL lines of a probe's captured stderr, for surfacing the REAL
+    cause of a probe failure to the user instead of the old generic "could not
+    determine a frame count" message. Strips blank lines and ffmpeg's own repeating
+    `-stats` progress lines (frame=... time=... speed=...) -- routine noise on every
+    run, successful or not -- so genuine warning/error text (e.g. "Task finished with
+    error: File exists") isn't crowded out by hundreds of progress updates. Falls back
+    to the raw last lines (including stats noise) if nothing meaningful is left, so a
+    real failure that happens to only ever print stats-shaped lines still shows
+    something rather than an empty list."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    meaningful = [ln for ln in lines if not _FFMPEG_STATS_LINE_RE.search(ln)]
+    tail = meaningful if meaningful else lines
+    return tail[-max_lines:]
+
+
+def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_time=None,
+                                                 end_time=None, timeout=3600):
+    """Fallback frame-count probe using `ffprobe -count_frames` -- the method
+    _probe_frames_and_duration (ffmpeg -f null -) used before ADR-163's speed switch,
+    kept here specifically for when the fast path fails outright (see ADR-359). This is
+    deliberately NOT the default/first try anywhere -- ADR-163's real, measured ~6.5x
+    speedup is unaffected on the normal/working case, which never reaches this function.
+
+    This project's bundled ffprobe.exe does NOT support `-ss`/`-to` at all (confirmed,
+    see `_read_intervals_for_range`'s own docstring) -- trimming here uses
+    `-read_intervals` instead, ffprobe's own native mechanism for this, already proven
+    working on this project's bundled binary.
+
+    Returns (frame_count_or_None, duration_seconds_or_None, cmd_list) -- the same shape
+    as _probe_frames_and_duration on purpose, so a caller can treat the two
+    interchangeably once it has decided to use this one."""
+    cmd = [ffprobe_bin, "-v", "error", "-count_frames", "-select_streams", "v:0"]
+    interval = _read_intervals_for_range(start_time, end_time)
+    if interval:
+        cmd += ["-read_intervals", interval]
+    cmd += ["-show_entries", "stream=nb_read_frames,duration",
+            "-of", "default=noprint_wrappers=1", str(input_path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        stdout = proc.stdout or ""
+    except Exception:
+        return None, None, cmd
+
+    frame_count = None
+    duration = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("nb_read_frames="):
+            try:
+                frame_count = int(line.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif line.startswith("duration="):
+            try:
+                duration = float(line.split("=", 1)[1])
+            except ValueError:
+                pass
+    return frame_count, duration, cmd
+
+
+def _probe_frames_and_duration_with_fallback(input_path, ffmpeg_bin, ffprobe_bin, start_time=None,
+                                              end_time=None, timeout=3600, stage=None,
+                                              total_seconds_hint=None, label=""):
+    """Wraps _probe_frames_and_duration with real PROBE-FAILURE detection (ADR-359) and
+    an automatic fallback to `ffprobe -count_frames` (see
+    _probe_frames_and_duration_ffprobe_fallback) when the fast ffmpeg path fails outright
+    -- instead of silently misreporting a crash, or a crash's own partial/garbage frame
+    count, as an ordinary frame-count MISMATCH. This is the function run()/
+    _run_with_rife_manifest() call for their actual gating probes; the two call sites
+    that just need a quick fire-and-forget count (progress hints, etc.) are unaffected
+    and still call _probe_frames_and_duration directly.
+
+    A genuinely legitimate zero-frame case -- start_time/end_time describing an empty,
+    zero-or-negative-length range -- is detected from the args alone and returned
+    immediately as (0, 0.0, [], False), WITHOUT ever invoking ffmpeg or the fallback.
+    This must never be treated as a failure: a real empty range legitimately produces no
+    `frame=` line either, and confusing the two would fallback-loop on ordinary, correct
+    behavior (e.g. a --start-time/--end-time pair that is deliberately empty).
+
+    `label` is purely cosmetic (e.g. "--source"/"--converted"), used only in the
+    messages this function prints.
+
+    Returns (frame_count_or_None, duration_seconds_or_None, cmd_list, used_fallback).
+    frame_count is None only when BOTH the fast path and the fallback genuinely failed
+    -- in that case the real diagnostics from both attempts have already been printed to
+    stderr before returning."""
+    start_sec = parse_time(start_time) if start_time else None
+    end_sec = parse_time(end_time) if end_time else None
+    if start_sec is not None and end_sec is not None and end_sec <= start_sec:
+        return 0, 0.0, [], False
+
+    probe_result = {}
+    frame_count, duration, cmd = _probe_frames_and_duration(
+        input_path, ffmpeg_bin, start_time, end_time, timeout=timeout,
+        stage=stage, total_seconds_hint=total_seconds_hint, probe_result=probe_result)
+
+    rc = probe_result.get("returncode")
+    probe_failed = bool(rc) or frame_count is None
+    if not probe_failed:
+        return frame_count, duration, cmd, False
+
+    real_error = _summarize_probe_stderr(probe_result.get("stderr"))
+    print(f"[reinject-hdr] WARNING: the fast ffmpeg-based frame probe for "
+          f"{label or input_path} failed outright (ffmpeg return code: {rc}) -- this is a "
+          f"PROBE FAILURE, not a real frame-count mismatch. Real ffmpeg output:",
+          file=sys.stderr)
+    for line in real_error:
+        print(f"    {line}", file=sys.stderr)
+    print(f"[reinject-hdr] falling back to the slower 'ffprobe -count_frames' method for "
+          f"{label or input_path}...", file=sys.stderr)
+
+    fb_frames, fb_duration, fb_cmd = _probe_frames_and_duration_ffprobe_fallback(
+        input_path, ffprobe_bin, start_time, end_time, timeout=timeout)
+    if fb_frames is not None:
+        print(f"[reinject-hdr] fallback succeeded: {fb_frames} frame(s) via "
+              f"{_format_cmd(fb_cmd)}", file=sys.stderr)
+        return fb_frames, (fb_duration if fb_duration is not None else duration), fb_cmd, True
+
+    print(f"[reinject-hdr] ERROR: the fallback 'ffprobe -count_frames' probe ALSO failed for "
+          f"{label or input_path} -- re-run {_format_cmd(fb_cmd)} by hand to see why.",
+          file=sys.stderr)
+    return None, duration, fb_cmd, True
 
 
 def _check_rife_guard(converted_path, ffprobe_bin):
@@ -924,22 +1088,26 @@ def _run_with_rife_manifest(args):
           "it may take a while on long clips...", file=sys.stderr)
     src_hint = _source_duration_hint(args.start_time, args.end_time, source, ffprobe_bin)
     conv_hint = _probe_container_duration(converted, ffprobe_bin)
-    src_frames, src_duration, src_cmd = _probe_frames_and_duration(
-        source, ffmpeg_bin, args.start_time, args.end_time, stage="source", total_seconds_hint=src_hint)
-    conv_frames, conv_duration, conv_cmd = _probe_frames_and_duration(
-        converted, ffmpeg_bin, None, None, stage="converted", total_seconds_hint=conv_hint)
+    src_frames, src_duration, src_cmd, src_fallback = _probe_frames_and_duration_with_fallback(
+        source, ffmpeg_bin, ffprobe_bin, args.start_time, args.end_time,
+        stage="source", total_seconds_hint=src_hint, label="--source")
+    conv_frames, conv_duration, conv_cmd, conv_fallback = _probe_frames_and_duration_with_fallback(
+        converted, ffmpeg_bin, ffprobe_bin, None, None,
+        stage="converted", total_seconds_hint=conv_hint, label="--converted")
 
-    print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}", file=sys.stderr)
-    print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}", file=sys.stderr)
+    print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}"
+          f"{' (fallback: ffprobe -count_frames)' if src_fallback else ''}", file=sys.stderr)
+    print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}"
+          f"{' (fallback: ffprobe -count_frames)' if conv_fallback else ''}", file=sys.stderr)
     print(f"[reinject-hdr] source (trimmed) decoded frame count: {src_frames}  "
           f"manifest source_frame_count: {source_frame_count}", file=sys.stderr)
     print(f"[reinject-hdr] converted decoded frame count:        {conv_frames}  "
           f"manifest output_frame_count: {output_frame_count}", file=sys.stderr)
 
     if src_frames is None or conv_frames is None:
-        print("ERROR: could not determine a decoded frame count for one or both files via ffprobe "
-              "-- refusing to proceed without a reliable frame-count comparison. Re-run the exact "
-              "ffprobe command(s) printed above by hand to see why.", file=sys.stderr)
+        print("ERROR: could not determine a decoded frame count for one or both files, even after "
+              "the ffprobe -count_frames fallback -- see the real probe-failure diagnostics printed "
+              "above. Refusing to proceed without a reliable frame-count comparison.", file=sys.stderr)
         return 1
 
     tolerance = max(0, int(getattr(args, "frame_count_tolerance", 0) or 0))
@@ -1106,22 +1274,26 @@ def _run_strict(args):
           "decodes the full range so it may take a while on long clips...", file=sys.stderr)
     src_hint = _source_duration_hint(args.start_time, args.end_time, source, ffprobe_bin)
     conv_hint = _probe_container_duration(converted, ffprobe_bin)
-    src_frames, src_duration, src_cmd = _probe_frames_and_duration(
-        source, ffmpeg_bin, args.start_time, args.end_time, stage="source", total_seconds_hint=src_hint)
-    conv_frames, conv_duration, conv_cmd = _probe_frames_and_duration(
-        converted, ffmpeg_bin, None, None, stage="converted", total_seconds_hint=conv_hint)
+    src_frames, src_duration, src_cmd, src_fallback = _probe_frames_and_duration_with_fallback(
+        source, ffmpeg_bin, ffprobe_bin, args.start_time, args.end_time,
+        stage="source", total_seconds_hint=src_hint, label="--source")
+    conv_frames, conv_duration, conv_cmd, conv_fallback = _probe_frames_and_duration_with_fallback(
+        converted, ffmpeg_bin, ffprobe_bin, None, None,
+        stage="converted", total_seconds_hint=conv_hint, label="--converted")
 
-    print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}", file=sys.stderr)
-    print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}", file=sys.stderr)
+    print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}"
+          f"{' (fallback: ffprobe -count_frames)' if src_fallback else ''}", file=sys.stderr)
+    print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}"
+          f"{' (fallback: ffprobe -count_frames)' if conv_fallback else ''}", file=sys.stderr)
     print(f"[reinject-hdr] source (trimmed) decoded frame count: {src_frames}  duration: {src_duration}",
           file=sys.stderr)
     print(f"[reinject-hdr] converted decoded frame count:        {conv_frames}  duration: {conv_duration}",
           file=sys.stderr)
 
     if src_frames is None or conv_frames is None:
-        print("ERROR: could not determine a decoded frame count for one or both files via ffprobe "
-              "-- refusing to proceed without a reliable frame-count comparison. Re-run the exact "
-              "ffprobe command(s) printed above by hand to see why.", file=sys.stderr)
+        print("ERROR: could not determine a decoded frame count for one or both files, even after "
+              "the ffprobe -count_frames fallback -- see the real probe-failure diagnostics printed "
+              "above. Refusing to proceed without a reliable frame-count comparison.", file=sys.stderr)
         return 1
 
     tolerance = max(0, int(args.frame_count_tolerance))
@@ -1429,6 +1601,131 @@ def _self_test_read_intervals_for_range():
     assert _read_intervals_for_range("10", None) == "10.0%"
     assert _read_intervals_for_range(None, "20") == "%20.0"
     print("_self_test_read_intervals_for_range: PASS")
+
+
+def _self_test_probe_frames_and_duration_probe_result_out_param():
+    """Regression test for ADR-359's `probe_result` out-param on
+    _probe_frames_and_duration: confirms it is populated with the real return code and
+    raw stderr in BOTH code paths (stage=None/subprocess.run, and stage set/
+    subprocess.Popen), and that existing callers who don't pass it see no change at
+    all (return signature untouched -- still a 3-tuple either way)."""
+    from unittest.mock import patch, MagicMock
+
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.return_value = MagicMock(stderr="ERROR: no such file", returncode=1)
+        probe_result = {}
+        frames, duration, cmd = _probe_frames_and_duration(
+            "fake.mkv", "ffmpeg", probe_result=probe_result)
+        assert frames is None, frames
+        assert probe_result["returncode"] == 1, probe_result
+        assert probe_result["stderr"] == "ERROR: no such file", probe_result
+
+    class _FakeProc:
+        def __init__(self, lines, rc):
+            self._lines = iter(lines)
+            self._rc = rc
+
+        @property
+        def stderr(self):
+            return self._lines
+
+        def wait(self, timeout=None):
+            return self._rc
+
+    with patch.object(subprocess, "Popen",
+                       return_value=_FakeProc(["[vf#0:0] Task finished with error: File exists\n"], 1)):
+        probe_result = {}
+        frames, duration, cmd = _probe_frames_and_duration(
+            "fake.mkv", "ffmpeg", stage="source", total_seconds_hint=None, probe_result=probe_result)
+        assert frames is None, frames
+        assert probe_result["returncode"] == 1, probe_result
+        assert "Task finished with error" in probe_result["stderr"], probe_result
+
+    # No probe_result passed at all -- unaffected, still a plain 3-tuple (byte-for-byte
+    # unchanged for every pre-ADR-359 caller).
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.return_value = MagicMock(stderr="frame=10 time=00:00:01.00", returncode=0)
+        result = _probe_frames_and_duration("fake.mkv", "ffmpeg")
+        assert len(result) == 3, result
+
+    print("_self_test_probe_frames_and_duration_probe_result_out_param: PASS")
+
+
+def _self_test_probe_failure_fallback():
+    """Regression test for ADR-359 -- the real production incident: a recent ffmpeg
+    nightly crashing near-instantly on certain real HEVC/Dolby Vision content left a
+    PARTIAL (non-None) frame count that looked exactly like an ordinary frame-count
+    MISMATCH instead of a probe failure. Covers all three required cases: (a) a normal
+    successful probe is completely unaffected (no fallback used); (b) a probe that
+    returns a nonzero exit code (even with a non-None, partial frame count parsed from
+    whatever -stats printed before the crash) triggers the ffprobe fallback, and the
+    fallback's own result is what gets used/returned; (c) a genuinely legitimate
+    zero-frame case (an empty start_time==end_time trim range) is NOT treated as a
+    failure and never invokes ffmpeg or the fallback at all -- no fallback-loop on a
+    real, correct silence case."""
+    import io
+    import contextlib
+    from unittest.mock import patch, MagicMock
+
+    # (a) normal successful probe -- same frame count, fallback never invoked.
+    with patch.object(subprocess, "run") as mock_run:
+        mock_run.return_value = MagicMock(
+            stderr="frame= 240 fps=150 time=00:00:10.00 speed=6.5x", returncode=0)
+        frames, duration, cmd, used_fallback = _probe_frames_and_duration_with_fallback(
+            "fake.mkv", "ffmpeg", "ffprobe", label="--source")
+        assert frames == 240, frames
+        assert used_fallback is False, used_fallback
+        mock_run.assert_called_once()  # the ffmpeg probe only -- fallback would be a 2nd call
+
+    # (b) ffmpeg crashes with a nonzero return code but a real, partial frame count was
+    # already printed to -stats before it died (the actual 2026-10-06 incident shape) --
+    # must be treated as a PROBE FAILURE, not a mismatch, and fall back to ffprobe
+    # -count_frames, whose own (different, correct) result is what gets returned.
+    buf = io.StringIO()
+    with patch.object(subprocess, "run") as mock_run, contextlib.redirect_stderr(buf):
+        mock_run.side_effect = [
+            MagicMock(stderr="frame= 90000 fps=150 time=00:10:00.00 speed=6.5x\n"
+                             "[vf#0:0] Task finished with error: File exists\n"
+                             "Could not open encoder before EOF\n", returncode=1),
+            MagicMock(stdout="nb_read_frames=166426\nduration=6935.0\n", returncode=0),
+        ]
+        frames, duration, cmd, used_fallback = _probe_frames_and_duration_with_fallback(
+            "fake.mkv", "ffmpeg", "ffprobe", label="--source")
+        assert used_fallback is True, used_fallback
+        assert frames == 166426, frames  # the FALLBACK's result, not the crash's partial 90000
+        assert mock_run.call_count == 2
+        fallback_cmd = mock_run.call_args_list[1][0][0]
+        assert "-count_frames" in fallback_cmd, fallback_cmd
+    printed = buf.getvalue()
+    assert "PROBE FAILURE" in printed, printed
+    assert "Task finished with error" in printed, printed  # the real cause is surfaced
+    assert "falling back" in printed, printed
+
+    # (c) a genuinely legitimate zero-frame case -- an empty start_time==end_time trim
+    # range -- must never be treated as a failure, and must never invoke ffmpeg/ffprobe
+    # at all (no fallback-loop on a real, correct silence case).
+    with patch.object(subprocess, "run") as mock_run:
+        frames, duration, cmd, used_fallback = _probe_frames_and_duration_with_fallback(
+            "fake.mkv", "ffmpeg", "ffprobe", start_time="30", end_time="30", label="--source")
+        assert frames == 0, frames
+        assert used_fallback is False, used_fallback
+        mock_run.assert_not_called()
+
+    # Both the fast path AND the fallback genuinely fail -- frames is None, but the real
+    # diagnostics from both attempts were printed (not just a generic unhelpful message).
+    buf2 = io.StringIO()
+    with patch.object(subprocess, "run") as mock_run, contextlib.redirect_stderr(buf2):
+        mock_run.side_effect = [
+            MagicMock(stderr="Could not open encoder before EOF\n", returncode=1),
+            MagicMock(stdout="", returncode=1),
+        ]
+        frames, duration, cmd, used_fallback = _probe_frames_and_duration_with_fallback(
+            "fake.mkv", "ffmpeg", "ffprobe", label="--converted")
+        assert frames is None, frames
+        assert used_fallback is True, used_fallback
+    assert "ALSO failed" in buf2.getvalue(), buf2.getvalue()
+
+    print("_self_test_probe_failure_fallback: PASS")
 
 
 def _self_test_rife_guard():
@@ -2235,6 +2532,8 @@ def _run_self_tests():
     _self_test_reinject_progress_streaming()
     _self_test_reinject_duration_hint_helpers()
     _self_test_read_intervals_for_range()
+    _self_test_probe_frames_and_duration_probe_result_out_param()
+    _self_test_probe_failure_fallback()
     _self_test_rife_guard()
     _self_test_hdr_transfer_compatibility()
     _self_test_mismatched_master_source_warning()

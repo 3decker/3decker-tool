@@ -499,7 +499,19 @@ the odds the kink is actually noticeable. Bigger coverage = affects more of the
 scene, but also raises transition-line risk; it isn't simply "stronger with no
 downside."
 
-#### Background Divergence — custom addition, not upstream nunif (2026-08-18)
+#### Background Divergence — REMOVED (2026-08-24, ADR-126); use Background Pop instead
+
+**Correction (2026-10-12):** this feature and its "Foreground Divergence" mirror
+image, both described below, were fully removed from the codebase on 2026-08-24
+(ADR-126) -- the `--background-divergence`/`--foreground-divergence` CLI flags and
+their GUI combo boxes no longer exist anywhere in `iw3/gui.py` or `iw3/utils.py`.
+They were replaced by **Background Pop** and **Foreground Pop** (Stereo group, in
+the pane now labeled "Depth Pop"), which cover the same "push just the farthest/
+nearest 15% of the scene" use case with a different mechanism (additive push, with
+independent Low/High threshold fields, rather than a true per-region Divergence
+ratio). The rest of this subsection is kept as historical record of how the removed
+feature worked and why it existed, not as a current how-to -- do not expect to find
+"Background Divergence" or "Foreground Divergence" in the GUI or CLI.
 
 Built at the user's request as a more literal answer to "can the farthest 15% use a
 different Divergence value than the rest of the scene?" — Background Pop (above)
@@ -564,13 +576,17 @@ right below Foreground Pop, blank = disabled), and output filename tagging
 `_bd<value>` if both are set). Same hard-cutoff seam caveat as the other three custom
 depth-effect additions applies. **Untested in real footage as of creation.**
 
-**The full custom-addition family, for reference:** this project's fork now has four
-depth-effect levers beyond upstream nunif, all in `iw3/depth_effects.py`: Foreground
-Pop (additive push, nearest 15%), Background Pop (additive push, farthest 15%),
-Foreground Divergence (true Divergence-ratio rescale, nearest 15%), Background
-Divergence (true Divergence-ratio rescale, farthest 15%). None of these exist in
-upstream nunif — remember that if ever comparing against the public project's docs
-or updating from upstream.
+**The full custom-addition family, for reference (as of 2026-08-18; see correction
+above):** this project's fork had four depth-effect levers beyond upstream nunif, all
+in `iw3/depth_effects.py`: Foreground Pop (additive push, nearest 15%), Background Pop
+(additive push, farthest 15%), Foreground Divergence (true Divergence-ratio rescale,
+nearest 15%), Background Divergence (true Divergence-ratio rescale, farthest 15%).
+**As of ADR-126 (2026-08-24), only Foreground Pop and Background Pop remain** -- the
+two Divergence-ratio variants were removed in favor of giving Foreground/Background/
+Midground Pop a fully symmetric, identically-shaped design (one strength + independent
+Low/High thresholds each). None of the surviving Pop levers exist in upstream nunif —
+remember that if ever comparing against the public project's docs or updating from
+upstream.
 
 #### Foreground Scale — verified mechanism (corrected)
 
@@ -2654,10 +2670,15 @@ landscape reading as a landscape instead of a diorama.
 **If a specific landscape shot still feels flat** after this, the right
 levers are ones this project already built for exactly that, without
 touching the shared Divergence curve at all:
-- **Background Divergence** (`--background-divergence`, GUI "Background
-  Divergence," Section 3) -- a true per-region Divergence override for just
-  the farthest 15% of the depth range, the actual distant background of a
-  landscape shot. Raise it independently of the base curve.
+- **Background Pop** (`--background-pop` + its Low/High threshold flags, GUI
+  "Background Pop," Section 3) -- a targeted additive push on just the
+  farthest 15% of the depth range (adjustable via the threshold fields), the
+  actual distant background of a landscape shot. Raise it independently of
+  the base curve. (This section originally pointed at "Background
+  Divergence," a true per-region Divergence-ratio override that did the same
+  job by a different mechanism -- it was removed in ADR-126, see the
+  correction note in Section "Background Divergence" above. Background Pop is
+  the lever that remains.)
 - **Negative Foreground Scale** (Section 3, "Foreground Scale — verified
   mechanism") -- redistributes separation toward the background at the cost
   of the foreground; `-0.5` moderate, `-1.0` stronger. A landscape shot has
@@ -2689,7 +2710,7 @@ different artifact risk.
 | Goal | Right lever | Wrong lever (real risk) |
 |---|---|---|
 | Whole movie handles both close-ups and landscapes well | Auto 3D Strength, `cuts` mode | One fixed Divergence for the whole film |
-| A landscape/wide shot feels flat | Background Divergence, or negative Foreground Scale | Raising Auto Range Min (risks miniaturization on every wide shot, 15.4) |
+| A landscape/wide shot feels flat | Background Pop, or negative Foreground Scale | Raising Auto Range Min (risks miniaturization on every wide shot, 15.4) |
 | A close-up face/hand reads flat/cardboard | Positive Foreground Scale | Raising Auto Range Max (real confirmed halo risk past ~`5.5` on dark/fine-detail subjects, 15.3) |
 | A close-up looks artifacted/haloed | Lower Auto Range Max | Raising resolution or Depth Refine -- both already ruled out as fixes for this exact problem (15.3) |
 

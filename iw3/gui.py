@@ -7132,6 +7132,41 @@ class MainFrame(wx.Frame):
               "handles a bare E-AC-3 track -- when in doubt, use the default. Has no effect on Plain "
               "MKV/Bare M2TS output above, which already keeps DD+ lossless unconditionally."))
 
+        # ADR-361: real user request (Steve, via decker) -- the main tab's own inline MVC
+        # pipeline has had this exact checkbox (chk_mvc_makemkv_to_mkv, ADR-319 follow-up) for a
+        # while; this standalone tool had no equivalent, so getting both an ISO and a real MVC
+        # .mkv out of it meant running the separate standalone "3D Blu-ray ISO to MVC MKV
+        # (MakeMKV)" tool below by hand afterward. Same label, same ISO-only restriction, same
+        # "never fails the job itself" chaining philosophy -- see run_sbs2mvc()'s own chaining
+        # code and update_sbs2mvc_makemkv_to_mkv() for the real logic, mirroring
+        # update_mvc_makemkv_to_mkv() on the main tab.
+        self.chk_sbs2mvc_makemkv_to_mkv = wx.CheckBox(
+            self.cpn_sbs2mvc.GetPane(),
+            label=T("Also build a real MVC .mkv via MakeMKV (after the ISO)"),
+            name="chk_sbs2mvc_makemkv_to_mkv")
+        self.chk_sbs2mvc_makemkv_to_mkv.SetValue(False)
+        self.chk_sbs2mvc_makemkv_to_mkv.SetToolTip(
+            T("What it's for: once this tool's own 3D Blu-ray ISO is fully built, automatically runs "
+              "it through a real, separately-installed MakeMKV (makemkvcon) -- the same thing the "
+              "standalone '3D Blu-ray ISO to MVC MKV (MakeMKV)' tool below does by hand -- and rips "
+              "it into a real MVC .mkv, no separate manual step.\n"
+              "Requires MakeMKV: a real, separately installed AND licensed copy (a permanent paid key "
+              "or an officially-rotated free beta key) -- 3DECKER never bundles or installs it. Get it "
+              "yourself from https://www.makemkv.com/ first; Run will tell you clearly if it can't be "
+              "found, and the ISO above is still kept either way.\n"
+              "Only available when Output Type above is specifically '3D Blu-ray ISO' -- MakeMKV's "
+              "own CLI rips from a real .iso, not a BD Folder/Plain MKV/Bare M2TS.\n"
+              "Output: a new, separate '<name>_MKV.mkv' file next to the .iso -- the .iso itself is "
+              "never touched or replaced.\n"
+              "Con: real extra processing time after the ISO has already finished -- MakeMKV re-reads "
+              "and re-muxes the whole disc image. Never fails this job: if MakeMKV isn't found or the "
+              "rip fails for any reason, the log below says why and the ISO above is unaffected.\n"
+              "Recommended: on if your 3D-capable player/TV is confirmed to auto-detect a real "
+              "MakeMKV-built MVC .mkv but not this project's own direct Plain MKV/Bare M2TS output -- "
+              "off (default) if you're happy with ISO/BD Folder playback, or don't have MakeMKV "
+              "installed."))
+        self.update_sbs2mvc_makemkv_to_mkv()
+
         self.btn_sbs2mvc_run = wx.Button(self.cpn_sbs2mvc.GetPane(), label=T("Run"))
         self.btn_sbs2mvc_run.SetToolTip(
             T("What it's for: starts the conversion as a separate background process (python -m "
@@ -7173,6 +7208,10 @@ class MainFrame(wx.Frame):
         self.sbs2mvc_proc = None
         self.sbs2mvc_cancelled = False
         self.sbs2mvc_start_time = 0.0
+        # ADR-361: True only once the optional MakeMKV chain step's own subprocess has started --
+        # see _cleanup_after_sbs2mvc_cancel()'s own use of this (a cancel during that second step
+        # must not delete the already-finished ISO from the first step).
+        self.sbs2mvc_makemkv_chain_active = False
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -7198,6 +7237,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_sbs2mvc_fix_frame_rate, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_sbs2mvc_convert_hdr_to_sdr, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_sbs2mvc_allow_lossless_eac3, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_sbs2mvc_makemkv_to_mkv, (h := h + 1, 0), (0, 4), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_sbs2mvc_run, (h := h + 1, 2), flag=wx.EXPAND)
         layout.Add(self.btn_sbs2mvc_cancel, (h, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_sbs2mvc, (h := h + 1, 0), (0, 4), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
@@ -8362,6 +8402,18 @@ class MainFrame(wx.Frame):
         for control in (self.pnl_file.input_path_widget, self.pnl_file.output_path_widget, self.txt_vf,
                         self.txt_start_time, self.txt_end_time, *editable_comboboxes):
             control.SetDropTarget(FileDropCallback(self.on_drop_files))
+
+        # ADR-360: real user report (Steve, via decker) -- only the main tab above supports
+        # dropping a file onto it; none of the Standalone Tools tab's own panes did at all.
+        # Unlike the main tab's shared pattern just above (every drop target there routes to
+        # the ONE shared Input field, via on_drop_files), each field below is independent --
+        # the field you drop a file onto is the field that gets set. A tool with more than one
+        # genuine file/folder input (e.g. Retroactive HDR/DV Reinjection's Source/Converted/
+        # RIFE Manifest) gets each of its own fields wired separately. Output-only fields
+        # (where you type a path to CREATE a new file, never an existing one to read) are
+        # deliberately not wired -- see _standalone_tool_drop_target_fields()'s own docstring.
+        for control in self._standalone_tool_drop_target_fields():
+            control.SetDropTarget(FileDropCallback(self._make_standalone_drop_callback(control)))
 
         # Fix Frame and Panel background colors are different in windows
         self.SetBackgroundColour(self.pnl_file_option.GetBackgroundColour())
@@ -10088,6 +10140,64 @@ class MainFrame(wx.Frame):
         if filenames:
             self.pnl_file.set_input_path(filenames[0])
         return True
+
+    def _standalone_tool_drop_target_fields(self):
+        """ADR-360: every genuine FILE/FOLDER input field across the 15 Standalone Tools tab
+        panes -- one per real thing-to-read, not a plain numeric/text setting (e.g. Language,
+        Track Name, Font Size) and not an Output File field (a path typed in to CREATE a new
+        file, never an existing one to drop). Returns the live widgets themselves so callers can
+        wire (or, in a self-test, inspect) each one's own drop target.
+
+        Kept as a flat list, not a dict/registry -- there is nothing here any other code needs
+        to look up by name, just something to iterate once at startup (wiring) or in a test
+        (verification)."""
+        return [
+            # Search Subtitles (OpenSubtitles) -- optional original-source moviehash input.
+            self.txt_subsearch_source,
+            # Retroactive HDR/DV Reinjection -- three independent inputs.
+            self.txt_reinject_source, self.txt_reinject_converted, self.txt_reinject_rife_manifest,
+            # Add Subtitle Track.
+            self.txt_submux_input, self.txt_submux_srt,
+            # Add Audio Track.
+            self.txt_audiomux_input, self.txt_audiomux_audio,
+            # Restore All Audio Tracks.
+            self.txt_audiorestore_input, self.txt_audiorestore_source,
+            # Retroactively Tag MKV as 3D (edits in place -- one input).
+            self.txt_stereotag_input,
+            # Sharpen.
+            self.txt_sharpen_input,
+            # RIFE Interpolation (standalone).
+            self.txt_rife_standalone_input, self.txt_rife_standalone_dv_source,
+            # Limit Bitrate an Existing File (standalone).
+            self.txt_bitrate_cap_standalone_input, self.txt_bitrate_cap_standalone_dv_source,
+            self.txt_bitrate_cap_standalone_rife_manifest,
+            # 3D Blu-ray Import -- one field, either an ISO file or a BDMV folder.
+            self.txt_bluray_disc,
+            # SBS to 3D Blu-ray MVC.
+            self.txt_sbs2mvc_input,
+            # Convert HDR/DV to SDR.
+            self.txt_hdr_to_sdr_input,
+            # 3D Blu-ray ISO to MVC MKV (MakeMKV).
+            self.txt_makemkv_input,
+            # VobSub to PGS Subtitle (BDSup2Sub++).
+            self.txt_vobsub_input,
+            # Upscale with waifu2x.
+            self.txt_upscale_input,
+        ]
+
+    @staticmethod
+    def _make_standalone_drop_callback(widget):
+        """ADR-360: one independent drop callback per Standalone Tools tab field -- unlike
+        on_drop_files above (every main-tab drop target routes to the ONE shared Input field),
+        each of these only ever sets the SAME widget it was dropped onto. No separate
+        path-setting helper method exists for any of these fields (every button handler above
+        does its own inline dialog/SetValue), so this just sets the field's own value directly,
+        same as on_drop_files' own fallback for a field with no such helper."""
+        def _on_drop(x, y, filenames):
+            if filenames:
+                widget.SetValue(filenames[0])
+            return True
+        return _on_drop
 
     def update_start_button_state(self):
         if not self.processing:
@@ -15917,6 +16027,15 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_sbs2mvc_output.SetValue(dlg.GetPath())
 
+    def update_sbs2mvc_makemkv_to_mkv(self):
+        """ADR-361: mirrors the main tab's own update_mvc_makemkv_to_mkv() -- 'Also build a real
+        MVC .mkv via MakeMKV' only means anything when Output Type is actually producing an
+        .iso (iso_to_mvc_makemkv_cli.py's own convert() is built entirely around MakeMKV's
+        `iso:<path>` CLI source syntax). Greyed out (not hidden) otherwise, same Enable()
+        convention as every other conditional control in this tool."""
+        output_type = self.cbo_sbs2mvc_output_type.GetClientData(self.cbo_sbs2mvc_output_type.GetSelection())
+        self.chk_sbs2mvc_makemkv_to_mkv.Enable(output_type == "iso")
+
     def on_changed_sbs2mvc_output_type(self, event):
         # ADR-273: makes the file extension picking rule (this tool's own
         # is_mkv_output = extension check in sbs_to_mvc_cli.py) a real, explicit,
@@ -15929,6 +16048,7 @@ class MainFrame(wx.Frame):
         # "Keep DD+ lossless on disc output" only means anything for a real disc-structured
         # target (ISO/BD Folder) -- Plain MKV/Bare M2TS already keep it lossless unconditionally.
         self.chk_sbs2mvc_allow_lossless_eac3.Enable(out_type in ("iso", "folder"))
+        self.update_sbs2mvc_makemkv_to_mkv()
         current = self.txt_sbs2mvc_output.GetValue().strip()
         if not current:
             return
@@ -15959,7 +16079,12 @@ class MainFrame(wx.Frame):
                  "tonemap": T("Converting HDR to SDR"),
                  # ADR-291: BD Folder's own extra step after the real disc image is built --
                  # mounting it and copying its contents out (iso_to_bd_folder()).
-                 "folder": T("Copying the disc structure to the folder")}
+                 "folder": T("Copying the disc structure to the folder"),
+                 # ADR-361: the optional MakeMKV chain step, once the ISO above is done -- the
+                 # same two stage names iso_to_mvc_makemkv_cli.py's own --gui-progress reports
+                 # (see _update_makemkv_progress's identical labels on the standalone MakeMKV tool).
+                 "scan": T("Scanning the disc for the main feature"),
+                 "rip": T("Ripping with MakeMKV")}
         name = names.get(stage, stage)
         if total > 0:
             self.gauge_sbs2mvc.SetRange(int(total))
@@ -15989,7 +16114,7 @@ class MainFrame(wx.Frame):
             self.gauge_sbs2mvc.Pulse()
             self.lbl_sbs2mvc_progress.SetLabel(f"{name}...")
 
-    def run_sbs2mvc(self, cmd):
+    def run_sbs2mvc(self, cmd, makemkv_chain=None):
         self.sbs2mvc_proc = proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -16010,13 +16135,72 @@ class MainFrame(wx.Frame):
                     continue
         proc.wait()
         stderr_thread.join(timeout=5)
-        return proc.returncode, "".join(stderr_chunks)
+        output = "".join(stderr_chunks)
+
+        # ADR-361: optional second step -- once the ISO above is genuinely done, chain into the
+        # same iso_to_mvc_makemkv_cli call the standalone "3D Blu-ray ISO to MVC MKV (MakeMKV)"
+        # tool's own build_makemkv_command() uses, same "never fails the overall job" philosophy
+        # as utils.py's _run_makemkv_mvc_to_mkv() (the main tab's own equivalent chain): MakeMKV
+        # not being found, or the rip itself failing, is reported in the log text below but never
+        # turns this already-successful ISO job into a reported failure.
+        if makemkv_chain and proc.returncode == 0 and not self.sbs2mvc_cancelled:
+            from .iso_to_mvc_makemkv_cli import _find_makemkvcon
+            if _find_makemkvcon() is None:
+                output += "\n[3DECKER] " + T(
+                    "MakeMKV not found -- \"Also build a real MVC .mkv via MakeMKV\" needs a real, "
+                    "separately installed and licensed copy of MakeMKV (makemkvcon64.exe/"
+                    "makemkvcon.exe). Install it yourself from https://www.makemkv.com/ first; "
+                    "3DECKER never bundles or installs MakeMKV. The 3D Blu-ray ISO above was still "
+                    "created successfully.")
+            else:
+                makemkv_cmd = [sys.executable, "-m", "iw3.iso_to_mvc_makemkv_cli",
+                               "--iso", makemkv_chain["iso_path"], "--output", makemkv_chain["mkv_path"],
+                               "--gui-progress"]
+                self.sbs2mvc_makemkv_chain_active = True
+                self.sbs2mvc_proc = mk_proc = subprocess.Popen(
+                    makemkv_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                mk_stderr_chunks = []
+
+                def _drain_makemkv_stderr():
+                    for line in mk_proc.stderr:
+                        mk_stderr_chunks.append(line)
+
+                mk_stderr_thread = threading.Thread(target=_drain_makemkv_stderr, daemon=True)
+                mk_stderr_thread.start()
+                for line in mk_proc.stdout:
+                    parts = line.strip().split(" ")
+                    if len(parts) == 4 and parts[0] == "IW3_MVC_PROGRESS":
+                        try:
+                            wx.CallAfter(self._update_sbs2mvc_progress, parts[1], float(parts[2]), float(parts[3]))
+                        except ValueError:
+                            continue
+                mk_proc.wait()
+                mk_stderr_thread.join(timeout=5)
+                output += (f"\n---- {T('3D Blu-ray ISO to MVC MKV (MakeMKV)')} ----\n"
+                           + "".join(mk_stderr_chunks))
+                if mk_proc.returncode != 0 and not self.sbs2mvc_cancelled:
+                    output += "\n[3DECKER] " + T(
+                        "MakeMKV rip failed or refused -- the 3D Blu-ray ISO above was still created "
+                        "successfully; see the log above for the MakeMKV failure reason.")
+        return proc.returncode, output
 
     def _cleanup_after_sbs2mvc_cancel(self):
         output_path = self.txt_sbs2mvc_output.GetValue().strip()
         stem = path.splitext(path.basename(output_path))[0]
         out_dir = path.dirname(path.abspath(output_path))
         shutil.rmtree(path.join(out_dir, f"_sbs2mvc_work_{stem}"), ignore_errors=True)
+        # ADR-361: once the optional MakeMKV chain step has actually started, the ISO itself is
+        # already a complete, finished file from THIS run -- a cancel during that second step
+        # must only remove the chain's own partial .mkv, never the finished ISO.
+        if self.sbs2mvc_makemkv_chain_active:
+            mkv_path = f"{path.splitext(output_path)[0]}_MKV.mkv"
+            try:
+                if path.exists(mkv_path):
+                    os.remove(mkv_path)
+            except OSError:
+                pass
+            return
         try:
             if path.exists(output_path) and path.getmtime(output_path) >= self.sbs2mvc_start_time - 1:
                 os.remove(output_path)
@@ -16126,17 +16310,29 @@ class MainFrame(wx.Frame):
         if error:
             wx.MessageBox(error, T("SBS to 3D Blu-ray MVC"), wx.OK | wx.ICON_WARNING)
             return
+        # ADR-361: built here (GUI thread, real widget reads), not inside run_sbs2mvc's own
+        # background thread -- same convention as the standalone RIFE tool's own "dv" chain
+        # dict. Only when the checkbox is on AND the real output path actually ends in .iso
+        # (the field itself is the source of truth, same ADR-295 reasoning as
+        # build_sbs2mvc_command() above -- Output Type is only a convenience that sets this).
+        makemkv_chain = None
+        if self.chk_sbs2mvc_makemkv_to_mkv.GetValue():
+            output_path = self.txt_sbs2mvc_output.GetValue().strip()
+            if output_path.lower().endswith(".iso"):
+                makemkv_chain = {"iso_path": output_path,
+                                 "mkv_path": f"{path.splitext(output_path)[0]}_MKV.mkv"}
         self.txt_sbs2mvc_log.SetValue(T("Running...\n"))
         self.gauge_sbs2mvc.SetRange(1)
         self.gauge_sbs2mvc.SetValue(0)
         self.lbl_sbs2mvc_progress.SetLabel("")
         self.sbs2mvc_cancelled = False
+        self.sbs2mvc_makemkv_chain_active = False
         self.sbs2mvc_start_time = time()
         self.btn_sbs2mvc_run.Disable()
         self.btn_sbs2mvc_clear.Disable()
         self.btn_sbs2mvc_cancel.Enable()
         self.SetStatusText(T("Converting to 3D Blu-ray..."))
-        startWorker(self.on_exit_sbs2mvc_worker, self.run_sbs2mvc, wargs=(cmd,))
+        startWorker(self.on_exit_sbs2mvc_worker, self.run_sbs2mvc, wargs=(cmd, makemkv_chain))
 
     # --- Convert HDR/DV to SDR (standalone tool) ---
 
@@ -18714,6 +18910,81 @@ def _self_test_standalone_tools_collapsible_sections():
         app.Destroy()
 
     print("_self_test_standalone_tools_collapsible_sections: PASS")
+
+
+def _self_test_standalone_tool_drag_and_drop():
+    """ADR-360: real user report (Steve, via decker) -- drag-and-drop only ever worked on the
+    main tab (self.SetDropTarget/on_drop_files); none of the 15 Standalone Tools tab panes had
+    any drop target wired onto any of their own fields at all. A real OS drag-and-drop event
+    can't be simulated in a self-test, so this verifies the two things that actually matter at
+    the unit level: every field _standalone_tool_drop_target_fields() lists really has its own
+    wx.FileDropTarget (a real FileDropCallback, not left unset), and each field's own callback,
+    called directly, sets ONLY that field -- never any other field, and never routes to the
+    main tab's shared Input the way on_drop_files does. Output-only fields (a path typed in to
+    CREATE a new file, never dropped onto) are confirmed absent from the wired list."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        fields = frame._standalone_tool_drop_target_fields()
+        assert len(fields) == len(set(id(f) for f in fields)), "no field should be wired twice"
+
+        expected_names = {
+            "txt_subsearch_source", "txt_reinject_source", "txt_reinject_converted",
+            "txt_reinject_rife_manifest", "txt_submux_input", "txt_submux_srt",
+            "txt_audiomux_input", "txt_audiomux_audio", "txt_audiorestore_input",
+            "txt_audiorestore_source", "txt_stereotag_input", "txt_sharpen_input",
+            "txt_rife_standalone_input", "txt_rife_standalone_dv_source",
+            "txt_bitrate_cap_standalone_input", "txt_bitrate_cap_standalone_dv_source",
+            "txt_bitrate_cap_standalone_rife_manifest", "txt_bluray_disc", "txt_sbs2mvc_input",
+            "txt_hdr_to_sdr_input", "txt_makemkv_input", "txt_vobsub_input", "txt_upscale_input",
+        }
+        actual_names = {f.GetName() for f in fields}
+        assert actual_names == expected_names, actual_names.symmetric_difference(expected_names)
+
+        # Output-only fields (typed in to CREATE a new file, never an existing one to drop onto)
+        # are deliberately NOT wired.
+        for excluded in ("txt_reinject_output", "txt_submux_output", "txt_audiomux_output",
+                         "txt_audiorestore_output", "txt_sharpen_output",
+                         "txt_rife_standalone_output", "txt_bitrate_cap_standalone_output",
+                         "txt_bluray_output", "txt_sbs2mvc_output", "txt_hdr_to_sdr_output",
+                         "txt_makemkv_output", "txt_vobsub_output", "txt_upscale_output"):
+            assert excluded not in actual_names, excluded
+
+        for field in fields:
+            drop_target = field.GetDropTarget()
+            assert drop_target is not None, f"{field.GetName()} has no drop target wired at all"
+            assert isinstance(drop_target, gui_mod.FileDropCallback), field.GetName()
+            # Invoked directly (no real OS drag event) -- must set ONLY this field, never any
+            # other, matching ADR-360's "the field you drop onto is the field that gets set"
+            # (unlike the main tab's shared on_drop_files, which always routes to one Input).
+            sentinel = frame.txt_reinject_source if field is not frame.txt_reinject_source \
+                else frame.txt_bluray_disc
+            field.SetValue("")
+            sentinel.SetValue("UNTOUCHED")
+            marker = f"C:/dropped/{field.GetName()}.mkv"
+            result = drop_target.callback(0, 0, [marker])
+            assert result is True
+            assert field.GetValue() == marker, (field.GetName(), field.GetValue())
+            assert sentinel.GetValue() == "UNTOUCHED", f"{field.GetName()}'s own drop touched another field"
+            # An empty filenames list (can happen for a non-file drag) is a harmless no-op.
+            field.SetValue("unchanged")
+            drop_target.callback(0, 0, [])
+            assert field.GetValue() == "unchanged"
+
+        # The main tab's own existing drop targets are completely unaffected -- still the
+        # one shared on_drop_files callback, still routing to the one shared Input field.
+        assert frame.pnl_file.input_path_widget.GetDropTarget().callback == frame.on_drop_files
+        assert frame.pnl_file.output_path_widget.GetDropTarget().callback == frame.on_drop_files
+        assert frame.GetDropTarget().callback == frame.on_drop_files
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_standalone_tool_drag_and_drop: PASS")
 
 
 def _self_test_depth_blend_collapsible_section():
@@ -24773,6 +25044,192 @@ def _self_test_sbs2mvc_panel():
         app.Destroy()
 
     print("_self_test_sbs2mvc_panel: PASS")
+
+
+def _self_test_sbs2mvc_makemkv_to_mkv_checkbox():
+    """ADR-361: real user request (Steve, via decker) -- the standalone 'SBS to 3D Blu-ray MVC'
+    tool gets the same 'Also build a real MVC .mkv via MakeMKV (after the ISO)' checkbox the
+    main tab's inline MVC pipeline already has (chk_mvc_makemkv_to_mkv, ADR-319 follow-up), so
+    getting both an ISO and a real MVC .mkv out of THIS tool no longer needs a separate manual
+    run of the standalone MakeMKV tool afterward. Covers: default off, tooltip content, greyed
+    out for every Output Type except '3D Blu-ray ISO' (mirroring
+    update_mvc_makemkv_to_mkv()'s own Enable() convention), on_click_btn_sbs2mvc_run() only
+    building a real chain dict when the checkbox is on AND the real output path ends in .iso,
+    run_sbs2mvc()'s own chaining (reusing the exact iso_to_mvc_makemkv_cli call the standalone
+    MakeMKV tool's build_makemkv_command() uses) never failing the already-successful ISO job
+    even when MakeMKV is missing or the rip itself fails, and _cleanup_after_sbs2mvc_cancel()
+    never deleting the already-finished ISO when Cancel is clicked during that second step."""
+    import io
+    import iw3.gui as gui_mod
+    import iw3.iso_to_mvc_makemkv_cli as makemkv_mod
+
+    app = wx.App()
+    frame = None
+    orig_popen = subprocess.Popen
+    orig_find = makemkv_mod._find_makemkvcon
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+
+        # Default state: off, and greyed out only once a non-"iso" Output Type is selected --
+        # the tool's own default Output Type IS "iso", so it starts enabled (unlike the main
+        # tab's copy, whose own 3D Blu-ray MVC Output defaults to Off).
+        assert frame.chk_sbs2mvc_makemkv_to_mkv.GetValue() is False, "must default off -- opt-in only"
+        assert frame.cbo_sbs2mvc_output_type.GetClientData(
+            frame.cbo_sbs2mvc_output_type.GetSelection()) == "iso", "must default to ISO"
+        assert frame.chk_sbs2mvc_makemkv_to_mkv.IsEnabled(), "iso is the default Output Type -- must be enabled"
+        tip = frame.chk_sbs2mvc_makemkv_to_mkv.GetToolTip().GetTip()
+        for phrase in ("separately installed", "licensed", "makemkvcon", "_MKV.mkv",
+                       "3D Blu-ray ISO", "never touched"):
+            assert phrase in tip, f"tooltip missing {phrase!r}: {tip}"
+
+        items = [frame.cbo_sbs2mvc_output_type.GetClientData(i)
+                 for i in range(frame.cbo_sbs2mvc_output_type.GetCount())]
+        for output_type in ("folder", "mkv", "m2ts"):
+            frame.cbo_sbs2mvc_output_type.SetSelection(items.index(output_type))
+            frame.on_changed_sbs2mvc_output_type(None)
+            assert not frame.chk_sbs2mvc_makemkv_to_mkv.IsEnabled(), f"must grey out for {output_type}"
+        frame.cbo_sbs2mvc_output_type.SetSelection(items.index("iso"))
+        frame.on_changed_sbs2mvc_output_type(None)
+        assert frame.chk_sbs2mvc_makemkv_to_mkv.IsEnabled(), "must re-enable for 3D Blu-ray ISO"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = path.join(tmpdir, "movie_sbs.mkv")
+            open(video, "wb").close()
+            frame.txt_sbs2mvc_input.SetValue(video)
+            iso_out = path.join(tmpdir, "movie_MVC.iso")
+            frame.txt_sbs2mvc_output.SetValue(iso_out)
+
+            # on_click_btn_sbs2mvc_run() must only build a real chain dict when the checkbox is
+            # on AND the real output path ends in .iso -- Output Type is only a convenience.
+            captured = {}
+            gui_mod.startWorker = lambda on_exit, worker_fn, wargs=(), **kw: captured.update(
+                on_exit=on_exit, fn=worker_fn, wargs=wargs)
+
+            frame.chk_sbs2mvc_makemkv_to_mkv.SetValue(False)
+            frame.on_click_btn_sbs2mvc_run(None)
+            cmd, makemkv_chain = captured["wargs"]
+            assert makemkv_chain is None, "checkbox off -- no chain"
+
+            frame.chk_sbs2mvc_makemkv_to_mkv.SetValue(True)
+            mkv_out = path.join(tmpdir, "movie_MVC.mkv")
+            frame.txt_sbs2mvc_output.SetValue(mkv_out)
+            frame.on_click_btn_sbs2mvc_run(None)
+            cmd, makemkv_chain = captured["wargs"]
+            assert makemkv_chain is None, "checkbox on but real output isn't .iso -- no chain"
+
+            frame.txt_sbs2mvc_output.SetValue(iso_out)
+            frame.on_click_btn_sbs2mvc_run(None)
+            cmd, makemkv_chain = captured["wargs"]
+            assert makemkv_chain == {"iso_path": iso_out, "mkv_path": path.join(tmpdir, "movie_MVC_MKV.mkv")}, \
+                makemkv_chain
+
+            # run_sbs2mvc()'s own chaining, called directly (no event loop/threads needed --
+            # Popen itself is faked, same pattern _self_test_rife_standalone_folder_batch uses).
+            from unittest import mock
+
+            popen_calls = []
+
+            def make_fake_popen(first_rc, second_rc, first_err="sbs2mvc done", second_err="makemkv done"):
+                def _fake_popen(cmd, **kwargs):
+                    popen_calls.append(cmd)
+                    proc = mock.Mock()
+                    proc.cmd = cmd
+                    is_makemkv = "iso_to_mvc_makemkv_cli" in cmd[2]
+                    proc.returncode = second_rc if is_makemkv else first_rc
+                    proc.stdout = io.StringIO("")
+                    proc.stderr = io.StringIO((second_err if is_makemkv else first_err) + "\n")
+                    proc.wait = lambda: None
+                    proc.poll = lambda: proc.returncode
+                    return proc
+                return _fake_popen
+
+            # (a) no chain dict at all -- exactly one Popen call, output/returncode unaffected.
+            popen_calls.clear()
+            subprocess.Popen = make_fake_popen(0, 0)
+            frame.sbs2mvc_cancelled = False
+            rc, output = frame.run_sbs2mvc(cmd, None)
+            assert rc == 0 and "sbs2mvc done" in output
+            assert len(popen_calls) == 1, "no chain requested -- must not touch MakeMKV at all"
+
+            # (b) chain requested, but no real MakeMKV install -- still exactly one Popen call
+            # (the rip is never attempted), the ISO job's own success is unaffected, and the
+            # reason is in the log text.
+            popen_calls.clear()
+            subprocess.Popen = make_fake_popen(0, 0)
+            makemkv_mod._find_makemkvcon = lambda: None
+            rc, output = frame.run_sbs2mvc(cmd, makemkv_chain)
+            assert rc == 0, "MakeMKV missing must never fail the already-successful ISO job"
+            assert len(popen_calls) == 1, "MakeMKV must never be launched when it can't be found"
+            assert "MakeMKV not found" in output
+
+            # (c) chain requested, MakeMKV found, rip succeeds -- two Popen calls, the second
+            # reusing the exact --iso/--output/--gui-progress shape build_makemkv_command() uses,
+            # combined output includes both runs' own text.
+            popen_calls.clear()
+            subprocess.Popen = make_fake_popen(0, 0)
+            makemkv_mod._find_makemkvcon = lambda: "makemkvcon64.exe"
+            rc, output = frame.run_sbs2mvc(cmd, makemkv_chain)
+            assert rc == 0
+            assert len(popen_calls) == 2
+            makemkv_cmd = popen_calls[1]
+            assert makemkv_cmd[1:3] == ["-m", "iw3.iso_to_mvc_makemkv_cli"], makemkv_cmd
+            assert makemkv_cmd[makemkv_cmd.index("--iso") + 1] == iso_out, makemkv_cmd
+            assert makemkv_cmd[makemkv_cmd.index("--output") + 1] == path.join(tmpdir, "movie_MVC_MKV.mkv"), \
+                makemkv_cmd
+            assert "--gui-progress" in makemkv_cmd
+            assert "sbs2mvc done" in output and "makemkv done" in output
+            assert frame.sbs2mvc_makemkv_chain_active is True
+
+            # (d) chain requested, MakeMKV found, but the rip itself fails -- still never fails
+            # the overall (already-successful) ISO job, and the log says why.
+            popen_calls.clear()
+            subprocess.Popen = make_fake_popen(0, 1)
+            rc, output = frame.run_sbs2mvc(cmd, makemkv_chain)
+            assert rc == 0, "a MakeMKV rip failure must never fail the ISO job's own already-successful result"
+            assert "MakeMKV rip failed or refused" in output
+
+            # (e) the ISO step itself failed -- the chain must never even be attempted.
+            popen_calls.clear()
+            subprocess.Popen = make_fake_popen(1, 0)
+            rc, output = frame.run_sbs2mvc(cmd, makemkv_chain)
+            assert rc == 1 and len(popen_calls) == 1, "chain must never run after a failed ISO step"
+
+            # (f) cancelled during the first step -- the chain must never run either.
+            popen_calls.clear()
+            subprocess.Popen = make_fake_popen(0, 0)
+            frame.sbs2mvc_cancelled = True
+            rc, output = frame.run_sbs2mvc(cmd, makemkv_chain)
+            assert len(popen_calls) == 1, "cancelled -- the chain must never run"
+            frame.sbs2mvc_cancelled = False
+
+            # _cleanup_after_sbs2mvc_cancel(): once the chain step has actually started, a
+            # cancel must remove only its own partial .mkv, never the already-finished ISO --
+            # even though the ISO's own mtime falls inside this run's start-time window.
+            open(iso_out, "wb").close()
+            mkv_path = path.join(tmpdir, "movie_MVC_MKV.mkv")
+            open(mkv_path, "wb").close()
+            frame.sbs2mvc_start_time = time() - 5
+            frame.sbs2mvc_makemkv_chain_active = True
+            frame._cleanup_after_sbs2mvc_cancel()
+            assert path.exists(iso_out), "the finished ISO must survive a cancel during the MakeMKV chain"
+            assert not path.exists(mkv_path), "the chain's own partial .mkv must be removed"
+
+            # Regression check: with the chain never having started, the ORIGINAL cleanup rule
+            # (remove a partial ISO written during this run) still applies unchanged.
+            open(iso_out, "wb").close()
+            frame.sbs2mvc_makemkv_chain_active = False
+            frame._cleanup_after_sbs2mvc_cancel()
+            assert not path.exists(iso_out), "a partial ISO from this run must still be removed as before"
+    finally:
+        subprocess.Popen = orig_popen
+        makemkv_mod._find_makemkvcon = orig_find
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_sbs2mvc_makemkv_to_mkv_checkbox: PASS")
 
 
 def _self_test_quick_convert_panel():
@@ -31542,6 +31999,7 @@ def _run_self_tests():
         _self_test_stereo_collapsible_sections,
         _self_test_video_filter_collapsible_section,
         _self_test_standalone_tools_collapsible_sections,
+        _self_test_standalone_tool_drag_and_drop,
         _self_test_depth_blend_collapsible_section,
         _self_test_zoom_level_persistence,
         _self_test_zoom_startup_restore,
@@ -31617,6 +32075,7 @@ def _run_self_tests():
         _self_test_analyze_source_video,
         _self_test_bluray_import_panel,
         _self_test_sbs2mvc_panel,
+        _self_test_sbs2mvc_makemkv_to_mkv_checkbox,
         _self_test_quick_convert_panel,
         _self_test_hdr_to_sdr_panel,
         _self_test_makemkv_panel,

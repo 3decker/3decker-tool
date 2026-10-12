@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — October 9, 2026
+## Latest Update — October 12, 2026
+
+**Added: drag-and-drop now works on every Standalone Tool, not just the main tab.** Before, you could only drop a file onto the main conversion tab's own Input box -- none of the Standalone Tools (Retroactive HDR/DV Reinjection, Add Subtitle Track, Add Audio Track, Restore All Audio Tracks, Retroactively Tag MKV as 3D, Sharpen, RIFE Interpolation, Limit Bitrate, 3D Blu-ray Import, SBS to 3D Blu-ray MVC, Convert HDR/DV to SDR, 3D Blu-ray ISO to MVC MKV (MakeMKV), VobSub to PGS Subtitle, Upscale with waifu2x, and Search Subtitles) accepted a dropped file at all. Now you can drag a file straight onto any of their own file boxes, and it fills in that exact box -- not the main tab's Input. A tool with more than one file box (for example Retroactive HDR/DV Reinjection's Source, Converted, and RIFE Manifest fields) has each one wired up separately, so you can drop a different file onto each.
+
+**Added: a "build a real MVC .mkv via MakeMKV" option on the standalone SBS to 3D Blu-ray MVC tool.** The main conversion tab has had a checkbox for a while that automatically runs MakeMKV on a freshly-built 3D Blu-ray ISO to also produce a real MVC .mkv file, right after the ISO finishes. The standalone "SBS to 3D Blu-ray MVC" tool now has the exact same checkbox (only available when its Output Type is set to "3D Blu-ray ISO") -- tick it, click Run, and you get both the ISO and a real MakeMKV-built MVC .mkv, one after the other, without having to run the separate "3D Blu-ray ISO to MVC MKV (MakeMKV)" tool by hand afterward. If MakeMKV isn't installed, or the rip itself fails, the ISO you already made is kept either way, and the log explains what happened.
+
+## Update — October 9, 2026
 
 **Fixed: Dolby Vision/HDR10+ reinjection could show a confusing "frame counts don't match" error that wasn't the real problem.** On some systems, a recent update to the bundled video tool could crash while counting a video's frames -- but the crash looked like a normal result instead of an error, so Reinjection (both the standalone tool and the automatic one after RIFE) reported a frame-count mismatch instead of the real cause. It now recognizes a real crash for what it is, shows the actual error, and automatically retries with a slower but more reliable counting method before giving up. A normal, working run is not slowed down at all -- the retry only ever happens after a real failure.
 

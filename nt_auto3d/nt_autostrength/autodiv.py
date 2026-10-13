@@ -61,9 +61,12 @@ strength per frame and calls the original once per run of equal values with
 -- gets it. The CLI gains --auto-divergence, --auto-divergence-mode,
 --divergence-min, --divergence-max, --auto-divergence-cut-smooth (eases the
 strength change at a cut into a ramp over N frames instead of an instant
-jump; 0 default, unchanged) and --auto-divergence-overlay (debug: the
-strength used, written into each frame's corner); the iw3 window gains the
-same controls under 3D Strength, saved with the rest of its settings.
+jump; 0 default, unchanged), --auto-divergence-overlay (debug: the strength
+used, written into each frame's corner) and --auto-divergence-scene-log
+(writes a plain text file next to the output listing the strength used per
+scene plus the movie's average, for review -- nothing burned into the
+picture); the iw3 window gains the same controls under 3D Strength, saved
+with the rest of its settings.
 
 NT_AUTODIV_DISABLE=1 turns all of it off, including the controls.
 """
@@ -365,9 +368,12 @@ class Tracker:
         self.cut_pending = True   # the next frame starts a scene
         self.ramp_from = None     # cut_smooth: value being eased away from
         self.ramp_left = 0        # cut_smooth: frames left in the current ramp
+        self.last_cuts = []       # which frames of the last run() call started a new scene
 
     def run(self, scores, embs, reset_pts, own_cuts, curve):
         out = []
+        cuts = []                 # same per-frame "new scene" flag `out` was built from -- the
+                                   # single source of truth for the scene log (see _RunState._scene_record)
         p = self.p
         for i, sc in enumerate(scores):
             cut = self.cut_pending
@@ -413,6 +419,8 @@ class Tracker:
                     if abs(target - self.out) < 0.05:
                         self.out, self.moving = target, False
             out.append(self.out)
+            cuts.append(cut)
+        self.last_cuts = cuts
         return out
 
 
@@ -435,6 +443,56 @@ class _RunState:
         self.pending = collections.deque()
         self.announced = False
         self.verbose = bool(os.environ.get("NT_INPAINT_VERBOSE"))
+        self.reset_scene_log()
+
+    def reset_scene_log(self):
+        """"Log 3D Strength per Scene" (--auto-divergence-scene-log): per-run buffer
+        of finished scenes, written once at the end of the movie (see _finish_scene_log
+        in fresh()) rather than incrementally, so an interrupted run never leaves a
+        malformed file. Reset here (called once per fresh run, alongside the Tracker's
+        own reset) rather than after writing, so a run that never reaches a clean
+        finish simply has nothing written for it."""
+        self.scene_records = []    # [(start_frame, end_frame, frame_count, mean_strength), ...]
+        self.scene_log_meta = None  # (mode, min, max, typical) for the log header
+        self._scene_open = False
+        self._scene_start = 0
+        self._scene_frames = 0
+        self._scene_sum = 0.0
+        self._scene_total_frames = 0
+
+    def _scene_flush(self):
+        """Closes the currently-open scene (if any) into scene_records. Called at
+        each newly detected cut, and once more from fresh() at the end of the run to
+        close out the final still-open scene."""
+        if self._scene_open and self._scene_frames > 0:
+            mean = self._scene_sum / self._scene_frames
+            self.scene_records.append(
+                (self._scene_start, self._scene_total_frames, self._scene_frames, mean))
+        self._scene_open = False
+        self._scene_frames = 0
+        self._scene_sum = 0.0
+
+    def _scene_record(self, divs, cuts):
+        """Buffers this batch's frames into the scene log, starting a new scene at
+        each real cut. Uses the SAME `cut` flags Tracker.run() itself just computed
+        (exposed via tracker.last_cuts) rather than re-deriving cut detection a
+        second time -- one source of truth for "is this a new scene", shared with the
+        strength tracking itself.
+
+        The per-scene value logged is a frame-count-weighted MEAN of the actual
+        strength applied across that scene's frames. In `cuts` mode this is just the
+        one held value; in `hybrid`/`smooth` mode the strength drifts within a scene,
+        and "scene" there just means "the span between two detected cuts" even though
+        the value moved inside it -- a deliberate choice, well-defined in every mode."""
+        for cut, d in zip(cuts, divs):
+            if cut and self._scene_open:
+                self._scene_flush()
+            if not self._scene_open:
+                self._scene_open = True
+                self._scene_start = self._scene_total_frames
+            self._scene_frames += 1
+            self._scene_sum += float(d)
+            self._scene_total_frames += 1
 
     def divergences(self, im, depth, args, reset_pts, same_obj=None):
         # iw3 warps the alpha channel with a second call on the SAME depth
@@ -463,6 +521,9 @@ class _RunState:
                  + ("" if self.estimator.model is not None else " (depth-only estimate)")
                  + f"; now {divs[-1]:.1f}")
         self.last_depth, self.last_divs = obj, divs
+        if getattr(args, "auto_divergence_scene_log", False):
+            self.scene_log_meta = (self.tracker.mode, lo, hi, typical)
+            self._scene_record(divs, self.tracker.last_cuts)
         log = os.environ.get("NT_AUTODIV_LOG")
         if log:
             try:
@@ -549,6 +610,110 @@ def _enabled(args):
 
 
 # --------------------------------------------------------------------------
+# "Log 3D Strength per Scene" (--auto-divergence-scene-log): a plain text file
+# next to the finished video, written once the whole run is done -- see
+# _finish_scene_log(), called from fresh() below.
+# --------------------------------------------------------------------------
+def _resolve_video_fps(U, args, input_path):
+    """Best-effort real fps for the log's timestamps -- mirrors process_video_full's
+    own config_callback() (the real fps Final Render actually encodes at: the
+    source's fps, clamped to --max-fps), never an invented value. Returns None if it
+    can't be read (e.g. input_path isn't a real video file), and the log falls back
+    to frame numbers only."""
+    try:
+        fps = float(U.VU.VideoMetadata.from_file(str(input_path)).get_fps())
+    except Exception:
+        return None
+    max_fps = getattr(args, "max_fps", None)
+    if max_fps:
+        fps = min(fps, float(max_fps))
+    return fps if fps > 0 else None
+
+
+def _scene_log_paths(U, args, input_path, output_path):
+    """(real output filename, scene-log path) for one movie. Reuses iw3's own
+    _resolve_single_file_log_path() (ADR-278/279) for the folder-vs-real-filename
+    resolution rather than duplicating that logic, then swaps its "_log.txt" suffix
+    for "_3d_strength_log.txt" so this never collides with the real job log. The
+    real output filename itself has to be resolved a second time (that function only
+    returns the already-suffixed log path) -- same two-line rule it uses internally."""
+    job_log = U._resolve_single_file_log_path(args, input_path, output_path)
+    base = job_log[:-len("_log.txt")] if job_log.endswith("_log.txt") else path.splitext(job_log)[0]
+    output = str(output_path)
+    if U.is_output_dir(output):
+        output = path.join(output, U.make_output_filename(input_path, args, video=U.is_video(str(input_path))))
+    return output, base + "_3d_strength_log.txt"
+
+
+def _format_time(sec):
+    sec = max(0, int(round(sec)))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _format_scene_log(st, output_filename, fps):
+    mode, lo, hi, typical = st.scene_log_meta or (st.tracker.mode, 0.0, 0.0, 0.0)
+    lines = [f"3D Strength log -- {path.basename(str(output_filename))}",
+             f"Auto 3D Strength: {mode} mode, range {lo:g}-{hi:g}, typical (3D Strength) {typical:g}"]
+    if not fps:
+        lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
+    lines.append("")
+    total_frames = 0
+    weighted_sum = 0.0
+    for i, (start, end, frames, mean) in enumerate(st.scene_records, 1):
+        span = (f"{_format_time(start / fps)} - {_format_time(end / fps)}" if fps
+               else f"frame {start} - {end}")
+        lines.append(f"Scene {i}   {span}   ({frames} frames)   3D Strength: {mean:.1f}")
+        total_frames += frames
+        weighted_sum += mean * frames
+    lines.append("")
+    overall = weighted_sum / total_frames if total_frames else 0.0
+    lines.append(f"Average 3D Strength for whole movie (time-weighted): {overall:.2f}")
+    return "\n".join(lines) + "\n"
+
+
+def _finish_scene_log(st, args, kind, call_args):
+    """Writes the "Log 3D Strength per Scene" text file for the just-finished run,
+    called from fresh() right after the wrapped function returns -- using the
+    _RunState that was live during that call, before the next call's reset() clears
+    it. Runs exactly once per real conversion job (one fresh()-wrapped call ==
+    one movie), which is also what makes a batch/directory run produce one separate
+    log per movie rather than one combined log: each movie gets its own call.
+
+    Only for real video jobs (process_video / process_config_video) -- process_image
+    has no "scene" and no per-movie job-log precedent to sit next to, so it is
+    skipped entirely.
+
+    Best-effort, like the existing NT_AUTODIV_LOG debug log: a write failure must
+    never raise into the real job. Unlike that silent debug log, a real failure here
+    IS reported, via _say() -- matching ensure_weights()'s own error-reporting
+    convention -- rather than swallowed with a bare `except: pass`."""
+    if not getattr(args, "auto_divergence_scene_log", False):
+        return
+    st._scene_flush()
+    if not st.scene_records:
+        return
+    try:
+        import iw3.utils as U
+        if kind == "process_video":
+            input_path, output_path = call_args[0], call_args[1]
+            fps = _resolve_video_fps(U, args, input_path)
+        else:  # process_config_video: config.fps is the real, already-resolved fps
+            config = call_args[0]
+            input_path, output_path = args.input, args.output
+            fps = float(getattr(config, "fps", 0)) or None
+        real_output, log_path = _scene_log_paths(U, args, input_path, output_path)
+        text = _format_scene_log(st, real_output, fps)
+        tmp = f"{log_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, log_path)
+    except Exception as e:                                           # noqa: BLE001
+        _say(f"could not write the 3D Strength scene log ({type(e).__name__}: {e})")
+
+
+# --------------------------------------------------------------------------
 # patches
 # --------------------------------------------------------------------------
 def _cat(parts):
@@ -606,18 +771,30 @@ def _patch_utils(U):
     U.apply_divergence = apply_divergence
 
     # each video and each image starts fresh
-    def fresh(fn, independent=False):
+    def fresh(fn, independent=False, scene_log_kind=None):
         def wrapper(*a, **kw):
             args = kw.get("args")
             if args is None:
                 args = next((x for x in a if hasattr(x, "divergence") and hasattr(x, "state")), None)
+            st = None
             if args is not None and _enabled(args):
                 st = args.state.get("nt_autodiv")
                 if st is not None:
                     st.tracker.reset()
                     st.last_depth = None
                     st.pending.clear()
-            return fn(*a, **kw)
+                    st.reset_scene_log()
+            result = fn(*a, **kw)
+            # "Log 3D Strength per Scene": write the just-finished movie's log right
+            # here, using the SAME _RunState that was just reset above for it -- the
+            # next call's reset() (above) is what clears it for the NEXT movie, so a
+            # batch/directory run naturally gets one real per-movie log, not one
+            # combined log, exactly mirroring how iw3's own job log already works
+            # per-movie (ADR-279). Only on a normal return -- a job that raised gets
+            # no "just finished" log.
+            if st is not None and scene_log_kind is not None:
+                _finish_scene_log(st, args, scene_log_kind, a)
+            return result
         wrapper._nt_autodiv = True
         wrapper.__wrapped__ = fn
         return wrapper
@@ -625,7 +802,8 @@ def _patch_utils(U):
     for name in ("process_video", "process_config_video", "process_image"):
         fn = getattr(U, name, None)
         if fn is not None and not getattr(fn, "_nt_autodiv", False):
-            setattr(U, name, fresh(fn))
+            kind = name if name in ("process_video", "process_config_video") else None
+            setattr(U, name, fresh(fn, scene_log_kind=kind))
 
     # iw3 empties the inpaint frame queue with side_model.reset() (e.g. after
     # its output-size probe) without returning those frames; drop their labels
@@ -669,6 +847,9 @@ def _patch_utils(U):
                             "unchanged instant jump")
         g.add_argument("--auto-divergence-overlay", action="store_true",
                        help="debug: write the strength used into the top-left of every frame")
+        g.add_argument("--auto-divergence-scene-log", action="store_true",
+                       help="write a text file next to the output listing the 3D strength used "
+                            "for each scene, plus the whole movie's average")
         return p
 
     create_parser._nt_autodiv = True
@@ -730,15 +911,22 @@ def _add_controls(self, T, EditableComboBox):
         "Writes the 3D Strength used for each frame into its top-left corner,\n"
         "in both eyes, so you can see what Auto 3D Strength decided.\n"
         "For testing - it is burned into the output video.")
+    self.chk_nt_auto_div_scene_log = wx.CheckBox(box, label=T("Log 3D Strength per Scene"),
+                                                 name="chk_nt_auto_div_scene_log")
+    self.chk_nt_auto_div_scene_log.SetToolTip(
+        "Writes a text file next to the finished video listing the 3D Strength\n"
+        "used for each scene, plus one overall average for the whole movie -- so\n"
+        "you can see what Auto 3D Strength decided without watching the video.\n"
+        "Unlike the checkbox above, nothing is written into the picture itself.")
 
-    # four rows directly under 3D Strength (and the warning line under it)
+    # five rows directly under 3D Strength (and the warning line under it)
     grid = self.cbo_divergence.GetContainingSizer()
     row = grid.GetItemPosition(self.cbo_divergence).GetRow() + 2
     items = [(it, it.GetPos()) for it in grid.GetChildren()]
     for it, pos in sorted(items, key=lambda t: -t[1].GetRow()):
         if pos.GetRow() >= row:
             target = it.GetWindow() or it.GetSizer()
-            grid.SetItemPosition(target, wx.GBPosition(pos.GetRow() + 4, pos.GetCol()))
+            grid.SetItemPosition(target, wx.GBPosition(pos.GetRow() + 5, pos.GetCol()))
     grid.Add(self.chk_nt_auto_div, (row, 0), flag=wx.ALIGN_CENTER_VERTICAL)
     grid.Add(self.cbo_nt_auto_div_mode, (row, 1), (1, 2), flag=wx.EXPAND)
     grid.Add(self.lbl_nt_div_range, (row + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -747,6 +935,7 @@ def _add_controls(self, T, EditableComboBox):
     grid.Add(self.lbl_nt_auto_div_stab, (row + 2, 0), flag=wx.ALIGN_CENTER_VERTICAL)
     grid.Add(self.cbo_nt_auto_div_stab, (row + 2, 1), (1, 2), flag=wx.EXPAND)
     grid.Add(self.chk_nt_auto_div_overlay, (row + 3, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+    grid.Add(self.chk_nt_auto_div_scene_log, (row + 4, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
     self._nt_T = T
     self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, lambda e: _update(self))
     self._nt_autodiv_ready = True
@@ -758,7 +947,8 @@ def _update(self):
     on = self.chk_nt_auto_div.IsChecked()
     for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range,
               self.cbo_nt_div_min, self.cbo_nt_div_max, self.lbl_nt_auto_div_stab,
-              self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay):
+              self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay,
+              self.chk_nt_auto_div_scene_log):
         c.Enable(on)
     T = getattr(self, "_nt_T", lambda s: s)
     self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
@@ -816,6 +1006,7 @@ def _patch_window_class(MF):
         args.divergence_min = float(self.cbo_nt_div_min.GetValue())
         args.divergence_max = float(self.cbo_nt_div_max.GetValue())
         args.auto_divergence_overlay = bool(on) and self.chk_nt_auto_div_overlay.IsChecked()
+        args.auto_divergence_scene_log = bool(on) and self.chk_nt_auto_div_scene_log.IsChecked()
         args.auto_divergence_stability = (self.cbo_nt_auto_div_stab.GetValue()
                                           or DEFAULT_STABILITY).replace(" ", "-")
         return args

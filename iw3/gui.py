@@ -1454,6 +1454,15 @@ class MainFrame(wx.Frame):
               "corner, in both eyes, so you can see what Auto 3D Strength decided.\n"
               "Con: it's burned into the picture itself.\n"
               "Recommended: on only while testing a scene, off for the real conversion."))
+        self.chk_nt_auto_div_scene_log = wx.CheckBox(self.grp_stereo, label=T("Log 3D Strength per Scene"),
+                                                     name="chk_nt_auto_div_scene_log")
+        self.chk_nt_auto_div_scene_log.SetToolTip(
+            T("What it's for: writes a text file next to the finished video listing the 3D Strength "
+              "used for each scene, plus one overall average for the whole movie -- so you can review "
+              "what Auto 3D Strength decided without watching the video.\n"
+              "How it's different from the checkbox above: nothing is written into the picture itself, "
+              "just a plain text file you can open afterward.\n"
+              "Recommended: on if you want a record of what Auto 3D Strength chose; off otherwise."))
         self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div)
         self.update_nt_auto_divergence()
         self.chk_stereo_show_advanced.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_stereo_show_advanced)
@@ -3249,6 +3258,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_nt_cut_smooth, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_nt_cut_smooth, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_nt_auto_div_scene_log, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_convergence, (i, 2), flag=wx.EXPAND)
@@ -10655,6 +10665,7 @@ class MainFrame(wx.Frame):
             self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
             self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
             self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay,
+            self.chk_nt_auto_div_scene_log,
             self.lbl_resolution_preset, self.cbo_resolution_preset,
             self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
@@ -10685,7 +10696,8 @@ class MainFrame(wx.Frame):
         on = self.chk_nt_auto_div.GetValue()
         for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
                   self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
-                  self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay):
+                  self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay,
+                  self.chk_nt_auto_div_scene_log):
             c.Enable(on)
         self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
 
@@ -11393,6 +11405,7 @@ class MainFrame(wx.Frame):
             auto_divergence_stability=self.cbo_nt_auto_div_stab.GetValue().replace(" ", "-"),
             auto_divergence_cut_smooth=int(self.cbo_nt_cut_smooth.GetValue()),
             auto_divergence_overlay=self.chk_nt_auto_div_overlay.GetValue(),
+            auto_divergence_scene_log=self.chk_nt_auto_div_scene_log.GetValue(),
             face_protect_strength=float(self.cbo_face_protect.GetValue()),
             ipd_offset=float(self.sld_ipd_offset.GetValue()),
             synthetic_view=self.cbo_synthetic_view.GetValue(),
@@ -12677,6 +12690,7 @@ class MainFrame(wx.Frame):
                            getattr(args, "auto_divergence_stability", "medium").replace("-", " "))
         _apply_combo_value(self.cbo_nt_cut_smooth, getattr(args, "auto_divergence_cut_smooth", 0))
         self.chk_nt_auto_div_overlay.SetValue(bool(getattr(args, "auto_divergence_overlay", False)))
+        self.chk_nt_auto_div_scene_log.SetValue(bool(getattr(args, "auto_divergence_scene_log", False)))
         _apply_combo_value(self.cbo_face_protect, getattr(args, "face_protect_strength", 0.0))
         self.sld_ipd_offset.SetValue(int(round(args.ipd_offset)))
         _apply_combo_value(self.cbo_synthetic_view, args.synthetic_view)
@@ -28858,7 +28872,8 @@ def _self_test_nt_auto_divergence_controls():
         frame = MainFrame()
         siblings = (frame.cbo_nt_auto_div_mode, frame.lbl_nt_div_range, frame.cbo_nt_div_min,
                    frame.cbo_nt_div_max, frame.lbl_nt_auto_div_stab, frame.cbo_nt_auto_div_stab,
-                   frame.lbl_nt_cut_smooth, frame.cbo_nt_cut_smooth, frame.chk_nt_auto_div_overlay)
+                   frame.lbl_nt_cut_smooth, frame.cbo_nt_cut_smooth, frame.chk_nt_auto_div_overlay,
+                   frame.chk_nt_auto_div_scene_log)
         assert not frame.chk_nt_auto_div.GetValue() and all(not c.IsEnabled() for c in siblings)
         assert frame.lbl_divergence.GetLabelText() == "3D Strength"
         assert frame.cbo_nt_cut_smooth.GetValue() == "0", "must default to off"
@@ -28874,17 +28889,20 @@ def _self_test_nt_auto_divergence_controls():
         frame.cbo_nt_auto_div_stab.SetValue("very high")
         frame.cbo_nt_cut_smooth.SetValue("6")
         frame.chk_nt_auto_div_overlay.SetValue(True)
+        frame.chk_nt_auto_div_scene_log.SetValue(True)
         args = frame.parse_args(skip_set_state=True)
         assert args.auto_divergence is True and args.auto_divergence_mode == "cuts"
         assert args.divergence_min == 3.0 and args.divergence_max == 12.0
         assert args.auto_divergence_stability == "very-high" and args.auto_divergence_overlay is True
         assert args.auto_divergence_cut_smooth == 6
+        assert args.auto_divergence_scene_log is True
         assert "--auto-divergence" in frame.get_cli_command(), "must show up in Copy Command like any real setting"
 
         frame.apply_parsed_args_to_gui(args)
         assert frame.chk_nt_auto_div.GetValue() and frame.cbo_nt_div_min.GetValue() == "3.0"
         assert frame.cbo_nt_auto_div_stab.GetValue() == "very high", "restore must undo the dash CLI uses"
         assert frame.cbo_nt_cut_smooth.GetValue() == "6"
+        assert frame.chk_nt_auto_div_scene_log.GetValue() is True, "scene-log checkbox must round-trip too"
 
         frame.chk_nt_auto_div.SetValue(False)
         frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
@@ -28986,6 +29004,123 @@ def _self_test_auto_divergence_cut_smooth():
     out2b = t2b.run(scores, None, reset_pts, False, curve)
     assert out2a == out2b, "cut_smooth must have zero effect in smooth mode, which never jumps at all"
     print("_self_test_auto_divergence_cut_smooth: PASS")
+
+
+def _self_test_auto_divergence_scene_log():
+    """New feature: "Log 3D Strength per Scene" / --auto-divergence-scene-log
+    (`nt_auto3d/nt_autostrength/autodiv.py`) writes a plain-text file next to the
+    finished video listing the 3D Strength used per scene plus the movie's overall
+    average. Verified two ways, pure Python, no GPU/model/real movie needed:
+
+    1. Tracker.run()'s own `cut` flags (exposed via `last_cuts`) and _RunState's
+       scene-bucketing (_scene_record/_scene_flush/_format_scene_log) against known
+       synthetic closeness scores and known cut points, checked against hand-
+       computed scene boundaries/values/the time-weighted average.
+    2. _finish_scene_log() (the real file-writing hook fresh() calls once per movie)
+       for TWO separate movies in one run, confirming one separate log file per
+       movie rather than one combined log -- the real requirement behind ADR-279's
+       job-log precedent this feature deliberately mirrors."""
+    import tempfile
+    from os import path as _p
+    from nt_autostrength import autodiv as AD
+    from iw3 import utils as U
+
+    def curve(s):
+        return 2.0 + (16.0 - 2.0) * s   # lo=2.0, hi=16.0
+
+    # Scene 1: frames 0-4 (closeness 0.0 -> strength 2.0). Cut. Scene 2: frames 5-7
+    # (closeness 1.0 -> strength 16.0). Cut. Scene 3: frames 8-9 (closeness 0.5 ->
+    # strength 9.0). reset_pts marks iw3's own scene-detect cut -- it resets AFTER
+    # the marked frame, so True at index 4 lands the cut on index 5, etc.
+    scores = [0.0] * 5 + [1.0] * 3 + [0.5] * 2
+    reset_pts = [False] * 4 + [True] + [False] * 2 + [True] + [False]
+
+    tracker = AD.Tracker("cuts", "medium")
+    divs = tracker.run(scores, None, reset_pts, False, curve)
+    cuts = tracker.last_cuts
+    assert [i for i, c in enumerate(cuts) if c] == [0, 5, 8], cuts
+
+    # Every frame within a scene shares the identical closeness here, so cuts
+    # mode's running mean never moves off the raw score -- divs is just
+    # curve(score) rounded to STEP for every frame.
+    expected_divs = [round(curve(s) / AD.STEP) * AD.STEP for s in scores]
+    assert divs == expected_divs, (divs, expected_divs)
+    assert divs[0] == 2.0 and divs[5] == 16.0 and divs[8] == 9.0
+
+    st = AD._RunState.__new__(AD._RunState)   # skip __init__: no Estimator/CLIP needed for this part
+    st.reset_scene_log()
+    st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+    st._scene_record(divs, cuts)
+    st._scene_flush()
+    # Hand-computed: scene 1 = frames [0,5) (5 frames, mean 2.0), scene 2 = [5,8)
+    # (3 frames, mean 16.0), scene 3 = [8,10) (2 frames, mean 9.0).
+    assert st.scene_records == [(0, 5, 5, 2.0), (5, 8, 3, 16.0), (8, 10, 2, 9.0)], st.scene_records
+
+    text = AD._format_scene_log(st, "movie_SBS.mp4", fps=1.0)
+    lines = text.splitlines()
+    assert lines[0] == "3D Strength log -- movie_SBS.mp4"
+    assert lines[1] == "Auto 3D Strength: cuts mode, range 2-16, typical (3D Strength) 6"
+    assert "Scene 1   00:00:00 - 00:00:05   (5 frames)   3D Strength: 2.0" in lines
+    assert "Scene 2   00:00:05 - 00:00:08   (3 frames)   3D Strength: 16.0" in lines
+    assert "Scene 3   00:00:08 - 00:00:10   (2 frames)   3D Strength: 9.0" in lines
+    # time-weighted average: (5*2.0 + 3*16.0 + 2*9.0) / 10 = (10 + 48 + 18) / 10 = 7.6
+    assert lines[-1] == "Average 3D Strength for whole movie (time-weighted): 7.60", lines[-1]
+
+    # No real fps reachable -> frame numbers instead of timestamps, with a clear note.
+    text_no_fps = AD._format_scene_log(st, "movie_SBS.mp4", fps=None)
+    assert "could not be determined" in text_no_fps
+    assert "Scene 1   frame 0 - 5   (5 frames)   3D Strength: 2.0" in text_no_fps.splitlines()
+
+    # Part 2: one real per-movie log file per movie in a batch, not one combined log
+    # (the same real requirement ADR-279's job log already solved) -- exercised
+    # through the real _finish_scene_log() file-writing path and the real
+    # make_output_filename()/_resolve_single_file_log_path() path resolution.
+    with tempfile.TemporaryDirectory() as tmp_out:
+        parser = U.create_parser(required_true=False)
+
+        def run_one(input_name, strengths):
+            args = parser.parse_args([
+                "-i", input_name, "-o", tmp_out,
+                "--auto-divergence", "--auto-divergence-scene-log",
+                "--divergence-min", "2.0", "--divergence-max", "16.0",
+            ])
+            args.video_extension = ".mkv"
+            one_st = AD._RunState.__new__(AD._RunState)
+            one_st.reset_scene_log()
+            one_st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+            one_st._scene_record(list(strengths), [True] * len(strengths))
+            AD._finish_scene_log(one_st, args, "process_video", (input_name, tmp_out))
+            return args
+
+        args1 = run_one("movie1.mp4", [2.0, 5.0])
+        args2 = run_one("movie2.mp4", [9.0])
+
+        name1 = U.make_output_filename("movie1.mp4", args1, video=True)
+        name2 = U.make_output_filename("movie2.mp4", args2, video=True)
+        assert name1 != name2, "sanity: the two fake movies must resolve to different real filenames"
+        log1 = _p.join(tmp_out, _p.splitext(name1)[0] + "_3d_strength_log.txt")
+        log2 = _p.join(tmp_out, _p.splitext(name2)[0] + "_3d_strength_log.txt")
+        assert _p.isfile(log1), f"movie1's own scene log was not written: {log1}"
+        assert _p.isfile(log2), f"movie2's own scene log was not written: {log2}"
+        text1 = open(log1, encoding="utf-8").read()
+        text2 = open(log2, encoding="utf-8").read()
+        # movie1: two single-frame scenes (2.0, 5.0) -> average (2.0+5.0)/2 = 3.50
+        assert "Average 3D Strength for whole movie (time-weighted): 3.50" in text1, text1
+        # movie2: one single-frame scene (9.0) -> average 9.00
+        assert "Average 3D Strength for whole movie (time-weighted): 9.00" in text2, text2
+        assert "3.50" not in text2 and "9.00" not in text1, "the two movies' logs must not share data"
+
+        # Turning the checkbox/flag off must write nothing at all.
+        with tempfile.TemporaryDirectory() as tmp_off:
+            args_off = parser.parse_args(["-i", "movie3.mp4", "-o", tmp_off, "--auto-divergence"])
+            args_off.video_extension = ".mkv"
+            off_st = AD._RunState.__new__(AD._RunState)
+            off_st.reset_scene_log()
+            off_st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+            off_st._scene_record([2.0], [True])
+            AD._finish_scene_log(off_st, args_off, "process_video", ("movie3.mp4", tmp_off))
+            assert os.listdir(tmp_off) == [], "the flag must be off by default -- nothing should be written"
+    print("_self_test_auto_divergence_scene_log: PASS")
 
 
 def _self_test_face_protect():
@@ -32112,6 +32247,7 @@ def _run_self_tests():
         _self_test_nt_auto_divergence_controls,
         _self_test_auto_divergence_metadata_tags,
         _self_test_auto_divergence_cut_smooth,
+        _self_test_auto_divergence_scene_log,
         _self_test_audio_subtitle_restore_dual_eye_flag,
         _self_test_restore_audio_uses_per_file_source_in_folder,
         _self_test_default_depth_model_is_any_v3_mono,

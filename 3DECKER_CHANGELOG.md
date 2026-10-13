@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 12, 2026
+## Latest Update — October 13, 2026
+
+**Added: "Log 3D Strength per Scene" for Auto 3D Strength.** Auto 3D Strength already had a debug option that burns the strength it picked into the corner of the video. Now there's a second, separate checkbox next to it that writes a plain text file beside your finished video instead -- listing which 3D Strength value it used for each scene (with the start/end time of each one) plus one overall average for the whole movie. Nothing is written into the picture itself; it's just a text file you can open afterward to see what Auto 3D Strength decided. Works the same way for a batch/folder of movies -- each one gets its own separate log, matching how the regular log file already works.
+
+## Update — October 12, 2026
 
 **Added: drag-and-drop now works on every Standalone Tool, not just the main tab.** Before, you could only drop a file onto the main conversion tab's own Input box -- none of the Standalone Tools (Retroactive HDR/DV Reinjection, Add Subtitle Track, Add Audio Track, Restore All Audio Tracks, Retroactively Tag MKV as 3D, Sharpen, RIFE Interpolation, Limit Bitrate, 3D Blu-ray Import, SBS to 3D Blu-ray MVC, Convert HDR/DV to SDR, 3D Blu-ray ISO to MVC MKV (MakeMKV), VobSub to PGS Subtitle, Upscale with waifu2x, and Search Subtitles) accepted a dropped file at all. Now you can drag a file straight onto any of their own file boxes, and it fills in that exact box -- not the main tab's Input. A tool with more than one file box (for example Retroactive HDR/DV Reinjection's Source, Converted, and RIFE Manifest fields) has each one wired up separately, so you can drop a different file onto each.
 

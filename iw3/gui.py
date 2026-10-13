@@ -1641,6 +1641,19 @@ class MainFrame(wx.Frame):
               "Recommended: on only while testing/comparing settings on a scene, off for the real "
               "conversion."))
 
+        self.chk_convergence_scene_log = wx.CheckBox(
+            self.grp_stereo, label=T("Log Convergence Value per Scene"), name="chk_convergence_scene_log")
+        self.chk_convergence_scene_log.SetValue(False)
+        self.chk_convergence_scene_log.SetToolTip(
+            T("What it's for: writes a text file next to the finished video listing the Convergence Plane "
+              "value used for each scene, plus one overall average for the whole movie -- so you can "
+              "review what sod_v1 / Face Detect decided without watching the video.\n"
+              "How it's different from the checkbox above: nothing is written into the picture itself, "
+              "just a plain text file you can open afterward.\n"
+              "Only does anything for sod_v1 / Face Detect -- constant never varies, so there is nothing "
+              "per-scene to log.\n"
+              "Recommended: on if you want a record of what the Convergence Plane chose; off otherwise."))
+
         self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Pop-Out Limit / Boost"))
         self.cbo_max_negative_parallax = EditableComboBox(
             self.grp_stereo, choices=["1.0", "1.25", "1.5", "2.0", "2.25", "2.5", "3.0", "0.7", "0.4", "0.0"],
@@ -3274,6 +3287,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_convergence_subject_lock, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_subject_lock, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_convergence_scene_log, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_max_negative_parallax, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.sld_stereo_max_negative_parallax, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -10449,10 +10463,12 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_smoothing.Disable()
             self.chk_convergence_scene_hold.Disable()
             self.chk_convergence_overlay.Disable()
+            self.chk_convergence_scene_log.Disable()
         else:
             self.cbo_convergence_smoothing.Enable()
             self.chk_convergence_scene_hold.Enable()
             self.chk_convergence_overlay.Enable()
+            self.chk_convergence_scene_log.Enable()
         self.update_convergence_cut_smooth()
         self.update_convergence_subject_lock()
 
@@ -10671,7 +10687,7 @@ class MainFrame(wx.Frame):
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
             self.chk_convergence_scene_hold, self.lbl_convergence_cut_smooth, self.cbo_convergence_cut_smooth,
             self.lbl_convergence_subject_lock, self.cbo_convergence_subject_lock,
-            self.chk_convergence_overlay,
+            self.chk_convergence_overlay, self.chk_convergence_scene_log,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
             self.lbl_face_protect, self.cbo_face_protect,
             self.lbl_ipd_offset, self.sld_ipd_offset,
@@ -11393,6 +11409,7 @@ class MainFrame(wx.Frame):
             convergence_cut_smooth=int(self.cbo_convergence_cut_smooth.GetValue()),
             convergence_subject_lock=int(self.cbo_convergence_subject_lock.GetValue()),
             convergence_overlay=self.chk_convergence_overlay.GetValue(),
+            convergence_scene_log=self.chk_convergence_scene_log.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
             # the add-on is actually installed (create_parser() is only patched with them when it is; the
@@ -12679,6 +12696,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_cut_smooth, getattr(args, "convergence_cut_smooth", 0))
         _apply_combo_value(self.cbo_convergence_subject_lock, getattr(args, "convergence_subject_lock", 0))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
+        self.chk_convergence_scene_log.SetValue(bool(getattr(args, "convergence_scene_log", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
         # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- getattr defaults match create_parser()'s own
         # patched defaults, so a command line from before the add-on was installed still restores cleanly.
@@ -31082,6 +31100,248 @@ def _self_test_convergence_overlay():
     print("_self_test_convergence_overlay: PASS")
 
 
+def _self_test_convergence_scene_log_gui_and_metadata():
+    """New GUI checkbox "Log Convergence Value per Scene" / --convergence-scene-log,
+    a direct analog of nt_auto3d's own "Log 3D Strength per Scene" (ADR-362) for the
+    Convergence Plane's own auto modes. Deliberate gating decision: enabled for BOTH
+    sod_v1 AND face_detect (matching chk_convergence_overlay's own precedent), not
+    restricted to sod_v1 only, and disabled on constant. Covers the checkbox gating
+    across all three modes, CLI/GUI round-trip, and the filename/metadata tags."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.chk_convergence_scene_log.GetValue() is False, "must default to off"
+        assert not frame.chk_convergence_scene_log.IsEnabled(), \
+            "must be disabled when Convergence Plane is constant (its own starting default)"
+
+        frame.cbo_convergence_mode.SetValue("sod_v1")
+        frame.update_convergence_mode()
+        assert frame.chk_convergence_scene_log.IsEnabled(), "must enable for sod_v1"
+
+        frame.cbo_convergence_mode.SetValue("face_detect")
+        frame.update_convergence_mode()
+        assert frame.chk_convergence_scene_log.IsEnabled(), \
+            "must enable for face_detect too -- not sod_v1-only"
+
+        frame.chk_convergence_scene_log.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_scene_log is True
+        assert "--convergence-scene-log" in frame.get_cli_command()
+
+        frame.chk_convergence_scene_log.SetValue(False)
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_convergence_scene_log.GetValue() is True, "restore must bring the checked state back"
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.chk_convergence_scene_log.IsEnabled(), "must disable again back on constant"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # filename/metadata tags -- only when the flag is on AND the mode isn't constant
+    parser = U.create_parser(required_true=False)
+    on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                            "--convergence-mode", "sod_v1", "--convergence-scene-log"])
+    on.video_extension = ".mkv"
+    assert "_scenelog" in U.make_output_filename("a.mp4", on, video=True)
+    assert "iw3_convergence_scene_log=1" in U._build_iw3_comment_metadata(on, video=True)
+
+    on_face = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                 "--convergence-mode", "face_detect", "--convergence-scene-log"])
+    on_face.video_extension = ".mkv"
+    assert "_scenelog" in U.make_output_filename("a.mp4", on_face, video=True), \
+        "must tag for face_detect too, not sod_v1-only"
+
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                             "--convergence-mode", "sod_v1"])
+    off.video_extension = ".mkv"
+    assert "_scenelog" not in U.make_output_filename("a.mp4", off, video=True)
+    assert "convergence_scene_log" not in U._build_iw3_comment_metadata(off, video=True)
+
+    constant_on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                     "--convergence-scene-log"])
+    constant_on.video_extension = ".mkv"
+    assert "_scenelog" not in U.make_output_filename("a.mp4", constant_on, video=True), \
+        "constant mode must never show the scene-log tag either, even with the flag set"
+
+    print("_self_test_convergence_scene_log_gui_and_metadata: PASS")
+
+
+def _self_test_convergence_scene_log_accumulation():
+    """New feature: "Log Convergence Value per Scene" / --convergence-scene-log
+    (iw3/utils.py), a direct analog of nt_auto3d's own "Log 3D Strength per Scene"
+    (ADR-362) but native to core iw3 (not an add-on monkeypatch) and for the
+    Convergence Plane's own auto modes (sod_v1/face_detect). Verified pure Python,
+    no GPU/model/real movie needed:
+
+    1. _ConvergenceSceneLogState's own scene-bucketing (record/flush) and
+       _format_convergence_scene_log() against hand-computed scene boundaries/
+       values/the time-weighted average, including the no-fps frame-number
+       fallback and the scene-hold/cut-smooth header variant.
+    2. apply_divergence()'s own push/drain wiring (NULL method, 1:1 input:output):
+       constant mode never accumulates even with the flag on, auto mode only
+       accumulates when the flag is actually on, and a reset_pts cut closes a
+       scene exactly like SceneHoldTracker.mark_cut()'s own timing.
+    3. finish_convergence_scene_log() (the real file-writing hook process_video()/
+       process_config_video() call once per movie) for TWO separate movies in one
+       run, confirming one separate log file per movie, an atomic tmp+replace write
+       (no leftover .tmp), the flag off writing nothing, and zero recorded scenes
+       writing nothing either.
+    """
+    import types
+    import tempfile
+    from os import path as _p
+    from . import utils as U
+
+    # Scene 1: frames 0-4 (5 frames, value 0.1). Cut after frame 4. Scene 2: frames
+    # 5-7 (3 frames, value 0.5). Cut after frame 7. Scene 3: frames 8-9 (2 frames,
+    # value 0.9), closed by the final flush() instead of a cut -- mirrors reset_pts'
+    # own "True on the LAST frame of the old scene" timing.
+    values = [0.1] * 5 + [0.5] * 3 + [0.9] * 2
+    cuts = [False] * 4 + [True] + [False] * 2 + [True] + [False] * 2
+
+    st = U._ConvergenceSceneLogState()
+    for v, c in zip(values, cuts):
+        st.record(v, c)
+    st.flush()
+    assert st.scene_records == [(0, 5, 5, 0.1), (5, 8, 3, 0.5), (8, 10, 2, 0.9)], st.scene_records
+
+    st.meta = ("sod_v1", 0.5, 0.9, False, 0)
+    text = U._format_convergence_scene_log(st, "movie_SBS.mp4", fps=1.0)
+    lines = text.splitlines()
+    assert lines[0] == "Convergence Value log -- movie_SBS.mp4"
+    assert lines[1] == "Convergence Plane: sod_v1 mode, convergence 0.5, smoothing 0.9, scene hold off"
+    assert "Scene 1   00:00:00 - 00:00:05   (5 frames)   Convergence: 0.10" in lines
+    assert "Scene 2   00:00:05 - 00:00:08   (3 frames)   Convergence: 0.50" in lines
+    assert "Scene 3   00:00:08 - 00:00:10   (2 frames)   Convergence: 0.90" in lines
+    # time-weighted average: (5*0.1 + 3*0.5 + 2*0.9) / 10 = (0.5+1.5+1.8)/10 = 0.38
+    assert lines[-1] == "Average Convergence for whole movie (time-weighted): 0.38", lines[-1]
+
+    # No real fps reachable -> frame numbers instead of timestamps, with a clear note.
+    text_no_fps = U._format_convergence_scene_log(st, "movie_SBS.mp4", fps=None)
+    assert "could not be determined" in text_no_fps
+    assert "Scene 1   frame 0 - 5   (5 frames)   Convergence: 0.10" in text_no_fps.splitlines()
+
+    # scene_hold on + a nonzero cut_smooth shows up in the header too.
+    st.meta = ("face_detect", 0.25, 0.75, True, 6)
+    text_hold = U._format_convergence_scene_log(st, "movie_SBS.mp4", fps=1.0)
+    assert ("Convergence Plane: face_detect mode, convergence 0.25, smoothing 0.75, "
+            "scene hold on, cut smooth 6") in text_hold.splitlines()
+
+    # Part 2: apply_divergence()'s own push/drain gating, via the NULL method (fastest,
+    # 1:1 input:output, isolates the accumulation logic from the warp/inpaint machinery).
+    im = torch.rand(2, 3, 8, 8)
+    depth = torch.full((2, 1, 8, 8), 0.5)
+
+    def make_args(convergence_model, scene_log):
+        return types.SimpleNamespace(
+            state={"convergence_model": convergence_model}, mapper="none", method="NULL",
+            convergence=0.5, divergence=2.0, foreground_pop=0.0, background_pop=0.0, midground_pop=0.0,
+            max_negative_parallax=1.0, face_protect_strength=0.0, synthetic_view="both",
+            convergence_overlay=False, convergence_scene_log=scene_log,
+            convergence_mode="sod_v1", convergence_smoothing=0.9,
+            convergence_scene_hold=False, convergence_cut_smooth=0,
+        )
+
+    auto_model = lambda rgb, d, reset_pts=None: torch.tensor([[[[0.2]]], [[[0.6]]]])  # noqa: E731
+    args_on = make_args(auto_model, scene_log=True)
+    U.apply_divergence(depth.clone(), im.clone(), args_on, None, reset_pts=[True, False])
+    scene_log_state = args_on.state["_convergence_scene_log"]
+    # float32 tensor -> python float round-trip isn't bit-exact, so compare with a tolerance.
+    assert len(scene_log_state.scene_records) == 1
+    start, end, frames, mean = scene_log_state.scene_records[0]
+    assert (start, end, frames) == (0, 1, 1) and abs(mean - 0.2) < 1e-5, \
+        "the cut on frame 0 must close that scene right away"
+    scene_log_state.flush()
+    start, end, frames, mean = scene_log_state.scene_records[-1]
+    assert (start, end, frames) == (1, 2, 1) and abs(mean - 0.6) < 1e-5, "frame 1 stays open until flushed"
+
+    # constant mode (convergence_model=None) -> convergence is a plain float, never a
+    # tensor, so nothing is pushed/accumulated even with the flag on.
+    args_constant = make_args(None, scene_log=True)
+    U.apply_divergence(depth.clone(), im.clone(), args_constant, None, reset_pts=[False, False])
+    assert "_convergence_scene_log" not in args_constant.state, \
+        "constant mode must never accumulate, even with the flag on"
+
+    # auto mode, flag off -> nothing accumulated either.
+    args_off = make_args(auto_model, scene_log=False)
+    U.apply_divergence(depth.clone(), im.clone(), args_off, None, reset_pts=[False, False])
+    assert "_convergence_scene_log" not in args_off.state
+
+    # Part 3: finish_convergence_scene_log() -- one real per-movie log file per
+    # movie in a batch, never a combined log (ADR-279's own precedent), exercised
+    # through the real file-writing path and the real make_output_filename()/
+    # _resolve_single_file_log_path() resolution.
+    with tempfile.TemporaryDirectory() as tmp_out:
+        parser = U.create_parser(required_true=False)
+
+        def run_one(input_name, vals, cuts_):
+            args = parser.parse_args([
+                "-i", input_name, "-o", tmp_out,
+                "--convergence-mode", "sod_v1", "--convergence-scene-log",
+            ])
+            args.video_extension = ".mkv"
+            args.state = {}
+            U.reset_convergence_scene_log(args)
+            st_one = args.state["_convergence_scene_log"]
+            for v, c in zip(vals, cuts_):
+                st_one.record(v, c)
+            st_one.meta = ("sod_v1", 0.5, 0.9, False, 0)
+            U.finish_convergence_scene_log(args, input_name, tmp_out, fps=1.0)
+            return args
+
+        args1 = run_one("movie1.mp4", [0.2, 0.6], [True, False])
+        args2 = run_one("movie2.mp4", [0.9], [False])
+
+        name1 = U.make_output_filename("movie1.mp4", args1, video=True)
+        name2 = U.make_output_filename("movie2.mp4", args2, video=True)
+        assert name1 != name2, "sanity: the two fake movies must resolve to different real filenames"
+        log1 = _p.join(tmp_out, _p.splitext(name1)[0] + "_convergence_log.txt")
+        log2 = _p.join(tmp_out, _p.splitext(name2)[0] + "_convergence_log.txt")
+        assert _p.isfile(log1), f"movie1's own scene log was not written: {log1}"
+        assert _p.isfile(log2), f"movie2's own scene log was not written: {log2}"
+        text1 = open(log1, encoding="utf-8").read()
+        text2 = open(log2, encoding="utf-8").read()
+        # movie1: two single-frame scenes (0.2, 0.6) -> average (0.2+0.6)/2 = 0.40
+        assert "Average Convergence for whole movie (time-weighted): 0.40" in text1, text1
+        # movie2: one single-frame scene (0.9) -> average 0.90
+        assert "Average Convergence for whole movie (time-weighted): 0.90" in text2, text2
+        assert "0.40" not in text2 and "0.90" not in text1, "the two movies' logs must not share data"
+        # atomic write: no leftover .tmp file after a successful write
+        assert not _p.exists(log1 + ".tmp") and not _p.exists(log2 + ".tmp")
+
+        # Turning the flag off must write nothing at all.
+        with tempfile.TemporaryDirectory() as tmp_off:
+            args_off2 = parser.parse_args(["-i", "movie3.mp4", "-o", tmp_off, "--convergence-mode", "sod_v1"])
+            args_off2.video_extension = ".mkv"
+            args_off2.state = {}
+            U.reset_convergence_scene_log(args_off2)
+            args_off2.state["_convergence_scene_log"].record(0.5, True)
+            U.finish_convergence_scene_log(args_off2, "movie3.mp4", tmp_off, fps=1.0)
+            assert os.listdir(tmp_off) == [], "the flag must be off by default -- nothing should be written"
+
+        # Zero recorded scenes (apply_divergence never ran, or ran with no frames) ->
+        # nothing written either.
+        with tempfile.TemporaryDirectory() as tmp_empty:
+            args_empty = parser.parse_args([
+                "-i", "movie4.mp4", "-o", tmp_empty,
+                "--convergence-mode", "sod_v1", "--convergence-scene-log",
+            ])
+            args_empty.video_extension = ".mkv"
+            args_empty.state = {}
+            U.reset_convergence_scene_log(args_empty)
+            U.finish_convergence_scene_log(args_empty, "movie4.mp4", tmp_empty, fps=1.0)
+            assert os.listdir(tmp_empty) == [], "zero recorded scenes must write nothing"
+
+    print("_self_test_convergence_scene_log_accumulation: PASS")
+
+
 def _self_test_make_output_filename_length_cap():
     """Real, 100%-reproducible user crash (ADR investigation, 2026-09-23): with enough
     settings active at once, make_output_filename()'s tag string grows past Windows'
@@ -32292,6 +32552,8 @@ def _run_self_tests():
         _self_test_convergence_subject_lock,
         _self_test_convergence_subject_lock_gui_and_metadata,
         _self_test_convergence_overlay,
+        _self_test_convergence_scene_log_gui_and_metadata,
+        _self_test_convergence_scene_log_accumulation,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,
         _self_test_default_output_dir_name_is_3decker,

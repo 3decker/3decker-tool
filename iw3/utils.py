@@ -3318,6 +3318,8 @@ def make_output_filename(input_filename, args, video=False):
                     convergence_smoothing += f"_subjlock{convergence_subject_lock}"
             if getattr(args, "convergence_overlay", False):
                 convergence_smoothing += "_dbg"
+            if getattr(args, "convergence_scene_log", False):
+                convergence_smoothing += "_scenelog"
         else:
             convergence_name = "c"
             convergence_smoothing = ""
@@ -3712,6 +3714,8 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_convergence_subject_lock={args.convergence_subject_lock}")
         if getattr(args, "convergence_overlay", False):
             comment_parts.append("iw3_convergence_overlay=1")
+        if getattr(args, "convergence_scene_log", False):
+            comment_parts.append("iw3_convergence_scene_log=1")
     if isinstance(args.edge_dilation, (list, tuple)):
         comment_parts.append(f"iw3_edge_dilation={'x'.join(str(v) for v in args.edge_dilation)}")
     else:
@@ -4141,6 +4145,178 @@ def add_preprocess_vf(vf_org, args) -> str:
         return vf_org
 
 
+# --------------------------------------------------------------------------
+# "Log Convergence Value per Scene" (--convergence-scene-log): a direct analog
+# of nt_auto3d's own "Log 3D Strength per Scene" (ADR-362), but for the
+# Convergence Plane's own auto modes (sod_v1/face_detect) and native to core
+# iw3 -- not an add-on monkeypatch. Writes a plain text file next to the
+# finished video listing the Convergence Plane value actually used per scene,
+# plus the movie's overall average, for reviewing the decision without
+# watching the video or enabling --convergence-overlay's burned-in numbers.
+#
+# Unlike Auto 3D Strength (which has to build and expose its own CLIP-based
+# cut detector, autodiv.py's Tracker.last_cuts), the scene-cut signal here is
+# already available: reset_pts is the SAME per-frame boundary the shared
+# TransNetV2 scene-boundary pass already computed upstream, and
+# ConvergenceEstimator/FaceConvergenceEstimator already call
+# tracker.mark_cut() on it (ADR-231) -- no new cut detection is built here.
+# --------------------------------------------------------------------------
+class _ConvergenceSceneLogState():
+    """Lives at args.state["_convergence_scene_log"]. Reset once per fresh
+    movie (reset_convergence_scene_log()) and written once at the end of that
+    movie (finish_convergence_scene_log()) -- buffered, not incremental, so an
+    interrupted run never leaves a malformed file.
+
+    `pending` holds (value, cut_after) tuples in INPUT-frame order, pushed by
+    apply_divergence() right after computing `convergence` (mirroring the
+    existing `_convergence_overlay_pending` queue, ADR-237) and drained one
+    per actual OUTPUT frame -- some stereo/inpaint methods buffer frames
+    internally and return a different number of OUTPUT frames than the INPUT
+    batch size they were given, so what's logged matches what viewers
+    actually saw, not the raw per-input-frame model output."""
+
+    def __init__(self):
+        self.scene_records = []    # [(start_frame, end_frame, frame_count, mean_value), ...]
+        self.meta = None            # (mode, convergence_value, smoothing, scene_hold, cut_smooth)
+        self.pending = collections.deque()
+        self._scene_open = False
+        self._scene_start = 0
+        self._scene_frames = 0
+        self._scene_sum = 0.0
+        self._scene_total_frames = 0
+
+    def record(self, value, cut_after):
+        """Buffers one OUTPUT frame's convergence value, closing the scene
+        right after a frame flagged cut_after=True -- the LAST frame of its
+        scene, same "reset takes effect on the NEXT frame" timing reset_pts
+        already uses elsewhere in this codebase (SceneHoldTracker.mark_cut())."""
+        if not self._scene_open:
+            self._scene_open = True
+            self._scene_start = self._scene_total_frames
+        self._scene_frames += 1
+        self._scene_sum += float(value)
+        self._scene_total_frames += 1
+        if cut_after:
+            self.flush()
+
+    def flush(self):
+        if self._scene_open and self._scene_frames > 0:
+            mean = self._scene_sum / self._scene_frames
+            self.scene_records.append(
+                (self._scene_start, self._scene_total_frames, self._scene_frames, mean))
+        self._scene_open = False
+        self._scene_frames = 0
+        self._scene_sum = 0.0
+
+
+def reset_convergence_scene_log(args):
+    """Called once per fresh movie, from process_video()/process_config_video()'s
+    own existing per-movie convergence-model reset points -- mirrors
+    autodiv.py's reset_scene_log(). A batch/directory run thus naturally gets
+    one separate log per movie (ADR-279's own per-movie granularity), never
+    one combined log."""
+    state = getattr(args, "state", None)
+    if isinstance(state, dict):
+        state["_convergence_scene_log"] = _ConvergenceSceneLogState()
+
+
+def _convergence_scene_log_fps(args, input_path):
+    """Best-effort real fps for the log's timestamps -- mirrors
+    process_video_full's own config_callback() (the real fps Final Render
+    actually encodes at: the source's fps, clamped to --max-fps), never an
+    invented value. Returns None if it can't be read, and the log falls back
+    to frame numbers only."""
+    try:
+        fps = float(VU.VideoMetadata.from_file(str(input_path)).get_fps())
+    except Exception:
+        return None
+    max_fps = getattr(args, "max_fps", None)
+    if max_fps:
+        fps = min(fps, float(max_fps))
+    return fps if fps > 0 else None
+
+
+def _convergence_scene_log_paths(args, input_path, output_path):
+    """(real output filename, scene-log path) for one movie. Reuses
+    _resolve_single_file_log_path() (ADR-278/279) for the folder-vs-real-
+    filename resolution rather than duplicating it, then swaps its "_log.txt"
+    suffix for "_convergence_log.txt" so this never collides with the real
+    job log -- same approach as autodiv.py's own _scene_log_paths()."""
+    job_log = _resolve_single_file_log_path(args, input_path, output_path)
+    base = job_log[:-len("_log.txt")] if job_log.endswith("_log.txt") else path.splitext(job_log)[0]
+    output = str(output_path)
+    if is_output_dir(output):
+        output = path.join(output, make_output_filename(input_path, args, video=is_video(str(input_path))))
+    return output, base + "_convergence_log.txt"
+
+
+def _format_hms(sec):
+    """HH:MM:SS, for the scene log's per-scene timestamps -- same shape as
+    autodiv.py's own _format_time()."""
+    sec = max(0, int(round(sec)))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _format_convergence_scene_log(st, output_filename, fps):
+    mode, convergence_value, smoothing, scene_hold, cut_smooth = st.meta or ("sod_v1", 0.5, 0.9, False, 0)
+    header = (f"Convergence Plane: {mode} mode, convergence {convergence_value:g}, "
+              f"smoothing {smoothing:g}, scene hold {'on' if scene_hold else 'off'}")
+    if scene_hold and cut_smooth:
+        header += f", cut smooth {cut_smooth}"
+    lines = [f"Convergence Value log -- {path.basename(str(output_filename))}", header]
+    if not fps:
+        lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
+    lines.append("")
+    total_frames = 0
+    weighted_sum = 0.0
+    for i, (start, end, frames, mean) in enumerate(st.scene_records, 1):
+        span = (f"{_format_hms(start / fps)} - {_format_hms(end / fps)}" if fps
+               else f"frame {start} - {end}")
+        lines.append(f"Scene {i}   {span}   ({frames} frames)   Convergence: {mean:.2f}")
+        total_frames += frames
+        weighted_sum += mean * frames
+    lines.append("")
+    overall = weighted_sum / total_frames if total_frames else 0.0
+    lines.append(f"Average Convergence for whole movie (time-weighted): {overall:.2f}")
+    return "\n".join(lines) + "\n"
+
+
+def finish_convergence_scene_log(args, input_path, output_path, fps=None):
+    """Writes the "Log Convergence Value per Scene" text file for the
+    just-finished movie -- called once from process_video()/
+    process_config_video(), right after the real conversion work for that
+    movie returns normally (never on a raised exception, matching
+    autodiv.py's fresh()/_finish_scene_log()). Only for real video jobs --
+    process_image has no "scene" concept, so it is never called from there.
+
+    `fps`: pass the already-resolved fps directly when the caller already has
+    one (process_config_video's config.fps) -- otherwise it is resolved here
+    from `input_path` (process_video's own real source file)."""
+    if not getattr(args, "convergence_scene_log", False):
+        return
+    state = getattr(args, "state", None)
+    st = state.get("_convergence_scene_log") if isinstance(state, dict) else None
+    if st is None:
+        return
+    st.flush()
+    if not st.scene_records:
+        return
+    if fps is None:
+        fps = _convergence_scene_log_fps(args, input_path)
+    try:
+        real_output, log_path = _convergence_scene_log_paths(args, input_path, output_path)
+        text = _format_convergence_scene_log(st, real_output, fps)
+        tmp = f"{log_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, log_path)
+    except Exception as e:                                           # noqa: BLE001
+        print(f"[convergence-log] could not write the Convergence Value scene log "
+              f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
 def apply_divergence(depth, im, args, side_model, reset_pts=None):
     batch = True
     if depth.ndim != 4:
@@ -4180,6 +4356,25 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
     if convergence_overlay_active:
         pending = args.state.setdefault("_convergence_overlay_pending", collections.deque())
         pending.extend(convergence.flatten().tolist())
+
+    # "Log Convergence Value per Scene" (--convergence-scene-log): same pending-queue
+    # reasoning as the overlay push just above -- push this call's own per-INPUT-frame
+    # (value, cut_after) pairs now, drain exactly as many as actually come back out
+    # (see the drain site further down, right next to the overlay's own drain) so the
+    # scene boundaries line up with what was fed in (reset_pts' own timing) while the
+    # logged values match what was actually produced for OUTPUT frames.
+    convergence_scene_log_active = getattr(args, "convergence_scene_log", False) and torch.is_tensor(convergence)
+    if convergence_scene_log_active:
+        scene_log_state = args.state.setdefault("_convergence_scene_log", _ConvergenceSceneLogState())
+        scene_log_state.meta = (
+            getattr(args, "convergence_mode", "constant"),
+            float(args.convergence),
+            float(getattr(args, "convergence_smoothing", 0.9) or 0.0),
+            bool(getattr(args, "convergence_scene_hold", False)),
+            int(getattr(args, "convergence_cut_smooth", 0) or 0),
+        )
+        rp_for_log = reset_pts if reset_pts is not None else [False] * convergence.shape[0]
+        scene_log_state.pending.extend(zip(convergence.flatten().tolist(), rp_for_log))
 
     # Depth pop effects -- all three (Foreground/Midground/Background Pop) are
     # fully symmetric: one shared primitive (DE.apply_depth_band_pop), called
@@ -4362,6 +4557,18 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
         conv_values = [pending.popleft() if pending else 0.0 for _ in range(n_out)]
         left_eye = FO.stamp_values(left_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
         right_eye = FO.stamp_values(right_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
+
+    # "Log Convergence Value per Scene": drains exactly as many (value, cut_after)
+    # pairs as frames actually came back this call -- same reasoning as the overlay
+    # drain just above, kept as a separate queue/gate so the two debug/logging
+    # features never interfere with each other.
+    if convergence_scene_log_active and left_eye is not None:
+        n_out = 1 if left_eye.ndim == 3 else left_eye.shape[0]
+        scene_log_state = args.state["_convergence_scene_log"]
+        scene_pending = scene_log_state.pending
+        for _ in range(n_out):
+            value, cut_after = scene_pending.popleft() if scene_pending else (0.0, False)
+            scene_log_state.record(value, cut_after)
 
     if not batch:
         if left_eye is not None:
@@ -6610,6 +6817,10 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     input_filename, hdr_tmp_file = _tonemap_hdr_to_sdr(input_filename, args)
     input_filename, denoise_tmp_file = _denoise_preprocess(input_filename, args)
     resolved_output_path = None
+    # "Log Convergence Value per Scene": fresh buffer for THIS movie, mirroring the
+    # convergence model's own per-movie reset just below (and autodiv.py's own
+    # reset_scene_log()) -- a batch/directory run gets one separate log per movie.
+    reset_convergence_scene_log(args)
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -6677,6 +6888,12 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
         finally:
             if needs_vram_release:
                 _reload_pause_vram(args)
+
+    # "Log Convergence Value per Scene": written once, here, right after this movie's
+    # real conversion work above has returned normally (an exception raised inside the
+    # try block above would skip everything from here down, including this call --
+    # matching autodiv.py's fresh()/_finish_scene_log() behavior exactly).
+    finish_convergence_scene_log(args, original_input_filename, final_output_path)
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -7220,6 +7437,7 @@ def process_config_video(config, args, side_model):
         side_model.reset()
     if args.state["convergence_model"] is not None:
         args.state["convergence_model"].reset(enable_ema=True)
+    reset_convergence_scene_log(args)
 
     if is_output_dir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -7374,6 +7592,11 @@ def process_config_video(config, args, side_model):
         )
     finally:
         args.mapper = original_mapper
+
+    # "Log Convergence Value per Scene": written once, right after generate_video()
+    # above returns normally (an exception there skips this, same as process_video()).
+    # config.fps is the real, already-resolved fps -- never re-derived here.
+    finish_convergence_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
 
 
 def process_config_images(config, args, side_model):
@@ -7569,6 +7792,13 @@ def create_parser(required_true=True):
                               "top-right corner of every frame (auto convergence modes only -- sod_v1/"
                               "face_detect). Same idea as --auto-divergence-overlay, opposite corner so both "
                               "can be on at once."))
+    parser.add_argument("--convergence-scene-log", action="store_true",
+                        help=("Writes a text file next to the finished video listing the Convergence Plane "
+                              "value used for each scene, plus one overall average for the whole movie -- "
+                              "auto convergence modes only (sod_v1/face_detect; constant never varies, so "
+                              "there's nothing per-scene to log). Same idea as "
+                              "--auto-divergence-scene-log (nt_auto3d's own 3D Strength scene log), for "
+                              "video jobs only (no effect on single images, which have no \"scene\")."))
     parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 3.0)],
                         help=("Pop-out limit (0-1) / boost (1-3), independent of the Convergence value itself. "
                               "ADR-179 limit: below 1.0 is a hard safety cap on negative parallax (how far anything "

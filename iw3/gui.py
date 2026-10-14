@@ -3654,6 +3654,7 @@ class MainFrame(wx.Frame):
               "Switch Video Codec to an HEVC choice to turn it on again; its own on/off setting is kept in the meantime.\n"
               "Recommended: on for any Dolby Vision or HDR10+ source you want to keep looking correct on "
               "an HDR display after conversion."))
+        self.chk_preserve_dowi.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_preserve_dowi)
 
         self.chk_hdr_to_sdr = wx.CheckBox(self.grp_video_filter, label=T("Convert HDR to SDR"),
                                          name="chk_hdr_to_sdr")
@@ -4260,6 +4261,36 @@ class MainFrame(wx.Frame):
               "Recommended: leave it off (FP32) unless speed matters more to you than the unreviewed "
               "quality tradeoff."))
 
+        # Same deliberate escape hatch as the standalone Retroactive HDR/DV Reinjection
+        # panel's own txt_reinject_frame_count_tolerance (see its construction above) --
+        # only ever reaches the main pipeline's own _reinject_dv_after_rife() call (see
+        # utils.py) when Preserve Dolby Vision and RIFE are both on and this job actually
+        # has Dolby Vision/HDR10+ to re-attach after RIFE.
+        self.lbl_rife_dv_frame_count_tolerance = wx.StaticText(
+            self.grp_postprocess, label=T("Frame Count Tolerance"))
+        self.txt_rife_dv_frame_count_tolerance = EditableComboBox(
+            self.grp_postprocess, choices=["0", "2", "5", "10"],
+            name="txt_rife_dv_frame_count_tolerance")
+        self.txt_rife_dv_frame_count_tolerance.SetSelection(2)
+        self.txt_rife_dv_frame_count_tolerance.SetToolTip(
+            T("DELIBERATE ESCAPE HATCH -- not a normal setting. What it's for: how many frames of "
+              "mismatch to allow between Source (trimmed) and Converted before refusing to inject, "
+              "instead of requiring an exact match.\n"
+              "Why it defaults to 5 (not 0): a genuinely correct Start/End Time can still probe a few "
+              "frames off from Converted's real count -- ffmpeg's -ss/-t trim seeking is timestamp-"
+              "approximate, not frame-exact, so a small boundary-frame gap can happen even when the range "
+              "itself is right. 5 covers that routine rounding automatically so you don't have to raise "
+              "it by hand every time you hit it.\n"
+              "Con: it does NOT fix a genuinely wrong Start/End Time range -- raising it high enough to "
+              "paper over a real mismatch just injects DV/HDR metadata at the wrong frames instead of "
+              "refusing, which is worse than refusing. A mismatch of dozens of frames or more almost "
+              "always means a wrong range or an incomplete conversion, not trim rounding -- fix that "
+              "instead of raising this further.\n"
+              "Recommended: 5 (default) covers routine trim rounding automatically. Set to 0 if you want "
+              "an exact match required every time with no automatic slack. If a real run still refuses "
+              "with a mismatch in the dozens or more, that's not this field's job -- check your Start/End "
+              "Time instead."))
+
         self.cbo_rife_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_mode)
         self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
         self.update_rife_interpolate()
@@ -4627,6 +4658,9 @@ class MainFrame(wx.Frame):
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 4), (j := j + 1, 0))
         layout.Add(self.chk_rife_interpolate, (j := j + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_rife_dv_frame_count_tolerance, (j := j + 1, 0),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.txt_rife_dv_frame_count_tolerance, (j, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_rife_model, (j := j + 1, 0), flag=wx.EXPAND | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_mode, (j, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_target_fps, (j, 2), flag=wx.EXPAND)
@@ -6246,6 +6280,34 @@ class MainFrame(wx.Frame):
         self.txt_rife_standalone_dv_start.SetToolTip(_dv_time_tip)
         self.txt_rife_standalone_dv_end.SetToolTip(_dv_time_tip)
 
+        # Same deliberate escape hatch as the Retroactive HDR/DV Reinjection panel's own
+        # txt_reinject_frame_count_tolerance (see its construction above) -- only used
+        # when Original DV Source above resolves to a real re-attach after RIFE.
+        self.lbl_rife_standalone_dv_tolerance = wx.StaticText(
+            self.cpn_rife_standalone.GetPane(), label=T("Frame Count Tolerance"))
+        self.txt_rife_standalone_dv_tolerance = EditableComboBox(
+            self.cpn_rife_standalone.GetPane(), choices=["0", "2", "5", "10"],
+            name="txt_rife_standalone_dv_tolerance")
+        self.txt_rife_standalone_dv_tolerance.SetSelection(2)
+        self.txt_rife_standalone_dv_tolerance.SetToolTip(
+            T("DELIBERATE ESCAPE HATCH -- not a normal setting. What it's for: how many frames of "
+              "mismatch to allow between Source (trimmed) and Converted before refusing to inject, "
+              "instead of requiring an exact match.\n"
+              "Why it defaults to 5 (not 0): a genuinely correct Start/End Time can still probe a few "
+              "frames off from Converted's real count -- ffmpeg's -ss/-t trim seeking is timestamp-"
+              "approximate, not frame-exact, so a small boundary-frame gap can happen even when the range "
+              "itself is right. 5 covers that routine rounding automatically so you don't have to raise "
+              "it by hand every time you hit it.\n"
+              "Con: it does NOT fix a genuinely wrong Start/End Time range -- raising it high enough to "
+              "paper over a real mismatch just injects DV/HDR metadata at the wrong frames instead of "
+              "refusing, which is worse than refusing. A mismatch of dozens of frames or more almost "
+              "always means a wrong range or an incomplete conversion, not trim rounding -- fix that "
+              "instead of raising this further.\n"
+              "Recommended: 5 (default) covers routine trim rounding automatically. Set to 0 if you want "
+              "an exact match required every time with no automatic slack. If a real run still refuses "
+              "with a mismatch in the dozens or more, that's not this field's job -- check your Start/End "
+              "Time instead."))
+
         self.btn_rife_standalone_run = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Run"))
         self.btn_rife_standalone_run.SetToolTip(
             T("What it's for: runs RIFE interpolation as a separate background process (python -m "
@@ -6328,6 +6390,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_rife_standalone_dv_times, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_dv_start, (h, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_standalone_dv_end, (h, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_rife_standalone_dv_tolerance, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_rife_standalone_dv_tolerance, (h, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_mode, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_standalone_mode, (h, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_standalone_target_fps, (h, 2), flag=wx.EXPAND)
@@ -9502,6 +9566,10 @@ class MainFrame(wx.Frame):
         # the MVC sub-option greying must be re-applied here, not only in the handlers.
         self.update_mvc_mode()
         self.update_preserve_dowi()
+        # Same reason: a restored/preset chk_preserve_dowi/chk_rife_interpolate value also
+        # arrives via SetValue() with no change event, so the Frame Count Tolerance field's
+        # own enable state needs this re-applied here too.
+        self.update_rife_interpolate()
         self._repin_options_min_size()
 
     def get_depth_models(self):
@@ -10727,9 +10795,19 @@ class MainFrame(wx.Frame):
         self.cbo_rife_gpu.Enable(enabled)
         self.chk_rife_fp16.Enable(enabled)
         self.txt_rife_target_fps.Enable(enabled and self.cbo_rife_mode.GetValue() == "Custom FPS...")
+        # Only usable once Preserve Dolby Vision is also checked -- this field only ever
+        # reaches the DV re-attach step _reinject_dv_after_rife() runs after RIFE.
+        dv_tolerance_enabled = enabled and self.chk_preserve_dowi.GetValue()
+        self.lbl_rife_dv_frame_count_tolerance.Enable(dv_tolerance_enabled)
+        self.txt_rife_dv_frame_count_tolerance.Enable(dv_tolerance_enabled)
 
     def on_changed_chk_rife_interpolate(self, event):
         self.update_rife_interpolate()
+
+    def on_changed_chk_preserve_dowi(self, event):
+        self.update_rife_interpolate()
+        if event is not None:
+            event.Skip()
 
     def on_changed_cbo_rife_mode(self, event):
         self.update_rife_interpolate()
@@ -11158,6 +11236,10 @@ class MainFrame(wx.Frame):
             if not validate_number(self.txt_rife_target_fps.GetValue(), 0.1, 1000.0, allow_empty=False):
                 self.show_validation_error_message(T("RIFE Rate: Custom FPS"), 0.1, 1000.0)
                 return
+        if not validate_number(self.txt_rife_dv_frame_count_tolerance.GetValue(), 0, 100000,
+                                is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Frame Count Tolerance"), 0, 100000)
+            return
         if rife_mode == "Custom FPS...":
             rife_multiplier = None
             rife_target_fps = (float(self.txt_rife_target_fps.GetValue())
@@ -11490,6 +11572,7 @@ class MainFrame(wx.Frame):
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
             rife_fp16=self.chk_rife_fp16.GetValue(),
+            rife_dv_frame_count_tolerance=int(self.txt_rife_dv_frame_count_tolerance.GetValue() or "0"),
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
             restore_dual_eye_subtitles=self.chk_restore_dual_eye_subtitles.GetValue(),
             convert_to_mvc=self._mvc_mode() == "alongside",
@@ -12366,6 +12449,7 @@ class MainFrame(wx.Frame):
         "txt_rife_standalone_input", "txt_rife_standalone_output",
         "txt_rife_standalone_target_fps",
         "txt_rife_standalone_dv_source", "txt_rife_standalone_dv_start", "txt_rife_standalone_dv_end",
+        "txt_rife_standalone_dv_tolerance",
         "txt_bitrate_cap_standalone_input", "txt_bitrate_cap_standalone_output", "txt_bitrate_cap_standalone_limit",
         "txt_bitrate_cap_standalone_crf", "txt_bitrate_cap_standalone_dv_source",
         "txt_bitrate_cap_standalone_rife_manifest",
@@ -12377,9 +12461,12 @@ class MainFrame(wx.Frame):
         "txt_upscale_input", "txt_upscale_output",
         "txt_standalone_log",
     )
-    # The one field in that list whose real default isn't blank -- confirmed
-    # by reading its own constructor (`wx.TextCtrl(..., value="en", ...)`).
-    _CLEAR_ALL_STANDALONE_TEXT_DEFAULTS = {"txt_submux_language": "en", "txt_bitrate_cap_standalone_crf": "15"}
+    # The fields in that list whose real default isn't blank -- confirmed by reading their
+    # own constructors (txt_submux_language's wx.TextCtrl(..., value="en", ...);
+    # txt_bitrate_cap_standalone_crf's and txt_rife_standalone_dv_tolerance's own
+    # SetSelection(...) on construction).
+    _CLEAR_ALL_STANDALONE_TEXT_DEFAULTS = {"txt_submux_language": "en", "txt_bitrate_cap_standalone_crf": "15",
+                                           "txt_rife_standalone_dv_tolerance": "5"}
 
     def _clear_standalone_tool_logs(self):
         """ADR-249: empties every Standalone Tools *_log box -- reuses
@@ -12848,6 +12935,8 @@ class MainFrame(wx.Frame):
 
         self.chk_rife_interpolate.SetValue(bool(args.rife_interpolate))
         self.chk_rife_fp16.SetValue(bool(getattr(args, "rife_fp16", False)))
+        _apply_combo_value(self.txt_rife_dv_frame_count_tolerance,
+                           getattr(args, "rife_dv_frame_count_tolerance", 5))
         _apply_combo_value(self.cbo_rife_model, args.rife_model)
         # cbo_rife_gpu is a non-editable ComboBox keyed by integer ClientData (device
         # index, or -1 for CPU) -- not a plain string value _apply_combo_value can
@@ -15246,7 +15335,8 @@ class MainFrame(wx.Frame):
                 types.SimpleNamespace(start_time=dv.get("start"), end_time=dv.get("end"), state={}),
                 log=dv_lines.append, proc_hook=_hook,
                 progress_cb=lambda label, done, total: wx.CallAfter(
-                    self._update_rife_standalone_dv_progress, label, done, total))
+                    self._update_rife_standalone_dv_progress, label, done, total),
+                frame_count_tolerance=dv.get("tolerance", 0))
             output = output + "\n" + "\n".join(dv_lines)
         return proc.returncode, output
 
@@ -15602,12 +15692,18 @@ class MainFrame(wx.Frame):
             if video_codec not in ("libx265", "hevc_nvenc"):
                 # Dolby Vision only exists in HEVC: force it (GPU encode when a GPU is selected)
                 video_codec = "hevc_nvenc" if gpu_id >= 0 else "libx265"
+            dv_tolerance_str = self.txt_rife_standalone_dv_tolerance.GetValue().strip()
+            if dv_tolerance_str and not validate_number(dv_tolerance_str, 0, 100000, is_int=True):
+                wx.MessageBox(T("`Frame Count Tolerance` must be a whole number 0 - 100000."),
+                              T("RIFE Frame Interpolation"), wx.OK | wx.ICON_WARNING)
+                return
             same_file = path.abspath(dv_source) == path.abspath(input_path)
             # When the 3D video itself is the source, its Dolby Vision already covers exactly the frames RIFE
             # reads, so Start/End (which describe a range of an original movie) do not apply.
             dv = {"source": dv_source, "output": output_path,
                   "start": None if same_file else (self.txt_rife_standalone_dv_start.GetValue().strip() or None),
-                  "end": None if same_file else (self.txt_rife_standalone_dv_end.GetValue().strip() or None)}
+                  "end": None if same_file else (self.txt_rife_standalone_dv_end.GetValue().strip() or None),
+                  "tolerance": int(dv_tolerance_str) if dv_tolerance_str else 0}
 
         # Real incident (see docs/ai/AI_DECISIONS.md ADR-330): RIFE run against a Dolby
         # Vision/HDR10+ source while Output Codec stayed on its H.264 default -- that
@@ -24418,9 +24514,12 @@ def _self_test_bitrate_cap_preserves_dv():
          mock.patch.object(U, "_reinject_dv_after_rife") as m_reinject:
         result = U._run_bitrate_cap("x.mkv", _args(), dv_source="original_source.mkv")
     assert result == "x.mkv"
+    # frame_count_tolerance=0: the new "Frame Count Tolerance" plumbing threaded through
+    # this call site too (getattr(args, "rife_dv_frame_count_tolerance", 0)) -- _args()
+    # above has no such attribute, so it must default to 0, not break this existing call.
     m_reinject.assert_called_once_with("original_source.mkv", "x.mkv", mock.ANY,
                                        use_manifest=False, what="bitrate-capped video",
-                                       trim_source=True)
+                                       trim_source=True, frame_count_tolerance=0)
 
     # dv_source=None (no DV wanted for this job) -> must NOT call the reinject at all,
     # even though a real re-encode still happens
@@ -24556,6 +24655,233 @@ def _self_test_bitrate_cap_rife_manifest_dv():
         assert "RIFE's frame list is missing" in log, log
 
     print("_self_test_bitrate_cap_rife_manifest_dv: PASS")
+
+
+def _self_test_rife_dv_frame_count_tolerance_main_pipeline():
+    """Regression test for the new "Frame Count Tolerance" control on the Main Processor
+    tab's RIFE section (txt_rife_dv_frame_count_tolerance), the in-pipeline GUI-only
+    counterpart of the standalone Reinject panel's own txt_reinject_frame_count_tolerance
+    (ADR-167), threaded through utils.py's own new `frame_count_tolerance` parameter on
+    _reinject_dv_after_rife(). Confirms: (1) it is only enabled once both Preserve Dolby
+    Vision and RIFE are checked, added to update_rife_interpolate()'s existing enable-
+    pattern, and reacts live to either checkbox (not just at construction); (2)
+    parse_args() carries its value through as args.rife_dv_frame_count_tolerance (default
+    "5", a changed value, and "0" -> 0); (3) _run_post_conversion_steps()'s own RIFE+DV
+    call site forwards getattr(args, "rife_dv_frame_count_tolerance", 0) into
+    _reinject_dv_after_rife()'s frame_count_tolerance kwarg -- the GUI's real non-zero
+    value, an explicit 0, and a missing attribute (an old saved args/preset) all come
+    through correctly. No GPU or real movie file needed: _reinject_dv_after_rife and the
+    rest of the post-conversion chain are replaced with mocks."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+
+        # Default: both unchecked -> field disabled, default value "5".
+        assert frame.chk_preserve_dowi.GetValue() is False
+        assert frame.chk_rife_interpolate.GetValue() is False
+        assert frame.txt_rife_dv_frame_count_tolerance.GetValue() == "5"
+        assert not frame.txt_rife_dv_frame_count_tolerance.IsEnabled()
+
+        frame.chk_rife_interpolate.SetValue(True)
+        frame.update_rife_interpolate()
+        assert not frame.txt_rife_dv_frame_count_tolerance.IsEnabled(), \
+            "RIFE alone, without Preserve Dolby Vision, must not enable it"
+
+        frame.chk_preserve_dowi.SetValue(True)
+        frame.on_changed_chk_preserve_dowi(None)
+        assert frame.txt_rife_dv_frame_count_tolerance.IsEnabled(), \
+            "both RIFE and Preserve Dolby Vision checked must enable it"
+
+        frame.chk_preserve_dowi.SetValue(False)
+        frame.on_changed_chk_preserve_dowi(None)
+        assert not frame.txt_rife_dv_frame_count_tolerance.IsEnabled(), \
+            "unchecking Preserve Dolby Vision live must disable it again"
+        frame.chk_preserve_dowi.SetValue(True)
+        frame.on_changed_chk_preserve_dowi(None)
+        assert frame.txt_rife_dv_frame_count_tolerance.IsEnabled()
+
+        # parse_args() round-trip.
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        args = frame.parse_args(skip_set_state=True)
+        assert args.rife_dv_frame_count_tolerance == 5, args.rife_dv_frame_count_tolerance
+
+        frame.txt_rife_dv_frame_count_tolerance.SetValue("10")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.rife_dv_frame_count_tolerance == 10
+
+        frame.txt_rife_dv_frame_count_tolerance.SetValue("0")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.rife_dv_frame_count_tolerance == 0
+
+        # Invalid value -> parse_args() must refuse with exactly one validation
+        # message and return None, not raise an uncaught ValueError from a bare
+        # int(...) conversion (this field is a free-text EditableComboBox).
+        validation_errors = []
+        frame.show_validation_error_message = lambda name, lo, hi: validation_errors.append((name, lo, hi))
+        frame.txt_rife_dv_frame_count_tolerance.SetValue("abc")
+        invalid_args = frame.parse_args(skip_set_state=True)
+        assert invalid_args is None, "an invalid Frame Count Tolerance must refuse, not raise or proceed"
+        assert len(validation_errors) == 1 and validation_errors[0][0] == T("Frame Count Tolerance"), \
+            validation_errors
+        del frame.show_validation_error_message
+        frame.txt_rife_dv_frame_count_tolerance.SetValue("5")
+
+        # apply_parsed_args_to_gui() restore round-trip.
+        args.rife_dv_frame_count_tolerance = 10
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.txt_rife_dv_frame_count_tolerance.GetValue() == "10"
+
+        # Call site: _run_post_conversion_steps()'s RIFE+DV branch forwards it.
+        def _args(**kw):
+            base = dict(rife_interpolate=True, rife_dv_frame_count_tolerance=10)
+            base.update(kw)
+            return types.SimpleNamespace(**base)
+
+        def _run_with(args_obj):
+            with mock.patch.object(U, "_should_use_stereo_upscale", lambda a: False), \
+                    mock.patch.object(U, "_run_waifu2x_upscale", lambda p, a: None), \
+                    mock.patch.object(U, "_run_rife_interpolation",
+                                      lambda p, a, force_hevc=False, scene_source_path=None: "m_rife.mkv"), \
+                    mock.patch.object(U, "_reinject_dv_after_rife") as m_reinject, \
+                    mock.patch.object(U, "_run_audio_subtitle_restore", lambda p, a, **k: None), \
+                    mock.patch.object(U, "_run_bitrate_cap", lambda p, a, **k: None), \
+                    mock.patch.object(U, "_run_mvc_conversion", lambda p, a: None):
+                U._run_post_conversion_steps("m.mkv", args_obj, dv_source="orig.mkv")
+            return m_reinject
+
+        m_reinject = _run_with(_args())
+        assert m_reinject.call_args.kwargs["frame_count_tolerance"] == 10, m_reinject.call_args
+
+        m_reinject = _run_with(_args(rife_dv_frame_count_tolerance=0))
+        assert m_reinject.call_args.kwargs["frame_count_tolerance"] == 0, m_reinject.call_args
+
+        # Attribute entirely missing (an old saved args/preset without it) -> defaults to 0.
+        m_reinject = _run_with(types.SimpleNamespace(rife_interpolate=True))
+        assert m_reinject.call_args.kwargs["frame_count_tolerance"] == 0, m_reinject.call_args
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_dv_frame_count_tolerance_main_pipeline: PASS")
+
+
+def _self_test_rife_standalone_dv_frame_count_tolerance():
+    """Regression test for the new "Frame Count Tolerance" control on the RIFE
+    Interpolation (Standalone Tool) tab (txt_rife_standalone_dv_tolerance), the
+    standalone counterpart of _self_test_rife_dv_frame_count_tolerance_main_pipeline.
+    run_rife_standalone()'s own DV-reattach path (the dv={...} branch that calls
+    _reinject_dv_after_rife() after RIFE) previously had no self-test coverage at all --
+    this covers both the pre-existing base DV-source-present behavior and the new
+    tolerance plumbing: on_click_btn_rife_standalone_run() builds dv["tolerance"] from
+    the field (default "5", a changed value, "0" -> 0, and an invalid value refusing with
+    exactly one warning before any command is built), and run_rife_standalone() forwards
+    dv.get("tolerance", 0) into _reinject_dv_after_rife()'s frame_count_tolerance kwarg.
+    No GPU or real movie file needed: startWorker is monkeypatched to capture the dv dict
+    instead of launching a real subprocess, and _reinject_dv_after_rife is replaced with a
+    Mock for the run_rife_standalone() half of the test."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    orig_message_box = gui_mod.wx.MessageBox
+    message_box_calls = []
+    gui_mod.wx.MessageBox = lambda *a, **kw: message_box_calls.append(a)
+    try:
+        frame = gui_mod.MainFrame()
+
+        assert frame.txt_rife_standalone_dv_tolerance.GetParent() is frame.cpn_rife_standalone.GetPane()
+        assert frame.txt_rife_standalone_dv_tolerance.GetValue() == "5"
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["cmd"] = wargs[0]
+            captured["dv"] = wargs[1] if len(wargs) > 1 else None
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dv_source_path = path.join(tmpdir, "movie.mkv")
+            input_path = path.join(tmpdir, "movie_3d.mkv")
+            with open(dv_source_path, "wb") as f:
+                f.write(b"fake")
+            with open(input_path, "wb") as f:
+                f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_rife.mkv")
+
+            frame.txt_rife_standalone_input.SetValue(input_path)
+            frame.txt_rife_standalone_output.SetValue(output_path)
+            frame.txt_rife_standalone_dv_source.SetValue(dv_source_path)
+
+            # Base DV-source-present case, previously untested: Run must actually build
+            # a dv dict (not None) once a real Original DV Source is filled in.
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured.get("dv") is not None, "a filled-in DV Source must build a dv dict"
+            assert captured["dv"]["source"] == dv_source_path
+            # Default field value "5" must land in the dv dict unchanged.
+            assert captured["dv"]["tolerance"] == 5, captured["dv"]
+
+            # Changed value.
+            captured.clear()
+            frame.txt_rife_standalone_dv_tolerance.SetValue("10")
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["dv"]["tolerance"] == 10, captured["dv"]
+
+            # "0" -> 0 (the dv dict's own int, not the omitted-flag point -- that's
+            # _reinject_dv_after_rife()'s own job, covered below).
+            captured.clear()
+            frame.txt_rife_standalone_dv_tolerance.SetValue("0")
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["dv"]["tolerance"] == 0, captured["dv"]
+
+            # Invalid value -> refuses with exactly one warning, no command/dv built.
+            captured.clear()
+            message_box_calls.clear()
+            frame.txt_rife_standalone_dv_tolerance.SetValue("abc")
+            frame.on_click_btn_rife_standalone_run(None)
+            assert "cmd" not in captured, "must refuse before building a command for an invalid tolerance"
+            assert len(message_box_calls) == 1, "must warn the user exactly once about the bad value"
+            frame.txt_rife_standalone_dv_tolerance.SetValue("5")
+
+        # run_rife_standalone() itself: forwards dv.get("tolerance", 0) into
+        # _reinject_dv_after_rife()'s frame_count_tolerance kwarg.
+        script = "print('done')\n"
+        cmd = [sys.executable, "-c", script]
+        with mock.patch.object(iw3_utils, "_reinject_dv_after_rife") as m_reinject:
+            frame.run_rife_standalone(cmd, dv={"source": "orig.mkv", "output": "out.mkv",
+                                               "start": None, "end": None, "tolerance": 7})
+            wx.Yield()
+        assert m_reinject.call_args.kwargs["frame_count_tolerance"] == 7, m_reinject.call_args
+
+        with mock.patch.object(iw3_utils, "_reinject_dv_after_rife") as m_reinject:
+            frame.run_rife_standalone(cmd, dv={"source": "orig.mkv", "output": "out.mkv",
+                                               "start": None, "end": None})
+            wx.Yield()
+        assert m_reinject.call_args.kwargs["frame_count_tolerance"] == 0, \
+            "a dv dict with no tolerance key at all must default to 0"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        gui_mod.wx.MessageBox = orig_message_box
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_dv_frame_count_tolerance: PASS")
 
 
 def _self_test_analyze_source_video():
@@ -26190,7 +26516,7 @@ def _self_test_post_steps_are_chained():
             calls.append(("rife", p, force_hevc, scene_source_path))
             return rife
 
-        def dv(src, p, a):
+        def dv(src, p, a, **k):
             calls.append(("dv", src, p))
             return True
 
@@ -26855,6 +27181,23 @@ def _self_test_hdr_to_sdr_tonemap_progress_is_incremental():
             assert open(rife, "rb").read() == b"new-with-dv", "success replaces the RIFE file"
             assert not any("_dvtmp" in n for n in os.listdir(tmp)), "temp file cleaned up"
 
+            # New "Frame Count Tolerance" plumbing: default (0, unset) omits the flag
+            # entirely -- byte-for-byte the same command as before this parameter existed.
+            calls.clear()
+            U._reinject_dv_after_rife("src.mkv", rife, args)
+            assert "--frame-count-tolerance" not in calls[0], calls[0]
+
+            # A non-zero value is forwarded verbatim as a string.
+            calls.clear()
+            U._reinject_dv_after_rife("src.mkv", rife, args, frame_count_tolerance=10)
+            cmd = calls[0]
+            assert "--frame-count-tolerance" in cmd and "10" in cmd, cmd
+
+            # Explicit 0 (and a falsy None) still omit it -- exact match required.
+            calls.clear()
+            U._reinject_dv_after_rife("src.mkv", rife, args, frame_count_tolerance=0)
+            assert "--frame-count-tolerance" not in calls[0], calls[0]
+
         # failure -> RIFE file left exactly as it was, temp cleaned, no exception
         with open(rife, "wb") as f:
             f.write(b"old")
@@ -26953,7 +27296,8 @@ def _self_test_rife_standalone_folder_batch():
         def fake_detect(input_path, ffprobe):
             return {"dv": path.basename(input_path).startswith(("d_", "e_")), "hdr10plus": False}
 
-        def fake_reinject(source, output, args, log=None, proc_hook=None, progress_cb=None):
+        def fake_reinject(source, output, args, log=None, proc_hook=None, progress_cb=None,
+                         frame_count_tolerance=0):
             reattached.append((source, output))
 
         def input_names():
@@ -32465,6 +32809,8 @@ def _run_self_tests():
         _self_test_preview_peak_bitrate,
         _self_test_bitrate_cap_preserves_dv,
         _self_test_bitrate_cap_rife_manifest_dv,
+        _self_test_rife_dv_frame_count_tolerance_main_pipeline,
+        _self_test_rife_standalone_dv_frame_count_tolerance,
         _self_test_bitrate_cap_standalone_panel,
         _self_test_mvc_muxopt_new_audio_pes,
         _self_test_analyze_source_video,

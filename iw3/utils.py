@@ -649,7 +649,8 @@ def _rife_manifest_frame_counts(manifest_path):
 
 
 def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None, progress_cb=None,
-                            use_manifest=True, what="RIFE output", trim_source=True, manifest_path=None):
+                            use_manifest=True, what="RIFE output", trim_source=True, manifest_path=None,
+                            frame_count_tolerance=0):
     """ADR-192: after RIFE, re-attach the ORIGINAL source's Dolby Vision RPU to RIFE's output through
     iw3.reinject_hdr_cli --rife-manifest (each in-between frame gets a copy of its nearest real frame's entry).
     The RIFE file is only replaced when the injection fully succeeded; otherwise it is left as it was
@@ -666,7 +667,11 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
     `log` (optional callable) receives the messages instead of stderr -- used by the standalone RIFE tool's
     log box. `proc_hook` (optional callable) receives the running Popen so a Cancel button can kill it.
     `progress_cb(label, done_frames, total_frames)` (optional) receives live progress; without it the job's own
-    bar (args.state["tqdm_fn"]) is used when there is one -- frames, FPS, elapsed and ETA for every stage."""
+    bar (args.state["tqdm_fn"]) is used when there is one -- frames, FPS, elapsed and ETA for every stage.
+
+    frame_count_tolerance (default 0, exact match): forwarded to iw3.reinject_hdr_cli's own
+    --frame-count-tolerance, the same deliberate escape hatch the standalone Reinject panel already
+    has -- only passed to the subprocess when non-zero."""
     def say(message):
         if log is None:
             print(message, file=sys.stderr)
@@ -704,6 +709,9 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
         # ADR-212: the new file has exactly the source's frames even if the NAME says "_rife" (an upscale of a file
         # RIFE already processed); the exact frame-count check inside the tool still guards it
         cmd += ["--skip-rife-guard"]
+    tolerance = max(0, int(frame_count_tolerance or 0))
+    if tolerance:
+        cmd += ["--frame-count-tolerance", str(tolerance)]
     if trim_source and getattr(args, "start_time", None):
         cmd += ["--start-time", str(args.start_time)]
     if trim_source and getattr(args, "end_time", None):
@@ -846,7 +854,8 @@ def _reinject_dv_after_upscale(source_path, upscaled_path, args, log=None, proc_
     """ADR-206: re-attach the Dolby Vision / HDR10+ data of `source_path` to its waifu2x-upscaled copy. Same
     frames in and out, so this is a one-to-one copy (no RIFE frame list). Never raises; True only on success."""
     return _reinject_dv_after_rife(source_path, upscaled_path, args, log=log, proc_hook=proc_hook,
-                                   progress_cb=progress_cb, use_manifest=False, what="upscaled video", trim_source=False)
+                                   progress_cb=progress_cb, use_manifest=False, what="upscaled video", trim_source=False,
+                                   frame_count_tolerance=getattr(args, "rife_dv_frame_count_tolerance", 0))
 
 
 def _run_cli_with_progress(cmd, cwd, args, progress_prefix, desc):
@@ -1321,10 +1330,12 @@ def _run_bitrate_cap(video_path, args, dv_source=None, rife_manifest=None):
         # the exact-frame-count-matched re-attach _reinject_dv_after_upscale() uses applies here too.
         if rife_manifest:
             _reinject_dv_after_rife(dv_source, video_path, args, use_manifest=True, manifest_path=rife_manifest,
-                                    what="bitrate-capped video", trim_source=True)
+                                    what="bitrate-capped video", trim_source=True,
+                                    frame_count_tolerance=getattr(args, "rife_dv_frame_count_tolerance", 0))
         else:
             _reinject_dv_after_rife(dv_source, video_path, args, use_manifest=False,
-                                    what="bitrate-capped video", trim_source=True)
+                                    what="bitrate-capped video", trim_source=True,
+                                    frame_count_tolerance=getattr(args, "rife_dv_frame_count_tolerance", 0))
     return video_path
 
 
@@ -1444,7 +1455,8 @@ def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_pa
     rife_output_path = _run_rife_interpolation(current, args, force_hevc=bool(dv_source),
                                                 scene_source_path=scene_source_path)
     if dv_source and getattr(args, "rife_interpolate", False):
-        _reinject_dv_after_rife(dv_source, rife_output_path, args)
+        _reinject_dv_after_rife(dv_source, rife_output_path, args,
+                                frame_count_tolerance=getattr(args, "rife_dv_frame_count_tolerance", 0))
     if rife_output_path:
         current = rife_output_path
     # Restore audio/subtitles onto the file the user will actually keep (the last one in the chain).

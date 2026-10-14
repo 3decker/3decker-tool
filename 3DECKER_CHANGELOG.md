@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 13, 2026
+## Latest Update — October 14, 2026
+
+**Fixed: a frame-count check (used by Dolby Vision/HDR reinjection) could silently give up with no explanation.** Before re-attaching Dolby Vision/HDR after RIFE, 3DECKER double-checks the video's real frame count. On a very large file read over a slow or busy network connection, that check could take longer than its one-hour time limit -- and when it did, it used to just give up silently, showing a generic "couldn't determine the frame count" message with no indication of why. Now it tells you plainly when this happens ("timed out after 3600 seconds") instead of going quiet, so you know to just retry it (ideally on a faster connection) rather than suspecting the file itself is broken.
+
+## Update — October 13, 2026
 
 **Added: "Log 3D Strength per Scene" for Auto 3D Strength.** Auto 3D Strength already had a debug option that burns the strength it picked into the corner of the video. Now there's a second, separate checkbox next to it that writes a plain text file beside your finished video instead -- listing which 3D Strength value it used for each scene (with the start/end time of each one) plus one overall average for the whole movie. Nothing is written into the picture itself; it's just a text file you can open afterward to see what Auto 3D Strength decided. Works the same way for a batch/folder of movies -- each one gets its own separate log, matching how the regular log file already works.
 

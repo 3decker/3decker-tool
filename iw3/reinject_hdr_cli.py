@@ -348,18 +348,31 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
 
     `probe_result` (ADR-359): an optional dict the caller provides to receive the RAW
     outcome of the underlying ffmpeg process -- `probe_result["returncode"]` (the real
-    exit code, or None if the process never completed, e.g. a timeout) and
-    `probe_result["stderr"]` (the full captured stderr text). This is purely an OUT-param
-    with a None default -- every existing caller that doesn't pass it sees byte-for-byte
-    unchanged behavior and this function's return signature/value is unchanged either way.
-    It exists so a caller can tell a genuine PROBE FAILURE (ffmpeg crashed or exited
-    non-zero, e.g. the real 2026-10-06 ffmpeg nightly regression on certain HEVC/Dolby
-    Vision content -- "[vf#0:0] Task finished with error: File exists" / "Could not open
-    encoder before EOF") apart from an ordinary frame-count MISMATCH -- a crash can still
-    leave a non-None, non-zero `frame_count` here (whatever partial progress was printed
-    to -stats before it died), which would otherwise silently look like a real but wrong
-    frame count instead of the real cause. See `_probe_frames_and_duration_with_fallback`,
+    exit code, or None if the process never completed, e.g. a timeout),
+    `probe_result["stderr"]` (the full captured stderr text), and `probe_result["exception"]`
+    (ADR-365: a human-readable string describing a timeout or other exception that
+    prevented the process from ever completing, or None on a normal run -- see below).
+    This is purely an OUT-param with a None default -- every existing caller that doesn't
+    pass it sees byte-for-byte unchanged behavior and this function's return signature/value
+    is unchanged either way. It exists so a caller can tell a genuine PROBE FAILURE (ffmpeg
+    crashed or exited non-zero, e.g. the real 2026-10-06 ffmpeg nightly regression on certain
+    HEVC/Dolby Vision content -- "[vf#0:0] Task finished with error: File exists" / "Could
+    not open encoder before EOF") apart from an ordinary frame-count MISMATCH -- a crash can
+    still leave a non-None, non-zero `frame_count` here (whatever partial progress was
+    printed to -stats before it died), which would otherwise silently look like a real but
+    wrong frame count instead of the real cause. See `_probe_frames_and_duration_with_fallback`,
     which uses this.
+
+    ADR-365: a `subprocess.TimeoutExpired` (the process didn't finish within `timeout`
+    seconds -- real incident: a ~19.5GB 4K source probed over a slow/congested network
+    link took longer than the hour-long timeout on both the fast and fallback probes, and
+    the caller just saw an unexplained "could not determine a decoded frame count" with no
+    indication a timeout had even happened) or any other exception while running ffmpeg is
+    now recorded into `probe_result["exception"]` instead of being silently discarded --
+    this function's own return value is unaffected either way (still None frame_count/
+    duration on failure, matching prior behavior exactly for callers that don't look at
+    `probe_result`). On a Popen-based timeout (the `stage` is not None, live-progress path),
+    the hung ffmpeg process is explicitly killed rather than left running in the background.
 
     Uses `ffmpeg -f null -` (full decode, frame count parsed from its own -stats output)
     rather than ffprobe -count_frames, which this function used until real, direct timing
@@ -402,13 +415,18 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
     frame_count = None
     duration = None
     returncode = None
+    probe_exception = None
     if stage is None:
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             stderr = proc.stderr or ""
             returncode = proc.returncode
-        except Exception:
+        except subprocess.TimeoutExpired:
             stderr = ""
+            probe_exception = f"timed out after {timeout} seconds (ffmpeg never finished decoding)"
+        except Exception as e:
+            stderr = ""
+            probe_exception = f"{type(e).__name__}: {e}"
     else:
         stderr_chunks = []
         last_emit = [0.0]
@@ -421,6 +439,7 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
             total_str = f"{total_seconds_hint:.2f}" if total_seconds_hint else "unknown"
             print(f"IW3_REINJECT_PROGRESS {stage} {current_seconds:.2f} {total_str}", flush=True)
 
+        proc = None
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                      text=True, bufsize=1)
@@ -431,14 +450,20 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
                     h, mnt, s = m.groups()
                     _emit(int(h) * 3600 + int(mnt) * 60 + float(s))
             returncode = proc.wait(timeout=timeout)
-        except Exception:
-            pass
+        except subprocess.TimeoutExpired:
+            probe_exception = f"timed out after {timeout} seconds (ffmpeg never finished decoding)"
+            if proc is not None:
+                proc.kill()
+                proc.wait()
+        except Exception as e:
+            probe_exception = f"{type(e).__name__}: {e}"
         stderr = "".join(stderr_chunks)
 
     if probe_result is not None:
         probe_result["returncode"] = returncode
         probe_result["stderr"] = stderr
         probe_result["cmd"] = cmd
+        probe_result["exception"] = probe_exception
 
     try:
         frame_matches = _FFMPEG_FRAME_RE.findall(stderr)
@@ -497,7 +522,7 @@ def _summarize_probe_stderr(stderr, max_lines=8):
 
 
 def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_time=None,
-                                                 end_time=None, timeout=3600):
+                                                 end_time=None, timeout=3600, probe_result=None):
     """Fallback frame-count probe using `ffprobe -count_frames` -- the method
     _probe_frames_and_duration (ffmpeg -f null -) used before ADR-163's speed switch,
     kept here specifically for when the fast path fails outright (see ADR-359). This is
@@ -508,6 +533,11 @@ def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_t
     see `_read_intervals_for_range`'s own docstring) -- trimming here uses
     `-read_intervals` instead, ffprobe's own native mechanism for this, already proven
     working on this project's bundled binary.
+
+    `probe_result` (ADR-365): same OUT-param shape as _probe_frames_and_duration's own --
+    an optional dict that receives `probe_result["exception"]` (a human-readable string
+    describing a timeout or other exception, or None on a normal run). Purely additive;
+    every existing caller that doesn't pass it sees unchanged behavior.
 
     Returns (frame_count_or_None, duration_seconds_or_None, cmd_list) -- the same shape
     as _probe_frames_and_duration on purpose, so a caller can treat the two
@@ -521,8 +551,16 @@ def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_t
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         stdout = proc.stdout or ""
-    except Exception:
+    except subprocess.TimeoutExpired:
+        if probe_result is not None:
+            probe_result["exception"] = f"timed out after {timeout} seconds (ffprobe never finished decoding)"
         return None, None, cmd
+    except Exception as e:
+        if probe_result is not None:
+            probe_result["exception"] = f"{type(e).__name__}: {e}"
+        return None, None, cmd
+    if probe_result is not None:
+        probe_result["exception"] = None
 
     frame_count = None
     duration = None
@@ -566,7 +604,8 @@ def _probe_frames_and_duration_with_fallback(input_path, ffmpeg_bin, ffprobe_bin
     Returns (frame_count_or_None, duration_seconds_or_None, cmd_list, used_fallback).
     frame_count is None only when BOTH the fast path and the fallback genuinely failed
     -- in that case the real diagnostics from both attempts have already been printed to
-    stderr before returning."""
+    stderr before returning (ADR-365: including a timeout, which used to print nothing
+    at all beyond a bare "could not determine a decoded frame count" at the call site)."""
     start_sec = parse_time(start_time) if start_time else None
     end_sec = parse_time(end_time) if end_time else None
     if start_sec is not None and end_sec is not None and end_sec <= start_sec:
@@ -578,30 +617,44 @@ def _probe_frames_and_duration_with_fallback(input_path, ffmpeg_bin, ffprobe_bin
         stage=stage, total_seconds_hint=total_seconds_hint, probe_result=probe_result)
 
     rc = probe_result.get("returncode")
+    probe_exception = probe_result.get("exception")
     probe_failed = bool(rc) or frame_count is None
     if not probe_failed:
         return frame_count, duration, cmd, False
 
-    real_error = _summarize_probe_stderr(probe_result.get("stderr"))
-    print(f"[reinject-hdr] WARNING: the fast ffmpeg-based frame probe for "
-          f"{label or input_path} failed outright (ffmpeg return code: {rc}) -- this is a "
-          f"PROBE FAILURE, not a real frame-count mismatch. Real ffmpeg output:",
-          file=sys.stderr)
-    for line in real_error:
-        print(f"    {line}", file=sys.stderr)
+    if probe_exception:
+        print(f"[reinject-hdr] WARNING: the fast ffmpeg-based frame probe for "
+              f"{label or input_path} did not complete -- {probe_exception}. This is a "
+              f"PROBE FAILURE, not a real frame-count mismatch.", file=sys.stderr)
+    else:
+        real_error = _summarize_probe_stderr(probe_result.get("stderr"))
+        print(f"[reinject-hdr] WARNING: the fast ffmpeg-based frame probe for "
+              f"{label or input_path} failed outright (ffmpeg return code: {rc}) -- this is a "
+              f"PROBE FAILURE, not a real frame-count mismatch. Real ffmpeg output:",
+              file=sys.stderr)
+        for line in real_error:
+            print(f"    {line}", file=sys.stderr)
     print(f"[reinject-hdr] falling back to the slower 'ffprobe -count_frames' method for "
           f"{label or input_path}...", file=sys.stderr)
 
+    fb_probe_result = {}
     fb_frames, fb_duration, fb_cmd = _probe_frames_and_duration_ffprobe_fallback(
-        input_path, ffprobe_bin, start_time, end_time, timeout=timeout)
+        input_path, ffprobe_bin, start_time, end_time, timeout=timeout, probe_result=fb_probe_result)
     if fb_frames is not None:
         print(f"[reinject-hdr] fallback succeeded: {fb_frames} frame(s) via "
               f"{_format_cmd(fb_cmd)}", file=sys.stderr)
         return fb_frames, (fb_duration if fb_duration is not None else duration), fb_cmd, True
 
-    print(f"[reinject-hdr] ERROR: the fallback 'ffprobe -count_frames' probe ALSO failed for "
-          f"{label or input_path} -- re-run {_format_cmd(fb_cmd)} by hand to see why.",
-          file=sys.stderr)
+    fb_exception = fb_probe_result.get("exception")
+    if fb_exception:
+        print(f"[reinject-hdr] ERROR: the fallback 'ffprobe -count_frames' probe ALSO failed for "
+              f"{label or input_path} -- {fb_exception}. Re-run {_format_cmd(fb_cmd)} by hand "
+              f"to confirm, or re-try when the source is reachable faster (e.g. not over a slow "
+              f"network link).", file=sys.stderr)
+    else:
+        print(f"[reinject-hdr] ERROR: the fallback 'ffprobe -count_frames' probe ALSO failed for "
+              f"{label or input_path} -- re-run {_format_cmd(fb_cmd)} by hand to see why.",
+              file=sys.stderr)
     return None, duration, fb_cmd, True
 
 
@@ -1728,6 +1781,90 @@ def _self_test_probe_failure_fallback():
     print("_self_test_probe_failure_fallback: PASS")
 
 
+def _self_test_probe_timeout_diagnostics():
+    """Regression test for ADR-365 -- the real user-reported incident: a probe that hit
+    subprocess's own timeout used to be swallowed by a bare `except Exception: pass`/
+    `except Exception: return None, None, cmd`, so the caller just saw a generic "could
+    not determine a decoded frame count" with no indication a timeout (as opposed to a
+    real crash or a corrupt file) was the actual cause. Covers: (a) the fast ffmpeg probe
+    (subprocess.run path, stage=None) timing out populates probe_result["exception"];
+    (b) the fast probe's live-progress path (subprocess.Popen, stage set) timing out does
+    the same AND kills the hung process rather than leaving it running; (c) the full
+    _probe_frames_and_duration_with_fallback wrapper, when BOTH the fast probe and the
+    ffprobe fallback time out, prints the real "timed out after N seconds" reason for
+    each -- not just a bare, unexplained failure."""
+    from unittest.mock import patch, MagicMock
+
+    # (a) fast probe (subprocess.run) times out -- exception recorded, not swallowed.
+    with patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=3600)):
+        probe_result = {}
+        frames, duration, cmd = _probe_frames_and_duration(
+            "fake.mkv", "ffmpeg", timeout=3600, probe_result=probe_result)
+        assert frames is None, frames
+        assert probe_result["returncode"] is None, probe_result
+        assert "timed out after 3600 seconds" in probe_result["exception"], probe_result
+
+    # (b) live-progress path (subprocess.Popen) times out -- exception recorded AND the
+    # hung process is killed rather than left running in the background.
+    class _HangingProc:
+        def __init__(self):
+            self.killed = False
+            self.waited_after_kill = False
+
+        @property
+        def stderr(self):
+            return iter(["frame=  10 fps=5 time=00:00:00.40 speed=0.1x\n"])
+
+        def wait(self, timeout=None):
+            if self.killed:
+                self.waited_after_kill = True
+                return -9
+            raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=timeout)
+
+        def kill(self):
+            self.killed = True
+
+    hanging_proc = _HangingProc()
+    with patch.object(subprocess, "Popen", return_value=hanging_proc):
+        probe_result = {}
+        frames, duration, cmd = _probe_frames_and_duration(
+            "fake.mkv", "ffmpeg", stage="source", total_seconds_hint=None, probe_result=probe_result)
+        # A partial frame count parsed from whatever -stats printed before the timeout
+        # (here, "frame=  10") can still be non-None -- same ADR-359 shape as a crash.
+        # The exception must be recorded regardless, so a caller can tell this apart
+        # from a real, complete, correct zero/low frame count.
+        assert "timed out after 3600 seconds" in probe_result["exception"], probe_result
+        assert probe_result["returncode"] is None, probe_result
+        assert hanging_proc.killed is True
+        assert hanging_proc.waited_after_kill is True
+
+    # (c) fallback ffprobe -count_frames also supports the same out-param.
+    with patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired(cmd="ffprobe", timeout=3600)):
+        probe_result = {}
+        frames, duration, cmd = _probe_frames_and_duration_ffprobe_fallback(
+            "fake.mkv", "ffprobe", timeout=3600, probe_result=probe_result)
+        assert frames is None, frames
+        assert "timed out after 3600 seconds" in probe_result["exception"], probe_result
+
+    # End-to-end: both the fast probe and the fallback time out -- the printed diagnostics
+    # must name the real timeout, not a bare "ALSO failed ... see why" with no cause.
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with patch.object(subprocess, "run",
+                       side_effect=subprocess.TimeoutExpired(cmd="ffmpeg/ffprobe", timeout=3600)), \
+         contextlib.redirect_stderr(buf):
+        frames, duration, cmd, used_fallback = _probe_frames_and_duration_with_fallback(
+            "fake.mkv", "ffmpeg", "ffprobe", timeout=3600, label="--source")
+        assert frames is None, frames
+        assert used_fallback is True, used_fallback
+    printed = buf.getvalue()
+    assert printed.count("timed out after 3600 seconds") == 2, printed
+    assert "PROBE FAILURE" in printed, printed
+
+    print("_self_test_probe_timeout_diagnostics: PASS")
+
+
 def _self_test_rife_guard():
     """Synthetic/mocked test of the RIFE guard's two independent signals (filename
     suffix, container comment tag) -- see module docstring for why neither alone is
@@ -2534,6 +2671,7 @@ def _run_self_tests():
     _self_test_read_intervals_for_range()
     _self_test_probe_frames_and_duration_probe_result_out_param()
     _self_test_probe_failure_fallback()
+    _self_test_probe_timeout_diagnostics()
     _self_test_rife_guard()
     _self_test_hdr_transfer_compatibility()
     _self_test_mismatched_master_source_warning()

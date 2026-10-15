@@ -4962,6 +4962,21 @@ class MainFrame(wx.Frame):
               "looking when no job has run yet this session."))
         self.lbl_reinject_progress = wx.StaticText(self.cpn_hdr_reinject.GetPane(), label="")
 
+        # ADR-368: real user report -- this tool's pre-flight decode check can run for up
+        # to an hour (the slow 'ffprobe -count_frames' backup method, ADR-367), and this
+        # was the only Standalone Tool pane with no Cancel button at all -- the only way
+        # to stop it was closing the whole app, which also throws away the log (the
+        # end-of-run write in on_exit_reinject_worker never gets a chance to run). Same
+        # Cancel pattern every other Standalone Tool already uses (e.g.
+        # btn_hdr_to_sdr_cancel): taskkill the whole process tree (reinject_hdr_cli.py
+        # itself spawns ffmpeg/ffprobe/dovi_tool as further children a plain proc.kill()
+        # would leave running), remove the partial output file, and still write
+        # whatever log text was captured before the cancel.
+        self.btn_reinject_cancel = wx.Button(self.cpn_hdr_reinject.GetPane(), label=T("Cancel"))
+        self.btn_reinject_cancel.Disable()
+        self.btn_reinject_cancel.SetToolTip(
+            T("Stops the running reinjection and removes the partial output file."))
+
         # ADR-250: self.txt_standalone_log/self.btn_standalone_log_clear are built ONCE,
         # shared by every Standalone Tool -- see their construction just above the first
         # tool's own section for why. Aliased under this tool's own familiar name so
@@ -4975,6 +4990,10 @@ class MainFrame(wx.Frame):
         self.btn_reinject_output.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_output)
         self.btn_reinject_rife_manifest.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_rife_manifest)
         self.btn_reinject_run.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_run)
+        self.btn_reinject_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_reinject_cancel)
+        self.reinject_proc = None
+        self.reinject_cancelled = False
+        self.reinject_start_time = 0.0
 
         layout = wx.GridBagSizer(vgap=4, hgap=4)
         layout.SetEmptyCellSize((0, 0))
@@ -5003,6 +5022,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_reinject_frame_count_tolerance, (h, 2), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
         layout.Add(self.gauge_reinject, (h, 0), (0, 2), flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.btn_reinject_cancel, (h, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_reinject_progress, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         self.cpn_hdr_reinject.GetPane().SetSizer(layout)
 
@@ -11040,7 +11060,7 @@ class MainFrame(wx.Frame):
         with wx.MessageDialog(None, message=message, caption=T("Error"), style=wx.OK) as dlg:
             dlg.ShowModal()
 
-    def _write_standalone_job_log(self, tool_label, output_path, log_text):
+    def _write_standalone_job_log(self, tool_label, output_path, log_text, already_streamed_live=False):
         """ADR-266: every Standalone Tool (RIFE, Restore Audio & Subtitles, etc.) launches
         its own separate program, so each one gets its own "<output>_log.txt" next to the
         real output file, same naming as utils.py's _job_log_path(). Lives here in gui.py
@@ -11050,12 +11070,22 @@ class MainFrame(wx.Frame):
         gone. The same run block is also appended to the main tab's Output panel, so the
         panel and the log file show identical lines (with the same run header line).
 
+        ADR-369: `already_streamed_live=True` -- set only by a caller that already
+        appended this exact run's text to the Output panel live, line by line, as it was
+        produced (currently just the Retroactive HDR/DV Reinjection panel, whose own
+        pre-flight decode check can run for up to an hour with the real reason otherwise
+        invisible until the very end -- see run_reinject_hdr) -- skips the panel append
+        below so that run's text doesn't show there twice. The per-file job log on disk
+        is unaffected either way: it is always (re)written fresh here, in full, regardless
+        of what has or hasn't already reached the panel.
+
         Never raises up into a caller's exit-handler flow. A blank `output_path` (nothing
         configured to run against) skips only the file, not the panel. A failed file
         write is reported to stderr (reaches the Output panel) and otherwise ignored."""
         run_block = (f"\n---- {tool_label} run {datetime.now().isoformat(timespec='seconds')} ----\n"
                      + (log_text.replace("\r", "\n") if log_text else "") + "\n")
-        self._append_main_output(run_block)
+        if not already_streamed_live:
+            self._append_main_output(run_block)
         output_path = (output_path or "").strip()
         if not output_path:
             return
@@ -14251,13 +14281,23 @@ class MainFrame(wx.Frame):
         # human-readable status/refusal message this tool prints still goes to stderr
         # exactly as before (unchanged), captured here into the same log text this
         # method has always returned.
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 text=True, bufsize=1)
+        #
+        # ADR-369: real user report -- the WARNING/ERROR lines explaining WHY the
+        # pre-flight check fell back to its slow backup method (ADR-367) were already
+        # being produced here, well before that slow pass even started, but sat buffered
+        # in `stderr_chunks` and only reached the log box/Output panel once the whole job
+        # finished -- up to an hour later. Each stderr line is now forwarded live via
+        # AppendText (which auto-mirrors to the Output panel, see _StandaloneOutputBox)
+        # the moment it's produced, same as the progress lines already are -- just on
+        # the human-readable channel instead of the machine one.
+        self.reinject_proc = proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                       text=True, bufsize=1)
         stderr_chunks = []
 
         def _drain_stderr():
             for line in proc.stderr:
                 stderr_chunks.append(line)
+                wx.CallAfter(self.txt_reinject_log.AppendText, line)
 
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
@@ -14279,9 +14319,30 @@ class MainFrame(wx.Frame):
         stderr_thread.join(timeout=5)
         return proc.returncode, "".join(stderr_chunks)
 
+    def _cleanup_after_reinject_cancel(self):
+        output_path = self.txt_reinject_output.GetValue().strip()
+        try:
+            if path.exists(output_path) and path.getmtime(output_path) >= self.reinject_start_time - 1:
+                os.remove(output_path)
+        except OSError:
+            pass
+
+    def on_click_btn_reinject_cancel(self, event):
+        # ADR-368: same taskkill-the-tree pattern every other Standalone Tool's Cancel
+        # button already uses (e.g. on_click_btn_hdr_to_sdr_cancel) -- reinject_hdr_cli.py
+        # itself spawns ffmpeg/ffprobe/dovi_tool as further child processes, so a plain
+        # proc.kill() (parent only) would leave one of those running in the background.
+        proc = self.reinject_proc
+        if proc is not None and proc.poll() is None:
+            self.reinject_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_reinject_cancel.Disable()
+
     def on_exit_reinject_worker(self, result):
         self.btn_reinject_run.Enable()
         self.btn_reinject_clear.Enable()
+        self.btn_reinject_cancel.Disable()
+        self.reinject_proc = None
         try:
             returncode, output = result.get()
         except: # noqa
@@ -14294,10 +14355,19 @@ class MainFrame(wx.Frame):
             wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
             return
 
-        self._write_standalone_job_log(T("Retroactive HDR/DV Reinjection"), self.txt_reinject_output.GetValue(), output)
-        self.txt_reinject_log.SetValue(output)
-        self.txt_reinject_log.ShowPosition(self.txt_reinject_log.GetLastPosition())
-        if returncode == 0:
+        # ADR-369: already_streamed_live=True -- every line in `output` was already
+        # appended to the log box/Output panel live, as it happened (see run_reinject_hdr),
+        # not held back until now; this call still writes the full per-file job log to
+        # disk (unaffected), it just skips re-appending the whole block to the panel a
+        # second time. The log box itself needs no further SetValue() here either -- it
+        # already shows this run's full text, in order, header included.
+        self._write_standalone_job_log(T("Retroactive HDR/DV Reinjection"), self.txt_reinject_output.GetValue(), output,
+                                        already_streamed_live=True)
+        if self.reinject_cancelled:
+            self._cleanup_after_reinject_cancel()
+            self.lbl_reinject_progress.SetLabel(T("Cancelled"))
+            self.SetStatusText(T("HDR reinjection cancelled"))
+        elif returncode == 0:
             # Force the bar to a clean full state on the last stage reached, rather than
             # trusting the last live update already landed there (it should have, since
             # wx.CallAfter preserves order and reinject_hdr_cli's own final flush is
@@ -14386,13 +14456,24 @@ class MainFrame(wx.Frame):
         if rife_manifest:
             cmd += ["--rife-manifest", rife_manifest]
 
-        self.txt_reinject_log.SetValue(
-            T("Running -- this decodes the full clip to verify frame counts, so it may take a while...\n"))
+        # ADR-369: SetValue() first (clears any previous run's text, not mirrored -- see
+        # _StandaloneOutputBox), then AppendText() for the actual run header so THIS line
+        # reaches the Output panel live too, right as the run starts -- every stderr line
+        # that follows (run_reinject_hdr's _drain_stderr) appends the same way, so a
+        # viewer watching either the log box or the Output panel sees the real reason as
+        # soon as it happens, not only once the whole job finishes (up to an hour later).
+        self.txt_reinject_log.SetValue("")
+        self.txt_reinject_log.AppendText(
+            f"---- {T('Retroactive HDR/DV Reinjection')} run {datetime.now().isoformat(timespec='seconds')} ----\n"
+            + T("Running -- this decodes the full clip to verify frame counts, so it may take a while...") + "\n")
         self.gauge_reinject.SetRange(1)
         self.gauge_reinject.SetValue(0)
         self.lbl_reinject_progress.SetLabel("")
+        self.reinject_cancelled = False
+        self.reinject_start_time = time()
         self.btn_reinject_run.Disable()
         self.btn_reinject_clear.Disable()
+        self.btn_reinject_cancel.Enable()
         self.SetStatusText(T("Running HDR reinjection..."))
         startWorker(self.on_exit_reinject_worker, self.run_reinject_hdr, wargs=(cmd,))
 
@@ -21462,6 +21543,206 @@ def _self_test_reinject_progress_bar():
         app.Destroy()
 
     print("_self_test_reinject_progress_bar: PASS")
+
+
+def _self_test_reinject_cancel_button():
+    """ADR-368: real user report -- the Retroactive HDR/DV Reinjection panel was the
+    only Standalone Tool with no Cancel button at all, and this tool's own pre-flight
+    decode check can run for up to an hour (the ADR-367 slow fallback). The only way to
+    stop it was closing the whole app, which also throws away the log (the end-of-run
+    write never runs). Same Cancel pattern every other Standalone Tool already uses
+    (see _self_test_rife_standalone_dv_and_cancel) -- a fake process stand-in, no real
+    subprocess or GPU involved."""
+    import iw3.gui as gui_mod
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    app = wx.App()
+    frame = None
+    orig_run = subprocess.run
+    try:
+        frame = gui_mod.MainFrame()
+        pane = frame.cpn_hdr_reinject.GetPane()
+        assert frame.btn_reinject_cancel.GetParent() is pane
+        assert not frame.btn_reinject_cancel.IsEnabled(), "must start disabled -- no job running yet"
+
+        # Enables while "running", disables again once the worker exits -- driven
+        # through the real handlers, not just manually toggled Enable/Disable calls.
+        orig_start_worker = gui_mod.startWorker
+        gui_mod.startWorker = lambda *a, **kw: None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                source_path = path.join(tmp, "source.mkv")
+                converted_path = path.join(tmp, "converted.mkv")
+                output_path = path.join(tmp, "output.mkv")
+                for p_ in (source_path, converted_path):
+                    with open(p_, "wb") as f:
+                        f.write(b"fake")
+                frame.txt_reinject_source.SetValue(source_path)
+                frame.txt_reinject_converted.SetValue(converted_path)
+                frame.txt_reinject_output.SetValue(output_path)
+
+                frame.on_click_btn_reinject_run(None)
+                assert frame.btn_reinject_cancel.IsEnabled()
+                assert frame.reinject_cancelled is False
+
+                # Clicking Cancel: kills the whole process tree (not just the parent --
+                # reinject_hdr_cli.py spawns ffmpeg/ffprobe/dovi_tool children of its own)
+                # and flags it, so the exit handler knows this wasn't a real failure.
+                class _FakeProc:
+                    pid = 4242
+
+                    def poll(self):
+                        return None
+
+                killed = []
+                subprocess.run = lambda cmd, **kw: killed.append(cmd)
+                frame.reinject_proc = _FakeProc()
+                frame.on_click_btn_reinject_cancel(None)
+                assert frame.reinject_cancelled and not frame.btn_reinject_cancel.IsEnabled()
+                assert killed and killed[0][:2] == ["taskkill", "/PID"] and "4242" in killed[0], killed
+                subprocess.run = orig_run
+
+                # Clicking Cancel again (process already gone, poll() no longer None)
+                # must be a harmless no-op, not a second taskkill on a stale PID.
+                killed.clear()
+                subprocess.run = lambda cmd, **kw: killed.append(cmd)
+
+                class _DeadProc:
+                    pid = 4242
+
+                    def poll(self):
+                        return 0
+
+                frame.reinject_proc = _DeadProc()
+                frame.on_click_btn_reinject_cancel(None)
+                assert not killed, killed
+                subprocess.run = orig_run
+
+                # The exit handler, when cancelled, cleans up the partial output
+                # (written after this run started) and reports "Cancelled", not a
+                # generic failure popup.
+                frame.reinject_start_time = time() - 5
+                with open(output_path, "wb") as f:
+                    f.write(b"partial")
+                frame.on_exit_reinject_worker(_FakeResult((-9, "killed")))
+                assert not path.exists(output_path), "partial output must be removed on cancel"
+                assert frame.lbl_reinject_progress.GetLabel() == T("Cancelled")
+                assert not frame.btn_reinject_cancel.IsEnabled()
+                assert frame.btn_reinject_run.IsEnabled()
+
+                # A pre-existing file from BEFORE this run started must survive --
+                # cleanup only ever removes what THIS run itself produced.
+                frame.reinject_cancelled = True
+                frame.reinject_start_time = time() + 5  # pretend the run started in the future
+                with open(output_path, "wb") as f:
+                    f.write(b"pre-existing, unrelated to this run")
+                frame._cleanup_after_reinject_cancel()
+                assert path.exists(output_path), "a file older than this run's start must not be removed"
+        finally:
+            gui_mod.startWorker = orig_start_worker
+    finally:
+        subprocess.run = orig_run
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_reinject_cancel_button: PASS")
+
+
+def _self_test_reinject_live_stderr_streaming():
+    """ADR-369: real user report -- the WARNING/ERROR lines explaining why the pre-flight
+    decode check fell back to its slow backup method (ADR-367) were already being
+    produced well before that slow pass started, but sat buffered until the whole job
+    finished (up to an hour later) before reaching the log box or the main Output panel.
+    Each stderr line is now forwarded live, as it's produced -- this test uses a real,
+    harmless `python -c` stand-in subprocess (same convention as
+    _self_test_reinject_progress_bar) that prints a WARNING-style stderr line BEFORE a
+    deliberate pause, so the only way this test can see that line while the fake "slow
+    pass" is still blocking the worker thread is if it's being forwarded live, not
+    buffered until the subprocess exits. Also confirms the final write-out
+    (already_streamed_live=True) does NOT duplicate that line in the Output panel --
+    the real risk this change introduced -- while the per-file job log on disk still
+    gets the complete text regardless."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+        script = (
+            "import sys, time\n"
+            "print('[reinject-hdr] WARNING: the fast ffmpeg-based frame probe did not complete', file=sys.stderr)\n"
+            "sys.stderr.flush()\n"
+            "time.sleep(0.3)\n"
+            "print('IW3_REINJECT_PROGRESS source_fallback 1.00 unknown')\n"
+            "print('[reinject-hdr] fallback succeeded: 42 frame(s)', file=sys.stderr)\n"
+        )
+        cmd = [sys.executable, "-c", script]
+
+        # run_reinject_hdr() itself blocks until the subprocess exits -- run it on a
+        # real background thread (same as startWorker would) so this test can observe
+        # the log box mid-run, before the 0.3s sleep above has elapsed.
+        result = {}
+
+        def _run():
+            result["value"] = frame.run_reinject_hdr(cmd)
+
+        worker = threading.Thread(target=_run, daemon=True)
+        before_len = len(frame.txt_main_output.GetValue())
+        worker.start()
+
+        deadline = time() + 5
+        seen_live = False
+        while time() < deadline and worker.is_alive():
+            wx.Yield()
+            if "WARNING" in frame.txt_main_output.GetValue()[before_len:]:
+                seen_live = True
+                break
+        assert seen_live, "the WARNING line must reach the Output panel WHILE the subprocess is still running"
+
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "stand-in subprocess did not finish in time"
+        wx.Yield()
+        returncode, output = result["value"]
+        assert returncode == 0, returncode
+        assert "WARNING" in output and "fallback succeeded" in output, output
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = path.join(tmpdir, "output.mkv")
+            frame.txt_reinject_output.SetValue(output_path)
+
+            class _FakeResult:
+                def __init__(self, value):
+                    self._value = value
+
+                def get(self):
+                    return self._value
+
+            before_panel = frame.txt_main_output.GetValue()
+            frame.on_exit_reinject_worker(_FakeResult((returncode, output)))
+            after_panel = frame.txt_main_output.GetValue()
+            added = after_panel[len(before_panel):]
+            assert "WARNING" not in added, \
+                ("the end-of-run write must NOT re-append text already streamed live", added)
+            log_path = path.join(tmpdir, "output_log.txt")
+            with open(log_path, "r", encoding="utf-8") as f:
+                log_file_text = f.read()
+            assert "WARNING" in log_file_text and "fallback succeeded" in log_file_text, \
+                "the per-file job log on disk must still get the complete text"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_reinject_live_stderr_streaming: PASS")
 
 
 def _self_test_tool_log_clear_buttons():
@@ -32840,6 +33121,8 @@ def _run_self_tests():
         _self_test_sharpen_progress_bar,
         _self_test_sharpen_codec_option,
         _self_test_reinject_progress_bar,
+        _self_test_reinject_cancel_button,
+        _self_test_reinject_live_stderr_streaming,
         _self_test_tool_log_clear_buttons,
         _self_test_run_update_git_checkpoint,
         _self_test_git_checkpoint_no_identity_configured,

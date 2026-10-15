@@ -27055,6 +27055,51 @@ def _self_test_utils_hdr_to_sdr_gpu_decode():
     print("_self_test_utils_hdr_to_sdr_gpu_decode: PASS")
 
 
+def _self_test_utils_reinject_dv_failure_message_tail_keeps_whole_lines():
+    """ADR-366: `_reinject_dv_after_rife()`'s FAILED message used to slice the subprocess's
+    raw captured output with `msg[-1500:]` -- a blind character cut. Real incident: on a
+    long filename, iw3.reinject_hdr_cli's own diagnostics (ADR-363/365) ran past 1500
+    characters, and the slice landed in the middle of a line (literally mid-filename),
+    discarding the real failure reason and printing an unreadable fragment instead.
+    `_tail_of_subprocess_output()` now keeps whole lines only, counting back from the end,
+    so the real reason -- always among the later lines, per reinject_hdr_cli's own print
+    order -- survives intact."""
+    from . import utils as U
+
+    long_name = "It.Chapter.Two.2019_" + ("x" * 200) + "_mlbw_l2_inpaint_d28.mkv"
+    lines = [
+        f"[reinject-hdr] WARNING: the fast ffmpeg-based frame probe for {long_name} did not "
+        f"complete -- timed out after 3600 seconds (ffmpeg never finished decoding). This is "
+        f"a PROBE FAILURE, not a real frame-count mismatch.",
+        f"[reinject-hdr] falling back to the slower 'ffprobe -count_frames' method for {long_name}",
+        f"[reinject-hdr] ERROR: the fallback 'ffprobe -count_frames' probe ALSO failed for "
+        f"{long_name} -- timed out after 3600 seconds. Re-run it by hand to confirm, or "
+        f"re-try when the source is reachable faster (e.g. not over a slow network link).",
+        f"[reinject-hdr] source ffmpeg command: ffprobe -count_frames ... {long_name}",
+        "ERROR: could not determine a decoded frame count for one or both files, even after "
+        "the ffprobe -count_frames fallback -- see the real probe-failure diagnostics printed "
+        "above. Refusing to proceed without a reliable frame-count comparison.",
+    ]
+    msg = "\n".join(lines)
+    assert len(msg) > 1500, "test fixture must actually exceed the old cutoff to reproduce the bug"
+
+    old_cut = msg[-1500:]
+    assert not old_cut.startswith("[reinject-hdr]") and not old_cut.startswith("ERROR:"), (
+        "fixture doesn't reproduce the old mid-line cut -- adjust the fixture length")
+
+    tail = U._tail_of_subprocess_output(msg, max_chars=1500)
+    assert "timed out after 3600 seconds" in tail, f"real failure reason was lost: {tail!r}"
+    first_line = tail.split("\n", 1)[0]
+    assert first_line == "[...earlier probe output truncated...]" or first_line.startswith("[reinject-hdr]"), (
+        f"truncation started mid-line: {first_line!r}")
+
+    # a message that already fits must pass through byte-for-byte unchanged (no marker added)
+    short = "line one\nline two"
+    assert U._tail_of_subprocess_output(short) == short
+
+    print("_self_test_utils_reinject_dv_failure_message_tail_keeps_whole_lines: PASS")
+
+
 def _self_test_hdr_to_sdr_tonemap_progress_is_incremental():
     """The real bug this session fixes: _tonemap_hdr_to_sdr() used to be a single blocking
     subprocess.run() with no progress signal at all, so a real multi-minute 4K HDR-to-SDR pass
@@ -32826,6 +32871,7 @@ def _run_self_tests():
         _self_test_upscale_panel,
         _self_test_rife_with_preserve_dolby_vision,
         _self_test_utils_hdr_to_sdr_gpu_decode,
+        _self_test_utils_reinject_dv_failure_message_tail_keeps_whole_lines,
         _self_test_hdr_to_sdr_tonemap_progress_is_incremental,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_rife_standalone_folder_batch,

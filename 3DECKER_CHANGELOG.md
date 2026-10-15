@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 14, 2026
+## Latest Update — October 15, 2026
+
+**Fixed: the Dolby Vision re-attach failure message could show a garbled, unreadable fragment instead of the real reason.** Right after yesterday's fix made the frame-count check explain itself when it fails, a second, older bug got exposed: on a long filename, the message that reports the failure could get cut off in the middle of a word (or even the middle of the movie's own filename), hiding the actual reason and showing nonsense text instead. This only showed up now because yesterday's fix made that message longer than before. Fixed so the failure message is never cut mid-word again -- it keeps whole lines, so the real reason is always readable.
+
+## Update — October 14, 2026
 
 **Fixed: a frame-count check (used by Dolby Vision/HDR reinjection) could silently give up with no explanation.** Before re-attaching Dolby Vision/HDR after RIFE, 3DECKER double-checks the video's real frame count. On a very large file read over a slow or busy network connection, that check could take longer than its one-hour time limit -- and when it did, it used to just give up silently, showing a generic "couldn't determine the frame count" message with no indication of why. Now it tells you plainly when this happens ("timed out after 3600 seconds") instead of going quiet, so you know to just retry it (ideally on a faster connection) rather than suspecting the file itself is broken.
 

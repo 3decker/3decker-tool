@@ -648,6 +648,34 @@ def _rife_manifest_frame_counts(manifest_path):
         return None, None
 
 
+def _tail_of_subprocess_output(msg, max_chars=4000):
+    """Keeps the last `max_chars` of a subprocess's captured output for an error message,
+    but only on whole-line boundaries -- never mid-line/mid-filename.
+
+    ADR-366: `_reinject_dv_after_rife()` used to slice the raw text with `msg[-1500:]`.
+    iw3.reinject_hdr_cli's own diagnostics (ADR-363/365) put the actual reason a probe
+    failed (e.g. a real timeout) on lines well before its final boilerplate "could not
+    determine a decoded frame count" summary, and those lines got longer once ADR-365
+    added more detail to them -- on a long filename, the combined output can run past
+    1500 characters, so the blind slice landed inside a line (a real incident: it cut
+    cleanly through the middle of a movie's own filename), hiding the real reason and
+    printing a nonsensical fragment instead. This keeps whole lines, counting back from
+    the end, so the real reason -- always among the later lines -- survives intact."""
+    lines = msg.splitlines()
+    kept = []
+    total = 0
+    for line in reversed(lines):
+        total += len(line) + 1
+        if kept and total > max_chars:
+            break
+        kept.append(line)
+    kept.reverse()
+    tail = "\n".join(kept)
+    if len(kept) < len(lines):
+        tail = "[...earlier probe output truncated...]\n" + tail
+    return tail
+
+
 def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None, progress_cb=None,
                             use_manifest=True, what="RIFE output", trim_source=True, manifest_path=None,
                             frame_count_tolerance=0):
@@ -759,7 +787,7 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
         else:
             msg = (result.stderr or b"").decode(errors="replace").strip() or (result.stdout or b"").decode(errors="replace").strip()
             say(f"[iw3] Dolby Vision after {what} FAILED (the file was left unchanged, without DV): "
-                f"{msg[-1500:]}")
+                f"{_tail_of_subprocess_output(msg)}")
     except Exception as e:
         say(f"[iw3] Dolby Vision after {what} FAILED ({e.__class__.__name__}: {e}); "
             f"the {what} was left unchanged, without DV.")

@@ -217,6 +217,7 @@ def _read_intervals_for_range(start_time, end_time):
 
 _FFMPEG_FRAME_RE = re.compile(r"frame=\s*(\d+)")
 _FFMPEG_TIME_RE = re.compile(r"time=(\d+):(\d\d):(\d\d(?:\.\d+)?)")
+_FFMPEG_FPS_RE = re.compile(r"fps=\s*([\d.]+)")
 
 
 def _ffmpeg_trim_args(start_time, end_time):
@@ -342,7 +343,7 @@ _REINJECT_PROGRESS_MIN_INTERVAL_SEC = 0.1
 
 
 def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time=None, timeout=3600,
-                                stage=None, total_seconds_hint=None, probe_result=None):
+                                stage=None, total_seconds_hint=None, total_frames_hint=None, probe_result=None):
     """Decoded (not estimated) frame count + best-effort duration for input_path, trimmed
     to [start_time, end_time] when given.
 
@@ -424,6 +425,18 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
     changes no behavior other than avoiding the broken code path -- frame count/duration
     still come from the exact same `-stats` stderr parsing as before.
 
+    ADR-375: `total_frames_hint` (optional, purely cosmetic like `total_seconds_hint`)
+    -- when the caller already knows the expected frame count (e.g. the RIFE manifest's
+    own `source_frame_count`/`output_frame_count` in `_run_with_rife_manifest`), it's
+    forwarded on a SEPARATE "IW3_REINJECT_FRAME <stage> <frame> <total_frames_or_
+    unknown> <fps_or_unknown>" progress line (not the existing "IW3_REINJECT_PROGRESS"
+    one, so an older consumer that only recognizes that one -- utils.py's _DvProgress --
+    is completely unaffected and simply never sees this new line, by construction, not
+    by a version check). Gives a caller (iw3/gui.py's standalone Reinject panel) a real
+    frame count alongside the existing seconds-decoded display, which `ffmpeg -stats`
+    already prints on every line but this function previously only read from the FULL
+    stderr text once, at the very end, never live.
+
     Returns (frame_count_or_None, duration_seconds_or_None, cmd_list).
     """
     trim_args = _ffmpeg_trim_args(start_time, end_time)
@@ -448,12 +461,22 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
     else:
         stderr_chunks = []
         last_emit = [0.0]
+        last_frame = [0]
+        last_fps = [None]
 
         def _emit(current_seconds):
             now = time.monotonic()
             if now - last_emit[0] < _REINJECT_PROGRESS_MIN_INTERVAL_SEC:
                 return
             last_emit[0] = now
+            # ADR-375: FRAME printed BEFORE PROGRESS -- the GUI reads both via one
+            # wx.CallAfter per line, in the order they arrive, and _update_reinject_
+            # progress() (triggered by the PROGRESS line) reads whatever frame info
+            # _update_reinject_frame_info() (triggered by the FRAME line) already cached
+            # -- this order means that cache is never one tick stale when it's read.
+            frame_total_str = str(total_frames_hint) if total_frames_hint else "unknown"
+            fps_str = f"{last_fps[0]:.2f}" if last_fps[0] is not None else "unknown"
+            print(f"IW3_REINJECT_FRAME {stage} {last_frame[0]} {frame_total_str} {fps_str}", flush=True)
             total_str = f"{total_seconds_hint:.2f}" if total_seconds_hint else "unknown"
             print(f"IW3_REINJECT_PROGRESS {stage} {current_seconds:.2f} {total_str}", flush=True)
 
@@ -463,6 +486,12 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
                                      text=True, bufsize=1)
             for line in proc.stderr:
                 stderr_chunks.append(line)
+                fm = _FFMPEG_FRAME_RE.search(line)
+                if fm:
+                    last_frame[0] = int(fm.group(1))
+                pm = _FFMPEG_FPS_RE.search(line)
+                if pm:
+                    last_fps[0] = float(pm.group(1))
                 m = _FFMPEG_TIME_RE.search(line)
                 if m:
                     h, mnt, s = m.groups()
@@ -497,7 +526,13 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
     if stage is not None:
         # Final, unthrottled flush at the real measured duration -- guarantees the
         # progress display always lands on a clean "done" state for this stage rather
-        # than possibly stopping short at the last throttled interval.
+        # than possibly stopping short at the last throttled interval. Uses the
+        # authoritative `frame_count` (parsed just above from the FULL stderr text,
+        # ADR-375) rather than whatever the live loop's last throttled tick happened to
+        # see, for the same "always land on the real final number" reason.
+        final_frame = frame_count if frame_count is not None else 0
+        frame_total_str = str(total_frames_hint) if total_frames_hint else "unknown"
+        print(f"IW3_REINJECT_FRAME {stage} {final_frame} {frame_total_str} unknown", flush=True)
         final_current = duration if duration is not None else 0.0
         total_str = f"{total_seconds_hint:.2f}" if total_seconds_hint else (
             f"{duration:.2f}" if duration is not None else "unknown")
@@ -653,7 +688,7 @@ def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_t
 
 def _probe_frames_and_duration_with_fallback(input_path, ffmpeg_bin, ffprobe_bin, start_time=None,
                                               end_time=None, timeout=3600, stage=None,
-                                              total_seconds_hint=None, label=""):
+                                              total_seconds_hint=None, total_frames_hint=None, label=""):
     """Wraps _probe_frames_and_duration with real PROBE-FAILURE detection (ADR-359) and
     an automatic fallback to `ffprobe -count_frames` (see
     _probe_frames_and_duration_ffprobe_fallback) when the fast ffmpeg path fails outright
@@ -686,7 +721,8 @@ def _probe_frames_and_duration_with_fallback(input_path, ffmpeg_bin, ffprobe_bin
     probe_result = {}
     frame_count, duration, cmd = _probe_frames_and_duration(
         input_path, ffmpeg_bin, start_time, end_time, timeout=timeout,
-        stage=stage, total_seconds_hint=total_seconds_hint, probe_result=probe_result)
+        stage=stage, total_seconds_hint=total_seconds_hint, total_frames_hint=total_frames_hint,
+        probe_result=probe_result)
 
     rc = probe_result.get("returncode")
     probe_exception = probe_result.get("exception")
@@ -1217,10 +1253,11 @@ def _run_with_rife_manifest(args):
     conv_hint = _probe_container_duration(converted, ffprobe_bin)
     src_frames, src_duration, src_cmd, src_fallback = _probe_frames_and_duration_with_fallback(
         source, ffmpeg_bin, ffprobe_bin, args.start_time, args.end_time,
-        stage="source", total_seconds_hint=src_hint, label="--source")
+        stage="source", total_seconds_hint=src_hint, total_frames_hint=source_frame_count, label="--source")
     conv_frames, conv_duration, conv_cmd, conv_fallback = _probe_frames_and_duration_with_fallback(
         converted, ffmpeg_bin, ffprobe_bin, None, None,
-        stage="converted", total_seconds_hint=conv_hint, label="--converted")
+        stage="converted", total_seconds_hint=conv_hint, total_frames_hint=output_frame_count,
+        label="--converted")
 
     print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}"
           f"{' (fallback: ffprobe -count_frames)' if src_fallback else ''}", file=sys.stderr)
@@ -1674,6 +1711,93 @@ def _self_test_reinject_progress_streaming():
     assert "IW3_REINJECT_PROGRESS" not in buf3.getvalue()
 
     print("_self_test_reinject_progress_streaming: PASS")
+
+
+def _self_test_reinject_frame_progress_streaming():
+    """ADR-375: real user request -- "as much information as possible" on the
+    standalone Reinject panel's two decode stages, specifically a real frame count
+    alongside the existing seconds-decoded display. `ffmpeg -stats` already prints
+    frame=/fps= on every line, but _probe_frames_and_duration only ever parsed that
+    from the FULL stderr text once, at the very end -- never live. New, SEPARATE
+    "IW3_REINJECT_FRAME <stage> <frame> <total_frames_or_unknown> <fps_or_unknown>"
+    progress line, deliberately not folded into the existing IW3_REINJECT_PROGRESS
+    line, so an older consumer that only recognizes that one (iw3/utils.py's
+    _DvProgress, the main pipeline's own progress bar) is completely unaffected --
+    it simply never sees this new line type, by construction. Reuses the exact same
+    fake-Popen-plus-monotonic-clock fixture _self_test_reinject_progress_streaming
+    already established."""
+    import io
+    import contextlib
+    from unittest.mock import patch
+
+    class _FakeProc:
+        def __init__(self, lines):
+            self._lines = iter(lines)
+
+        @property
+        def stderr(self):
+            return self._lines
+
+        def wait(self, timeout=None):
+            return 0
+
+    stderr_lines = [
+        "frame=  50 fps=100 q=-0.0 Lsize=N/A time=00:00:02.00 bitrate=N/A speed=5x elapsed=0:00:00.40\n",
+        "frame= 150 fps=100 q=-0.0 Lsize=N/A time=00:00:06.00 bitrate=N/A speed=5x elapsed=0:00:01.20\n",
+        "frame= 250 fps=100 q=-0.0 Lsize=N/A time=00:00:10.00 bitrate=N/A speed=5x elapsed=0:00:02.00\n",
+    ]
+    fake_clock = {"t": 0.0}
+
+    def _fake_monotonic():
+        fake_clock["t"] += 1.0
+        return fake_clock["t"]
+
+    # (a) with a real total_frames_hint (e.g. the RIFE manifest's own frame count):
+    # intermediate lines carry the real frame/fps read live, plus that hint as the
+    # total; the final, unthrottled flush uses the AUTHORITATIVE final frame count
+    # (parsed from the full stderr, same as the function's own return value), with
+    # "unknown" fps since decode is already finished by then.
+    buf = io.StringIO()
+    with patch.object(subprocess, "Popen", return_value=_FakeProc(list(stderr_lines))), \
+         patch("time.monotonic", side_effect=_fake_monotonic), \
+         contextlib.redirect_stdout(buf):
+        frames, duration, cmd = _probe_frames_and_duration(
+            "fake.mkv", "ffmpeg", stage="source", total_seconds_hint=10.0, total_frames_hint=345)
+    assert frames == 250, frames
+    frame_lines = [line for line in buf.getvalue().splitlines() if line.startswith("IW3_REINJECT_FRAME ")]
+    assert len(frame_lines) >= 3, frame_lines
+    assert frame_lines[0] == "IW3_REINJECT_FRAME source 50 345 100.00", frame_lines[0]
+    assert frame_lines[-2] == "IW3_REINJECT_FRAME source 250 345 100.00", frame_lines[-2]
+    assert frame_lines[-1] == "IW3_REINJECT_FRAME source 250 345 unknown", frame_lines[-1]
+    # every progress tick must carry BOTH line types, kept in sync (same throttle gate)
+    progress_lines = [line for line in buf.getvalue().splitlines() if line.startswith("IW3_REINJECT_PROGRESS ")]
+    assert len(progress_lines) == len(frame_lines), (progress_lines, frame_lines)
+
+    # (b) no total_frames_hint (e.g. _run_strict, which has no manifest to read a
+    # count from) -> every line, intermediate and final, says "unknown" for the total.
+    buf2 = io.StringIO()
+    fake_clock["t"] = 0.0
+    with patch.object(subprocess, "Popen", return_value=_FakeProc(list(stderr_lines))), \
+         patch("time.monotonic", side_effect=_fake_monotonic), \
+         contextlib.redirect_stdout(buf2):
+        _probe_frames_and_duration("fake.mkv", "ffmpeg", stage="converted", total_seconds_hint=None)
+    frame_lines2 = [line for line in buf2.getvalue().splitlines() if line.startswith("IW3_REINJECT_FRAME ")]
+    assert frame_lines2 and all(line.split()[3] == "unknown" for line in frame_lines2), frame_lines2
+
+    # (c) stage=None: byte-for-byte unchanged -- no IW3_REINJECT_FRAME line ever, same
+    # as the existing IW3_REINJECT_PROGRESS guarantee for this case.
+    buf3 = io.StringIO()
+    with patch.object(subprocess, "run") as mock_run, \
+         contextlib.redirect_stdout(buf3):
+        from unittest.mock import MagicMock
+        mock_run.return_value = MagicMock(
+            stderr="frame=240 fps=150 q=-0.0 Lsize=N/A time=00:00:10.00 bitrate=N/A speed=6.5x "
+                   "elapsed=0:00:01.00\n",
+            returncode=0)
+        _probe_frames_and_duration("fake.mkv", "ffmpeg")
+    assert "IW3_REINJECT_FRAME" not in buf3.getvalue()
+
+    print("_self_test_reinject_frame_progress_streaming: PASS")
 
 
 def _self_test_reinject_duration_hint_helpers():
@@ -2850,6 +2974,7 @@ def _run_self_tests():
     _self_test_replace_with_retry()
     _self_test_probe_frames_and_duration()
     _self_test_reinject_progress_streaming()
+    _self_test_reinject_frame_progress_streaming()
     _self_test_reinject_duration_hint_helpers()
     _self_test_read_intervals_for_range()
     _self_test_probe_frames_and_duration_probe_result_out_param()

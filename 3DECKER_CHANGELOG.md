@@ -15,6 +15,12 @@ it matters.
 
 ## Latest Update — October 15, 2026
 
+**Improved: the log box now marks when each step actually starts, not just the live progress line above it.** The step number used to only show in the little progress label, which overwrites itself constantly -- so scrolling back through the log gave no record of when each step began. Now a clear "[Step 3/8: ...]" line gets added to the log (and the main Output panel) the moment each step starts.
+
+**Improved: the frame-counting steps now show a real, live frame count and decode speed (fps), not just seconds.** For example: "frame 12,345/54,321 (29.97 fps)" alongside the existing time and percentage.
+
+**Improved: Retroactive HDR/DV Reinjection's progress now names which of its 8 steps is running, and shows an ETA.** The progress label now starts with "Step 3/8:" (etc.), so you always know where you are in the process, not just that *something* is happening. The two frame-counting steps (which used to only show seconds decoded) now also show a time-remaining estimate and decode speed, matching what the later steps already showed.
+
 **Fixed: the frame-count check could crash outright on some Dolby Vision files, every time, even after updating the bundled video tool.** On certain real Dolby Vision 4K files, the quick frame-count check was hitting a genuine, still-unfixed bug in the video tool itself (`ffmpeg`) and crashing almost instantly. "Updating" it never helped, because this project always grabbed whatever the newest version was -- and every recent version has carried this same bug since early 2025. The real fix: this project now uses one specific, deliberately chosen version that predates the bug, instead of always chasing the newest one. Verified installing cleanly on a real machine; a few quick command-line tweaks tried first (and mentioned in earlier notes) turned out not to be the actual fix once tested against the real file, and are superseded by this.
 
 **Added: a Cancel button for Retroactive HDR/DV Reinjection.** This was the one Standalone Tool with no way to stop it short of closing the whole program -- which also threw away the log, since nothing had a chance to save it. Now there's a proper Cancel button, same as every other tool: it stops the run cleanly, deletes the half-finished file, and still shows/saves the log of what happened so far.

@@ -14214,6 +14214,18 @@ class MainFrame(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_reinject_rife_manifest.SetValue(dlg.GetPath())
 
+    def _update_reinject_frame_info(self, stage, frame, total_frames, fps):
+        # ADR-375: real user request -- "as much information as possible". Called via
+        # wx.CallAfter from the SAME stdout-reading loop as _update_reinject_progress,
+        # just off the new, separate "IW3_REINJECT_FRAME" line reinject_hdr_cli.py now
+        # also emits for its two decode stages -- cached here and read by
+        # _update_reinject_progress when building that stage's own label, rather than
+        # driving a second, separate widget (there's only one progress line to show).
+        # Keyed to the stage it came from, so switching to a different stage (a new
+        # decode pass, or the ADR-367 "_fallback" variant switching away from a crashed
+        # fast attempt) never shows stale frame data for the wrong stage.
+        self.reinject_frame_info = (stage, frame, total_frames, fps)
+
     def _update_reinject_progress(self, stage, current, total):
         # Called via wx.CallAfter from run_reinject_hdr's background thread -- never touch
         # wx widgets directly from that thread. Two stages exist (source, then converted --
@@ -14237,6 +14249,31 @@ class MainFrame(wx.Frame):
                        "copy": T("Copying the converted file"), "extract": T("Extracting the video stream"),
                        "rpu": T("Extracting the Dolby Vision data"), "prepare": T("Preparing the video"),
                        "inject": T("Attaching Dolby Vision"), "remux": T("Packing the final file")}.get(stage, stage)
+
+        # ADR-374: real user request -- name which of the tool's 8 real steps is
+        # currently running (not just that one, unnamed, stage is active), and show an
+        # ETA for the two decode stages too (the byte-based stages already had one).
+        # "_fallback" stages are the SAME step as their base stage, just via the slower
+        # method (ADR-367), so they share its step number rather than looking like an
+        # extra, unlisted step.
+        step_order = ("source", "converted", "copy", "extract", "rpu", "prepare", "inject", "remux")
+        base_stage = stage[:-len("_fallback")] if stage.endswith("_fallback") else stage
+        if base_stage in step_order:
+            stage_label = f"{T('Step')} {step_order.index(base_stage) + 1}/{len(step_order)}: {stage_label}"
+
+        # ADR-376: real user report -- the step number only ever showed in the small
+        # progress label (which overwrites itself live), never in the log box/Output
+        # panel text -- scrolling back through the log gave no sense of when each step
+        # started. Appends one line the FIRST time a given stage is seen (never on
+        # every progress tick), so the log reads as a real timeline: "[Step 3/8]
+        # Copying the converted file..." alongside the WARNING/status text that's
+        # already streamed there live (ADR-369). Runs on the GUI thread already (this
+        # whole method is only ever invoked via wx.CallAfter), so a direct AppendText
+        # is safe here -- no nested CallAfter needed.
+        if getattr(self, "reinject_logged_stage", None) != stage:
+            self.reinject_logged_stage = stage
+            self.txt_reinject_log.AppendText(f"\n[{stage_label}]\n")
+
         if stage in ("copy", "extract", "rpu", "prepare", "inject", "remux") and total is not None and total > 0:
             # these stages report BYTES (of a temporary file growing), not seconds
             if getattr(self, "reinject_byte_stage", None) != stage:
@@ -14252,18 +14289,46 @@ class MainFrame(wx.Frame):
                          f"ETA {self._format_duration(max(0, total - current) / rate)}]")
             self.lbl_reinject_progress.SetLabel(text)
             return
+        # ADR-375: the real frame count/fps this stage is actually decoding at, read
+        # from _update_reinject_frame_info's own cache (fed by a SEPARATE
+        # "IW3_REINJECT_FRAME" line -- see run_reinject_hdr) -- only ever appended for
+        # the stage it was actually reported for, never a stale one left over from a
+        # previous, different stage.
+        frame_text = ""
+        frame_info = getattr(self, "reinject_frame_info", None)
+        if frame_info is not None and frame_info[0] == stage:
+            _, frame, total_frames, fps = frame_info
+            frame_text = f", {T('frame')} {frame:,}" + (f"/{total_frames:,}" if total_frames else "")
+            if fps:
+                frame_text += f" ({fps:.1f} fps)"
+
         if total is not None and total > 0:
+            # these stages report SECONDS of video decoded, not bytes -- same
+            # per-stage wall-clock timer convention as the byte-based branch above,
+            # just tracked under its own attribute so the two never clash.
+            if getattr(self, "reinject_time_stage", None) != stage:
+                self.reinject_time_stage = stage
+                self.reinject_time_stage_start = time()
             total_i = max(1, int(round(total)))
             self.gauge_reinject.SetRange(total_i)
             self.gauge_reinject.SetValue(min(total_i, int(round(current))))
             percent = min(100, int(current / total * 100))
-            self.lbl_reinject_progress.SetLabel(
-                f"{stage_label}: {current:.0f}s / {total:.0f}s ({percent}%)")
+            elapsed = time() - self.reinject_time_stage_start
+            rate = current / (elapsed + 1e-6)  # video-seconds decoded per wall-clock second
+            text = f"{stage_label}: {current:.0f}s / {total:.0f}s ({percent}%){frame_text}"
+            if rate > 0 and current > 0:
+                text += (f" [{rate:.1f}x realtime, {T('elapsed')} {self._format_duration(elapsed)}, "
+                         f"ETA {self._format_duration(max(0, total - current) / rate)}]")
+            self.lbl_reinject_progress.SetLabel(text)
         else:
-            # total unknown (the container's own duration metadata couldn't be read) --
-            # still shows real live elapsed time, just no percent/ETA to compute it from.
+            # total unknown (the container's own duration metadata couldn't be read, or
+            # this is the slow fallback's own heartbeat, which has no real total at all)
+            # -- still shows real live elapsed time, just no percent/ETA to compute it
+            # from (there's nothing to divide by). The fallback heartbeat never has
+            # frame_text either (ffprobe -count_frames gives no live per-frame signal
+            # at all, see ADR-367), so this stays exactly as plain as before for it.
             self.gauge_reinject.Pulse()
-            self.lbl_reinject_progress.SetLabel(f"{stage_label}: {current:.0f}s")
+            self.lbl_reinject_progress.SetLabel(f"{stage_label}: {current:.0f}s{frame_text}")
 
     def run_reinject_hdr(self, cmd):
         # Runs on a background thread via startWorker -- never blocks the GUI thread,
@@ -14304,7 +14369,22 @@ class MainFrame(wx.Frame):
 
         for line in proc.stdout:
             line = line.strip()
-            if line.startswith("IW3_REINJECT_PROGRESS "):
+            if line.startswith("IW3_REINJECT_FRAME "):
+                # ADR-375: a SEPARATE line type from IW3_REINJECT_PROGRESS below, always
+                # printed just before it for the same tick (see reinject_hdr_cli.py's
+                # _emit()) -- _update_reinject_frame_info() caches it so
+                # _update_reinject_progress() can fold it into that same tick's label.
+                parts = line.split(" ")
+                if len(parts) == 5:
+                    stage = parts[1]
+                    try:
+                        frame = int(parts[2])
+                    except ValueError:
+                        continue
+                    total_frames = None if parts[3] == "unknown" else int(parts[3])
+                    fps = None if parts[4] == "unknown" else float(parts[4])
+                    wx.CallAfter(self._update_reinject_frame_info, stage, frame, total_frames, fps)
+            elif line.startswith("IW3_REINJECT_PROGRESS "):
                 parts = line.split(" ")
                 if len(parts) == 4:
                     stage = parts[1]
@@ -14504,6 +14584,8 @@ class MainFrame(wx.Frame):
         self.gauge_reinject.SetRange(1)
         self.gauge_reinject.SetValue(0)
         self.lbl_reinject_progress.SetLabel("")
+        self.reinject_frame_info = None  # ADR-375: never show a stale run's frame count
+        self.reinject_logged_stage = None  # ADR-376: so the first real stage logs its own marker
         self.reinject_cancelled = False
         self.reinject_start_time = time()
         self.btn_reinject_run.Disable()
@@ -21516,6 +21598,9 @@ def _self_test_reinject_progress_bar():
             "print('IW3_REINJECT_PROGRESS source 10.00 10.00')\n"
             "print('some log line', file=sys.stderr)\n"
             "print('IW3_REINJECT_PROGRESS converted 3.00 6.00')\n"
+            # ADR-375: a real IW3_REINJECT_FRAME line, printed (as reinject_hdr_cli.py
+            # itself always does) just before its matching IW3_REINJECT_PROGRESS line.
+            "print('IW3_REINJECT_FRAME converted 150 150 29.97')\n"
             "print('IW3_REINJECT_PROGRESS converted 6.00 6.00')\n"
             "print('another log line', file=sys.stderr)\n"
         )
@@ -21528,11 +21613,27 @@ def _self_test_reinject_progress_bar():
         assert "another log line" in output, output
         assert "IW3_REINJECT_PROGRESS" not in output, \
             "progress lines must never leak into the stderr log text"
-        # Last update received wins -- "converted" stage, fully complete.
+        assert "IW3_REINJECT_FRAME" not in output, \
+            "frame-progress lines must never leak into the stderr log text either"
+        # ADR-376: real user report -- the step number only ever showed in the small
+        # progress label, never in the log box/Output panel text. A one-line marker
+        # must appear in the log box the FIRST time each stage is seen -- once per
+        # stage, not once per progress tick (both "source" stage lines above must only
+        # produce ONE marker, not two).
+        log_text = frame.txt_reinject_log.GetValue()
+        assert log_text.count(f"[{T('Step')} 1/8: {T('Source')}]") == 1, log_text
+        assert log_text.count(f"[{T('Step')} 2/8: {T('Converted')}]") == 1, log_text
+        # Last update received wins -- "converted" stage, fully complete. ADR-374: now
+        # prefixed with its step number (2/8) and suffixed with a realtime-rate/ETA
+        # bracket -- the bracket's own numbers are timing-dependent (this test feeds
+        # lines with no real delay between them), so only the stable, non-timing part
+        # of the label is asserted exactly. ADR-375: the real frame count/fps from the
+        # IW3_REINJECT_FRAME line just above must be folded into this same label too.
         assert frame.gauge_reinject.GetRange() == 6, frame.gauge_reinject.GetRange()
         assert frame.gauge_reinject.GetValue() == 6, frame.gauge_reinject.GetValue()
-        assert frame.lbl_reinject_progress.GetLabel() == f"{T('Converted')}: 6s / 6s (100%)", \
-            frame.lbl_reinject_progress.GetLabel()
+        label = frame.lbl_reinject_progress.GetLabel()
+        assert label.startswith(
+            f"{T('Step')} 2/8: {T('Converted')}: 6s / 6s (100%), {T('frame')} 150/150 (30.0 fps)"), label
 
         # A fresh run must reset the gauge/label rather than showing the previous
         # run's leftover values until the first live update arrives.
@@ -21569,8 +21670,10 @@ def _self_test_reinject_progress_bar():
         returncode_fb, _ = frame.run_reinject_hdr([sys.executable, "-c", script_fb])
         wx.Yield()
         assert returncode_fb == 0, returncode_fb
+        # ADR-374: "converted_fallback" shares step 2/8 with plain "converted" --
+        # same real step, just via the slower method, not an extra unlisted one.
         assert frame.lbl_reinject_progress.GetLabel() == \
-            f"{T('Converted (slower backup check)')}: 34s", frame.lbl_reinject_progress.GetLabel()
+            f"{T('Step')} 2/8: {T('Converted (slower backup check)')}: 34s", frame.lbl_reinject_progress.GetLabel()
     finally:
         if frame is not None:
             frame.Destroy()
@@ -21578,6 +21681,56 @@ def _self_test_reinject_progress_bar():
         app.Destroy()
 
     print("_self_test_reinject_progress_bar: PASS")
+
+
+def _self_test_reinject_step_numbers_and_eta():
+    """ADR-374: real user request -- name which of the tool's 8 real steps is running
+    (not just an unlabeled stage name), and show elapsed/ETA for the two decode stages
+    too (the byte-based mux/inject stages already had one). Drives
+    _update_reinject_progress() directly -- no subprocess needed."""
+    import time as time_mod
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+
+        # Every one of the 8 real steps gets the right "Step N/8" prefix, in the real
+        # pipeline order -- "_fallback" variants share their base stage's number, since
+        # it's the same real step, just via the slower method (ADR-367).
+        expected = [
+            ("source", 1, 10.0), ("source_fallback", 1, None),
+            ("converted", 2, 10.0), ("converted_fallback", 2, None),
+            ("copy", 3, 1e9), ("extract", 4, 1e9), ("rpu", 5, 1e9),
+            ("prepare", 6, 1e9), ("inject", 7, 1e9), ("remux", 8, 1e9),
+        ]
+        for stage, step_num, total in expected:
+            frame._update_reinject_progress(stage, 1.0, total)
+            label = frame.lbl_reinject_progress.GetLabel()
+            assert label.startswith(f"{T('Step')} {step_num}/8: "), (stage, label)
+
+        # A real, non-zero wall-clock delay between two updates of the SAME decode
+        # stage -- the ETA/rate bracket must appear, not just the bare seconds count.
+        frame._update_reinject_progress("source", 1.0, 100.0)
+        time_mod.sleep(0.05)
+        frame._update_reinject_progress("source", 5.0, 100.0)
+        label = frame.lbl_reinject_progress.GetLabel()
+        assert "ETA" in label and "realtime" in label and f"{T('elapsed')}" in label, label
+
+        # The slow fallback's own heartbeat (no real total) never gets an ETA -- there
+        # is nothing to compute one from -- but still names its step and shows elapsed.
+        frame._update_reinject_progress("source_fallback", 42.0, None)
+        label = frame.lbl_reinject_progress.GetLabel()
+        assert label == f"{T('Step')} 1/8: {T('Source (slower backup check)')}: 42s", label
+        assert "ETA" not in label, label
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_reinject_step_numbers_and_eta: PASS")
 
 
 def _self_test_reinject_cancel_button():
@@ -33225,6 +33378,7 @@ def _run_self_tests():
         _self_test_sharpen_progress_bar,
         _self_test_sharpen_codec_option,
         _self_test_reinject_progress_bar,
+        _self_test_reinject_step_numbers_and_eta,
         _self_test_reinject_cancel_button,
         _self_test_reinject_cancel_kills_discovered_children,
         _self_test_reinject_live_stderr_streaming,

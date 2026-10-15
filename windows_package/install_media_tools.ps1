@@ -37,20 +37,32 @@ param(
 )
 
 # ---------------------------------------------------------------------------
-# ffmpeg: BtbN's GitHub-hosted "latest" GPL build has no fixed semver to pin against --
-# only a rotating git-hash+date baked into the binary itself, and a same-named zip
-# asset (ffmpeg-master-latest-win64-gpl.zip) that changes in place on every BtbN
-# rebuild. Real version-awareness + real integrity verification for a build like this:
-# fetch the release's own small `checksums.sha256` asset (not the full zip) and
-# compare its current line for our filename against a hash this script itself
-# persisted last time it verified+installed a build (ffmpeg.buildhash.txt, next to
-# ffmpeg.exe). Different (or no marker yet) means a newer build exists -- download the
-# full zip, verify ITS hash matches that same checksums.sha256 line (never trust the
-# zip alone), then atomically swap it in and update the marker. Identical means
-# already current -- skip, no multi-hundred-MB download needed just to check.
-$script:FfmpegReleaseBase = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download"
-$script:FfmpegZipName = "ffmpeg-master-latest-win64-gpl.zip"
-$script:FfmpegChecksumsName = "checksums.sha256"
+# ffmpeg: ADR-373 -- used to always chase BtbN's GitHub-hosted "latest" GPL build (a
+# rotating git-hash+date with no fixed semver), re-verifying its checksums.sha256 on
+# every run so a changed build always got re-downloaded. That rolling-nightly design is
+# exactly why a real, reproducible ffmpeg crash on certain Dolby Vision HEVC content
+# (confirmed live: https://trac.ffmpeg.org/ticket/11468, a regression FFmpeg's own
+# developers bisected to libavcodec commits between 2025-01-22 and 2025-02-02, still
+# unresolved as of this fix) survived THROUGH an ffmpeg update that was supposed to fix
+# it -- every nightly since has carried the same bug, so "grab the newest one" could
+# never have helped. Switched to a normal pinned-version-and-checksum design instead
+# (matching MKVToolNix's own design just below, and tsMuxeR/FRIM in
+# iw3/install_mvc_tools.py/iw3/sbs_to_mvc_cli.py) -- a specific, fixed FFmpeg release
+# that predates that regression window, from gyan.dev (one of the Windows builds
+# ffmpeg.org's own download page itself links to), whose "full" GPL build already
+# matches BtbN's own feature set (nvenc/nvdec/cuvid/libx265/etc., confirmed directly:
+# `ffmpeg -version`'s own configure line lists them all). gyan.dev's own site only keeps
+# the current + previous release visible, but permanently mirrors every tagged release
+# on GitHub (github.com/GyanD/codexffmpeg/releases) -- confirmed live, not guessed, by
+# resolving gyan.dev's own "mirror @ github" link. No separate checksums.sha256 asset
+# ships on that mirror the way BtbN's release does, so the SHA-256 below was verified
+# the same way ADR-301 already established for MKVToolNix: downloaded the real file
+# directly and hashed it by hand before pinning. Bump both constants by hand (never
+# silently re-chase "latest" again) if a future FFmpeg release is deliberately adopted
+# -- re-verify against that regression (or whatever is current) first.
+$script:FfmpegVersion = "7.1.1"
+$script:FfmpegSha256 = "D760E1B3574402ED18B4865851F87D87E73965A982E6453212DF8621FED1C508"
+$script:FfmpegUrl = "https://github.com/GyanD/codexffmpeg/releases/download/$($script:FfmpegVersion)/ffmpeg-$($script:FfmpegVersion)-full_build.zip"
 
 # MKVToolNix, unlike ffmpeg, DOES get a normal pinned-version-and-checksum design
 # (matching tsMuxeR/FRIM in iw3/install_mvc_tools.py and iw3/sbs_to_mvc_cli.py) --
@@ -76,54 +88,42 @@ function Install-Ffmpeg {
 
     $ffmpegExe = Join-Path $Root "ffmpeg.exe"
     $ffprobeExe = Join-Path $Root "ffprobe.exe"
-    $markerPath = Join-Path $Root "ffmpeg.buildhash.txt"
-    $checksumsUrl = "$($script:FfmpegReleaseBase)/$($script:FfmpegChecksumsName)"
-    $zipUrl = "$($script:FfmpegReleaseBase)/$($script:FfmpegZipName)"
 
-    $checksumsPath = Join-Path $TmpDir "ffmpeg-checksums.sha256"
-    try {
-        Get-File $checksumsUrl $checksumsPath
-    } catch {
-        if ((Test-Path $ffmpegExe) -and (Test-Path $ffprobeExe)) {
-            Write-Host "  Could not check for a newer ffmpeg build ($($_.Exception.Message)) -- keeping the existing one." -ForegroundColor Yellow
-            return
+    # ADR-373: version-string check, same convention Install-MkvToolNix already uses --
+    # no more build-hash marker file (ffmpeg.buildhash.txt, from the old rolling-nightly
+    # design) needed now that there's a real, fixed version to compare against directly.
+    $installedVersion = $null
+    if ((Test-Path $ffmpegExe) -and (Test-Path $ffprobeExe)) {
+        try {
+            $verLine = (& $ffmpegExe -version 2>$null | Select-Object -First 1)
+            if ($verLine -match "ffmpeg version (\S+)") { $installedVersion = $Matches[1] }
+        } catch {
+            $installedVersion = $null
         }
-        throw "could not download ffmpeg's checksums.sha256 to perform the initial install: $($_.Exception.Message)"
     }
-
-    $matchLine = Select-String -Path $checksumsPath -Pattern ([regex]::Escape($script:FfmpegZipName)) | Select-Object -First 1
-    if (-not $matchLine) {
-        # A truncated download or an error page instead of the real list looks exactly like
-        # "name not listed". Retry once, then say what was actually received.
-        Remove-Item $checksumsPath -Force -ErrorAction SilentlyContinue
-        try { Get-File $checksumsUrl $checksumsPath } catch { }
-        $matchLine = if (Test-Path $checksumsPath) { Select-String -Path $checksumsPath -Pattern ([regex]::Escape($script:FfmpegZipName)) | Select-Object -First 1 }
-    }
-    if (-not $matchLine) {
-        $received = if (Test-Path $checksumsPath) { @(Get-Content $checksumsPath -TotalCount 3) -join ' | ' } else { '(nothing received)' }
-        $msg = "could not find $($script:FfmpegZipName) in the downloaded checksums.sha256 (after one retry). First lines received: $received"
-        if ((Test-Path $ffmpegExe) -and (Test-Path $ffprobeExe)) {
-            Write-Host "  $msg -- keeping the existing ffmpeg." -ForegroundColor Yellow
-            return
-        }
-        throw $msg
-    }
-    $currentHash = (($matchLine.Line -split '\s+')[0]).ToUpper()
-
-    $storedHash = $null
-    if (Test-Path $markerPath) { $storedHash = (Get-Content $markerPath -Raw).Trim().ToUpper() }
-
-    if ((Test-Path $ffmpegExe) -and (Test-Path $ffprobeExe) -and $storedHash -and ($storedHash -eq $currentHash)) {
-        Write-Host "  ffmpeg is already current (build hash $($currentHash.Substring(0,12))...) -- skipping."
+    if ($installedVersion -eq $script:FfmpegVersion) {
+        Write-Host "  ffmpeg is already current (v$installedVersion) -- skipping."
         return
     }
+    if ($installedVersion) {
+        Write-Host "  ffmpeg v$installedVersion found, expected v$($script:FfmpegVersion) -- updating."
+    } else {
+        Write-Host "  ffmpeg not found (or its version could not be read) -- installing v$($script:FfmpegVersion)."
+    }
 
-    Write-Host "  ffmpeg build hash changed (or not previously tracked) -- downloading the current build."
     $zipPath = Join-Path $TmpDir "ffmpeg.zip"
-    Get-File $zipUrl $zipPath
+    try {
+        Get-File $script:FfmpegUrl $zipPath
+    } catch {
+        if ((Test-Path $ffmpegExe) -and (Test-Path $ffprobeExe)) {
+            Write-Host "  Could not download ffmpeg v$($script:FfmpegVersion) ($($_.Exception.Message)) -- keeping the existing one." -ForegroundColor Yellow
+            return
+        }
+        throw "could not download ffmpeg v$($script:FfmpegVersion): $($_.Exception.Message)"
+    }
     $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToUpper()
-    if ($actualHash -ne $currentHash) {
-        throw "downloaded ffmpeg archive did not match checksums.sha256 (expected $currentHash, got $actualHash)"
+    if ($actualHash -ne $script:FfmpegSha256) {
+        throw "downloaded ffmpeg archive did not match the expected checksum (expected $($script:FfmpegSha256), got $actualHash)"
     }
 
     $extractTmp = Join-Path $TmpDir "ffmpeg-extract"
@@ -141,9 +141,11 @@ function Install-Ffmpeg {
     Copy-Item (Join-Path $binDir "ffprobe.exe") $ffprobeTmp -Force
     Move-Item $ffmpegTmp $ffmpegExe -Force
     Move-Item $ffprobeTmp $ffprobeExe -Force
-    Set-Content -Path $markerPath -Value $currentHash -Encoding ascii -NoNewline
+    # Old marker from the pre-ADR-373 rolling-nightly design -- no longer read or
+    # written, but remove it so it can't linger and confuse a future reader.
+    Remove-Item (Join-Path $Root "ffmpeg.buildhash.txt") -Force -ErrorAction SilentlyContinue
 
-    Write-Host "  ffmpeg + ffprobe installed/updated (build hash $($currentHash.Substring(0,12))...)."
+    Write-Host "  ffmpeg + ffprobe v$($script:FfmpegVersion) installed."
 }
 
 function Install-MkvToolNix {

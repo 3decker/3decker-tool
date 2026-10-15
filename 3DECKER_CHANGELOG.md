@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 15, 2026
 
+**Improved: the Retroactive HDR/DV Reinjection panel's progress bar no longer goes silent during the slow backup check.** This tool double-checks frame counts by decoding both files; normally that shows live progress, but when it has to fall back to a slower backup method (which large files tend to trigger), the bar used to show absolutely nothing for however long that took -- looking exactly like it had frozen. It now shows "Source (slower backup check): Xs elapsed" (and the same for Converted) so you can see it's still working, just using the slower method.
+
 **Fixed: the Dolby Vision re-attach failure message could show a garbled, unreadable fragment instead of the real reason.** Right after yesterday's fix made the frame-count check explain itself when it fails, a second, older bug got exposed: on a long filename, the message that reports the failure could get cut off in the middle of a word (or even the middle of the movie's own filename), hiding the actual reason and showing nonsense text instead. This only showed up now because yesterday's fix made that message longer than before. Fixed so the failure message is never cut mid-word again -- it keeps whole lines, so the real reason is always readable.
 
 ## Update — October 14, 2026

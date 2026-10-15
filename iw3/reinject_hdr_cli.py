@@ -521,8 +521,12 @@ def _summarize_probe_stderr(stderr, max_lines=8):
     return tail[-max_lines:]
 
 
+_REINJECT_FALLBACK_HEARTBEAT_SEC = 1.0
+
+
 def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_time=None,
-                                                 end_time=None, timeout=3600, probe_result=None):
+                                                 end_time=None, timeout=3600, probe_result=None,
+                                                 stage=None):
     """Fallback frame-count probe using `ffprobe -count_frames` -- the method
     _probe_frames_and_duration (ffmpeg -f null -) used before ADR-163's speed switch,
     kept here specifically for when the fast path fails outright (see ADR-359). This is
@@ -539,6 +543,22 @@ def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_t
     describing a timeout or other exception, or None on a normal run). Purely additive;
     every existing caller that doesn't pass it sees unchanged behavior.
 
+    `stage` (ADR-367, optional): when given, emits the same "IW3_REINJECT_PROGRESS
+    <stage> <elapsed_seconds> unknown" lines _probe_frames_and_duration's own
+    progress-reporting mode uses (ADR-166) -- but as a plain elapsed-time HEARTBEAT, not
+    real decode progress. `ffprobe -count_frames` prints nothing incremental while it
+    runs (unlike `ffmpeg -stats`), so there is no real per-frame signal to read here --
+    this is honestly only "still alive, here's how long it's taken" rather than a real
+    percentage. Real gap this closes: before this, a caller watching this run via that
+    channel (iw3/gui.py's standalone Reinject panel, or the main pipeline's own
+    _DvProgress) saw NOTHING at all for up to the full `timeout` whenever the fast path
+    failed and fell back to this slower method -- indistinguishable from a hang. The
+    convention is for the caller to suffix the base stage name with "_fallback" (e.g.
+    "source_fallback") so a consumer can tell this slower backup pass apart from the
+    normal one sharing the same base stage name; see
+    _probe_frames_and_duration_with_fallback, the only real caller. When `stage` is None
+    (the default), behavior is byte-for-byte the original single blocking call.
+
     Returns (frame_count_or_None, duration_seconds_or_None, cmd_list) -- the same shape
     as _probe_frames_and_duration on purpose, so a caller can treat the two
     interchangeably once it has decided to use this one."""
@@ -548,17 +568,51 @@ def _probe_frames_and_duration_ffprobe_fallback(input_path, ffprobe_bin, start_t
         cmd += ["-read_intervals", interval]
     cmd += ["-show_entries", "stream=nb_read_frames,duration",
             "-of", "default=noprint_wrappers=1", str(input_path)]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        stdout = proc.stdout or ""
-    except subprocess.TimeoutExpired:
-        if probe_result is not None:
-            probe_result["exception"] = f"timed out after {timeout} seconds (ffprobe never finished decoding)"
-        return None, None, cmd
-    except Exception as e:
-        if probe_result is not None:
-            probe_result["exception"] = f"{type(e).__name__}: {e}"
-        return None, None, cmd
+
+    if stage is None:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            stdout = proc.stdout or ""
+        except subprocess.TimeoutExpired:
+            if probe_result is not None:
+                probe_result["exception"] = f"timed out after {timeout} seconds (ffprobe never finished decoding)"
+            return None, None, cmd
+        except Exception as e:
+            if probe_result is not None:
+                probe_result["exception"] = f"{type(e).__name__}: {e}"
+            return None, None, cmd
+    else:
+        start = time.monotonic()
+        stop_heartbeat = threading.Event()
+
+        def _heartbeat():
+            while not stop_heartbeat.wait(_REINJECT_FALLBACK_HEARTBEAT_SEC):
+                print(f"IW3_REINJECT_PROGRESS {stage} {time.monotonic() - start:.2f} unknown", flush=True)
+
+        hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+        hb_thread.start()
+        proc = None
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            stdout, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if proc is not None:
+                proc.kill()
+                proc.wait()
+            if probe_result is not None:
+                probe_result["exception"] = f"timed out after {timeout} seconds (ffprobe never finished decoding)"
+            return None, None, cmd
+        except Exception as e:
+            if probe_result is not None:
+                probe_result["exception"] = f"{type(e).__name__}: {e}"
+            return None, None, cmd
+        finally:
+            stop_heartbeat.set()
+            hb_thread.join(timeout=5)
+        # Final, unthrottled flush -- guarantees the display lands on a clean "done"
+        # elapsed time rather than possibly stopping short at the last heartbeat tick.
+        print(f"IW3_REINJECT_PROGRESS {stage} {time.monotonic() - start:.2f} unknown", flush=True)
+
     if probe_result is not None:
         probe_result["exception"] = None
 
@@ -638,8 +692,10 @@ def _probe_frames_and_duration_with_fallback(input_path, ffmpeg_bin, ffprobe_bin
           f"{label or input_path}...", file=sys.stderr)
 
     fb_probe_result = {}
+    fb_stage = f"{stage}_fallback" if stage else None
     fb_frames, fb_duration, fb_cmd = _probe_frames_and_duration_ffprobe_fallback(
-        input_path, ffprobe_bin, start_time, end_time, timeout=timeout, probe_result=fb_probe_result)
+        input_path, ffprobe_bin, start_time, end_time, timeout=timeout, probe_result=fb_probe_result,
+        stage=fb_stage)
     if fb_frames is not None:
         print(f"[reinject-hdr] fallback succeeded: {fb_frames} frame(s) via "
               f"{_format_cmd(fb_cmd)}", file=sys.stderr)
@@ -1865,6 +1921,115 @@ def _self_test_probe_timeout_diagnostics():
     print("_self_test_probe_timeout_diagnostics: PASS")
 
 
+def _self_test_ffprobe_fallback_heartbeat():
+    """ADR-367: the 'ffprobe -count_frames' fallback used to run as one blocking call
+    with ZERO progress output -- a real gap (decker, 2026-10-15): unlike the fast path's
+    live ffmpeg -stats parsing (ADR-166), nothing told a caller watching
+    IW3_REINJECT_PROGRESS lines (iw3/gui.py's standalone Reinject panel, or the main
+    pipeline's own _DvProgress) that anything was even happening during this pass -- and
+    this project's own real large 4K files have been landing on this exact fallback all
+    session (ADR-365/366), for up to the full hour-long timeout. `stage`, when given,
+    now emits an elapsed-time HEARTBEAT on a fixed interval while waiting, plus an
+    unthrottled final flush -- honestly just "still alive, elapsed time", since
+    `ffprobe -count_frames` itself has no incremental signal to report a real percentage
+    from. Covers: (a) heartbeat lines appear with the given stage name, strictly
+    increasing elapsed time, and total always "unknown"; (b) `stage=None` (the default)
+    is untouched -- a single blocking subprocess.run() call, no progress lines at all;
+    (c) _probe_frames_and_duration_with_fallback suffixes whatever `stage` it was given
+    with "_fallback" before handing it to this function, so a consumer can always tell
+    the two decode methods apart."""
+    import io
+    import contextlib
+    from unittest.mock import patch, MagicMock
+
+    class _SlowFfprobeProc:
+        """A fake process that takes a little real wall-clock time to return, long
+        enough (given the shortened heartbeat interval below) for several real ticks."""
+        def communicate(self, timeout=None):
+            time.sleep(0.1)
+            return "nb_read_frames=42\nduration=12.5\n", ""
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            pass
+
+    # (a) heartbeat ticks + final flush, all for the given stage, all "unknown" total.
+    buf = io.StringIO()
+    with patch.object(subprocess, "Popen", return_value=_SlowFfprobeProc()), \
+         patch.dict(globals(), {"_REINJECT_FALLBACK_HEARTBEAT_SEC": 0.005}), \
+         contextlib.redirect_stdout(buf):
+        probe_result = {}
+        frames, duration, cmd = _probe_frames_and_duration_ffprobe_fallback(
+            "fake.mkv", "ffprobe", timeout=3600, probe_result=probe_result, stage="source_fallback")
+        assert frames == 42, frames
+        assert duration == 12.5, duration
+        assert probe_result["exception"] is None, probe_result
+
+    lines = [ln for ln in buf.getvalue().splitlines() if ln.startswith("IW3_REINJECT_PROGRESS")]
+    assert len(lines) >= 2, ("expected at least one heartbeat tick plus the final flush", lines)
+    elapsed_values = []
+    for ln in lines:
+        parts = ln.split()
+        assert parts[1] == "source_fallback", ln
+        assert parts[3] == "unknown", ln  # no real total exists for this method
+        elapsed_values.append(float(parts[2]))
+    assert elapsed_values == sorted(elapsed_values), elapsed_values  # a real, advancing clock
+
+    # (b) stage=None (the default): byte-for-byte the original single blocking call.
+    buf2 = io.StringIO()
+    with patch.object(subprocess, "run",
+                       return_value=MagicMock(stdout="nb_read_frames=7\nduration=1.0\n")) as mock_run, \
+         contextlib.redirect_stdout(buf2):
+        frames2, duration2, _ = _probe_frames_and_duration_ffprobe_fallback(
+            "fake.mkv", "ffprobe", timeout=3600)
+        assert frames2 == 7, frames2
+        assert mock_run.call_count == 1
+    assert buf2.getvalue() == "", "stage=None must emit no progress lines at all"
+
+    # (c) the wrapper suffixes the stage with "_fallback" before calling into this --
+    # end-to-end through _probe_frames_and_duration_with_fallback, with the FAST probe
+    # (also Popen-based here, since stage is given) hanging past its timeout so the
+    # fallback actually runs. One patched subprocess.Popen must serve both call sites
+    # with different fakes, same as the real ffmpeg (fast) vs ffprobe (fallback) binaries.
+    class _HangingFfmpegProc:
+        def __init__(self):
+            self.killed = False
+
+        @property
+        def stderr(self):
+            return iter([])  # no -stats lines before the timeout
+
+        def wait(self, timeout=None):
+            if self.killed:
+                return -9  # the post-kill reap call must actually return, not hang again
+            raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=timeout)
+
+        def kill(self):
+            self.killed = True
+
+    def _popen_side_effect(cmd, **kwargs):
+        return _HangingFfmpegProc() if cmd[0] == "ffmpeg" else _SlowFfprobeProc()
+
+    buf3 = io.StringIO()
+    with patch.object(subprocess, "Popen", side_effect=_popen_side_effect), \
+         patch.dict(globals(), {"_REINJECT_FALLBACK_HEARTBEAT_SEC": 0.005}), \
+         contextlib.redirect_stdout(buf3), \
+         contextlib.redirect_stderr(io.StringIO()):
+        frames3, duration3, cmd3, used_fallback3 = _probe_frames_and_duration_with_fallback(
+            "fake.mkv", "ffmpeg", "ffprobe", timeout=3600, stage="converted", label="--converted")
+        assert frames3 == 42, frames3
+        assert used_fallback3 is True, used_fallback3
+    # The fast attempt's own final flush also lands in here (stage="converted", unrelated
+    # to the fallback) -- only the "_fallback"-suffixed lines are what this case is about.
+    all_lines = [ln for ln in buf3.getvalue().splitlines() if ln.startswith("IW3_REINJECT_PROGRESS")]
+    fallback_lines = [ln for ln in all_lines if ln.split()[1] == "converted_fallback"]
+    assert fallback_lines, ("wrapper must forward stage through to the fallback as a heartbeat", all_lines)
+
+    print("_self_test_ffprobe_fallback_heartbeat: PASS")
+
+
 def _self_test_rife_guard():
     """Synthetic/mocked test of the RIFE guard's two independent signals (filename
     suffix, container comment tag) -- see module docstring for why neither alone is
@@ -2672,6 +2837,7 @@ def _run_self_tests():
     _self_test_probe_frames_and_duration_probe_result_out_param()
     _self_test_probe_failure_fallback()
     _self_test_probe_timeout_diagnostics()
+    _self_test_ffprobe_fallback_heartbeat()
     _self_test_rife_guard()
     _self_test_hdr_transfer_compatibility()
     _self_test_mismatched_master_source_warning()

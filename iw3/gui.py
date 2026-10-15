@@ -14190,7 +14190,20 @@ class MainFrame(wx.Frame):
         # see reinject_hdr_cli.py's _probe_frames_and_duration ADR-166), each its own decode
         # pass with its own total, so the label always names which one is in progress rather
         # than implying a single combined percentage across both.
+        #
+        # ADR-367: "source_fallback"/"converted_fallback" are the SAME two decode passes,
+        # just running via the slower 'ffprobe -count_frames' backup method instead of the
+        # normal fast one (reinject_hdr_cli.py's _probe_frames_and_duration_with_fallback
+        # falls back to it when the fast path fails or times out -- a real, repeated
+        # occurrence on this project's own large 4K files, see ADR-365/366). That backup
+        # method has no real incremental progress to report (unlike the fast path's
+        # ffmpeg -stats output), so it always arrives here with total=None -- the elapsed-
+        # seconds/pulsing-bar branch below already handles that display; this label dict
+        # just needs to name which method is actually running, so "stuck" and "just slow"
+        # are never confused for each other.
         stage_label = {"source": T("Source"), "converted": T("Converted"),
+                       "source_fallback": T("Source (slower backup check)"),
+                       "converted_fallback": T("Converted (slower backup check)"),
                        "copy": T("Copying the converted file"), "extract": T("Extracting the video stream"),
                        "rpu": T("Extracting the Dolby Vision data"), "prepare": T("Preparing the video"),
                        "inject": T("Attaching Dolby Vision"), "remux": T("Packing the final file")}.get(stage, stage)
@@ -21427,6 +21440,21 @@ def _self_test_reinject_progress_bar():
                 "starting a new run must reset the gauge, not show the last run's value"
             assert frame.lbl_reinject_progress.GetLabel() == "", \
                 "starting a new run must clear the previous run's progress label"
+
+        # ADR-367: the "_fallback" stages ('ffprobe -count_frames' heartbeat, no real
+        # total) must land in the same "total unknown" display the ordinary stages
+        # already use when a duration hint isn't available -- but labeled distinctly so
+        # it's never mistaken for a hang. Both source_fallback and converted_fallback
+        # covered, since the GUI names each one separately.
+        script_fb = (
+            "print('IW3_REINJECT_PROGRESS source_fallback 12.00 unknown')\n"
+            "print('IW3_REINJECT_PROGRESS converted_fallback 34.00 unknown')\n"
+        )
+        returncode_fb, _ = frame.run_reinject_hdr([sys.executable, "-c", script_fb])
+        wx.Yield()
+        assert returncode_fb == 0, returncode_fb
+        assert frame.lbl_reinject_progress.GetLabel() == \
+            f"{T('Converted (slower backup check)')}: 34s", frame.lbl_reinject_progress.GetLabel()
     finally:
         if frame is not None:
             frame.Destroy()

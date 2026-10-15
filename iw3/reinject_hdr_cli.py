@@ -406,11 +406,29 @@ def _probe_frames_and_duration(input_path, ffmpeg_bin, start_time=None, end_time
     real decode, never from the hint. When `stage` is None (the default), behavior is
     byte-for-byte the original blocking, non-progress-reporting call.
 
+    ADR-370: `-c:v rawvideo` -- real, confirmed incident (decker, It Chapter Two 2019
+    and, going all the way back to ADR-359, Mortal Kombat 2021, both real Dolby Vision
+    4K files): leaving the output codec unspecified lets ffmpeg auto-select
+    `wrapped_avframe` for the null muxer's video stream, and this project's own bundled
+    ffmpeg build -- always BtbN's rolling "master-latest" nightly, never a fixed stable
+    release, see install_media_tools.ps1 -- crashes near-instantly on certain real DV
+    content with "[vf#0:0] Task finished with error: File exists" / "[enc:wrapped_
+    avframe] Could not open encoder before EOF" (ADR-359's own PROBE FAILURE handling
+    already caught this safely and fell back to the much slower ffprobe -count_frames,
+    but updating to a newer nightly build did NOT fix the underlying crash -- confirmed
+    live, same exact crash recurred on a different file after a fresh ffmpeg update).
+    Forcing `rawvideo` instead skips that encoder entirely -- live-verified by decker
+    directly against the real file that was crashing: identical command, only this one
+    flag added, ran cleanly with no error. `rawvideo` never actually encodes anything
+    (the whole point of `-f null -` is to decode-only and discard the result), so this
+    changes no behavior other than avoiding the broken code path -- frame count/duration
+    still come from the exact same `-stats` stderr parsing as before.
+
     Returns (frame_count_or_None, duration_seconds_or_None, cmd_list).
     """
     trim_args = _ffmpeg_trim_args(start_time, end_time)
     cmd = [ffmpeg_bin, "-v", "error", "-stats", *trim_args,
-           "-i", str(input_path), "-map", "0:v:0", "-f", "null", "-"]
+           "-i", str(input_path), "-map", "0:v:0", "-c:v", "rawvideo", "-f", "null", "-"]
 
     frame_count = None
     duration = None

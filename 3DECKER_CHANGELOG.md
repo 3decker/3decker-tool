@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 15, 2026
 
+**Fixed: the frame-count check could crash outright on some Dolby Vision files, every time, even after updating ffmpeg.** On certain real Dolby Vision 4K files, the quick frame-count check was hitting a genuine bug in the bundled video tool itself and crashing almost instantly -- then falling back to a much slower backup method as a safety net. Updating that tool didn't help, because the bug was a known issue in its very latest version too. Found and fixed the actual cause: the check now tells the video tool exactly how to read the file instead of letting it guess (and pick a method that happens to be broken for this kind of content) -- confirmed working on a real file that was crashing every time before.
+
 **Added: a Cancel button for Retroactive HDR/DV Reinjection.** This was the one Standalone Tool with no way to stop it short of closing the whole program -- which also threw away the log, since nothing had a chance to save it. Now there's a proper Cancel button, same as every other tool: it stops the run cleanly, deletes the half-finished file, and still shows/saves the log of what happened so far.
 
 **Improved: that same panel now shows the real reason live, while it's still running -- not just after it finishes.** Previously, if the frame-count check had to fall back to its slower backup method, the log box just sat on a static "Running..." message for however long that took (up to an hour), even though the actual reason was already known internally. Now every status/warning line shows up immediately, in both the tool's own log box and the main Output panel, as it happens.

@@ -15,6 +15,10 @@ it matters.
 
 ## Latest Update — October 15, 2026
 
+**Added: the same "Skip Frame-Count Verification" option, and a Dolby Vision cancel fix, now also apply to RIFE Standalone and the main 2D-to-3D conversion pipeline.** Both were originally only built into the Retroactive HDR/DV Reinjection panel -- now the same fast-but-risky checkbox is available on the Main tab's RIFE section and the RIFE Standalone tool too (same off-by-default behavior). Also found and fixed: RIFE Standalone's own Cancel button had the exact same "doesn't always stop the real background video task" issue that was just fixed for the Reinjection panel.
+
+**Added: an option to skip the frame-count check entirely, for people who want faster Dolby Vision reinjection and are already confident their files line up.** Off by default -- the safety check still runs automatically unless you explicitly check the new "Skip Frame-Count Verification (faster, but risky)" box. Turning it on skips the check that takes up most of the time in this tool, but it's also the only thing that catches a real frame-count mismatch, so a mismatch with it off goes completely unnoticed instead of refusing with a clear reason. The tooltip explains a fast way to sanity-check by hand first if you want more confidence before using it.
+
 **Improved: the log box now marks when each step actually starts, not just the live progress line above it.** The step number used to only show in the little progress label, which overwrites itself constantly -- so scrolling back through the log gave no record of when each step began. Now a clear "[Step 3/8: ...]" line gets added to the log (and the main Output panel) the moment each step starts.
 
 **Improved: the frame-counting steps now show a real, live frame count and decode speed (fps), not just seconds.** For example: "frame 12,345/54,321 (29.97 fps)" alongside the existing time and percentage.

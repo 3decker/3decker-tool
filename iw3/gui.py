@@ -4291,6 +4291,25 @@ class MainFrame(wx.Frame):
               "with a mismatch in the dozens or more, that's not this field's job -- check your Start/End "
               "Time instead."))
 
+        # ADR-377/378: same real option the standalone Reinject panel has, rolled out
+        # here too (decker's own explicit "both" request) -- OFF by default, same
+        # reasoning: safe-by-default, not fast-by-default.
+        self.chk_rife_dv_skip_frame_check = wx.CheckBox(
+            self.grp_postprocess, label=T("Skip Frame-Count Verification (faster, but risky)"),
+            name="chk_rife_dv_skip_frame_check")
+        self.chk_rife_dv_skip_frame_check.SetValue(False)
+        self.chk_rife_dv_skip_frame_check.SetToolTip(
+            T("What it's for: skips the step that fully decodes the source and RIFE's output just to "
+              "count their frames and make sure the numbers genuinely match, before attaching any "
+              "Dolby Vision/HDR data. That check is what takes most of the time in this step -- "
+              "roughly 6.5x realtime, so a 2-hour movie is ~20-35 minutes just for this step. Checking "
+              "this box skips it entirely and goes straight to attaching the data.\n"
+              "Con: this is the ONLY thing that catches a real frame-count mismatch (e.g. RIFE silently "
+              "producing the wrong number of frames). Without it, a mismatch is never caught -- Dolby "
+              "Vision gets attached to the wrong frames with no error or warning at all.\n"
+              "Recommended: leave unchecked. Only check this once you're already confident this "
+              "specific source/RIFE-output pair lines up."))
+
         self.cbo_rife_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_mode)
         self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
         self.update_rife_interpolate()
@@ -4661,6 +4680,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_rife_dv_frame_count_tolerance, (j := j + 1, 0),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.txt_rife_dv_frame_count_tolerance, (j, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_rife_dv_skip_frame_check, (j := j + 1, 0), (0, 3),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_model, (j := j + 1, 0), flag=wx.EXPAND | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_mode, (j, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_target_fps, (j, 2), flag=wx.EXPAND)
@@ -4910,6 +4931,34 @@ class MainFrame(wx.Frame):
               "frame content between the two files) that the gap is a genuine tail-length difference "
               "between releases, not a wrong Start/End Time."))
 
+        # ADR-377: real user request -- a way to skip the expensive full-decode
+        # frame-count check entirely for people confident their files already line up.
+        # OFF by default, DELIBERATELY -- decker's own explicit choice after a tradeoff
+        # discussion: safe-by-default, not fast-by-default. Unlike Frame Count
+        # Tolerance (a small amount of automatic slack on an otherwise-still-real
+        # check), this is "don't check at all" -- a mismatch this would have caught
+        # becomes silent, wrong-looking Dolby Vision instead of a clear refusal.
+        self.chk_reinject_skip_frame_check = wx.CheckBox(
+            self.cpn_hdr_reinject.GetPane(), label=T("Skip Frame-Count Verification (faster, but risky)"),
+            name="chk_reinject_skip_frame_check")
+        self.chk_reinject_skip_frame_check.SetValue(False)
+        self.chk_reinject_skip_frame_check.SetToolTip(
+            T("What it's for: skips the step that fully decodes Original Source and Already-Converted "
+              "just to count their frames and make sure the numbers genuinely match, before attaching "
+              "any Dolby Vision/HDR data. That check is what takes most of the time here -- roughly "
+              "6.5x realtime, so a 2-hour movie is ~20-35 minutes just for this step. Checking this box "
+              "skips it entirely and goes straight to attaching the data.\n"
+              "Con: this is the ONLY thing that catches a real frame-count mismatch (e.g. from a RIFE or "
+              "upscale run that silently produced the wrong number of frames). Without it, a mismatch "
+              "is never caught -- Dolby Vision gets attached to the wrong frames with no error or "
+              "warning at all, and it can look subtly wrong without you knowing why.\n"
+              "A faster way to double-check by hand first: run ffprobe with -count_packets on both "
+              "files (no decoding, much quicker than this check) and compare the numbers -- not quite "
+              "as certain as this real check, but a solid sanity check before trusting this box.\n"
+              "Recommended: leave unchecked. Only check this once you're already confident the files "
+              "line up -- e.g. you already ran the real check once successfully on this exact pair and "
+              "are only re-running the injection itself."))
+
         self.lbl_reinject_frame_count_tolerance = wx.StaticText(
             self.cpn_hdr_reinject.GetPane(), label=T("Frame Count Tolerance"))
         self.txt_reinject_frame_count_tolerance = EditableComboBox(
@@ -5018,6 +5067,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_reinject_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_reinject_end_time, (h, 3), flag=wx.EXPAND)
         layout.Add(self.chk_reinject_allow_longer_converted, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_reinject_skip_frame_check, (h := h + 1, 0), (0, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_reinject_frame_count_tolerance, (h := h + 1, 0), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_reinject_frame_count_tolerance, (h, 2), flag=wx.EXPAND)
         layout.Add(self.btn_reinject_run, (h := h + 1, 3), flag=wx.EXPAND)
@@ -6328,6 +6378,25 @@ class MainFrame(wx.Frame):
               "with a mismatch in the dozens or more, that's not this field's job -- check your Start/End "
               "Time instead."))
 
+        # ADR-377/378: same real option the standalone Reinject panel has, rolled out
+        # here too (decker's own explicit "both" request) -- OFF by default, same
+        # reasoning: safe-by-default, not fast-by-default.
+        self.chk_rife_standalone_dv_skip_frame_check = wx.CheckBox(
+            self.cpn_rife_standalone.GetPane(), label=T("Skip Frame-Count Verification (faster, but risky)"),
+            name="chk_rife_standalone_dv_skip_frame_check")
+        self.chk_rife_standalone_dv_skip_frame_check.SetValue(False)
+        self.chk_rife_standalone_dv_skip_frame_check.SetToolTip(
+            T("What it's for: skips the step that fully decodes the DV source and this file's RIFE "
+              "output just to count their frames and make sure the numbers genuinely match, before "
+              "attaching any Dolby Vision/HDR data. That check is what takes most of the time in this "
+              "step -- roughly 6.5x realtime, so a 2-hour movie is ~20-35 minutes just for this step. "
+              "Checking this box skips it entirely and goes straight to attaching the data.\n"
+              "Con: this is the ONLY thing that catches a real frame-count mismatch (e.g. RIFE silently "
+              "producing the wrong number of frames). Without it, a mismatch is never caught -- Dolby "
+              "Vision gets attached to the wrong frames with no error or warning at all.\n"
+              "Recommended: leave unchecked. Only check this once you're already confident this "
+              "specific source/RIFE-output pair lines up."))
+
         self.btn_rife_standalone_run = wx.Button(self.cpn_rife_standalone.GetPane(), label=T("Run"))
         self.btn_rife_standalone_run.SetToolTip(
             T("What it's for: runs RIFE interpolation as a separate background process (python -m "
@@ -6412,6 +6481,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.txt_rife_standalone_dv_end, (h, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_dv_tolerance, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_dv_tolerance, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_rife_standalone_dv_skip_frame_check, (h := h + 1, 0), (0, 3),
+                  flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_rife_standalone_mode, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_standalone_mode, (h, 1), flag=wx.EXPAND)
         layout.Add(self.txt_rife_standalone_target_fps, (h, 2), flag=wx.EXPAND)
@@ -10820,6 +10891,7 @@ class MainFrame(wx.Frame):
         dv_tolerance_enabled = enabled and self.chk_preserve_dowi.GetValue()
         self.lbl_rife_dv_frame_count_tolerance.Enable(dv_tolerance_enabled)
         self.txt_rife_dv_frame_count_tolerance.Enable(dv_tolerance_enabled)
+        self.chk_rife_dv_skip_frame_check.Enable(dv_tolerance_enabled)
 
     def on_changed_chk_rife_interpolate(self, event):
         self.update_rife_interpolate()
@@ -11603,6 +11675,7 @@ class MainFrame(wx.Frame):
             rife_target_fps=rife_target_fps,
             rife_fp16=self.chk_rife_fp16.GetValue(),
             rife_dv_frame_count_tolerance=int(self.txt_rife_dv_frame_count_tolerance.GetValue() or "0"),
+            rife_dv_skip_frame_check=self.chk_rife_dv_skip_frame_check.GetValue(),
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
             restore_dual_eye_subtitles=self.chk_restore_dual_eye_subtitles.GetValue(),
             convert_to_mvc=self._mvc_mode() == "alongside",
@@ -12967,6 +13040,7 @@ class MainFrame(wx.Frame):
         self.chk_rife_fp16.SetValue(bool(getattr(args, "rife_fp16", False)))
         _apply_combo_value(self.txt_rife_dv_frame_count_tolerance,
                            getattr(args, "rife_dv_frame_count_tolerance", 5))
+        self.chk_rife_dv_skip_frame_check.SetValue(bool(getattr(args, "rife_dv_skip_frame_check", False)))
         _apply_combo_value(self.cbo_rife_model, args.rife_model)
         # cbo_rife_gpu is a non-editable ComboBox keyed by integer ClientData (device
         # index, or -1 for CPU) -- not a plain string value _apply_combo_value can
@@ -14561,6 +14635,8 @@ class MainFrame(wx.Frame):
             cmd += ["--end-time", end_time_str]
         if self.chk_reinject_allow_longer_converted.GetValue():
             cmd += ["--allow-longer-converted"]
+        if self.chk_reinject_skip_frame_check.GetValue():
+            cmd += ["--skip-frame-check"]
         # Only appended when non-zero -- the field's own GUI default is "5" (deliberately
         # NOT the CLI's own default=0, per explicit user request: routine 1-5 frame trim
         # rounding should pass automatically without hand-raising this every time), so most
@@ -15445,10 +15521,18 @@ class MainFrame(wx.Frame):
                 self.txt_rife_standalone_dv_source.SetValue(dlg.GetPath())
 
     def on_click_btn_rife_standalone_cancel(self, event):
+        # ADR-378: real user question, same real gap ADR-372 found and fixed for the
+        # standalone Reinject panel's own Cancel button -- this one used the exact same
+        # bare taskkill /T /F pattern, which left a child ffprobe.exe alive after a real
+        # Cancel click there. During this tab's own DV-reattach phase,
+        # self.rife_standalone_proc IS a `python -m iw3.reinject_hdr_cli` process (see
+        # _reinject_dv_after_rife in iw3/utils.py), with ffmpeg/ffprobe as its own
+        # direct children -- the identical shape that bug was found in. Reusing the
+        # same fix rather than duplicating it.
         proc = self.rife_standalone_proc
         if proc is not None and proc.poll() is None:
             self.rife_standalone_cancelled = True
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self._kill_process_and_children(proc.pid)
             self.btn_rife_standalone_cancel.Disable()
 
     def _cleanup_after_rife_standalone_cancel(self):
@@ -15547,7 +15631,8 @@ class MainFrame(wx.Frame):
                 log=dv_lines.append, proc_hook=_hook,
                 progress_cb=lambda label, done, total: wx.CallAfter(
                     self._update_rife_standalone_dv_progress, label, done, total),
-                frame_count_tolerance=dv.get("tolerance", 0))
+                frame_count_tolerance=dv.get("tolerance", 0),
+                skip_frame_check=dv.get("skip_frame_check", False))
             output = output + "\n" + "\n".join(dv_lines)
         return proc.returncode, output
 
@@ -15914,7 +15999,8 @@ class MainFrame(wx.Frame):
             dv = {"source": dv_source, "output": output_path,
                   "start": None if same_file else (self.txt_rife_standalone_dv_start.GetValue().strip() or None),
                   "end": None if same_file else (self.txt_rife_standalone_dv_end.GetValue().strip() or None),
-                  "tolerance": int(dv_tolerance_str) if dv_tolerance_str else 0}
+                  "tolerance": int(dv_tolerance_str) if dv_tolerance_str else 0,
+                  "skip_frame_check": self.chk_rife_standalone_dv_skip_frame_check.GetValue()}
 
         # Real incident (see docs/ai/AI_DECISIONS.md ADR-330): RIFE run against a Dolby
         # Vision/HDR10+ source while Output Codec stayed on its H.264 default -- that
@@ -20848,6 +20934,64 @@ def _self_test_hdr_reinject_rife_manifest_field():
     print("_self_test_hdr_reinject_rife_manifest_field: PASS")
 
 
+def _self_test_reinject_skip_frame_check_checkbox():
+    """ADR-377: real user request -- a way to skip the expensive full-decode frame-count
+    check for people confident their files already line up. Deliberately OFF by
+    default (decker's own explicit choice after a tradeoff discussion: safe-by-
+    default, not fast-by-default) -- confirms the checkbox starts unchecked, a fresh
+    run with it still unchecked omits --skip-frame-check entirely (today's behavior,
+    unaffected), and checking it adds the flag to the real built command."""
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+        assert frame.chk_reinject_skip_frame_check.GetParent() is frame.cpn_hdr_reinject.GetPane()
+        assert frame.chk_reinject_skip_frame_check.GetValue() is False, \
+            "must start unchecked -- safe-by-default, not fast-by-default"
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["cmd"] = wargs[0]
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = path.join(tmpdir, "source.mkv")
+            converted_path = path.join(tmpdir, "converted.mkv")
+            output_path = path.join(tmpdir, "output.mkv")
+            for p in (source_path, converted_path):
+                with open(p, "wb") as f:
+                    f.write(b"fake")
+            frame.txt_reinject_source.SetValue(source_path)
+            frame.txt_reinject_converted.SetValue(converted_path)
+            frame.txt_reinject_output.SetValue(output_path)
+            frame.chk_reinject_start_time.SetValue(False)
+            frame.chk_reinject_end_time.SetValue(False)
+            frame.txt_reinject_frame_count_tolerance.SetValue("0")  # omit that flag, isolate this one
+
+            # unchecked (default): --skip-frame-check never appears
+            frame.on_click_btn_reinject_run(None)
+            assert "--skip-frame-check" not in captured["cmd"], captured["cmd"]
+
+            # checked: --skip-frame-check is added to the real built command
+            frame.chk_reinject_skip_frame_check.SetValue(True)
+            captured.clear()
+            frame.on_click_btn_reinject_run(None)
+            assert "--skip-frame-check" in captured["cmd"], captured["cmd"]
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_reinject_skip_frame_check_checkbox: PASS")
+
+
 def _self_test_reinject_fractional_time_fields():
     """Regression test for ADR-168: txt_reinject_start_time/txt_reinject_end_time switched
     from a masked hh:mm:ss-only TimeCtrl to a plain wx.TextCtrl, after a real, live incident
@@ -25340,6 +25484,91 @@ def _self_test_rife_dv_frame_count_tolerance_main_pipeline():
     print("_self_test_rife_dv_frame_count_tolerance_main_pipeline: PASS")
 
 
+def _self_test_rife_dv_skip_frame_check_main_pipeline():
+    """ADR-377/378: real user follow-up -- "did you added all this changes for the
+    other pipelines that uses dolby vision injection prcoess?" -- no, not originally;
+    this rolls the standalone Reinject panel's own Skip Frame-Count Verification
+    checkbox out to the Main Processor tab's RIFE+Preserve-DV step too, the exact
+    same enable-gating/parse_args/call-site pattern
+    _self_test_rife_dv_frame_count_tolerance_main_pipeline already established for its
+    sibling Frame Count Tolerance field. OFF by default -- same reasoning: safe-by-
+    default, not fast-by-default."""
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+
+        assert frame.chk_rife_dv_skip_frame_check.GetValue() is False, \
+            "must start unchecked -- safe-by-default, not fast-by-default"
+        assert not frame.chk_rife_dv_skip_frame_check.IsEnabled()
+
+        frame.chk_rife_interpolate.SetValue(True)
+        frame.update_rife_interpolate()
+        assert not frame.chk_rife_dv_skip_frame_check.IsEnabled(), \
+            "RIFE alone, without Preserve Dolby Vision, must not enable it"
+
+        frame.chk_preserve_dowi.SetValue(True)
+        frame.on_changed_chk_preserve_dowi(None)
+        assert frame.chk_rife_dv_skip_frame_check.IsEnabled(), \
+            "both RIFE and Preserve Dolby Vision checked must enable it"
+
+        # parse_args() round-trip.
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        args = frame.parse_args(skip_set_state=True)
+        assert args.rife_dv_skip_frame_check is False, args.rife_dv_skip_frame_check
+
+        frame.chk_rife_dv_skip_frame_check.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.rife_dv_skip_frame_check is True
+
+        # apply_parsed_args_to_gui() restore round-trip.
+        args.rife_dv_skip_frame_check = False
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_rife_dv_skip_frame_check.GetValue() is False
+
+        # Call site: _run_post_conversion_steps()'s RIFE+DV branch forwards it.
+        def _args(**kw):
+            base = dict(rife_interpolate=True, rife_dv_skip_frame_check=True)
+            base.update(kw)
+            return types.SimpleNamespace(**base)
+
+        def _run_with(args_obj):
+            with mock.patch.object(U, "_should_use_stereo_upscale", lambda a: False), \
+                    mock.patch.object(U, "_run_waifu2x_upscale", lambda p, a: None), \
+                    mock.patch.object(U, "_run_rife_interpolation",
+                                      lambda p, a, force_hevc=False, scene_source_path=None: "m_rife.mkv"), \
+                    mock.patch.object(U, "_reinject_dv_after_rife") as m_reinject, \
+                    mock.patch.object(U, "_run_audio_subtitle_restore", lambda p, a, **k: None), \
+                    mock.patch.object(U, "_run_bitrate_cap", lambda p, a, **k: None), \
+                    mock.patch.object(U, "_run_mvc_conversion", lambda p, a: None):
+                U._run_post_conversion_steps("m.mkv", args_obj, dv_source="orig.mkv")
+            return m_reinject
+
+        m_reinject = _run_with(_args())
+        assert m_reinject.call_args.kwargs["skip_frame_check"] is True, m_reinject.call_args
+
+        m_reinject = _run_with(_args(rife_dv_skip_frame_check=False))
+        assert m_reinject.call_args.kwargs["skip_frame_check"] is False, m_reinject.call_args
+
+        # Attribute entirely missing (an old saved args/preset without it) -> defaults
+        # to False -- an old preset must never silently start skipping the check.
+        m_reinject = _run_with(types.SimpleNamespace(rife_interpolate=True))
+        assert m_reinject.call_args.kwargs["skip_frame_check"] is False, m_reinject.call_args
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_dv_skip_frame_check_main_pipeline: PASS")
+
+
 def _self_test_rife_standalone_dv_frame_count_tolerance():
     """Regression test for the new "Frame Count Tolerance" control on the RIFE
     Interpolation (Standalone Tool) tab (txt_rife_standalone_dv_tolerance), the
@@ -25448,6 +25677,83 @@ def _self_test_rife_standalone_dv_frame_count_tolerance():
         app.Destroy()
 
     print("_self_test_rife_standalone_dv_frame_count_tolerance: PASS")
+
+
+def _self_test_rife_standalone_dv_skip_frame_check():
+    """ADR-377/378: standalone counterpart of
+    _self_test_rife_dv_skip_frame_check_main_pipeline -- rolls the same Skip Frame-
+    Count Verification option out to the RIFE Interpolation (Standalone Tool) tab's
+    own DV-reattach path. OFF by default. Confirms the checkbox's value reaches the
+    dv dict on_click_btn_rife_standalone_run() builds, and that
+    run_rife_standalone() forwards dv.get("skip_frame_check", False) into
+    _reinject_dv_after_rife()'s skip_frame_check kwarg -- including the "key missing
+    entirely" case (an old dv dict shape) defaulting to False, never silently
+    skipping."""
+    import tempfile
+    from unittest import mock
+    from . import utils as iw3_utils
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_start_worker = gui_mod.startWorker
+    try:
+        frame = gui_mod.MainFrame()
+
+        assert frame.chk_rife_standalone_dv_skip_frame_check.GetParent() is frame.cpn_rife_standalone.GetPane()
+        assert frame.chk_rife_standalone_dv_skip_frame_check.GetValue() is False, \
+            "must start unchecked -- safe-by-default, not fast-by-default"
+
+        captured = {}
+
+        def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
+            captured["dv"] = wargs[1] if len(wargs) > 1 else None
+
+        gui_mod.startWorker = _fake_start_worker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dv_source_path = path.join(tmpdir, "movie.mkv")
+            input_path = path.join(tmpdir, "movie_3d.mkv")
+            for p_ in (dv_source_path, input_path):
+                with open(p_, "wb") as f:
+                    f.write(b"fake")
+            output_path = path.join(tmpdir, "movie_3d_rife.mkv")
+
+            frame.txt_rife_standalone_input.SetValue(input_path)
+            frame.txt_rife_standalone_output.SetValue(output_path)
+            frame.txt_rife_standalone_dv_source.SetValue(dv_source_path)
+
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["dv"]["skip_frame_check"] is False, captured["dv"]
+
+            captured.clear()
+            frame.chk_rife_standalone_dv_skip_frame_check.SetValue(True)
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["dv"]["skip_frame_check"] is True, captured["dv"]
+
+        # run_rife_standalone() itself: forwards dv.get("skip_frame_check", False).
+        script = "print('done')\n"
+        cmd = [sys.executable, "-c", script]
+        with mock.patch.object(iw3_utils, "_reinject_dv_after_rife") as m_reinject:
+            frame.run_rife_standalone(cmd, dv={"source": "orig.mkv", "output": "out.mkv",
+                                               "start": None, "end": None, "skip_frame_check": True})
+            wx.Yield()
+        assert m_reinject.call_args.kwargs["skip_frame_check"] is True, m_reinject.call_args
+
+        with mock.patch.object(iw3_utils, "_reinject_dv_after_rife") as m_reinject:
+            frame.run_rife_standalone(cmd, dv={"source": "orig.mkv", "output": "out.mkv",
+                                               "start": None, "end": None})
+            wx.Yield()
+        assert m_reinject.call_args.kwargs["skip_frame_check"] is False, \
+            "a dv dict with no skip_frame_check key at all must default to False"
+    finally:
+        gui_mod.startWorker = orig_start_worker
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_dv_skip_frame_check: PASS")
 
 
 def _self_test_analyze_source_video():
@@ -28042,6 +28348,60 @@ def _self_test_rife_standalone_folder_batch():
     print("_self_test_rife_standalone_folder_batch: PASS")
 
 
+def _self_test_rife_standalone_cancel_kills_children():
+    """ADR-378: real user question -- does the RIFE Standalone tab's own Cancel button
+    have the same gap ADR-372 found and fixed for the standalone Reinject panel's
+    Cancel (a bare taskkill /T /F that left a child ffprobe.exe alive)? Confirmed yes,
+    same exact pattern -- fixed by reusing the same `_kill_process_and_children()`
+    helper rather than duplicating it. Self-contained and independent of the larger,
+    pre-existing `_self_test_rife_standalone_dv_and_cancel` (which fails identically on
+    unmodified code for an unrelated reason -- a stale dict assertion missing the
+    "tolerance" key ADR-364 added -- confirmed via git stash, left alone per the
+    minimal-change policy)."""
+    import types
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_run = subprocess.run
+    try:
+        frame = gui_mod.MainFrame()
+
+        class _FakeProc:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+        calls = []
+
+        def _fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "powershell":
+                return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        subprocess.run = _fake_run
+        frame.rife_standalone_proc = _FakeProc()
+        frame.rife_standalone_cancelled = False
+        frame.btn_rife_standalone_cancel.Enable()
+        frame.on_click_btn_rife_standalone_cancel(None)
+
+        assert frame.rife_standalone_cancelled and not frame.btn_rife_standalone_cancel.IsEnabled()
+        assert any(c[0] == "powershell" and "4242" in c[-1] for c in calls), \
+            ("must ask which processes are direct children of 4242, same as the Reinject panel's fix", calls)
+        assert any(c[:3] == ["taskkill", "/PID", "4242"] and "/T" in c for c in calls), \
+            ("must still taskkill the parent too, belt and suspenders", calls)
+    finally:
+        subprocess.run = orig_run
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_rife_standalone_cancel_kills_children: PASS")
+
+
 def _self_test_rife_standalone_dv_and_cancel():
     """Standalone RIFE tool: optional Original DV Source (forces HEVC, passes the DV job to the worker) and the
     Cancel button (kills the running process, removes a half-written output only when cancelled during RIFE).
@@ -28150,13 +28510,17 @@ def _self_test_rife_standalone_dv_and_cancel():
                 def poll(self):
                     return None
 
+            # ADR-378: _kill_process_and_children() (same helper ADR-372 built for the
+            # Reinject panel) also does a PowerShell CIM lookup first, so the parent
+            # taskkill is no longer necessarily the first subprocess.run call -- search
+            # for it rather than assuming position.
             killed = []
             subprocess.run = lambda cmd, **kw: killed.append(cmd)
             frame.rife_standalone_proc = _FakeProc()
             frame.btn_rife_standalone_cancel.Enable()
             frame.on_click_btn_rife_standalone_cancel(None)
             assert frame.rife_standalone_cancelled and not frame.btn_rife_standalone_cancel.IsEnabled()
-            assert killed and killed[0][:2] == ["taskkill", "/PID"] and "4242" in killed[0], killed
+            assert any(c[:2] == ["taskkill", "/PID"] and "4242" in c and "/T" in c for c in killed), killed
             subprocess.run = orig_run
 
             # 5. cleanup: cancelled during RIFE removes the half output + manifest; during DV keeps them
@@ -33371,6 +33735,7 @@ def _run_self_tests():
         _self_test_genre_preset_quick_fill,
         _self_test_3decker_quick_preset,
         _self_test_hdr_reinject_rife_manifest_field,
+        _self_test_reinject_skip_frame_check_checkbox,
         _self_test_reinject_fractional_time_fields,
         _self_test_rife_standalone_panel,
         _self_test_rife_standalone_hdr_codec_warning,
@@ -33425,7 +33790,9 @@ def _run_self_tests():
         _self_test_bitrate_cap_preserves_dv,
         _self_test_bitrate_cap_rife_manifest_dv,
         _self_test_rife_dv_frame_count_tolerance_main_pipeline,
+        _self_test_rife_dv_skip_frame_check_main_pipeline,
         _self_test_rife_standalone_dv_frame_count_tolerance,
+        _self_test_rife_standalone_dv_skip_frame_check,
         _self_test_bitrate_cap_standalone_panel,
         _self_test_mvc_muxopt_new_audio_pes,
         _self_test_analyze_source_video,
@@ -33443,6 +33810,7 @@ def _run_self_tests():
         _self_test_utils_hdr_to_sdr_gpu_decode,
         _self_test_utils_reinject_dv_failure_message_tail_keeps_whole_lines,
         _self_test_hdr_to_sdr_tonemap_progress_is_incremental,
+        _self_test_rife_standalone_cancel_kills_children,
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_rife_standalone_folder_batch,
         _self_test_rife_fp16_processor_checkbox,

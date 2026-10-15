@@ -149,6 +149,22 @@ def create_parser():
                               "never converted, still refuses unconditionally. Off by default -- like "
                               "--frame-count-tolerance, this is an explicit opt-in for a specific, "
                               "independently-understood situation, not a normal setting.")
+    parser.add_argument("--skip-frame-check", action="store_true",
+                         help="DELIBERATE OPT-IN, OFF by default -- skips the decoded frame-count "
+                              "check entirely (both --source and --converted) and proceeds straight "
+                              "to extraction/injection, trusting that the frame counts already match. "
+                              "Saves real time (ADR-163: the check fully decodes both files, "
+                              "~6.5x realtime -- a 2-hour movie is ~20-35 minutes just for this step) "
+                              "at a real cost: without it, a genuine frame-count mismatch (e.g. from a "
+                              "RIFE/upscale run that silently produced the wrong number of frames) is "
+                              "never caught, and Dolby Vision gets attached to the wrong frames with no "
+                              "error or warning -- it will just look subtly wrong, possibly not noticed "
+                              "until much later. Only use this once you are already confident the files "
+                              "line up (e.g. you already ran the check once successfully on this exact "
+                              "pair and are only re-running the injection itself). In --rife-manifest "
+                              "mode, the manifest's own frame counts are still used to build/expand the "
+                              "RPU correctly -- this only skips the separate, expensive full-decode "
+                              "cross-check against them, not the RPU-expansion math itself.")
     parser.add_argument("--skip-rife-guard", action="store_true",
                         help=("skip the '_rife' file-name / comment-tag heuristic (ADR-212). For a --converted file that "
                               "keeps the source's frame count even though its name says _rife, e.g. a waifu2x upscale "
@@ -1246,82 +1262,94 @@ def _run_with_rife_manifest(args):
         return 1
     output_frame_count = len(manifest.get("frames", []))
 
-    print("[reinject-hdr] (RIFE-manifest mode) probing --source (trimmed) and --converted decoded "
-          "frame counts against the manifest's own recorded counts -- this decodes the full range so "
-          "it may take a while on long clips...", file=sys.stderr)
-    src_hint = _source_duration_hint(args.start_time, args.end_time, source, ffprobe_bin)
-    conv_hint = _probe_container_duration(converted, ffprobe_bin)
-    src_frames, src_duration, src_cmd, src_fallback = _probe_frames_and_duration_with_fallback(
-        source, ffmpeg_bin, ffprobe_bin, args.start_time, args.end_time,
-        stage="source", total_seconds_hint=src_hint, total_frames_hint=source_frame_count, label="--source")
-    conv_frames, conv_duration, conv_cmd, conv_fallback = _probe_frames_and_duration_with_fallback(
-        converted, ffmpeg_bin, ffprobe_bin, None, None,
-        stage="converted", total_seconds_hint=conv_hint, total_frames_hint=output_frame_count,
-        label="--converted")
+    if getattr(args, "skip_frame_check", False):
+        # ADR-377: deliberate opt-in, OFF by default -- see --skip-frame-check's own
+        # help text for the real tradeoff. The manifest's own source_frame_count/
+        # output_frame_count (already read above, purely from the manifest JSON, no
+        # ffmpeg involved) are still what _expand_rpu_for_rife uses to build/trim the
+        # RPU correctly -- this only skips the separate, expensive full-decode
+        # cross-check that those numbers are actually TRUE for these two real files.
+        print("[reinject-hdr] --skip-frame-check given -- skipping the decoded frame-count "
+              "verification entirely and trusting that --source/--converted/--rife-manifest already "
+              "line up. If they don't, this will attach Dolby Vision to the wrong frames with no "
+              "error or warning.", file=sys.stderr)
+    else:
+        print("[reinject-hdr] (RIFE-manifest mode) probing --source (trimmed) and --converted decoded "
+              "frame counts against the manifest's own recorded counts -- this decodes the full range so "
+              "it may take a while on long clips...", file=sys.stderr)
+        src_hint = _source_duration_hint(args.start_time, args.end_time, source, ffprobe_bin)
+        conv_hint = _probe_container_duration(converted, ffprobe_bin)
+        src_frames, src_duration, src_cmd, src_fallback = _probe_frames_and_duration_with_fallback(
+            source, ffmpeg_bin, ffprobe_bin, args.start_time, args.end_time,
+            stage="source", total_seconds_hint=src_hint, total_frames_hint=source_frame_count, label="--source")
+        conv_frames, conv_duration, conv_cmd, conv_fallback = _probe_frames_and_duration_with_fallback(
+            converted, ffmpeg_bin, ffprobe_bin, None, None,
+            stage="converted", total_seconds_hint=conv_hint, total_frames_hint=output_frame_count,
+            label="--converted")
 
-    print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}"
-          f"{' (fallback: ffprobe -count_frames)' if src_fallback else ''}", file=sys.stderr)
-    print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}"
-          f"{' (fallback: ffprobe -count_frames)' if conv_fallback else ''}", file=sys.stderr)
-    print(f"[reinject-hdr] source (trimmed) decoded frame count: {src_frames}  "
-          f"manifest source_frame_count: {source_frame_count}", file=sys.stderr)
-    print(f"[reinject-hdr] converted decoded frame count:        {conv_frames}  "
-          f"manifest output_frame_count: {output_frame_count}", file=sys.stderr)
+        print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}"
+              f"{' (fallback: ffprobe -count_frames)' if src_fallback else ''}", file=sys.stderr)
+        print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}"
+              f"{' (fallback: ffprobe -count_frames)' if conv_fallback else ''}", file=sys.stderr)
+        print(f"[reinject-hdr] source (trimmed) decoded frame count: {src_frames}  "
+              f"manifest source_frame_count: {source_frame_count}", file=sys.stderr)
+        print(f"[reinject-hdr] converted decoded frame count:        {conv_frames}  "
+              f"manifest output_frame_count: {output_frame_count}", file=sys.stderr)
 
-    if src_frames is None or conv_frames is None:
-        print("ERROR: could not determine a decoded frame count for one or both files, even after "
-              "the ffprobe -count_frames fallback -- see the real probe-failure diagnostics printed "
-              "above. Refusing to proceed without a reliable frame-count comparison.", file=sys.stderr)
-        return 1
+        if src_frames is None or conv_frames is None:
+            print("ERROR: could not determine a decoded frame count for one or both files, even after "
+                  "the ffprobe -count_frames fallback -- see the real probe-failure diagnostics printed "
+                  "above. Refusing to proceed without a reliable frame-count comparison.", file=sys.stderr)
+            return 1
 
-    tolerance = max(0, int(getattr(args, "frame_count_tolerance", 0) or 0))
-    conv_mismatch = abs(conv_frames - output_frame_count)
+        tolerance = max(0, int(getattr(args, "frame_count_tolerance", 0) or 0))
+        conv_mismatch = abs(conv_frames - output_frame_count)
 
-    # Source side: real testing (2026-09-08, see docs/ai/AI_DECISIONS.md ADR-051's
-    # amendment) found a genuinely correct --start-time/--end-time can still probe
-    # MORE frames on --source than the manifest's own source_frame_count -- ffprobe/
-    # ffmpeg range-trimming is keyframe/timestamp-approximate, while
-    # source_frame_count is the EXACT count the real conversion pipeline actually
-    # rendered for that range (the authoritative value -- see DOLBY_VISION.md's own
-    # "exact frame count over approximate timestamp math" invariant). An excess
-    # here is expected and safe -- _expand_rpu_for_rife (below) trims the extracted
-    # RPU's own tail to match, mirroring dovi_tool inject-rpu's own real, already-
-    # trusted auto-correction for the identical situation. A SHORTAGE is never safe
-    # (missing DV metadata can't be fabricated) and still refuses immediately, same
-    # as before this fix. A large excess (beyond _SOURCE_TRIM_SLOP_MAX_FRAMES) also
-    # still refuses -- more likely a genuinely wrong --start-time/--end-time than
-    # routine trim slop. The converted/RIFE side is NOT given this same allowance:
-    # --converted is probed as a whole file with no time-range trimming involved at
-    # all, and RIFE's own frame-doubling math is fully deterministic, so any
-    # mismatch there still means --converted/--rife-manifest are from different
-    # runs, exactly as before.
-    src_shortage = max(0, source_frame_count - src_frames)
-    src_excess = max(0, src_frames - source_frame_count)
-    src_refused = src_shortage > tolerance or src_excess > max(tolerance, _SOURCE_TRIM_SLOP_MAX_FRAMES)
+        # Source side: real testing (2026-09-08, see docs/ai/AI_DECISIONS.md ADR-051's
+        # amendment) found a genuinely correct --start-time/--end-time can still probe
+        # MORE frames on --source than the manifest's own source_frame_count -- ffprobe/
+        # ffmpeg range-trimming is keyframe/timestamp-approximate, while
+        # source_frame_count is the EXACT count the real conversion pipeline actually
+        # rendered for that range (the authoritative value -- see DOLBY_VISION.md's own
+        # "exact frame count over approximate timestamp math" invariant). An excess
+        # here is expected and safe -- _expand_rpu_for_rife (below) trims the extracted
+        # RPU's own tail to match, mirroring dovi_tool inject-rpu's own real, already-
+        # trusted auto-correction for the identical situation. A SHORTAGE is never safe
+        # (missing DV metadata can't be fabricated) and still refuses immediately, same
+        # as before this fix. A large excess (beyond _SOURCE_TRIM_SLOP_MAX_FRAMES) also
+        # still refuses -- more likely a genuinely wrong --start-time/--end-time than
+        # routine trim slop. The converted/RIFE side is NOT given this same allowance:
+        # --converted is probed as a whole file with no time-range trimming involved at
+        # all, and RIFE's own frame-doubling math is fully deterministic, so any
+        # mismatch there still means --converted/--rife-manifest are from different
+        # runs, exactly as before.
+        src_shortage = max(0, source_frame_count - src_frames)
+        src_excess = max(0, src_frames - source_frame_count)
+        src_refused = src_shortage > tolerance or src_excess > max(tolerance, _SOURCE_TRIM_SLOP_MAX_FRAMES)
 
-    if src_refused or conv_mismatch > tolerance:
-        print(
-            "ERROR: frame counts don't match the RIFE manifest's own recorded counts -- refusing to "
-            "inject.\n"
-            f"  source (trimmed) frames: {src_frames}   manifest source_frame_count: "
-            f"{source_frame_count}   shortage: {src_shortage}   excess: {src_excess}   "
-            f"(excess auto-corrected up to {_SOURCE_TRIM_SLOP_MAX_FRAMES} frames)\n"
-            f"  converted frames:        {conv_frames}   manifest output_frame_count: "
-            f"{output_frame_count}   mismatch: {conv_mismatch}\n"
-            f"  tolerance: {tolerance}\n"
-            "This almost always means --start-time/--end-time doesn't exactly match the range that "
-            "was actually fed into RIFE, or --converted/--rife-manifest are from different RIFE runs. "
-            "Use --frame-count-tolerance as a deliberate escape hatch only after independently "
-            "confirming a specific known boundary-frame discrepancy.",
-            file=sys.stderr)
-        return 1
+        if src_refused or conv_mismatch > tolerance:
+            print(
+                "ERROR: frame counts don't match the RIFE manifest's own recorded counts -- refusing to "
+                "inject.\n"
+                f"  source (trimmed) frames: {src_frames}   manifest source_frame_count: "
+                f"{source_frame_count}   shortage: {src_shortage}   excess: {src_excess}   "
+                f"(excess auto-corrected up to {_SOURCE_TRIM_SLOP_MAX_FRAMES} frames)\n"
+                f"  converted frames:        {conv_frames}   manifest output_frame_count: "
+                f"{output_frame_count}   mismatch: {conv_mismatch}\n"
+                f"  tolerance: {tolerance}\n"
+                "This almost always means --start-time/--end-time doesn't exactly match the range that "
+                "was actually fed into RIFE, or --converted/--rife-manifest are from different RIFE runs. "
+                "Use --frame-count-tolerance as a deliberate escape hatch only after independently "
+                "confirming a specific known boundary-frame discrepancy.",
+                file=sys.stderr)
+            return 1
 
-    if src_excess > 0:
-        print(f"[reinject-hdr] (RIFE-manifest mode) source has {src_excess} more decoded frame(s) than "
-              f"the manifest expects -- routine -ss/-to trim slop, not a mismatch; the extraction step "
-              f"below trims the extracted RPU to match exactly.", file=sys.stderr)
-    print("[reinject-hdr] (RIFE-manifest mode) frame counts match the manifest (within tolerance/"
-          "the auto-corrected trim-slop allowance). Proceeding.", file=sys.stderr)
+        if src_excess > 0:
+            print(f"[reinject-hdr] (RIFE-manifest mode) source has {src_excess} more decoded frame(s) than "
+                  f"the manifest expects -- routine -ss/-to trim slop, not a mismatch; the extraction step "
+                  f"below trims the extracted RPU to match exactly.", file=sys.stderr)
+        print("[reinject-hdr] (RIFE-manifest mode) frame counts match the manifest (within tolerance/"
+              "the auto-corrected trim-slop allowance). Proceeding.", file=sys.stderr)
 
     out_dir = path.dirname(path.abspath(output)) or "."
     os.makedirs(out_dir, exist_ok=True)
@@ -1434,75 +1462,90 @@ def _run_strict(args):
         print(f"[reinject-hdr] WARNING: {mismatched_master_warning}", file=sys.stderr)
 
     # --- required pre-flight: exact (by default) decoded frame-count match ---
-    print("[reinject-hdr] probing source (trimmed) and converted decoded frame counts -- this "
-          "decodes the full range so it may take a while on long clips...", file=sys.stderr)
-    src_hint = _source_duration_hint(args.start_time, args.end_time, source, ffprobe_bin)
-    conv_hint = _probe_container_duration(converted, ffprobe_bin)
-    src_frames, src_duration, src_cmd, src_fallback = _probe_frames_and_duration_with_fallback(
-        source, ffmpeg_bin, ffprobe_bin, args.start_time, args.end_time,
-        stage="source", total_seconds_hint=src_hint, label="--source")
-    conv_frames, conv_duration, conv_cmd, conv_fallback = _probe_frames_and_duration_with_fallback(
-        converted, ffmpeg_bin, ffprobe_bin, None, None,
-        stage="converted", total_seconds_hint=conv_hint, label="--converted")
+    src_frames = None
+    if getattr(args, "skip_frame_check", False):
+        # ADR-377: deliberate opt-in, OFF by default -- see --skip-frame-check's own
+        # help text for the real tradeoff. Unlike --rife-manifest mode, there is no
+        # manifest here to fall back on for ANY frame-count knowledge -- this is the
+        # only check that ever existed for --source/--converted lining up, so skipping
+        # it means trusting the two inputs completely, with nothing left to catch a
+        # real mismatch. `src_frames` stays None -- _GrowthProgress (below) already
+        # tolerates that gracefully, just with a less precise progress estimate for
+        # its own "rpu" sub-stage.
+        print("[reinject-hdr] --skip-frame-check given -- skipping the decoded frame-count "
+              "verification entirely and trusting that --source/--converted already line up. If they "
+              "don't, this will attach Dolby Vision to the wrong frames with no error or warning.",
+              file=sys.stderr)
+    else:
+        print("[reinject-hdr] probing source (trimmed) and converted decoded frame counts -- this "
+              "decodes the full range so it may take a while on long clips...", file=sys.stderr)
+        src_hint = _source_duration_hint(args.start_time, args.end_time, source, ffprobe_bin)
+        conv_hint = _probe_container_duration(converted, ffprobe_bin)
+        src_frames, src_duration, src_cmd, src_fallback = _probe_frames_and_duration_with_fallback(
+            source, ffmpeg_bin, ffprobe_bin, args.start_time, args.end_time,
+            stage="source", total_seconds_hint=src_hint, label="--source")
+        conv_frames, conv_duration, conv_cmd, conv_fallback = _probe_frames_and_duration_with_fallback(
+            converted, ffmpeg_bin, ffprobe_bin, None, None,
+            stage="converted", total_seconds_hint=conv_hint, label="--converted")
 
-    print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}"
-          f"{' (fallback: ffprobe -count_frames)' if src_fallback else ''}", file=sys.stderr)
-    print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}"
-          f"{' (fallback: ffprobe -count_frames)' if conv_fallback else ''}", file=sys.stderr)
-    print(f"[reinject-hdr] source (trimmed) decoded frame count: {src_frames}  duration: {src_duration}",
-          file=sys.stderr)
-    print(f"[reinject-hdr] converted decoded frame count:        {conv_frames}  duration: {conv_duration}",
-          file=sys.stderr)
+        print(f"[reinject-hdr] source ffmpeg command:    {_format_cmd(src_cmd)}"
+              f"{' (fallback: ffprobe -count_frames)' if src_fallback else ''}", file=sys.stderr)
+        print(f"[reinject-hdr] converted ffmpeg command: {_format_cmd(conv_cmd)}"
+              f"{' (fallback: ffprobe -count_frames)' if conv_fallback else ''}", file=sys.stderr)
+        print(f"[reinject-hdr] source (trimmed) decoded frame count: {src_frames}  duration: {src_duration}",
+              file=sys.stderr)
+        print(f"[reinject-hdr] converted decoded frame count:        {conv_frames}  duration: {conv_duration}",
+              file=sys.stderr)
 
-    if src_frames is None or conv_frames is None:
-        print("ERROR: could not determine a decoded frame count for one or both files, even after "
-              "the ffprobe -count_frames fallback -- see the real probe-failure diagnostics printed "
-              "above. Refusing to proceed without a reliable frame-count comparison.", file=sys.stderr)
-        return 1
+        if src_frames is None or conv_frames is None:
+            print("ERROR: could not determine a decoded frame count for one or both files, even after "
+                  "the ffprobe -count_frames fallback -- see the real probe-failure diagnostics printed "
+                  "above. Refusing to proceed without a reliable frame-count comparison.", file=sys.stderr)
+            return 1
 
-    tolerance = max(0, int(args.frame_count_tolerance))
-    diff = conv_frames - src_frames  # positive: --converted has MORE frames (the tail-shortfall case)
-    mismatch = abs(diff)
-    if mismatch > tolerance:
-        if args.allow_longer_converted and diff > 0:
-            if diff > _CONVERTED_EXCESS_MAX_FRAMES:
+        tolerance = max(0, int(args.frame_count_tolerance))
+        diff = conv_frames - src_frames  # positive: --converted has MORE frames (the tail-shortfall case)
+        mismatch = abs(diff)
+        if mismatch > tolerance:
+            if args.allow_longer_converted and diff > 0:
+                if diff > _CONVERTED_EXCESS_MAX_FRAMES:
+                    print(
+                        "ERROR: --converted has far more decoded frames than --source (trimmed) -- more "
+                        "than --allow-longer-converted's own sanity bound, so refusing even with it set.\n"
+                        f"  source (trimmed) frames: {src_frames}   duration: {src_duration}\n"
+                        f"  converted frames:        {conv_frames}   duration: {conv_duration}\n"
+                        f"  excess: {diff} frame(s)   bound: {_CONVERTED_EXCESS_MAX_FRAMES}\n"
+                        "This is much larger than a real tail-length difference between two releases of the "
+                        "same film -- almost certainly a genuinely wrong --start-time/--end-time. Double "
+                        "check the exact range and try again.",
+                        file=sys.stderr)
+                    return 1
                 print(
-                    "ERROR: --converted has far more decoded frames than --source (trimmed) -- more "
-                    "than --allow-longer-converted's own sanity bound, so refusing even with it set.\n"
+                    f"[reinject-hdr] --converted has {diff} more decoded frame(s) than --source (trimmed) "
+                    f"-- allowed by --allow-longer-converted (bound: {_CONVERTED_EXCESS_MAX_FRAMES}). "
+                    f"dovi_tool will duplicate its last RPU frame to cover --converted's excess tail frames "
+                    f"(its own real, confirmed behavior for this case -- see --allow-longer-converted's own "
+                    f"help text). Proceeding.", file=sys.stderr)
+            else:
+                print(
+                    "ERROR: frame count mismatch between --source (trimmed to --start-time/--end-time) and "
+                    "--converted exceeds the allowed tolerance -- refusing to inject.\n"
                     f"  source (trimmed) frames: {src_frames}   duration: {src_duration}\n"
                     f"  converted frames:        {conv_frames}   duration: {conv_duration}\n"
-                    f"  excess: {diff} frame(s)   bound: {_CONVERTED_EXCESS_MAX_FRAMES}\n"
-                    "This is much larger than a real tail-length difference between two releases of the "
-                    "same film -- almost certainly a genuinely wrong --start-time/--end-time. Double "
-                    "check the exact range and try again.",
+                    f"  mismatch: {mismatch} frame(s)   tolerance: {tolerance}\n"
+                    "This almost always means --start-time/--end-time doesn't exactly match the range that "
+                    "was actually converted into --converted -- double check the exact range and try again. "
+                    "If you have independently confirmed this specific mismatch is a single known dropped/"
+                    "duplicated boundary frame (NOT a wrong range), you can override this with "
+                    "--frame-count-tolerance -- that is a deliberate escape hatch, not a normal setting. If "
+                    "--converted is genuinely from a different release with a different tail length (and has "
+                    "MORE frames than --source), use --allow-longer-converted instead -- --frame-count-"
+                    "tolerance is not the right tool for that.",
                     file=sys.stderr)
                 return 1
-            print(
-                f"[reinject-hdr] --converted has {diff} more decoded frame(s) than --source (trimmed) "
-                f"-- allowed by --allow-longer-converted (bound: {_CONVERTED_EXCESS_MAX_FRAMES}). "
-                f"dovi_tool will duplicate its last RPU frame to cover --converted's excess tail frames "
-                f"(its own real, confirmed behavior for this case -- see --allow-longer-converted's own "
-                f"help text). Proceeding.", file=sys.stderr)
         else:
-            print(
-                "ERROR: frame count mismatch between --source (trimmed to --start-time/--end-time) and "
-                "--converted exceeds the allowed tolerance -- refusing to inject.\n"
-                f"  source (trimmed) frames: {src_frames}   duration: {src_duration}\n"
-                f"  converted frames:        {conv_frames}   duration: {conv_duration}\n"
-                f"  mismatch: {mismatch} frame(s)   tolerance: {tolerance}\n"
-                "This almost always means --start-time/--end-time doesn't exactly match the range that "
-                "was actually converted into --converted -- double check the exact range and try again. "
-                "If you have independently confirmed this specific mismatch is a single known dropped/"
-                "duplicated boundary frame (NOT a wrong range), you can override this with "
-                "--frame-count-tolerance -- that is a deliberate escape hatch, not a normal setting. If "
-                "--converted is genuinely from a different release with a different tail length (and has "
-                "MORE frames than --source), use --allow-longer-converted instead -- --frame-count-"
-                "tolerance is not the right tool for that.",
-                file=sys.stderr)
-            return 1
-    else:
-        print(f"[reinject-hdr] frame counts match within tolerance ({mismatch} <= {tolerance}). Proceeding.",
-              file=sys.stderr)
+            print(f"[reinject-hdr] frame counts match within tolerance ({mismatch} <= {tolerance}). Proceeding.",
+                  file=sys.stderr)
 
     # --- copy --converted to a working temp file BEFORE touching anything, so a failure
     # partway through injection can never corrupt --converted or leave a half-written
@@ -2904,6 +2947,100 @@ def _self_test_run_with_rife_manifest_dispatch_and_gating():
     print("_self_test_run_with_rife_manifest_dispatch_and_gating: PASS")
 
 
+def _self_test_skip_frame_check():
+    """ADR-377: real user request -- "so if someone does wanta faster dolby vision
+    injection and is sure frames matches dont need the step and can save the time?"
+    `--skip-frame-check`, deliberately OFF by default (decker's own explicit choice
+    after a tradeoff discussion: safe-by-default, not fast-by-default), bypasses the
+    decoded frame-count probe ENTIRELY in both real code paths and proceeds straight
+    to extraction. Covers both `_run_strict()` (no manifest -- this is the ONLY check
+    that ever existed there) and `_run_with_rife_manifest()` (the manifest's own
+    already-known source_frame_count/output_frame_count must still reach
+    _expand_rpu_for_rife correctly -- only the expensive cross-check against them is
+    skipped, not the numbers themselves)."""
+    import argparse as _argparse
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="iw3_reinject_skip_check_selftest_") as tmpdir:
+        source = path.join(tmpdir, "source.mkv")
+        converted = path.join(tmpdir, "converted.mkv")
+        output = path.join(tmpdir, "output.mkv")
+        for p in (source, converted):
+            with open(p, "wb") as f:
+                f.write(b"0")
+
+        # 1) _run_strict(): the probe must never run at all, and the gate must pass
+        # straight through to extraction -- no frame counts exist anywhere to compare,
+        # since there's no manifest in this mode.
+        with patch(f"{__name__}._check_rife_guard", return_value=[]), \
+             patch(f"{__name__}._probe_frames_and_duration") as mock_probe, \
+             patch(f"{__name__}._extract_hdr_rpu_files") as mock_extract, \
+             patch(f"{__name__}._find_dovi_tool", return_value="dovi_tool"), \
+             patch(f"{__name__}._find_hdr10plus_tool", return_value=None), \
+             patch(f"{__name__}._inject_hdr_rpu", return_value=(None, None, "stubbed decline")):
+            def _fake_extract(input_path, work_dir, shim_args, rpu_path, h10p_path):
+                with open(rpu_path, "wb") as f:
+                    f.write(b"rpu")
+                return True, True, []
+            mock_extract.side_effect = _fake_extract
+
+            rc = run(_argparse.Namespace(
+                source=source, converted=converted, output=output,
+                start_time=None, end_time=None, frame_count_tolerance=0,
+                allow_longer_converted=False, skip_frame_check=True))
+            mock_probe.assert_not_called()
+            mock_extract.assert_called_once()
+            assert rc == 1, rc  # injection stubbed to decline -- proves the gate passed cleanly
+
+        # 2) _run_with_rife_manifest(): same -- probe never runs, but the manifest's
+        # own real frame counts still reach _expand_rpu_for_rife unchanged.
+        manifest_path = path.join(tmpdir, "converted.mkv.rife_manifest.json")
+        manifest = {
+            "frames": [{"real": True, "source_index": 0}, {"real": True, "source_index": 1}],
+            "source_frame_count": 2,
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        expand_calls = []
+
+        def _fake_expand(rpu_path, ops, expected_count, dovi_bin, work_dir):
+            expand_calls.append(expected_count)
+            return rpu_path
+
+        with patch(f"{__name__}._probe_frames_and_duration") as mock_probe, \
+             patch(f"{__name__}._extract_hdr_rpu_files") as mock_extract, \
+             patch(f"{__name__}._find_dovi_tool", return_value="dovi_tool"), \
+             patch(f"{__name__}._expand_rpu_for_rife", side_effect=_fake_expand), \
+             patch(f"{__name__}._inject_hdr_rpu", return_value=(None, None, "stubbed decline")):
+            def _fake_extract2(input_path, work_dir, shim_args, rpu_path, h10p_path):
+                with open(rpu_path, "wb") as f:
+                    f.write(b"rpu")
+                return True, True, []
+            mock_extract.side_effect = _fake_extract2
+
+            rc = run(_argparse.Namespace(
+                source=source, converted=converted, output=output,
+                start_time=None, end_time=None, frame_count_tolerance=0,
+                rife_manifest=manifest_path, skip_frame_check=True))
+            mock_probe.assert_not_called()
+            assert rc == 1, rc  # injection stubbed to decline -- proves the gate passed cleanly
+            assert expand_calls == [2], expand_calls  # the manifest's real source_frame_count
+
+        # 3) default (no skip_frame_check attribute at all, matching every pre-existing
+        # caller) -- the probe still runs exactly as before, nothing silently changed.
+        with patch(f"{__name__}._check_rife_guard", return_value=[]), \
+             patch(f"{__name__}._probe_frames_and_duration") as mock_probe:
+            mock_probe.side_effect = [(241, 10.04, ["ffprobe"]), (240, 10.0, ["ffprobe"])]
+            run(_argparse.Namespace(
+                source=source, converted=converted, output=output,
+                start_time=None, end_time=None, frame_count_tolerance=0,
+                allow_longer_converted=False))
+            mock_probe.assert_called()
+
+    print("_self_test_skip_frame_check: PASS")
+
+
 def _self_test_replace_with_retry():
     """Regression test for a real user-reported crash: a transient Windows
     file-lock race (`PermissionError: [WinError 32] The process cannot access
@@ -2988,6 +3125,7 @@ def _run_self_tests():
     _self_test_build_duplicate_ops_from_manifest()
     _self_test_expand_rpu_for_rife()
     _self_test_run_with_rife_manifest_dispatch_and_gating()
+    _self_test_skip_frame_check()
     _self_test_rife_manifest_source_excess_tolerance()
     print("All reinject_hdr_cli self-tests PASSED")
 

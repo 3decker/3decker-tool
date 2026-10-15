@@ -678,7 +678,7 @@ def _tail_of_subprocess_output(msg, max_chars=4000):
 
 def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=None, progress_cb=None,
                             use_manifest=True, what="RIFE output", trim_source=True, manifest_path=None,
-                            frame_count_tolerance=0):
+                            frame_count_tolerance=0, skip_frame_check=False):
     """ADR-192: after RIFE, re-attach the ORIGINAL source's Dolby Vision RPU to RIFE's output through
     iw3.reinject_hdr_cli --rife-manifest (each in-between frame gets a copy of its nearest real frame's entry).
     The RIFE file is only replaced when the injection fully succeeded; otherwise it is left as it was
@@ -699,7 +699,14 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
 
     frame_count_tolerance (default 0, exact match): forwarded to iw3.reinject_hdr_cli's own
     --frame-count-tolerance, the same deliberate escape hatch the standalone Reinject panel already
-    has -- only passed to the subprocess when non-zero."""
+    has -- only passed to the subprocess when non-zero.
+
+    skip_frame_check (ADR-377/378, default False): forwarded to iw3.reinject_hdr_cli's own
+    --skip-frame-check -- skips the expensive full-decode frame-count verification entirely and
+    trusts source_path/rife_path already line up. Deliberately OFF by default, same as the
+    standalone Reinject panel's own checkbox -- this is the ONLY thing that catches a real
+    frame-count mismatch (e.g. RIFE/upscale silently producing the wrong count); skipping it means
+    a mismatch is never caught and Dolby Vision gets attached to the wrong frames with no error."""
     def say(message):
         if log is None:
             print(message, file=sys.stderr)
@@ -740,6 +747,8 @@ def _reinject_dv_after_rife(source_path, rife_path, args, log=None, proc_hook=No
     tolerance = max(0, int(frame_count_tolerance or 0))
     if tolerance:
         cmd += ["--frame-count-tolerance", str(tolerance)]
+    if skip_frame_check:
+        cmd += ["--skip-frame-check"]
     if trim_source and getattr(args, "start_time", None):
         cmd += ["--start-time", str(args.start_time)]
     if trim_source and getattr(args, "end_time", None):
@@ -1484,7 +1493,8 @@ def _run_post_conversion_steps(video_path, args, dv_source=None, scene_source_pa
                                                 scene_source_path=scene_source_path)
     if dv_source and getattr(args, "rife_interpolate", False):
         _reinject_dv_after_rife(dv_source, rife_output_path, args,
-                                frame_count_tolerance=getattr(args, "rife_dv_frame_count_tolerance", 0))
+                                frame_count_tolerance=getattr(args, "rife_dv_frame_count_tolerance", 0),
+                                skip_frame_check=getattr(args, "rife_dv_skip_frame_check", False))
     if rife_output_path:
         current = rife_output_path
     # Restore audio/subtitles onto the file the user will actually keep (the last one in the chain).

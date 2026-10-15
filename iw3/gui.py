@@ -14327,15 +14327,41 @@ class MainFrame(wx.Frame):
         except OSError:
             pass
 
+    def _kill_process_and_children(self, pid):
+        # ADR-372: real user report -- taskkill's own /T (tree-kill) flag, the same
+        # pattern every other Standalone Tool's Cancel button already relies on, left a
+        # child ffprobe.exe alive and running after a real Cancel click here (confirmed
+        # live: ending it by hand in Task Manager worked fine, so it genuinely was this
+        # run's own process, not an unrelated leftover). Rather than trust /T's own
+        # black-box tree walk alone, this explicitly asks Windows (via PowerShell's CIM,
+        # not `wmic` -- Microsoft has been removing that from newer Windows builds) which
+        # processes are DIRECT children of `pid`, kills each one by PID itself, THEN
+        # still kills `pid` with the normal taskkill /T /F as before -- belt and
+        # suspenders, not a replacement, in case a future call site's tree runs deeper
+        # than one level. Never raises; a failed/empty lookup just falls through to the
+        # same taskkill /T /F this already did.
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter \"ParentProcessId={pid}\").ProcessId"],
+                capture_output=True, text=True, timeout=5)
+            for line in (result.stdout or "").splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    subprocess.run(["taskkill", "/PID", line, "/F"], capture_output=True)
+        except Exception:
+            pass
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+
     def on_click_btn_reinject_cancel(self, event):
-        # ADR-368: same taskkill-the-tree pattern every other Standalone Tool's Cancel
-        # button already uses (e.g. on_click_btn_hdr_to_sdr_cancel) -- reinject_hdr_cli.py
-        # itself spawns ffmpeg/ffprobe/dovi_tool as further child processes, so a plain
-        # proc.kill() (parent only) would leave one of those running in the background.
+        # ADR-368/372: kills the whole process tree, not just the parent --
+        # reinject_hdr_cli.py spawns ffmpeg/ffprobe/dovi_tool as further child
+        # processes, so a plain proc.kill() (parent only) would leave one of those
+        # running in the background.
         proc = self.reinject_proc
         if proc is not None and proc.poll() is None:
             self.reinject_cancelled = True
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self._kill_process_and_children(proc.pid)
             self.btn_reinject_cancel.Disable()
 
     def on_exit_reinject_worker(self, result):
@@ -14365,6 +14391,15 @@ class MainFrame(wx.Frame):
                                         already_streamed_live=True)
         if self.reinject_cancelled:
             self._cleanup_after_reinject_cancel()
+            # ADR-371: real user report -- a stage still in its "total unknown" branch
+            # (_update_reinject_progress's Pulse()) at the moment of cancel kept visibly
+            # animating/marching afterward, looking like the job was somehow still
+            # running even though the status/label already said Cancelled. Pulse() puts
+            # the control into an indeterminate-animation mode that only a real
+            # SetValue() call clears -- the success branch below already did this for
+            # its own case; this branch never did.
+            self.gauge_reinject.SetRange(1)
+            self.gauge_reinject.SetValue(0)
             self.lbl_reinject_progress.SetLabel(T("Cancelled"))
             self.SetStatusText(T("HDR reinjection cancelled"))
         elif returncode == 0:
@@ -21553,6 +21588,7 @@ def _self_test_reinject_cancel_button():
     write never runs). Same Cancel pattern every other Standalone Tool already uses
     (see _self_test_rife_standalone_dv_and_cancel) -- a fake process stand-in, no real
     subprocess or GPU involved."""
+    import types
     import iw3.gui as gui_mod
 
     class _FakeResult:
@@ -21601,11 +21637,16 @@ def _self_test_reinject_cancel_button():
                         return None
 
                 killed = []
-                subprocess.run = lambda cmd, **kw: killed.append(cmd)
+
+                def _fake_run(cmd, **kw):
+                    killed.append(cmd)
+                    return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+                subprocess.run = _fake_run
                 frame.reinject_proc = _FakeProc()
                 frame.on_click_btn_reinject_cancel(None)
                 assert frame.reinject_cancelled and not frame.btn_reinject_cancel.IsEnabled()
-                assert killed and killed[0][:2] == ["taskkill", "/PID"] and "4242" in killed[0], killed
+                assert any(c[:2] == ["taskkill", "/PID"] and "4242" in c and "/T" in c for c in killed), killed
                 subprocess.run = orig_run
 
                 # Clicking Cancel again (process already gone, poll() no longer None)
@@ -21630,11 +21671,19 @@ def _self_test_reinject_cancel_button():
                 frame.reinject_start_time = time() - 5
                 with open(output_path, "wb") as f:
                     f.write(b"partial")
+                # ADR-371: real user report -- cancelling while a stage was in its
+                # "total unknown" Pulse() state left the bar visibly animating/marching
+                # forever afterward, even though the status text already said
+                # Cancelled. Put the gauge into that exact state first, so this
+                # reproduces the real bug if the fix regresses.
+                frame.gauge_reinject.Pulse()
                 frame.on_exit_reinject_worker(_FakeResult((-9, "killed")))
                 assert not path.exists(output_path), "partial output must be removed on cancel"
                 assert frame.lbl_reinject_progress.GetLabel() == T("Cancelled")
                 assert not frame.btn_reinject_cancel.IsEnabled()
                 assert frame.btn_reinject_run.IsEnabled()
+                assert frame.gauge_reinject.GetValue() == 0 and frame.gauge_reinject.GetRange() == 1, \
+                    "cancel must take the gauge out of its indeterminate Pulse() animation"
 
                 # A pre-existing file from BEFORE this run started must survive --
                 # cleanup only ever removes what THIS run itself produced.
@@ -21654,6 +21703,61 @@ def _self_test_reinject_cancel_button():
         app.Destroy()
 
     print("_self_test_reinject_cancel_button: PASS")
+
+
+def _self_test_reinject_cancel_kills_discovered_children():
+    """ADR-372: real user report -- after ADR-368's Cancel button shipped, a real click
+    correctly killed the parent process (status said Cancelled) but a child ffprobe.exe
+    was still running afterward in Task Manager -- confirmed live as genuinely tied to
+    that cancelled run, not an unrelated leftover (ending it by hand worked fine).
+    taskkill's own /T (tree-kill) flag is the same pattern every other Standalone Tool's
+    Cancel already relies on, so rather than remove it, `_kill_process_and_children()`
+    now also explicitly asks PowerShell's CIM which processes are direct children of the
+    target PID and kills each one by PID itself first -- belt and suspenders. Mocked
+    subprocess.run -- no real process tree involved."""
+    import types
+    import iw3.gui as gui_mod
+
+    app = wx.App()
+    frame = None
+    orig_run = subprocess.run
+    try:
+        frame = gui_mod.MainFrame()
+        calls = []
+
+        def _fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "powershell":
+                return types.SimpleNamespace(stdout="5555\n", stderr="", returncode=0)
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        subprocess.run = _fake_run
+        frame._kill_process_and_children(4242)
+
+        powershell_calls = [c for c in calls if c[0] == "powershell"]
+        assert powershell_calls and "4242" in powershell_calls[0][-1], powershell_calls
+        taskkill_calls = [c for c in calls if c[0] == "taskkill"]
+        assert any(c[:3] == ["taskkill", "/PID", "5555"] for c in taskkill_calls), \
+            ("the discovered child PID must be killed directly, by itself", taskkill_calls)
+        assert any(c[:3] == ["taskkill", "/PID", "4242"] and "/T" in c for c in taskkill_calls), \
+            ("the parent must still be killed via taskkill /T /F too", taskkill_calls)
+
+        # A failed/empty CIM lookup (e.g. PowerShell itself unavailable) must never
+        # raise -- it just falls through to the same taskkill /T /F as before.
+        calls.clear()
+        subprocess.run = lambda cmd, **kw: (_ for _ in ()).throw(OSError("no powershell")) \
+            if cmd[0] == "powershell" else (calls.append(cmd) or types.SimpleNamespace(
+                stdout="", stderr="", returncode=0))
+        frame._kill_process_and_children(9999)
+        assert any(c[:3] == ["taskkill", "/PID", "9999"] for c in calls), calls
+    finally:
+        subprocess.run = orig_run
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_reinject_cancel_kills_discovered_children: PASS")
 
 
 def _self_test_reinject_live_stderr_streaming():
@@ -33122,6 +33226,7 @@ def _run_self_tests():
         _self_test_sharpen_codec_option,
         _self_test_reinject_progress_bar,
         _self_test_reinject_cancel_button,
+        _self_test_reinject_cancel_kills_discovered_children,
         _self_test_reinject_live_stderr_streaming,
         _self_test_tool_log_clear_buttons,
         _self_test_run_update_git_checkpoint,

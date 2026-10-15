@@ -19,6 +19,10 @@ it matters.
 
 **Added: a Cancel button for Retroactive HDR/DV Reinjection.** This was the one Standalone Tool with no way to stop it short of closing the whole program -- which also threw away the log, since nothing had a chance to save it. Now there's a proper Cancel button, same as every other tool: it stops the run cleanly, deletes the half-finished file, and still shows/saves the log of what happened so far.
 
+**Fixed: that Cancel button could leave the progress bar visibly "still running" afterward.** The status text correctly said Cancelled, but the green bar itself kept marching in place instead of stopping, which looked like the cancel hadn't actually worked. The bar now properly stops the moment you cancel.
+
+**Fixed: Cancel could stop the program but leave the real background video task still running.** Confirmed by a real report: clicking Cancel correctly stopped the main process, but the actual `ffprobe` task it had started kept running in the background, visible in Task Manager, until ended by hand. Cancel now actively hunts down and stops that background task too, not just the main one.
+
 **Improved: that same panel now shows the real reason live, while it's still running -- not just after it finishes.** Previously, if the frame-count check had to fall back to its slower backup method, the log box just sat on a static "Running..." message for however long that took (up to an hour), even though the actual reason was already known internally. Now every status/warning line shows up immediately, in both the tool's own log box and the main Output panel, as it happens.
 
 **Improved: the Retroactive HDR/DV Reinjection panel's progress bar no longer goes silent during the slow backup check.** This tool double-checks frame counts by decoding both files; normally that shows live progress, but when it has to fall back to a slower backup method (which large files tend to trigger), the bar used to show absolutely nothing for however long that took -- looking exactly like it had frozen. It now shows "Source (slower backup check): Xs elapsed" (and the same for Converted) so you can see it's still working, just using the slower method.

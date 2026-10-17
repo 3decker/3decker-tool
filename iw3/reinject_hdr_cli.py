@@ -1199,6 +1199,44 @@ def _expand_rpu_for_rife(source_rpu_path, ops, expected_source_frame_count, dovi
     return expanded_rpu_path
 
 
+_REINJECT_DISK_SPACE_MARGIN = 1.2  # 20% headroom beyond the raw estimate below
+
+
+def _check_reinject_disk_space(out_dir, converted_size, source_size):
+    """Pre-flight free-space check (real incident, 2026-10-16: a 4K Dolby Vision RIFE
+    job ran for over an hour before dying with "No space left on device" partway
+    through the main encode, then the follow-up reinjection run here also failed --
+    it had nothing left to extract from). This tool's own two call sites
+    (_run_strict/_run_with_rife_manifest) each write:
+      - out_dir (next to --output): a full working copy of --converted (tmp_output)
+        PLUS the final remuxed file (<tmp_output>.hdr_inject<ext>) -- both exist at
+        once briefly, so budget 2x converted_size there.
+      - the system temp drive (tempfile.gettempdir() -- NOT necessarily the same
+        drive as --output): the extracted source HEVC (~source_size) plus two more
+        converted-size copies while preparing/injecting the HEVC stream
+        (_iw3_out.hevc, _iw3_out_dv.hevc) -- budget source_size + 2x converted_size
+        there.
+    Returns an error message to print and refuse on, or None if there's enough room.
+    Never raises -- shutil.disk_usage failing (e.g. an exotic filesystem) just skips
+    that one check rather than blocking a run that might otherwise be fine."""
+    for target_dir, needed_bytes, label in (
+        (out_dir, 2 * converted_size, "the output folder"),
+        (tempfile.gettempdir(), source_size + 2 * converted_size, "the system temp folder"),
+    ):
+        needed_bytes = int(needed_bytes * _REINJECT_DISK_SPACE_MARGIN)
+        try:
+            free = shutil.disk_usage(target_dir).free
+        except OSError:
+            continue
+        if free < needed_bytes:
+            return (f"not enough free disk space in {label} ({target_dir}): need about "
+                    f"{needed_bytes / 1e9:.1f} GB, only {free / 1e9:.1f} GB free. This tool "
+                    f"temporarily needs a full working copy of the converted file (and, for the "
+                    f"system temp folder, the source's video stream too) -- free up space and "
+                    f"try again.")
+    return None
+
+
 def _run_with_rife_manifest(args):
     """RIFE-manifest-aware retroactive DV RPU reinjection (ADR-051) -- a
     DISTINCT code path from _run_strict()'s exact-frame-count gate, never a
@@ -1353,9 +1391,15 @@ def _run_with_rife_manifest(args):
 
     out_dir = path.dirname(path.abspath(output)) or "."
     os.makedirs(out_dir, exist_ok=True)
+    converted_size = path.getsize(converted)
+    source_size = path.getsize(source)
+    disk_err = _check_reinject_disk_space(out_dir, converted_size, source_size)
+    if disk_err:
+        print(f"ERROR: {disk_err}", file=sys.stderr)
+        return 1
     tmp_output = path.splitext(output)[0] + ".hdr_inject_tmp" + path.splitext(output)[1]
     print(f"[reinject-hdr] copying --converted to a working copy: {tmp_output}", file=sys.stderr)
-    growth = _GrowthProgress(tmp_output, path.getsize(converted), path.getsize(source), source_frame_count)
+    growth = _GrowthProgress(tmp_output, converted_size, source_size, source_frame_count)
     growth.start()
     shutil.copyfile(converted, tmp_output)
 
@@ -1552,9 +1596,15 @@ def _run_strict(args):
     # file at --output (see docs/ai/CODING_STANDARDS.md CS-IO-001: temp-then-replace). ---
     out_dir = path.dirname(path.abspath(output)) or "."
     os.makedirs(out_dir, exist_ok=True)
+    converted_size = path.getsize(converted)
+    source_size = path.getsize(source)
+    disk_err = _check_reinject_disk_space(out_dir, converted_size, source_size)
+    if disk_err:
+        print(f"ERROR: {disk_err}", file=sys.stderr)
+        return 1
     tmp_output = path.splitext(output)[0] + ".hdr_inject_tmp" + path.splitext(output)[1]
     print(f"[reinject-hdr] copying --converted to a working copy: {tmp_output}", file=sys.stderr)
-    growth = _GrowthProgress(tmp_output, path.getsize(converted), path.getsize(source), src_frames)
+    growth = _GrowthProgress(tmp_output, converted_size, source_size, src_frames)
     growth.start()
     shutil.copyfile(converted, tmp_output)
 
@@ -3107,8 +3157,108 @@ def _self_test_replace_with_retry():
     print("_self_test_replace_with_retry: PASS")
 
 
+def _self_test_reinject_disk_space_check():
+    """Real incident, 2026-10-16: a 4K Dolby Vision RIFE job ran for over an hour
+    before dying with "No space left on device" partway through the main encode,
+    then the follow-up reinjection run here ALSO failed (nothing left to extract
+    from). Tests the new pre-flight free-space check added for that: (1)
+    _check_reinject_disk_space() itself, directly, against the output folder and
+    the (possibly DIFFERENT-drive) system temp folder independently, plus the
+    never-raise-on-disk_usage-failure guarantee; (2) that run() (both the strict
+    and RIFE-manifest dispatch paths) actually calls it and refuses BEFORE any
+    copying/extraction work starts, not after."""
+    import argparse as _argparse
+    import types
+    from unittest.mock import patch
+
+    GB = 1024 ** 3
+
+    def _usage(free_bytes):
+        return types.SimpleNamespace(total=500 * GB, used=0, free=free_bytes)
+
+    with tempfile.TemporaryDirectory(prefix="iw3_reinject_disk_space_selftest_") as tmpdir:
+        out_dir = path.join(tmpdir, "out")
+        os.makedirs(out_dir)
+        temp_dir = path.join(tmpdir, "systemp")
+        os.makedirs(temp_dir)
+
+        # (1a) plenty of room everywhere -> no error
+        with patch("tempfile.gettempdir", return_value=temp_dir), \
+             patch("shutil.disk_usage", return_value=_usage(500 * GB)):
+            assert _check_reinject_disk_space(out_dir, 10 * GB, 10 * GB) is None
+
+        # (1b) the output folder's own drive is short -> refuses, names "output folder"
+        with patch("tempfile.gettempdir", return_value=temp_dir), \
+             patch("shutil.disk_usage",
+                   side_effect=lambda d: _usage(1 * GB) if d == out_dir else _usage(500 * GB)):
+            err = _check_reinject_disk_space(out_dir, 10 * GB, 10 * GB)
+            assert err is not None and "output folder" in err, err
+
+        # (1c) the output folder is fine but the system temp drive is short -> refuses,
+        # names "system temp folder" -- the real lesson here: this tool needs headroom
+        # on a potentially DIFFERENT drive than --output, not just --output's own drive.
+        with patch("tempfile.gettempdir", return_value=temp_dir), \
+             patch("shutil.disk_usage",
+                   side_effect=lambda d: _usage(500 * GB) if d == out_dir else _usage(1 * GB)):
+            err = _check_reinject_disk_space(out_dir, 10 * GB, 10 * GB)
+            assert err is not None and "system temp folder" in err, err
+
+        # (1d) shutil.disk_usage itself failing (e.g. an exotic filesystem) -> must
+        # never raise, just skip that one check rather than blocking a run that
+        # might otherwise be fine.
+        with patch("tempfile.gettempdir", return_value=temp_dir), \
+             patch("shutil.disk_usage", side_effect=OSError("no such device")):
+            assert _check_reinject_disk_space(out_dir, 10 * GB, 10 * GB) is None
+
+        # (2) run() -- both dispatch paths -- must call the check and refuse BEFORE
+        # any copying/extraction, when it reports insufficient space.
+        source = path.join(tmpdir, "source.mkv")
+        converted = path.join(tmpdir, "converted.mkv")
+        output = path.join(out_dir, "output.mkv")
+        for p in (source, converted):
+            with open(p, "wb") as f:
+                f.write(b"0")
+
+        def _args(**extra):
+            ns = _argparse.Namespace(
+                source=source, converted=converted, output=output,
+                start_time=None, end_time=None, frame_count_tolerance=0,
+                allow_longer_converted=False, skip_frame_check=True)
+            for k, v in extra.items():
+                setattr(ns, k, v)
+            return ns
+
+        with patch(f"{__name__}._check_rife_guard", return_value=[]), \
+             patch(f"{__name__}._check_reinject_disk_space",
+                   return_value="not enough free disk space in the output folder (...)") as mock_check, \
+             patch("shutil.copyfile") as mock_copy, \
+             patch(f"{__name__}._extract_hdr_rpu_files") as mock_extract:
+            rc = run(_args())
+            assert rc == 1, rc
+            mock_check.assert_called_once()
+            mock_copy.assert_not_called()
+            mock_extract.assert_not_called()
+
+        manifest_path = path.join(tmpdir, "converted.mkv.rife_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"frames": [{"real": True, "source_index": 0}], "source_frame_count": 1}, f)
+
+        with patch(f"{__name__}._check_reinject_disk_space",
+                   return_value="not enough free disk space in the system temp folder (...)") as mock_check, \
+             patch("shutil.copyfile") as mock_copy, \
+             patch(f"{__name__}._extract_hdr_rpu_files") as mock_extract:
+            rc = run(_args(rife_manifest=manifest_path))
+            assert rc == 1, rc
+            mock_check.assert_called_once()
+            mock_copy.assert_not_called()
+            mock_extract.assert_not_called()
+
+    print("_self_test_reinject_disk_space_check: PASS")
+
+
 def _run_self_tests():
     _self_test_replace_with_retry()
+    _self_test_reinject_disk_space_check()
     _self_test_probe_frames_and_duration()
     _self_test_reinject_progress_streaming()
     _self_test_reinject_frame_progress_streaming()

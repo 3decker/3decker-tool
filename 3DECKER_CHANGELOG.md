@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 15, 2026
+## Latest Update — October 17, 2026
+
+**Added: RIFE Frame Interpolation and Retroactive HDR/Dolby Vision Reinjection now check for enough free disk space before starting, instead of only finding out partway through.** This follows a real report: a 4K Dolby Vision movie ran for over an hour (RIFE roughly doubles the frame count, which makes a much bigger file) before the drive ran out of room and the whole job failed -- and then the follow-up Dolby Vision step failed too, with nothing left to work from at that point. Now, if there isn't enough free space -- on the output drive, or on the system's temp folder, which isn't always the same drive -- 3DECKER refuses right away with a clear message saying how much space is needed, instead of burning an hour (or more) of time first.
+
+## Update — October 15, 2026
 
 **Added: the same "Skip Frame-Count Verification" option, and a Dolby Vision cancel fix, now also apply to RIFE Standalone and the main 2D-to-3D conversion pipeline.** Both were originally only built into the Retroactive HDR/DV Reinjection panel -- now the same fast-but-risky checkbox is available on the Main tab's RIFE section and the RIFE Standalone tool too (same off-by-default behavior). Also found and fixed: RIFE Standalone's own Cancel button had the exact same "doesn't always stop the real background video task" issue that was just fixed for the Reinjection panel.
 

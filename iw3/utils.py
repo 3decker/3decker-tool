@@ -1058,6 +1058,40 @@ def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_pa
 
     base, ext = path.splitext(str(output_path))
     interpolated_path = f"{base}_rife{ext}"
+
+    # Pre-flight free-space check (real incident, 2026-10-16: a 4K Dolby Vision RIFE job
+    # ran for over an hour before dying with "No space left on device" partway through
+    # this exact encode step, after which the follow-up DV reinjection failed too --
+    # nothing left to extract from). RIFE roughly multiplies the frame count (2x/3x/4x,
+    # or source_fps->target_fps for --rife-target-fps), so its output file is roughly
+    # that same multiple of the already-finished output_path's own size (same per-frame
+    # bitrate). A generous margin (1.3x) covers encoder variance. Only ever SKIPS the
+    # check (never blocks a run) if a size/fps can't be read -- RIFE itself will still
+    # surface its own real error if something is genuinely wrong.
+    import shutil
+    try:
+        existing_size = path.getsize(output_path)
+        growth = None
+        if rife_target_fps is not None:
+            try:
+                source_fps = VU.VideoMetadata.from_file(str(output_path)).get_fps()
+                if source_fps:
+                    growth = max(1.0, float(rife_target_fps) / float(source_fps))
+            except Exception:
+                growth = None
+        if growth is None:
+            growth = float(rife_multiplier) if rife_multiplier else 2.0
+        needed = existing_size * growth * 1.3
+        free = shutil.disk_usage(path.dirname(path.abspath(interpolated_path)) or ".").free
+        if free < needed:
+            print(f"[iw3] ERROR: not enough free disk space for RIFE interpolation -- need about "
+                  f"{needed / 1e9:.1f} GB (roughly {growth:.1f}x the current "
+                  f"{existing_size / 1e9:.1f} GB output), only {free / 1e9:.1f} GB free. Free up "
+                  f"space and try again.", file=sys.stderr)
+            return None
+    except OSError:
+        pass
+
     cmd = [sys.executable, "-m", "iw3.rife_cli",
            "-i", str(output_path), "-o", interpolated_path,
            "--rife-model", rife_model,

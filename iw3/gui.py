@@ -28824,6 +28824,80 @@ def _self_test_rife_scene_cut_times_plumbing():
     print("_self_test_rife_scene_cut_times_plumbing: PASS")
 
 
+def _self_test_rife_disk_space_check():
+    """Real incident, 2026-10-16: a 4K Dolby Vision RIFE job ran for over an hour
+    before dying with "No space left on device" partway through this exact encode
+    step. Tests the new pre-flight free-space check in utils._run_rife_interpolation:
+    refuses immediately -- never even launches the subprocess -- when the destination
+    drive doesn't have enough room for RIFE's roughly multiplier-times-bigger output,
+    proceeds normally with plenty of room, never blocks a run just because
+    shutil.disk_usage itself fails, and the --rife-target-fps path falls back
+    gracefully when it can't cheaply read a source fps from a garbage test file."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    def fake_run_cli(cmd, cwd, args, prefix, desc):
+        with open(cmd[cmd.index("-o") + 1], "wb") as f:
+            f.write(b"fake rife output")
+        return 0, "", False
+
+    base = dict(rife_interpolate=True, state={}, rife_model=None,
+                rife_multiplier=None, rife_target_fps=None, rife_gpu=0)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x" * 1000)
+
+        real_run_cli = U._run_cli_with_progress
+        U._run_cli_with_progress = fake_run_cli
+        try:
+            with mock.patch.object(U, "_load_rife_scene_cut_times", lambda p, a: None):
+                # (a) plenty of free space -> proceeds normally
+                with mock.patch("shutil.disk_usage",
+                                return_value=types.SimpleNamespace(total=0, used=0, free=10 ** 12)):
+                    result = U._run_rife_interpolation(src, types.SimpleNamespace(**base))
+                assert result is not None and path.exists(result), result
+                os.remove(result)
+
+                # (b) not enough free space -> refuses immediately, never launches the subprocess
+                called = {"n": 0}
+
+                def counting_run_cli(*a, **k):
+                    called["n"] += 1
+                    return fake_run_cli(*a, **k)
+                U._run_cli_with_progress = counting_run_cli
+                with mock.patch("shutil.disk_usage",
+                                return_value=types.SimpleNamespace(total=0, used=0, free=0)):
+                    result2 = U._run_rife_interpolation(src, types.SimpleNamespace(**base))
+                assert result2 is None, result2
+                assert called["n"] == 0, "must refuse before ever launching RIFE's subprocess"
+                U._run_cli_with_progress = fake_run_cli
+
+                # (c) shutil.disk_usage itself raising -> must never block a run that might
+                # otherwise be fine, just skip that one check
+                with mock.patch("shutil.disk_usage", side_effect=OSError("no such device")):
+                    result3 = U._run_rife_interpolation(src, types.SimpleNamespace(**base))
+                assert result3 is not None and path.exists(result3), result3
+                os.remove(result3)
+
+                # (d) --rife-target-fps path: fps lookup failing on a garbage file must still
+                # fall back gracefully (to the 2x default) rather than crashing.
+                with mock.patch("shutil.disk_usage",
+                                return_value=types.SimpleNamespace(total=0, used=0, free=10 ** 12)):
+                    args_fps = dict(base)
+                    args_fps["rife_target_fps"] = 60
+                    result4 = U._run_rife_interpolation(src, types.SimpleNamespace(**args_fps))
+                assert result4 is not None and path.exists(result4), result4
+                os.remove(result4)
+        finally:
+            U._run_cli_with_progress = real_run_cli
+
+    print("_self_test_rife_disk_space_check: PASS")
+
+
 def _self_test_rife_fp16_processor_checkbox():
     """Main Processor tab RIFE FP16 opt-in (chk_rife_fp16). Deliberately separate from the depth
     model's own chk_fp16 and the Standalone RIFE Tool's chk_rife_standalone_fp16. Checks: the
@@ -33875,6 +33949,7 @@ def _run_self_tests():
         _self_test_every_step_shows_progress,
         _self_test_rife_progress_reaches_job_bar,
         _self_test_rife_scene_cut_times_plumbing,
+        _self_test_rife_disk_space_check,
         _self_test_standalone_tool_titles_share_accent_colour,
         _self_test_pop_feather,
         _self_test_convergence_scene_hold,

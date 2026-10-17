@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 17, 2026
 
+**Fixed: the Retroactive HDR/Dolby Vision Reinjection progress bar could visibly jump backward to "Step 3/8" right as a job finished successfully.** Caught from a real job log: the very last internal step (swapping in the finished file) was being mistaken for the earlier "copying" step happening all over again, which could look alarming right at the end of an otherwise completely successful run. Purely a cosmetic progress-display glitch -- it never affected whether the Dolby Vision data actually got attached correctly. Fixed so that step is never reported again once it's genuinely done.
+
 **Added: RIFE Frame Interpolation and Retroactive HDR/Dolby Vision Reinjection now check for enough free disk space before starting, instead of only finding out partway through.** This follows a real report: a 4K Dolby Vision movie ran for over an hour (RIFE roughly doubles the frame count, which makes a much bigger file) before the drive ran out of room and the whole job failed -- and then the follow-up Dolby Vision step failed too, with nothing left to work from at that point. Now, if there isn't enough free space -- on the output drive, or on the system's temp folder, which isn't always the same drive -- 3DECKER refuses right away with a clear message saying how much space is needed, instead of burning an hour (or more) of time first.
 
 ## Update — October 15, 2026

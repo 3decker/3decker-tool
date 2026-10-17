@@ -318,15 +318,29 @@ class _GrowthProgress(threading.Thread):
         self.rpu_total = max(1, int((source_frames or 0) * _RPU_BYTES_PER_FRAME_ESTIMATE))
         self.work_dir = None
         self._stop_evt = threading.Event()
+        self._copy_done = False
 
     def stop(self):
         self._stop_evt.set()
         self.join(timeout=3)
 
+    def mark_copy_done(self):
+        """Call once the initial shutil.copyfile(converted, tmp_output) has actually
+        finished (the caller does this synchronously, right after that call returns).
+        Real bug fixed by this (2026-10-17): _remux_injected_hevc()'s own final step
+        does os.replace(final_tmp, tmp_output) to swap in the finished remuxed file --
+        a LEGITIMATE, unrelated size change on this same path, long after copying is
+        done. Without this flag, _targets() below kept mapping tmp_output to "copy"
+        for the whole thread's lifetime, so that final swap was misreported as the
+        "copy" stage happening AGAIN right as the job finished -- visibly sending the
+        GUI's progress bar backward to Step 3/8 on a successful run."""
+        self._copy_done = True
+
     def _targets(self):
         stem, ext = path.splitext(self.tmp_output)
-        targets = [(self.tmp_output, "copy", self.converted_size),
-                   (stem + ".hdr_inject" + ext, "remux", self.converted_size)]
+        targets = [(stem + ".hdr_inject" + ext, "remux", self.converted_size)]
+        if not self._copy_done:
+            targets.insert(0, (self.tmp_output, "copy", self.converted_size))
         if self.work_dir:
             targets += [(path.join(self.work_dir, "_hdr_src.hevc"), "extract", self.source_size),
                         (path.join(self.work_dir, "dv_rpu.bin"), "rpu", self.rpu_total),
@@ -1402,6 +1416,7 @@ def _run_with_rife_manifest(args):
     growth = _GrowthProgress(tmp_output, converted_size, source_size, source_frame_count)
     growth.start()
     shutil.copyfile(converted, tmp_output)
+    growth.mark_copy_done()
 
     work_dir = tempfile.mkdtemp(prefix="iw3_reinject_hdr_rife_")
     growth.work_dir = work_dir
@@ -1607,6 +1622,7 @@ def _run_strict(args):
     growth = _GrowthProgress(tmp_output, converted_size, source_size, src_frames)
     growth.start()
     shutil.copyfile(converted, tmp_output)
+    growth.mark_copy_done()
 
     work_dir = tempfile.mkdtemp(prefix="iw3_reinject_hdr_")
     growth.work_dir = work_dir
@@ -3256,9 +3272,51 @@ def _self_test_reinject_disk_space_check():
     print("_self_test_reinject_disk_space_check: PASS")
 
 
+def _self_test_growth_progress_targets_exclude_copy_after_done():
+    """Real bug fixed 2026-10-17: _remux_injected_hevc()'s own final step does
+    os.replace(final_tmp, tmp_output) to swap in the finished remuxed file -- a
+    LEGITIMATE, unrelated size change on tmp_output's own path, long after the
+    initial copy is done. _GrowthProgress used to map tmp_output to the "copy"
+    stage for its ENTIRE lifetime, so that later swap got misreported as "copy"
+    happening again right as a job finished -- visibly sending the GUI's progress
+    bar backward to Step 3/8 on a SUCCESSFUL run. mark_copy_done() must permanently
+    remove tmp_output from the tracked targets once the real copy is done."""
+    with tempfile.TemporaryDirectory(prefix="iw3_growth_progress_selftest_") as tmpdir:
+        tmp_output = path.join(tmpdir, "output.hdr_inject_tmp.mkv")
+        growth = _GrowthProgress(tmp_output, converted_size=100, source_size=50, source_frames=10)
+
+        # before mark_copy_done(): tmp_output IS tracked under "copy"
+        targets_before = growth._targets()
+        copy_targets = [t for t in targets_before if t[1] == "copy"]
+        assert len(copy_targets) == 1 and copy_targets[0][0] == tmp_output, targets_before
+
+        growth.mark_copy_done()
+
+        # after mark_copy_done(): tmp_output is no longer tracked under ANY stage --
+        # a later os.replace() onto that same path must never be reported again.
+        targets_after = growth._targets()
+        assert all(t[1] != "copy" for t in targets_after), targets_after
+        assert all(t[0] != tmp_output for t in targets_after), targets_after
+
+        # "remux" (a genuinely different path) must still be tracked, both before and after
+        remux_before = [t for t in targets_before if t[1] == "remux"]
+        remux_after = [t for t in targets_after if t[1] == "remux"]
+        assert len(remux_before) == 1 and len(remux_after) == 1
+        assert remux_before[0] == remux_after[0]
+
+        # work_dir targets (extract/rpu/prepare/inject) are unaffected by this flag
+        growth.work_dir = tmpdir
+        targets_with_workdir = growth._targets()
+        stages = {t[1] for t in targets_with_workdir}
+        assert stages == {"remux", "extract", "rpu", "prepare", "inject"}, stages
+
+    print("_self_test_growth_progress_targets_exclude_copy_after_done: PASS")
+
+
 def _run_self_tests():
     _self_test_replace_with_retry()
     _self_test_reinject_disk_space_check()
+    _self_test_growth_progress_targets_exclude_copy_after_done()
     _self_test_probe_frames_and_duration()
     _self_test_reinject_progress_streaming()
     _self_test_reinject_frame_progress_streaming()

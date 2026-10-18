@@ -1114,7 +1114,8 @@ def _build_duplicate_ops_from_manifest(manifest):
     return ops, original_position
 
 
-def _expand_rpu_for_rife(source_rpu_path, ops, expected_source_frame_count, dovi_bin, work_dir):
+def _expand_rpu_for_rife(source_rpu_path, ops, expected_source_frame_count, dovi_bin, work_dir,
+                          shortage_tolerance=0):
     """Expands source_rpu_path (an already-extracted RPU, TRIMMED to exactly the
     range that was fed into RIFE -- see docs/ai/domains/DOLBY_VISION.md's
     exact-trim invariant) into a new RPU binary matching RIFE's output frame
@@ -1143,13 +1144,30 @@ def _expand_rpu_for_rife(source_rpu_path, ops, expected_source_frame_count, dovi
     length") -- done here explicitly and earlier so `ops`' indices (built
     against exactly expected_source_frame_count frames) stay valid. Bounded by
     _SOURCE_TRIM_SLOP_MAX_FRAMES -- a larger excess is refused as more likely a
-    genuinely wrong --start-time/--end-time than routine trim slop. A SHORTAGE
-    (fewer real frames than expected) is never auto-corrected -- there is no
-    real metadata to invent for missing frames -- and still refuses.
+    genuinely wrong --start-time/--end-time than routine trim slop.
+
+    A SHORTAGE (fewer real frames than expected) still refuses by default --
+    there is no real metadata to invent for a genuinely missing frame. Real
+    user incident, 2026-10-18: a WEB-DL release's Dolby Vision stream was
+    missing the RPU for exactly one real frame (a known muxing-seam quirk in
+    some streaming rips), and --frame-count-tolerance had no effect on this
+    check at all even though it's the user-facing control for exactly this
+    kind of "I've confirmed a known small boundary discrepancy" situation --
+    the EARLIER decode-based gate in _run_with_rife_manifest() already honors
+    it for a shortage (`src_shortage > tolerance`), but this LATER check never
+    did, so setting it couldn't actually get past this specific wall. Now:
+    a shortage of up to `shortage_tolerance` frames (same value as
+    --frame-count-tolerance, explicitly passed by the caller -- 0 by default,
+    unchanged behavior for any caller that doesn't opt in) is padded at the
+    END by duplicating the LAST real extracted frame's own RPU data that many
+    times -- mirroring the excess case's own already-trusted "the gap is at
+    the end" assumption, just inverted. This is explicitly an approximation
+    for the padded frame(s), not real metadata, and is announced as such. A
+    shortage beyond the tolerance still refuses exactly as before.
 
     Returns the expanded RPU binary's path -- or source_rpu_path itself
-    (trimmed first, if it had excess frames), verbatim, if `ops` is empty (an
-    all-real manifest, nothing to expand)."""
+    (trimmed/padded first, if frame counts didn't match exactly), verbatim, if
+    `ops` is empty (an all-real manifest, nothing to expand)."""
     export_json_path = path.join(work_dir, "_rife_expand_source_export.json")
     subprocess.run(
         [dovi_bin, "export", "-i", str(source_rpu_path), "-d", f"all={export_json_path}"],
@@ -1163,36 +1181,60 @@ def _expand_rpu_for_rife(source_rpu_path, ops, expected_source_frame_count, dovi
     if len(exported_frames) != expected_source_frame_count:
         excess = len(exported_frames) - expected_source_frame_count
         if excess < 0:
-            raise ValueError(
-                f"Extracted source RPU has {len(exported_frames)} real frames, but the RIFE manifest "
-                f"expects {expected_source_frame_count} real source frames -- the extraction found "
-                f"{-excess} FEWER frames than expected, which can never be safely auto-corrected (there "
-                f"is no real metadata to invent for the missing frames). This is very likely a "
-                f"--start-time/--end-time mismatch between this RPU extraction and the original RIFE "
-                f"input. Refusing to proceed.")
-        if excess > _SOURCE_TRIM_SLOP_MAX_FRAMES:
-            raise ValueError(
-                f"Extracted source RPU has {len(exported_frames)} real frames, {excess} MORE than the "
-                f"RIFE manifest's expected {expected_source_frame_count} -- too many to be routine "
-                f"-ss/-to trim slop (this only auto-corrects up to {_SOURCE_TRIM_SLOP_MAX_FRAMES} "
-                f"excess frames -- see docs/ai/AI_DECISIONS.md). This is very likely a genuinely wrong "
-                f"--start-time/--end-time. Refusing to proceed.")
-        print(f"[reinject-hdr] extracted source RPU has {len(exported_frames)} real frames, {excess} "
-              f"more than the RIFE manifest's expected {expected_source_frame_count} -- trimming the "
-              f"extra {excess} frame(s) from the END (routine -ss/-to trim slop, confirmed by real "
-              f"testing to land there, not a genuine mismatch -- see docs/ai/AI_DECISIONS.md).",
-              file=sys.stderr)
-        trim_config = {"remove": [f"{expected_source_frame_count}-{len(exported_frames) - 1}"]}
-        trim_config_path = path.join(work_dir, "_rife_expand_trim_config.json")
-        with open(trim_config_path, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(trim_config, f)
-        trimmed_rpu_path = path.join(work_dir, "_rife_expand_trimmed_source_rpu.bin")
-        subprocess.run(
-            [dovi_bin, "editor", "-i", str(source_rpu_path), "-j", trim_config_path,
-             "-o", trimmed_rpu_path],
-            check=True, capture_output=True,
-        )
-        source_rpu_path = trimmed_rpu_path
+            shortage = -excess
+            if shortage > max(0, int(shortage_tolerance or 0)):
+                raise ValueError(
+                    f"Extracted source RPU has {len(exported_frames)} real frames, but the RIFE "
+                    f"manifest expects {expected_source_frame_count} real source frames -- the "
+                    f"extraction found {shortage} FEWER frame(s) than expected, more than the "
+                    f"allowed Frame Count Tolerance ({shortage_tolerance}). Beyond that tolerance "
+                    f"this can never be safely auto-corrected (there is no real metadata to invent "
+                    f"for the missing frames). This is very likely a --start-time/--end-time "
+                    f"mismatch between this RPU extraction and the original RIFE input. Refusing "
+                    f"to proceed.")
+            print(f"[reinject-hdr] extracted source RPU has {len(exported_frames)} real frames, "
+                  f"{shortage} FEWER than the RIFE manifest's expected {expected_source_frame_count} "
+                  f"-- within the allowed Frame Count Tolerance ({shortage_tolerance}), so padding "
+                  f"the missing {shortage} frame(s) at the END by duplicating the LAST real frame's "
+                  f"own Dolby Vision data (an approximation for those frame(s), not real metadata).",
+                  file=sys.stderr)
+            pad_config = {"duplicate": [{"source": len(exported_frames) - 1,
+                                          "offset": len(exported_frames), "length": shortage}]}
+            pad_config_path = path.join(work_dir, "_rife_expand_pad_config.json")
+            with open(pad_config_path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(pad_config, f)
+            padded_rpu_path = path.join(work_dir, "_rife_expand_padded_source_rpu.bin")
+            subprocess.run(
+                [dovi_bin, "editor", "-i", str(source_rpu_path), "-j", pad_config_path,
+                 "-o", padded_rpu_path],
+                check=True, capture_output=True,
+            )
+            source_rpu_path = padded_rpu_path
+        else:
+            if excess > _SOURCE_TRIM_SLOP_MAX_FRAMES:
+                raise ValueError(
+                    f"Extracted source RPU has {len(exported_frames)} real frames, {excess} MORE "
+                    f"than the RIFE manifest's expected {expected_source_frame_count} -- too many "
+                    f"to be routine -ss/-to trim slop (this only auto-corrects up to "
+                    f"{_SOURCE_TRIM_SLOP_MAX_FRAMES} excess frames -- see "
+                    f"docs/ai/AI_DECISIONS.md). This is very likely a genuinely wrong "
+                    f"--start-time/--end-time. Refusing to proceed.")
+            print(f"[reinject-hdr] extracted source RPU has {len(exported_frames)} real frames, "
+                  f"{excess} more than the RIFE manifest's expected {expected_source_frame_count} "
+                  f"-- trimming the extra {excess} frame(s) from the END (routine -ss/-to trim "
+                  f"slop, confirmed by real testing to land there, not a genuine mismatch -- see "
+                  f"docs/ai/AI_DECISIONS.md).", file=sys.stderr)
+            trim_config = {"remove": [f"{expected_source_frame_count}-{len(exported_frames) - 1}"]}
+            trim_config_path = path.join(work_dir, "_rife_expand_trim_config.json")
+            with open(trim_config_path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(trim_config, f)
+            trimmed_rpu_path = path.join(work_dir, "_rife_expand_trimmed_source_rpu.bin")
+            subprocess.run(
+                [dovi_bin, "editor", "-i", str(source_rpu_path), "-j", trim_config_path,
+                 "-o", trimmed_rpu_path],
+                check=True, capture_output=True,
+            )
+            source_rpu_path = trimmed_rpu_path
 
     if not ops:
         return str(source_rpu_path)
@@ -1452,7 +1494,8 @@ def _run_with_rife_manifest(args):
               file=sys.stderr)
         try:
             expanded_rpu_path = _expand_rpu_for_rife(
-                hdr_rpu_path, ops, source_frame_count, dovi_bin, work_dir)
+                hdr_rpu_path, ops, source_frame_count, dovi_bin, work_dir,
+                shortage_tolerance=max(0, int(getattr(args, "frame_count_tolerance", 0) or 0)))
         except ValueError as e:
             # Real crash fixed 2026-10-18: a genuine, correctly-DETECTED frame-count
             # mismatch here (e.g. a 1-frame extraction shortfall against the RIFE
@@ -2866,6 +2909,64 @@ def _self_test_expand_rpu_for_rife():
                 assert "too many" in str(e), e
             assert all(c.args[0][1] != "editor" for c in mock_run.call_args_list)
 
+        # (f) real fix, 2026-10-18: a SHORTAGE within shortage_tolerance is now padded
+        # at the END by duplicating the LAST real extracted frame that many times,
+        # mirroring the excess case's own trim correction, just inverted. Export finds
+        # 4 real frames, caller expects 5 (shortage of 1), shortage_tolerance=2 ->
+        # must pad, not refuse. Two editor calls expected: one to pad 4->5, one to
+        # apply ops -- the SECOND call must run against the PADDED rpu.
+        editor_calls.clear()
+
+        def _fake_export_4(cmd, **kwargs):
+            export_arg = next(c for c in cmd if str(c).startswith("all="))
+            export_json_path = export_arg.split("=", 1)[1]
+            with open(export_json_path, "w", encoding="utf-8") as f:
+                json.dump([{"id": i} for i in range(4)], f)  # 4 real frames extracted, 1 short
+            return MagicMock(returncode=0)
+
+        def _fake_pad_and_duplicate(cmd, **kwargs):
+            if cmd[1] == "export":
+                return _fake_export_4(cmd, **kwargs)
+            elif cmd[1] == "editor":
+                editor_calls.append(cmd)
+                out_path = cmd[cmd.index("-o") + 1]
+                with open(out_path, "wb") as f:
+                    f.write(f"fake-rpu-stage-{len(editor_calls)}".encode())
+                return MagicMock(returncode=0)
+            raise AssertionError(f"unexpected dovi_tool subcommand: {cmd}")
+
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.side_effect = _fake_pad_and_duplicate
+            ops = [{"source": 3, "offset": 4, "length": 1}]
+            result = _expand_rpu_for_rife(source_rpu, ops, 5, "dovi_tool", work_dir,
+                                           shortage_tolerance=2)
+            assert len(editor_calls) == 2, editor_calls
+            pad_call, dup_call = editor_calls
+            assert pad_call[pad_call.index("-i") + 1] == source_rpu
+            pad_config_path = pad_call[pad_call.index("-j") + 1]
+            with open(pad_config_path, "r", encoding="utf-8") as f:
+                pad_written = json.load(f)
+            # duplicate the LAST real extracted frame (index 3) once, appended at
+            # the end (offset 4) -- pads 4 real frames up to the expected 5.
+            assert pad_written == {"duplicate": [{"source": 3, "offset": 4, "length": 1}]}, pad_written
+            # The ops-based duplicate call must run against the PADDED rpu, not the
+            # original (short) extraction -- so ops' indices (built against exactly
+            # 5 frames) stay valid.
+            assert dup_call[dup_call.index("-i") + 1] != source_rpu
+            assert path.exists(result)
+
+        # (g) a shortage BEYOND shortage_tolerance still refuses exactly as before --
+        # this is a bounded escape hatch, not an unconditional relaxation.
+        editor_calls.clear()
+        with patch.object(subprocess, "run") as mock_run:
+            mock_run.side_effect = _fake_export_4
+            try:
+                _expand_rpu_for_rife(source_rpu, [], 6, "dovi_tool", work_dir, shortage_tolerance=1)
+                raise AssertionError("expected ValueError for shortage beyond shortage_tolerance")
+            except ValueError as e:
+                assert "2" in str(e) and "1" in str(e), e
+            assert all(c.args[0][1] != "editor" for c in mock_run.call_args_list)
+
     print("_self_test_expand_rpu_for_rife: PASS")
 
 
@@ -3001,7 +3102,7 @@ def _self_test_run_with_rife_manifest_dispatch_and_gating():
         # 3) matching frame counts -> reaches extraction/expansion/injection with the right args.
         expand_calls = []
 
-        def _fake_expand(rpu_path, ops, expected_count, dovi_bin, work_dir):
+        def _fake_expand(rpu_path, ops, expected_count, dovi_bin, work_dir, **kwargs):
             expand_calls.append((rpu_path, ops, expected_count))
             return rpu_path
 
@@ -3088,7 +3189,7 @@ def _self_test_skip_frame_check():
 
         expand_calls = []
 
-        def _fake_expand(rpu_path, ops, expected_count, dovi_bin, work_dir):
+        def _fake_expand(rpu_path, ops, expected_count, dovi_bin, work_dir, **kwargs):
             expand_calls.append(expected_count)
             return rpu_path
 

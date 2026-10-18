@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — October 17, 2026
+## Latest Update — October 18, 2026
+
+**Fixed: a real frame-count mismatch during Dolby Vision reinjection (RIFE mode) could crash with a raw error screen instead of a clear message.** Caught from a real crash report: a genuine 1-frame mismatch between the Dolby Vision data and RIFE's own frame count was correctly caught and correctly refused -- no Dolby Vision ever got attached to the wrong frames -- but the refusal showed up as a wall of technical Python error text instead of 3DECKER's normal clear one-line explanation. It still refuses the same way for the same reason; it just does so cleanly now, like every other error in this tool.
+
+**Improved: the "Log Convergence Value per Scene" tooltip now explains why you might only see ONE scene in the log.** This log only knows where a scene ends if Scene Detection (or Automated Scene Batch) is also turned on — without it, there's no real cut information at all, so your whole movie gets logged as one combined average instead of a real per-scene breakdown. That's expected, not a bug, but nothing explained it before. The tooltip now says so directly and tells you to turn on Scene Detection if you want the real shot-by-shot version.
+
+## Update — October 17, 2026
 
 **Fixed: the Retroactive HDR/Dolby Vision Reinjection progress bar could visibly jump backward to "Step 3/8" right as a job finished successfully.** Caught from a real job log: the very last internal step (swapping in the finished file) was being mistaken for the earlier "copying" step happening all over again, which could look alarming right at the end of an otherwise completely successful run. Purely a cosmetic progress-display glitch -- it never affected whether the Dolby Vision data actually got attached correctly. Fixed so that step is never reported again once it's genuinely done.
 

@@ -1652,6 +1652,11 @@ class MainFrame(wx.Frame):
               "just a plain text file you can open afterward.\n"
               "Only does anything for sod_v1 / Face Detect -- constant never varies, so there is nothing "
               "per-scene to log.\n"
+              "Depends on the same real cut signal Hold Steady Per Scene above uses: if Scene Detection "
+              "(or Automated Scene Batch) is OFF, there's no real per-scene cut information at all, so the "
+              "whole movie gets logged as ONE single 'scene' spanning its entire runtime, with one "
+              "time-weighted average value -- not a bug, just nothing to split it on. Turn on Scene "
+              "Detection too if you want an actual shot-by-shot breakdown instead of one combined average.\n"
               "Recommended: on if you want a record of what the Convergence Plane chose; off otherwise."))
 
         self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Pop-Out Limit / Boost"))

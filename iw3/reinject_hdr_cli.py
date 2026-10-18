@@ -1450,8 +1450,26 @@ def _run_with_rife_manifest(args):
         print(f"[reinject-hdr] expanding source RPU ({source_frame_count} real frames) to match "
               f"RIFE's output ({output_frame_count} frames) via {len(ops)} duplicate operation(s)...",
               file=sys.stderr)
-        expanded_rpu_path = _expand_rpu_for_rife(
-            hdr_rpu_path, ops, source_frame_count, dovi_bin, work_dir)
+        try:
+            expanded_rpu_path = _expand_rpu_for_rife(
+                hdr_rpu_path, ops, source_frame_count, dovi_bin, work_dir)
+        except ValueError as e:
+            # Real crash fixed 2026-10-18: a genuine, correctly-DETECTED frame-count
+            # mismatch here (e.g. a 1-frame extraction shortfall against the RIFE
+            # manifest's own expected count -- most often from using
+            # --skip-frame-check, which removes the EARLIER, cleaner decode-based
+            # cross-check that would normally have caught this before any extraction
+            # work even started) used to propagate as an unhandled ValueError -- a raw
+            # Python traceback instead of this file's own "ERROR: ...\nreturn 1"
+            # convention used for every other refusal here. The check itself was
+            # always correct and safe (never silently attached DV to the wrong
+            # frames); only how it surfaced was broken.
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: dovi_tool failed while expanding the RPU: "
+                  f"{e.stderr.decode(errors='replace').strip() if e.stderr else e}", file=sys.stderr)
+            return 1
 
         print("[reinject-hdr] injecting expanded RPU into a copy of --converted...", file=sys.stderr)
         injected_hevc, fps_str, reason = _inject_hdr_rpu(
@@ -3313,10 +3331,75 @@ def _self_test_growth_progress_targets_exclude_copy_after_done():
     print("_self_test_growth_progress_targets_exclude_copy_after_done: PASS")
 
 
+def _self_test_rife_manifest_expand_failure_handled_gracefully():
+    """Real user-reported crash, 2026-10-18: a genuine, correctly-detected 1-frame
+    extraction shortfall (--skip-frame-check skips the earlier decode-based cross-
+    check that would normally catch this before any extraction work starts) made
+    _expand_rpu_for_rife() raise ValueError, which _run_with_rife_manifest() never
+    caught -- an unhandled Python traceback instead of this file's own
+    "ERROR: ...\\nreturn 1" convention used for every other refusal. The check was
+    always correct and safe (DV was never silently attached to the wrong frames);
+    only how it surfaced was broken. Confirms run() now returns 1 with a clean
+    ERROR message for both a ValueError and a subprocess.CalledProcessError from
+    that call, instead of letting either propagate."""
+    import argparse as _argparse
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="iw3_reinject_rife_expand_crash_selftest_") as tmpdir:
+        source = path.join(tmpdir, "source.mkv")
+        converted = path.join(tmpdir, "converted_rife.mkv")
+        output = path.join(tmpdir, "output.mkv")
+        manifest_path = path.join(tmpdir, "converted_rife.mkv.rife_manifest.json")
+        for p in (source, converted):
+            with open(p, "wb") as f:
+                f.write(b"0")
+        manifest = {
+            "frames": [{"real": True, "source_index": 0}, {"real": True, "source_index": 1}],
+            "source_frame_count": 2,
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+
+        def _args():
+            return _argparse.Namespace(
+                source=source, converted=converted, output=output, rife_manifest=manifest_path,
+                start_time=None, end_time=None, frame_count_tolerance=0, skip_frame_check=True)
+
+        def _fake_extract(input_path, work_dir, shim_args, rpu_path, h10p_path):
+            with open(rpu_path, "wb") as f:
+                f.write(b"rpu")
+            return True, True, []
+
+        # (a) ValueError (the real reported case: a genuine frame-count mismatch
+        # detected deep inside RPU expansion) -> clean "ERROR: ...", return 1, not a
+        # raised exception.
+        with patch(f"{__name__}._check_reinject_disk_space", return_value=None), \
+             patch(f"{__name__}._extract_hdr_rpu_files", side_effect=_fake_extract), \
+             patch(f"{__name__}._find_dovi_tool", return_value="dovi_tool"), \
+             patch(f"{__name__}._expand_rpu_for_rife",
+                   side_effect=ValueError("Extracted source RPU has 1 real frames, but the RIFE "
+                                           "manifest expects 2 real source frames")):
+            rc = run(_args())
+            assert rc == 1, rc
+
+        # (b) subprocess.CalledProcessError (dovi_tool itself failing, e.g. a corrupt
+        # extracted RPU) -> same clean handling, stderr text surfaced.
+        with patch(f"{__name__}._check_reinject_disk_space", return_value=None), \
+             patch(f"{__name__}._extract_hdr_rpu_files", side_effect=_fake_extract), \
+             patch(f"{__name__}._find_dovi_tool", return_value="dovi_tool"), \
+             patch(f"{__name__}._expand_rpu_for_rife",
+                   side_effect=subprocess.CalledProcessError(1, ["dovi_tool"], stderr=b"dovi_tool: bad RPU")):
+            rc = run(_args())
+            assert rc == 1, rc
+
+    print("_self_test_rife_manifest_expand_failure_handled_gracefully: PASS")
+
+
 def _run_self_tests():
     _self_test_replace_with_retry()
     _self_test_reinject_disk_space_check()
     _self_test_growth_progress_targets_exclude_copy_after_done()
+    _self_test_rife_manifest_expand_failure_handled_gracefully()
     _self_test_probe_frames_and_duration()
     _self_test_reinject_progress_streaming()
     _self_test_reinject_frame_progress_streaming()

@@ -13,7 +13,9 @@ it matters.
 
 ---
 
-## Latest Update — October 18, 2026
+## Latest Update — October 19, 2026
+
+**Added: "Hybrid Frame Rate" for RIFE Interpolation — the same technique Avatar: The Way of Water uses for its own high-frame-rate release.** New checkbox next to RIFE Interpolate on the main Processor tab. Normally, RIFE interpolation creates genuinely new in-between frames for the *entire* movie. With Hybrid Frame Rate on, 3DECKER automatically figures out which scenes are actually fast-moving (action) and which are calm (dialogue, static shots) — only the busy scenes get real new frames; calm scenes instead show each real frame twice in a row for a lower, more film-like motion feel. The finished file itself still plays back at one constant frame rate the whole way through, so it's just as compatible with any player as a normal RIFE output — nothing about playback compatibility changes. A new "Hybrid: Action %" field controls roughly how much of the movie's *runtime* (not scene count) gets real interpolation, biased toward the busiest scenes first — 50% by default. It finds scene boundaries entirely on its own and is completely independent of Scene Detection/Automated Scene Batch — turning it on does *not* change how your regular conversion behaves, and you don't need to enable either of those just to use this. Off by default.
 
 **Added: "Frame Count Tolerance" can now rescue a Dolby Vision reinjection (RIFE mode) that's missing data for just a frame or two, instead of only refusing.** Some streaming/WEB-DL releases genuinely have a tiny gap in their Dolby Vision data -- a frame or two with no metadata at all, usually from how the file was originally muxed. Frame Count Tolerance already let you allow a small mismatch elsewhere, but this one specific case ignored it completely and always refused outright. Now, within whatever tolerance you've set, a small gap like this gets filled in by reusing the nearest real frame's Dolby Vision data for the missing one(s) -- a reasonable stand-in, not real data for that exact frame, and always clearly announced when it happens. A gap bigger than your tolerance still refuses, exactly as before.
 

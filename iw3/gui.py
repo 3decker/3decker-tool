@@ -4266,6 +4266,55 @@ class MainFrame(wx.Frame):
               "Recommended: leave it off (FP32) unless speed matters more to you than the unreviewed "
               "quality tradeoff."))
 
+        # ADR-384: Avatar: The Way of Water's own "hybrid frame rate" technique -- the
+        # output file stays one constant frame rate throughout, but only the movie's
+        # own highest-motion scenes get real new RIFE frames; calmer/dialogue scenes
+        # duplicate the real frame instead (an effective lower cadence). Fully
+        # automatic (decker's own explicit choice, 2026-10-19) -- scores each scene's
+        # motion from an extra scan, no manual scene list.
+        self.chk_rife_hybrid_framerate = wx.CheckBox(
+            self.grp_postprocess, label=T("Hybrid Frame Rate"), name="chk_rife_hybrid_framerate")
+        self.chk_rife_hybrid_framerate.SetValue(False)
+        self.chk_rife_hybrid_framerate.SetToolTip(
+            T("What it's for: Avatar: The Way of Water's own technique for high-frame-rate playback -- "
+              "the finished file stays ONE constant frame rate throughout (fully compatible with any "
+              "player, same as RIFE normally produces), but only the movie's own highest-motion scenes "
+              "get real new interpolated frames. Calmer scenes (dialogue, static shots) duplicate the "
+              "real frame instead, giving them an effective lower motion cadence -- closer to film's "
+              "familiar look -- without the file itself ever changing frame rate.\n"
+              "How it decides which scenes are which: fully automatic. This finds where scenes begin "
+              "and end on its own -- the same real scene-boundary scan Scene Detection uses, run "
+              "automatically by this feature when needed -- then measures how much each scene actually "
+              "moves (frame-to-frame pixel change, not a full optical-flow analysis), and interpolates "
+              "the busiest scenes first (by their own runtime) until roughly the percentage set below "
+              "is reached -- see the field next to this checkbox.\n"
+              "Independent of Scene Detection/Automated Scene Batch: does NOT require either to be "
+              "turned on, and turning this on does NOT change how Scene Detection/Flicker Reduction/"
+              "Convergence behave in your normal conversion -- RIFE (and this feature) only ever runs "
+              "AFTER your conversion has already fully finished, against the finished file, so nothing "
+              "here can affect how that file was converted. If Scene Detection happens to have already "
+              "scanned this exact source for some other reason, this reuses that for free; otherwise it "
+              "runs its own scan the first time, then remembers it. With fewer than 2 real scenes found, "
+              "this has no effect.\n"
+              "Con: the scene scan (first time only) plus the motion scan add real time on top of an "
+              "already-slow RIFE pass, and the automatic action-vs-calm split is a judgment call that "
+              "may not match every scene's real artistic intent.\n"
+              "Recommended: off (default) for RIFE's normal, fully-interpolated behavior. Try it if "
+              "you specifically want this hybrid look."))
+        self.lbl_rife_hybrid_percent = wx.StaticText(self.grp_postprocess, label=T("Hybrid: Action %"))
+        self.txt_rife_hybrid_percent = EditableComboBox(
+            self.grp_postprocess, choices=["30", "50", "70"], name="txt_rife_hybrid_percent")
+        self.txt_rife_hybrid_percent.SetValue("50")
+        self.txt_rife_hybrid_percent.SetToolTip(
+            T("Only affects Hybrid Frame Rate above. Roughly what percentage of the movie's total "
+              "RUNTIME (not scene count) gets real RIFE interpolation, biased toward the highest-motion "
+              "scenes first -- the calmest scenes making up the rest are duplicated instead.\n"
+              "Values: 100 interpolates everything (same as leaving Hybrid Frame Rate off). 0 duplicates "
+              "everything (no real interpolation anywhere -- a real, if unusual, choice). 50 (default) "
+              "is an even split by runtime.\n"
+              "Recommended: 50 as a starting point -- raise it if too much looks duplicated/static, "
+              "lower it if you want the calmer, lower-cadence look across more of the movie."))
+
         # Same deliberate escape hatch as the standalone Retroactive HDR/DV Reinjection
         # panel's own txt_reinject_frame_count_tolerance (see its construction above) --
         # only ever reaches the main pipeline's own _reinject_dv_after_rife() call (see
@@ -4323,6 +4372,7 @@ class MainFrame(wx.Frame):
 
         self.cbo_rife_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_rife_mode)
         self.chk_rife_interpolate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
+        self.chk_rife_hybrid_framerate.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_rife_interpolate)
         self.update_rife_interpolate()
 
         # ADR-172: automatic counterpart to the standalone "Restore All Audio
@@ -4699,6 +4749,11 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_rife_gpu, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_gpu, (j, 1), flag=wx.EXPAND)
         layout.Add(self.chk_rife_fp16, (j, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_rife_hybrid_framerate, (j := j + 1, 0), (0, 2),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.lbl_rife_hybrid_percent, (j := j + 1, 0),
+                  flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.txt_rife_hybrid_percent, (j, 1), flag=wx.EXPAND)
 
         layout.Add((0, 6), (j := j + 1, 0))
         layout.Add(wx.StaticLine(self.grp_postprocess), (j := j + 1, 0), (0, 3), flag=wx.EXPAND)
@@ -10908,6 +10963,10 @@ class MainFrame(wx.Frame):
         self.cbo_rife_mode.Enable(enabled)
         self.cbo_rife_gpu.Enable(enabled)
         self.chk_rife_fp16.Enable(enabled)
+        self.chk_rife_hybrid_framerate.Enable(enabled)
+        hybrid_percent_enabled = enabled and self.chk_rife_hybrid_framerate.GetValue()
+        self.lbl_rife_hybrid_percent.Enable(hybrid_percent_enabled)
+        self.txt_rife_hybrid_percent.Enable(hybrid_percent_enabled)
         self.txt_rife_target_fps.Enable(enabled and self.cbo_rife_mode.GetValue() == "Custom FPS...")
         # Only usable once Preserve Dolby Vision is also checked -- this field only ever
         # reaches the DV re-attach step _reinject_dv_after_rife() runs after RIFE.
@@ -11279,6 +11338,9 @@ class MainFrame(wx.Frame):
                 T("`Auto EMA by Scene Length` requires either `Scene Detection` or "
                   "`Automated Scene Batch` to be turned on -- there are no scene "
                   "boundaries to key off of otherwise."))
+            return None
+        if not validate_number(self.txt_rife_hybrid_percent.GetValue(), 0, 100):
+            self.show_validation_error_message(T("Hybrid: Action %"), 0, 100)
             return None
         if self.chk_depth_blend.GetValue() and not validate_number(self.cbo_depth_blend_strength.GetValue(), 0.0, 1.0):
             self.show_validation_error_message(T("Dual-Pass Depth Blend"), 0.0, 1.0)
@@ -11697,6 +11759,8 @@ class MainFrame(wx.Frame):
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
             rife_fp16=self.chk_rife_fp16.GetValue(),
+            rife_hybrid_framerate=self.chk_rife_hybrid_framerate.GetValue(),
+            rife_hybrid_percent=float(self.txt_rife_hybrid_percent.GetValue() or "50"),
             rife_dv_frame_count_tolerance=int(self.txt_rife_dv_frame_count_tolerance.GetValue() or "0"),
             rife_dv_skip_frame_check=self.chk_rife_dv_skip_frame_check.GetValue(),
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
@@ -13061,6 +13125,8 @@ class MainFrame(wx.Frame):
 
         self.chk_rife_interpolate.SetValue(bool(args.rife_interpolate))
         self.chk_rife_fp16.SetValue(bool(getattr(args, "rife_fp16", False)))
+        self.chk_rife_hybrid_framerate.SetValue(bool(getattr(args, "rife_hybrid_framerate", False)))
+        _apply_combo_value(self.txt_rife_hybrid_percent, getattr(args, "rife_hybrid_percent", 50))
         _apply_combo_value(self.txt_rife_dv_frame_count_tolerance,
                            getattr(args, "rife_dv_frame_count_tolerance", 5))
         self.chk_rife_dv_skip_frame_check.SetValue(bool(getattr(args, "rife_dv_skip_frame_check", False)))
@@ -28921,6 +28987,264 @@ def _self_test_rife_disk_space_check():
     print("_self_test_rife_disk_space_check: PASS")
 
 
+def _self_test_ensure_hybrid_scene_cut_times():
+    """ADR-384 real design correction, 2026-10-19: Hybrid Frame Rate's own
+    scene-boundary lookup (utils._ensure_hybrid_scene_cut_times) -- UNLIKE
+    _load_rife_scene_cut_times (cut protection, never scans), this one SCANS for
+    boundaries itself when no cache exists, since decker pointed out the
+    original "requires Scene Detection/Scene Batch" gate forced an unwanted
+    coupling onto a pipeline that has never wanted Scene Detection otherwise.
+    Confirms: (a) an existing cache is reused for free, SBD.detect_boundary
+    never called; (b) no cache -> a real scan runs, gets saved to that SAME
+    cache (so a second call -- or Scene Detection itself, later -- gets a free
+    hit), and the result is correctly converted to seconds; (c) no real source
+    path at all -> None, no calls, no crash; (d) the scan itself raising ->
+    None, never crashes a RIFE run."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+    from . import scene_batch
+
+    base = types.SimpleNamespace(
+        max_fps=None, start_time=None, end_time=None, hwaccel=None,
+        disable_software_fallback=False, scene_cache_file=None, scene_cache_dir=None,
+        state={"device": "cpu", "stop_event": None, "suspend_event": None, "tqdm_fn": None})
+    fake_metadata = types.SimpleNamespace(get_fps=lambda: 24.0)
+    SCAN_FPS = 12.0  # arbitrary fixed value -- only needs to be consistent within this test
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x" * 1000)
+
+        # (a) cache hit -> reused for free, no scan.
+        with mock.patch.object(U.VU.VideoMetadata, "from_file", return_value=fake_metadata), \
+             mock.patch.object(scene_batch, "resolve_scene_scan_fps", return_value=SCAN_FPS), \
+             mock.patch.object(U, "try_load_scene_cache", return_value={10, 20}), \
+             mock.patch.object(U.SBD, "detect_boundary") as mock_scan, \
+             mock.patch.object(U, "save_scene_cache") as mock_save:
+            result = U._ensure_hybrid_scene_cut_times(src, base)
+        mock_scan.assert_not_called()
+        mock_save.assert_not_called()
+        assert result == sorted(p / SCAN_FPS for p in (10, 20)), result
+
+        # (b) cache miss -> scans, saves (to that SAME cache -- a later Scene
+        # Detection run or a second Hybrid Frame Rate run gets a free hit), and
+        # returns the scan's own result.
+        with mock.patch.object(U.VU.VideoMetadata, "from_file", return_value=fake_metadata), \
+             mock.patch.object(scene_batch, "resolve_scene_scan_fps", return_value=SCAN_FPS), \
+             mock.patch.object(U, "try_load_scene_cache", return_value=None), \
+             mock.patch.object(U.SBD, "detect_boundary", return_value={5, 15}) as mock_scan, \
+             mock.patch.object(U, "save_scene_cache") as mock_save:
+            result2 = U._ensure_hybrid_scene_cut_times(src, base)
+        mock_scan.assert_called_once()
+        mock_save.assert_called_once()
+        saved_args = mock_save.call_args[0]
+        assert saved_args[0] == src and saved_args[1] == {5, 15}, saved_args
+        assert result2 == sorted(p / SCAN_FPS for p in (5, 15)), result2
+
+        # (c) no real source path -> None, nothing attempted at all.
+        with mock.patch.object(U, "try_load_scene_cache") as mock_load, \
+             mock.patch.object(U.SBD, "detect_boundary") as mock_scan:
+            assert U._ensure_hybrid_scene_cut_times(None, base) is None
+            assert U._ensure_hybrid_scene_cut_times(path.join(tmp, "missing.mkv"), base) is None
+        mock_load.assert_not_called()
+        mock_scan.assert_not_called()
+
+        # (d) the scan itself raising -> None, never crashes.
+        with mock.patch.object(U.VU.VideoMetadata, "from_file", return_value=fake_metadata), \
+             mock.patch.object(scene_batch, "resolve_scene_scan_fps", return_value=SCAN_FPS), \
+             mock.patch.object(U, "try_load_scene_cache", return_value=None), \
+             mock.patch.object(U.SBD, "detect_boundary", side_effect=RuntimeError("decode failed")):
+            assert U._ensure_hybrid_scene_cut_times(src, base) is None
+
+    print("_self_test_ensure_hybrid_scene_cut_times: PASS")
+
+
+def _self_test_rife_hybrid_framerate_plumbing():
+    """ADR-384 "Hybrid Frame Rate": tests utils._run_rife_interpolation's own
+    plumbing for this feature -- iw3.rife_hybrid's own motion-scan/decision logic
+    is tested directly in iw3/rife_hybrid.py's own test suite, not re-tested here.
+    Confirms: (a) off by default -- rife_hybrid.compute_hybrid_exclude_ranges is
+    never even called, no --hybrid-exclude-ranges-file in the command, byte-for-
+    byte unaffected; (b) on, with real exclude ranges returned -- the sidecar JSON
+    is written with exactly those ranges, --hybrid-exclude-ranges-file points at
+    it, and it's cleaned up (removed) once the run finishes; (c) on, but nothing
+    to exclude (empty list, e.g. fewer than 2 real scenes) -- no flag added, no
+    leftover sidecar file, same as if the feature had found nothing to do."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+    from . import rife_hybrid
+
+    captured = {}
+
+    def fake_run_cli(cmd, cwd, args, prefix, desc):
+        captured["cmd"] = list(cmd)
+        with open(cmd[cmd.index("-o") + 1], "wb") as f:
+            f.write(b"fake rife output")
+        return 0, "", False
+
+    base = dict(rife_interpolate=True, state={}, rife_model=None,
+                rife_multiplier=None, rife_target_fps=None, rife_gpu=0,
+                rife_hybrid_framerate=False, rife_hybrid_percent=50)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x" * 1000)
+
+        real_run_cli = U._run_cli_with_progress
+        U._run_cli_with_progress = fake_run_cli
+        try:
+            with mock.patch.object(U, "_load_rife_scene_cut_times", lambda p, a: None), \
+                 mock.patch("shutil.disk_usage",
+                            return_value=types.SimpleNamespace(total=0, used=0, free=10 ** 12)):
+                # (a) off by default -> compute_hybrid_exclude_ranges never called,
+                # no new flag in the command.
+                captured.clear()
+                with mock.patch.object(rife_hybrid, "compute_hybrid_exclude_ranges") as mock_compute:
+                    result = U._run_rife_interpolation(src, types.SimpleNamespace(**base))
+                assert result is not None and path.exists(result), result
+                mock_compute.assert_not_called()
+                assert "--hybrid-exclude-ranges-file" not in captured["cmd"], captured["cmd"]
+                os.remove(result)
+
+                # (b) on, with real exclude ranges -> sidecar written with exactly
+                # those ranges, flag present, file cleaned up afterward.
+                captured.clear()
+                args_on = dict(base, rife_hybrid_framerate=True)
+                with mock.patch.object(rife_hybrid, "compute_hybrid_exclude_ranges",
+                                        return_value=[[1.5, 4.0], [10.0, 12.0]]) as mock_compute:
+                    result2 = U._run_rife_interpolation(src, types.SimpleNamespace(**args_on))
+                assert result2 is not None and path.exists(result2), result2
+                mock_compute.assert_called_once()
+                call_args = mock_compute.call_args[0]
+                assert call_args[0] == src, call_args  # output_path forwarded, not --input
+                assert "--hybrid-exclude-ranges-file" in captured["cmd"], captured["cmd"]
+                ranges_path = captured["cmd"][captured["cmd"].index("--hybrid-exclude-ranges-file") + 1]
+                assert not path.exists(ranges_path), "sidecar must be cleaned up once the run finished"
+                os.remove(result2)
+
+                # (c) on, but nothing to exclude -> no flag added, nothing left behind.
+                captured.clear()
+                with mock.patch.object(rife_hybrid, "compute_hybrid_exclude_ranges", return_value=[]):
+                    result3 = U._run_rife_interpolation(src, types.SimpleNamespace(**args_on))
+                assert result3 is not None and path.exists(result3), result3
+                assert "--hybrid-exclude-ranges-file" not in captured["cmd"], captured["cmd"]
+                os.remove(result3)
+        finally:
+            U._run_cli_with_progress = real_run_cli
+
+    print("_self_test_rife_hybrid_framerate_plumbing: PASS")
+
+
+def _self_test_rife_hybrid_framerate_gui():
+    """ADR-384 "Hybrid Frame Rate" GUI: checkbox + "Hybrid: Action %" field exist
+    under grp_postprocess, both off/default (False / "50"), gated the same way as
+    chk_rife_fp16 (enabled only while RIFE Interpolate is on), with the percent
+    field ADDITIONALLY requiring the Hybrid checkbox itself to be checked (not
+    just RIFE Interpolate). Drives the real parse_args()/apply_parsed_args_to_gui()
+    round-trip, including an old-preset Namespace with neither new attribute at
+    all defaulting safely (off / "50").
+
+    Real design correction, 2026-10-19 (direct decker follow-up): Hybrid Frame
+    Rate used to REQUIRE Scene Detection or Automated Scene Batch to also be
+    checked (a gate, rife_hybrid_framerate_gate_ok(), mirroring Auto EMA by Scene
+    Length's own precedent) -- removed entirely once decker pointed out this
+    forced an unwanted coupling: turning on Scene Detection for a conversion that
+    never otherwise used it also changes Flicker Reduction's own behavior at
+    cuts. Hybrid Frame Rate now finds scene boundaries itself (see
+    utils._ensure_hybrid_scene_cut_times), so it works standalone with BOTH
+    Scene Detection and Scene Batch left off -- confirmed directly below, not
+    assumed.
+
+    Deliberately does NOT call parse_args() for the out-of-range-percent
+    refusal case -- same reason _self_test_scene_auto_ema_regular_gate avoids
+    parse_args() for its own refusal case: a real refusal pops a real, unmocked
+    wx.MessageBox (show_validation_error_message), which blocks forever in a
+    self-test context (KI-014). That case is verified directly against the
+    real validate_number() helper parse_args() itself calls, instead."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.chk_rife_hybrid_framerate.GetParent() is frame.grp_postprocess
+        assert frame.chk_rife_hybrid_framerate.GetValue() is False
+        assert frame.txt_rife_hybrid_percent.GetValue() == "50"
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        # Enable gating: checkbox follows RIFE Interpolate; percent field ALSO
+        # needs the Hybrid checkbox itself checked.
+        frame.chk_rife_interpolate.SetValue(False)
+        frame.update_rife_interpolate()
+        assert not frame.chk_rife_hybrid_framerate.IsEnabled()
+        assert not frame.txt_rife_hybrid_percent.IsEnabled()
+
+        frame.chk_rife_interpolate.SetValue(True)
+        frame.update_rife_interpolate()
+        assert frame.chk_rife_hybrid_framerate.IsEnabled()
+        assert not frame.txt_rife_hybrid_percent.IsEnabled(), \
+            "percent field must stay disabled until Hybrid Frame Rate itself is checked"
+
+        frame.chk_rife_hybrid_framerate.SetValue(True)
+        frame.update_rife_interpolate()
+        assert frame.txt_rife_hybrid_percent.IsEnabled()
+
+        # parse_args()/apply_parsed_args_to_gui() round-trip -- Scene Detection AND
+        # Scene Batch both left off, confirming this feature genuinely no longer
+        # requires either (the whole point of the fix).
+        frame.chk_scene_detect.SetValue(False)
+        frame.chk_scene_batch.SetValue(False)
+        args_on = frame.parse_args(skip_set_state=True)
+        assert args_on is not None, \
+            "Hybrid Frame Rate must not refuse just because Scene Detection/Scene Batch are off"
+        assert args_on.rife_hybrid_framerate is True
+        assert args_on.rife_hybrid_percent == 50.0
+
+        frame.txt_rife_hybrid_percent.SetValue("30")
+        args_30 = frame.parse_args(skip_set_state=True)
+        assert args_30.rife_hybrid_percent == 30.0
+
+        frame.chk_rife_hybrid_framerate.SetValue(False)
+        frame.txt_rife_hybrid_percent.SetValue("50")
+        frame.apply_parsed_args_to_gui(args_30)
+        assert frame.chk_rife_hybrid_framerate.GetValue() is True
+        assert frame.txt_rife_hybrid_percent.GetValue() == "30"
+
+        # Old preset/config with neither new attribute at all -> defaults safely
+        # (off / "50"), never crashes.
+        del args_30.rife_hybrid_framerate
+        del args_30.rife_hybrid_percent
+        frame.chk_rife_hybrid_framerate.SetValue(True)
+        frame.txt_rife_hybrid_percent.SetValue("30")
+        frame.apply_parsed_args_to_gui(args_30)
+        assert frame.chk_rife_hybrid_framerate.GetValue() is False, \
+            "old config without rife_hybrid_framerate must default to off"
+        assert frame.txt_rife_hybrid_percent.GetValue() == "50", \
+            "old config without rife_hybrid_percent must default to 50"
+
+        # Validation: out-of-range percent fails the same validate_number() check
+        # parse_args() itself runs -- verified directly, not via parse_args()
+        # (see this test's own docstring for why).
+        assert not validate_number("150", 0, 100), "out-of-range percent must fail validation"
+        assert validate_number("50", 0, 100)
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_rife_hybrid_framerate_gui: PASS")
+
+
 def _self_test_rife_fp16_processor_checkbox():
     """Main Processor tab RIFE FP16 opt-in (chk_rife_fp16). Deliberately separate from the depth
     model's own chk_fp16 and the Standalone RIFE Tool's chk_rife_standalone_fp16. Checks: the
@@ -33973,6 +34297,9 @@ def _run_self_tests():
         _self_test_rife_progress_reaches_job_bar,
         _self_test_rife_scene_cut_times_plumbing,
         _self_test_rife_disk_space_check,
+        _self_test_ensure_hybrid_scene_cut_times,
+        _self_test_rife_hybrid_framerate_plumbing,
+        _self_test_rife_hybrid_framerate_gui,
         _self_test_standalone_tool_titles_share_accent_colour,
         _self_test_pop_feather,
         _self_test_convergence_scene_hold,

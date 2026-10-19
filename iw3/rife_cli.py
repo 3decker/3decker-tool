@@ -130,6 +130,22 @@ def create_parser():
                               "source this job converted -- not intended to be set by hand. Omitted "
                               "(the default): unchanged prior behavior, every real-frame pair is "
                               "interpolated unconditionally.")
+    parser.add_argument("--hybrid-exclude-ranges-file", type=str, default=None,
+                         help="path to a JSON file containing a list of [start_sec, end_sec] time "
+                              "ranges (relative to THIS video's own start) to exclude from real "
+                              "interpolation -- every real-frame pair inside one of these ranges is "
+                              "duplicated (nearest real frame, same mechanism as scene-cut "
+                              "protection) instead of flow-warp blended, exactly like Avatar: The Way "
+                              "of Water's own 'hybrid frame rate' technique (calm scenes play back at "
+                              "an effective lower cadence via frame duplication, action scenes get "
+                              "real new frames), while the output file itself stays one constant "
+                              "frame rate throughout -- see docs/ai/AI_DECISIONS.md ADR-384. Written "
+                              "automatically by the main iw3 pipeline (iw3.utils._run_rife_interpolation, "
+                              "Hybrid Frame Rate option) from an automatic per-scene motion scan -- not "
+                              "intended to be set by hand. Omitted (the default): unchanged prior "
+                              "behavior, every real-frame pair is interpolated unconditionally (subject "
+                              "still to --scene-cut-times-file's own cut protection, unaffected by this "
+                              "flag either way).")
     return parser
 
 
@@ -236,6 +252,37 @@ def _compute_cut_pair_indices(scene_cut_times, orig_fps):
     docs/ai/AI_DECISIONS.md ADR-059 / resolve_scene_scan_fps)."""
     orig_fps_f = float(orig_fps)
     return {round(t * orig_fps_f) for t in (scene_cut_times or [])}
+
+
+def _compute_hybrid_exclude_pair_indices(hybrid_exclude_ranges, orig_fps):
+    """ADR-384: translates Hybrid Frame Rate's exclude ranges (seconds, [start, end)
+    pairs, relative to this video's own start -- see create_parser's
+    --hybrid-exclude-ranges-file help) into the set of real-frame PAIR indices
+    (same 0-based pair_index _make_frame_callback's own state machine already
+    tracks) whose EARLIER real frame's timestamp falls inside any range. A pair
+    is identified by its earlier frame's time (pair_index / orig_fps) -- matches
+    how a scene's own motion was scored against that same real frame's time by
+    the caller (iw3.rife_hybrid._scan_scene_motion), so a pair at a range
+    boundary lands in exactly the scene its earlier real frame actually belongs
+    to, never the next one. Returns an empty set for no ranges (None/empty
+    list), never raises on a malformed range (skips it, same
+    tolerant-of-partial-data philosophy as the rest of this file's optional
+    inputs)."""
+    if not hybrid_exclude_ranges:
+        return set()
+    orig_fps_f = float(orig_fps)
+    excluded = set()
+    for rng in hybrid_exclude_ranges:
+        try:
+            start_sec, end_sec = float(rng[0]), float(rng[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if end_sec <= start_sec:
+            continue
+        start_pair = int(start_sec * orig_fps_f + 0.5)
+        end_pair = int(end_sec * orig_fps_f + 0.5)  # exclusive
+        excluded.update(range(max(0, start_pair), max(0, end_pair)))
+    return excluded
 
 
 # Duplicate-source-frame detection (real feature, 2026-10-03): real research comparing
@@ -370,7 +417,18 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
         # (clone instead of blend) is identical either way, so checking similarity on
         # a cut pair would just be wasted tensor work.
         is_duplicate_pair = (not is_cut_pair) and _is_near_duplicate_pair(pending, x)
-        skip_interpolation = is_cut_pair or is_duplicate_pair
+        # ADR-384 Hybrid Frame Rate: a pair inside one of the automatically-detected
+        # "calm scene" ranges is ALSO cloned instead of blended -- Avatar: The Way of
+        # Water's own technique (duplicate the real frame for an effective lower
+        # cadence, keep the file itself one constant frame rate throughout). Checked
+        # regardless of is_cut_pair/is_duplicate_pair (unlike those two, which are
+        # mutually exclusive with each other for efficiency only) since it's a
+        # completely independent, coarser-grained reason -- cheap set membership, no
+        # real cost either way.
+        hybrid_exclude_pair_indices = ratio_state.get("hybrid_exclude_pair_indices")
+        is_hybrid_excluded = (bool(hybrid_exclude_pair_indices)
+                               and state["pair_index"] in hybrid_exclude_pair_indices)
+        skip_interpolation = is_cut_pair or is_duplicate_pair or is_hybrid_excluded
         for t in timesteps:
             nearest = _nearest_real_index(pending_source_index, cur_source_index, t)
             if skip_interpolation:
@@ -385,6 +443,8 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
                     entry["scene_cut_duplicate"] = True
                 if is_duplicate_pair:
                     entry["duplicate_source_frame"] = True
+                if is_hybrid_excluded:
+                    entry["hybrid_duplicate"] = True
                 manifest_frames.append(entry)
         state["pending"] = x
         state["pending_source_index"] = cur_source_index
@@ -530,13 +590,35 @@ def _load_scene_cut_times_file(scene_cut_times_file):
         return None
 
 
+def _load_hybrid_exclude_ranges_file(hybrid_exclude_ranges_file):
+    """Reads --hybrid-exclude-ranges-file (see create_parser), tolerating any failure
+    (missing/unreadable/corrupt file) by returning None -- a bad or missing file here
+    must never crash a RIFE run; it should just fall back to unconditional full
+    interpolation for every pair, exactly as if the flag had been omitted."""
+    if not hybrid_exclude_ranges_file:
+        return None
+    try:
+        with open(hybrid_exclude_ranges_file, mode="r", encoding="utf-8") as f:
+            ranges = json.load(f)
+        ranges = [[float(r[0]), float(r[1])] for r in ranges]
+        print(f"[iw3.rife_cli] loaded {len(ranges)} Hybrid Frame Rate exclude range(s) from "
+              f"{hybrid_exclude_ranges_file}", file=sys.stderr)
+        return ranges
+    except Exception as e:
+        print(f"[iw3.rife_cli] could not read --hybrid-exclude-ranges-file "
+              f"'{hybrid_exclude_ranges_file}' ({e.__class__.__name__}: {e}) -- continuing with "
+              f"unconditional full interpolation.", file=sys.stderr)
+        return None
+
+
 def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         rife_multiplier=None, rife_target_fps=None, video_codec=None,
-        scene_cut_times_file=None, fp16=False):
+        scene_cut_times_file=None, hybrid_exclude_ranges_file=None, fp16=False):
     device = create_device(gpu)
     model = load_rife_model(rife_model, device, fp16=fp16)
-    ratio_state = {"ratio": None, "cut_pair_indices": None}
+    ratio_state = {"ratio": None, "cut_pair_indices": None, "hybrid_exclude_pair_indices": None}
     scene_cut_times = _load_scene_cut_times_file(scene_cut_times_file)
+    hybrid_exclude_ranges = _load_hybrid_exclude_ranges_file(hybrid_exclude_ranges_file)
     manifest_frames = []
     frame_callback = _make_frame_callback(model, device, ratio_state, manifest_frames)
     fps_info = {}
@@ -551,6 +633,8 @@ def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         orig_fps_frac = orig_fps if isinstance(orig_fps, Fraction) else Fraction(orig_fps)
         ratio_state["ratio"] = target_fps / orig_fps_frac
         ratio_state["cut_pair_indices"] = _compute_cut_pair_indices(scene_cut_times, orig_fps_frac)
+        ratio_state["hybrid_exclude_pair_indices"] = _compute_hybrid_exclude_pair_indices(
+            hybrid_exclude_ranges, orig_fps_frac)
         fps_info["orig_fps"] = float(orig_fps_frac)
         fps_info["target_fps"] = float(target_fps)
         return _build_output_config(target_fps, video_codec, gpu,
@@ -1207,6 +1291,131 @@ def _test_rife_duplicate_frame_detection():
     print("_test_rife_duplicate_frame_detection: PASS")
 
 
+def _test_rife_hybrid_frame_rate():
+    """ADR-384: "Hybrid Frame Rate" -- Avatar: The Way of Water's own technique
+    (duplicate the real frame for calm scenes instead of blending, keep the file
+    itself one constant frame rate throughout). iw3.rife_hybrid decides WHICH
+    scenes to exclude from real interpolation (not this file's job); this tests
+    only how rife_cli.py itself consumes that decision.
+
+    Part 1: _compute_hybrid_exclude_pair_indices's time-range -> pair-index
+    translation, including a malformed range being skipped rather than raising,
+    and None/empty input producing an empty set (never blocks a normal run).
+
+    Part 2: drives the REAL, unmodified _make_frame_callback (same CS-TEST-001
+    sentinel-value technique as _test_rife_scene_cut_protection) over a synthetic
+    10-real-frame, 2x sequence with hybrid_exclude_pair_indices = {5, 6, 7} (a
+    simulated 3-pair "calm scene") AND cut_pair_indices = {5} (pair 5 is ALSO a
+    confirmed scene cut, to prove the two mechanisms compose: both flags land on
+    the same manifest entry, neither suppresses the other, since -- unlike the
+    near-duplicate check -- Hybrid Frame Rate is a completely independent,
+    coarser-grained reason checked unconditionally). Confirms: every pair
+    outside the excluded set is still a genuine RIFE interpolation (the
+    sentinel), completely unaffected by this feature when it's never set at all
+    (ratio_state omitting the key) or empty."""
+    from unittest.mock import patch
+
+    # Part 1: time-range -> pair_index translation.
+    assert _compute_hybrid_exclude_pair_indices(None, Fraction(10)) == set()
+    assert _compute_hybrid_exclude_pair_indices([], Fraction(10)) == set()
+    assert _compute_hybrid_exclude_pair_indices([[0.5, 0.8]], Fraction(10)) == {5, 6, 7}
+    # two ranges -> union
+    assert _compute_hybrid_exclude_pair_indices([[0.0, 0.2], [0.5, 0.7]], Fraction(10)) == {0, 1, 5, 6}
+    # a malformed range (end before start) is skipped, not raised on
+    assert _compute_hybrid_exclude_pair_indices([[0.8, 0.5], [0.5, 0.6]], Fraction(10)) == {5}
+    # a non-numeric / short entry is skipped, not raised on
+    assert _compute_hybrid_exclude_pair_indices([["x"], [0.5, 0.6]], Fraction(10)) == {5}
+
+    # Part 2: end-to-end frame_callback behavior + composition with a cut pair.
+    SENTINEL = 999.0
+
+    def fake_interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
+        return torch.full_like(img0, SENTINEL)
+
+    def fake_to_tensor(frame, device=None):
+        return torch.full((1, 2, 2), float(frame))
+
+    source_frame_count = 10
+    cut_pair_indices = {5}
+    hybrid_exclude_pair_indices = {5, 6, 7}
+    manifest_frames = []
+    ratio_state = {"ratio": Fraction(2), "cut_pair_indices": cut_pair_indices,
+                    "hybrid_exclude_pair_indices": hybrid_exclude_pair_indices}
+
+    outputs = []
+    with patch(f"{__name__}.interpolate_frame", fake_interpolate_frame), \
+         patch.object(VU, "to_tensor", fake_to_tensor):
+        frame_callback = _make_frame_callback(
+            model=None, device=torch.device("cpu"), ratio_state=ratio_state,
+            manifest_frames=manifest_frames)
+        for i in range(source_frame_count):
+            result = frame_callback(i)
+            if result is not None:
+                outputs.extend(result)
+        last = frame_callback(None)
+        if last is not None:
+            outputs.append(last)
+
+    assert len(outputs) == len(manifest_frames), (len(outputs), len(manifest_frames))
+
+    synth_by_pair = {}
+    current_pair = None
+    for out_tensor, entry in zip(outputs, manifest_frames):
+        value = out_tensor.flatten()[0].item()
+        if entry["real"]:
+            current_pair = entry["source_index"]
+            continue
+        synth_by_pair[current_pair] = (value, entry)
+
+    # Pairs outside the excluded set: genuine interpolation, no hybrid flag at all.
+    for p in (0, 1, 2, 3, 4, 8):
+        value, entry = synth_by_pair[p]
+        assert value == SENTINEL, (p, value)
+        assert "hybrid_duplicate" not in entry, (p, entry)
+
+    # Pairs 6, 7: hybrid-excluded only (not a cut) -> cloned, flagged hybrid_duplicate
+    # ONLY (never scene_cut_duplicate).
+    for p in (6, 7):
+        value, entry = synth_by_pair[p]
+        assert value != SENTINEL, (p, value, entry)
+        assert entry.get("hybrid_duplicate") is True, (p, entry)
+        assert "scene_cut_duplicate" not in entry, (p, entry)
+
+    # Pair 5: BOTH a confirmed cut AND hybrid-excluded -> cloned (as either alone
+    # would already force), but flagged with BOTH markers -- proves the two
+    # mechanisms compose rather than one silently hiding the other.
+    value, entry = synth_by_pair[5]
+    assert value != SENTINEL, (value, entry)
+    assert entry.get("scene_cut_duplicate") is True, entry
+    assert entry.get("hybrid_duplicate") is True, entry
+
+    # Omitting the key entirely (every pre-existing caller/test that never sets
+    # it) must be byte-for-byte unaffected -- proven by reusing the exact
+    # _test_rife_scene_cut_protection scenario with no hybrid key present at all.
+    manifest_frames2 = []
+    ratio_state2 = {"ratio": Fraction(2), "cut_pair_indices": set()}
+    with patch(f"{__name__}.interpolate_frame", fake_interpolate_frame), \
+         patch.object(VU, "to_tensor", fake_to_tensor):
+        frame_callback2 = _make_frame_callback(
+            model=None, device=torch.device("cpu"), ratio_state=ratio_state2,
+            manifest_frames=manifest_frames2)
+        outputs2 = []
+        for i in range(5):
+            result = frame_callback2(i)
+            if result is not None:
+                outputs2.extend(result)
+        last2 = frame_callback2(None)
+        if last2 is not None:
+            outputs2.append(last2)
+    for out_tensor, entry in zip(outputs2, manifest_frames2):
+        if entry["real"]:
+            continue
+        assert out_tensor.flatten()[0].item() == SENTINEL, entry
+        assert "hybrid_duplicate" not in entry, entry
+
+    print("_test_rife_hybrid_frame_rate: PASS")
+
+
 def _test_rife_video_codec_options():
     """Regression test for the real, confirmed fix (2026-09-08, see
     docs/ai/AI_DECISIONS.md ADR-051/ADR-064 amendments) for the bug that RIFE could
@@ -1607,6 +1816,7 @@ def _run_self_tests():
     _test_rife_manifest_emission()
     _test_rife_scene_cut_protection()
     _test_rife_duplicate_frame_detection()
+    _test_rife_hybrid_frame_rate()
     _test_rife_video_codec_options()
     _test_rife_output_pix_fmt()
     _test_rife_carries_forward_source_comment_metadata()
@@ -1624,6 +1834,7 @@ def main(argv=None):
     run(args.input, args.output, rife_model=args.rife_model, gpu=args.gpu,
         rife_multiplier=args.rife_multiplier, rife_target_fps=args.rife_target_fps,
         video_codec=args.video_codec, scene_cut_times_file=args.scene_cut_times_file,
+        hybrid_exclude_ranges_file=args.hybrid_exclude_ranges_file,
         fp16=args.fp16)
 
 

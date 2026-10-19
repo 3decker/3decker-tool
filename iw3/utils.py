@@ -993,6 +993,81 @@ def _load_rife_scene_cut_times(scene_source_path, args):
     return sorted(p / scan_fps for p in segment_pts)
 
 
+def _ensure_hybrid_scene_cut_times(scene_source_path, args):
+    """ADR-384 Hybrid Frame Rate's OWN scene-boundary lookup -- deliberately NOT
+    _load_rife_scene_cut_times above, and this is the real, decker-requested
+    design correction, not an oversight: cut-protection is an optional BONUS (a
+    nicer RIFE result when scene data happens to already exist, a harmless no-op
+    otherwise), so that function is right to never trigger a scan of its own.
+    Hybrid Frame Rate is the opposite -- it is COMPLETELY NON-FUNCTIONAL without
+    real scene boundaries, so refusing to scan for it (the original v1 design,
+    gated on Scene Detection/Scene Batch already being on for the MAIN
+    conversion) forced a real, unwanted coupling: a user who has never wanted
+    Scene Detection for their regular 2D-to-3D pipeline (it changes Flicker
+    Reduction's own behavior at cuts, if that's on -- see chk_ema_normalize's own
+    tooltip) had no way to get Hybrid Frame Rate without ALSO accepting that
+    change for every conversion.
+
+    This function instead looks up the SAME on-disk scene-boundary cache
+    (scene_boundary_cache.py) Scene Detection/Scene Batch themselves use --
+    completely free/instant if either of those happens to have run against this
+    same source already -- but, unlike _load_rife_scene_cut_times, SCANS for it
+    (the same real TransNetV2 AI pass Scene Detection itself runs) when no cache
+    exists yet, since the user explicitly opted into Hybrid Frame Rate itself
+    and this is the one piece of data it cannot work without. Saves the result
+    into that same cache afterward, so a second Hybrid Frame Rate run (or the
+    main pipeline's own Scene Detection, if ever turned on later) gets a free
+    cache hit instead of re-scanning.
+
+    Critically, this NEVER sets args.scene_detect or touches the main
+    conversion's own per-frame reset_ema/reset_pts wiring in process_video_full
+    et al. -- RIFE (and therefore Hybrid Frame Rate) always runs as its own
+    post-processing step, strictly AFTER the main conversion has already fully
+    finished, against the already-written output file. Scanning here can never
+    retroactively change anything about how that conversion was already done.
+
+    Returns None (Hybrid Frame Rate falls back to unconditional full
+    interpolation for this run, same as if the feature had never found anything)
+    on any failure -- a bad scan must never crash or block a RIFE run."""
+    if not scene_source_path or not path.isfile(scene_source_path):
+        return None
+    from .scene_batch import resolve_scene_scan_fps
+    state = getattr(args, "state", None) or {}
+    try:
+        native_fps = float(VU.VideoMetadata.from_file(scene_source_path).get_fps())
+        scan_fps = resolve_scene_scan_fps(native_fps, args.max_fps)
+        segment_pts = try_load_scene_cache(scene_source_path, args, max_fps=scan_fps)
+        if segment_pts is None:
+            print("[iw3] Hybrid Frame Rate: no existing scene-boundary scan found for this source -- "
+                  "running one now (the same AI pass Scene Detection itself uses; cached afterward, so "
+                  "this only happens once per source).", file=sys.stderr)
+            stop_event = state.get("stop_event")
+            with TorchHubDir(HUB_MODEL_DIR):
+                segment_pts = SBD.detect_boundary(
+                    scene_source_path,
+                    max_fps=args.max_fps,
+                    device=state.get("device", "cpu"),
+                    hwaccel=getattr(args, "hwaccel", None),
+                    disable_software_fallback=getattr(args, "disable_software_fallback", False),
+                    start_time=args.start_time,
+                    end_time=args.end_time,
+                    stop_event=stop_event,
+                    suspend_event=state.get("suspend_event"),
+                    tqdm_fn=state.get("tqdm_fn"),
+                    tqdm_title=f"{path.basename(scene_source_path)}: Hybrid Frame Rate scene scan",
+                )
+            if stop_event is not None and stop_event.is_set():
+                return None
+            save_scene_cache(scene_source_path, segment_pts, args, max_fps=scan_fps)
+    except Exception as e:
+        print(f"[iw3] Hybrid Frame Rate: scene-boundary scan failed ({e.__class__.__name__}: {e}) -- "
+              f"continuing with unconditional full RIFE interpolation.", file=sys.stderr)
+        return None
+    if not segment_pts:
+        return None
+    return sorted(p / scan_fps for p in segment_pts)
+
+
 def _write_rife_scene_cut_times_file(interpolated_path, scene_cut_times):
     """Small sidecar JSON listing scene-cut times (seconds) for rife_cli.py's own
     subprocess to read via --scene-cut-times-file (see _load_rife_scene_cut_times
@@ -1007,6 +1082,21 @@ def _write_rife_scene_cut_times_file(interpolated_path, scene_cut_times):
         _json.dump(scene_cut_times, f)
     os.replace(tmp_path, cut_times_path)
     return cut_times_path
+
+
+def _write_rife_hybrid_exclude_ranges_file(interpolated_path, exclude_ranges):
+    """ADR-384: small sidecar JSON listing Hybrid Frame Rate's exclude ranges
+    ([start_sec, end_sec] pairs) for rife_cli.py's own subprocess to read via
+    --hybrid-exclude-ranges-file -- same written-once/read-once/deleted-by-caller
+    lifecycle as _write_rife_scene_cut_times_file above, same atomic write
+    (tmp-name + os.replace, CS-IO-001)."""
+    import json as _json
+    ranges_path = f"{interpolated_path}.hybrid_exclude_ranges.json"
+    tmp_path = ranges_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        _json.dump(exclude_ranges, f)
+    os.replace(tmp_path, ranges_path)
+    return ranges_path
 
 
 def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_path=None):
@@ -1115,6 +1205,25 @@ def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_pa
         print(f"[iw3] RIFE: reusing {len(scene_cut_times)} already-detected scene cut(s) to avoid "
               f"morphing across hard cuts.", file=sys.stderr)
 
+    # ADR-384 Hybrid Frame Rate (revised design, 2026-10-19, real decker follow-up):
+    # deliberately uses its OWN scene-boundary lookup (_ensure_hybrid_scene_cut_times),
+    # NOT the scene_cut_times above -- that one (cut PROTECTION) is an optional bonus
+    # and must never scan on its own; Hybrid Frame Rate is non-functional without real
+    # scene boundaries, so it scans for them itself when needed, completely
+    # independent of whether Scene Detection/Scene Batch are on for the MAIN
+    # conversion (which has already fully finished by the time RIFE even starts) --
+    # see that function's own docstring for why this never couples the two.
+    hybrid_exclude_ranges_path = None
+    if getattr(args, "rife_hybrid_framerate", False):
+        from . import rife_hybrid
+        hybrid_scene_cut_times = _ensure_hybrid_scene_cut_times(scene_source_path, args)
+        hybrid_exclude_ranges = rife_hybrid.compute_hybrid_exclude_ranges(
+            output_path, hybrid_scene_cut_times, args)
+        if hybrid_exclude_ranges:
+            hybrid_exclude_ranges_path = _write_rife_hybrid_exclude_ranges_file(
+                interpolated_path, hybrid_exclude_ranges)
+            cmd += ["--hybrid-exclude-ranges-file", hybrid_exclude_ranges_path]
+
     try:
         _notify_stage(args, STAGE_RIFE_INTERPOLATE)
         print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
@@ -1143,6 +1252,11 @@ def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_pa
         if scene_cut_times_path:
             try:
                 os.remove(scene_cut_times_path)
+            except OSError:
+                pass
+        if hybrid_exclude_ranges_path:
+            try:
+                os.remove(hybrid_exclude_ranges_path)
             except OSError:
                 pass
 
@@ -8109,6 +8223,30 @@ def create_parser(required_true=True):
                               "a separate subprocess after the main conversion's output is fully written, so "
                               "it can target a different device. Same -1-means-CPU convention as "
                               "iw3.rife_cli's own --gpu option."))
+    parser.add_argument("--rife-hybrid-framerate", action="store_true",
+                        help=("ADR-384: Avatar: The Way of Water's own 'hybrid frame rate' technique -- "
+                              "automatically interpolates only the movie's own highest-motion scenes (real "
+                              "RIFE frames), duplicating the real frame instead for calmer/dialogue scenes "
+                              "(an effective lower cadence), while the output file itself stays one constant "
+                              "frame rate throughout. Fully automatic -- finds scene boundaries itself "
+                              "(reusing an existing Scene Detection/Scene Batch scan for this exact source "
+                              "if one is already cached, otherwise running and caching one of its own --  "
+                              "same AI pass, cost paid once) and scores each scene's motion from an extra "
+                              "scan of the finished output, no manual scene list. Independent of whether "
+                              "Scene Detection/Scene Batch are on for the main conversion -- this flag is "
+                              "evaluated AFTER that conversion has already fully finished, against the "
+                              "finished file, so it can never affect how that conversion itself was done. "
+                              "With fewer than 2 real scenes found, this has no effect (every pair "
+                              "interpolated normally). See --rife-hybrid-percent for how much of the runtime "
+                              "gets real interpolation. Off by default -- omitted, behavior is byte-for-byte "
+                              "unchanged."))
+    parser.add_argument("--rife-hybrid-percent", type=float, default=50,
+                        help=("with --rife-hybrid-framerate: roughly what percentage of the movie's total "
+                              "RUNTIME (not scene count) gets real RIFE interpolation, biased toward the "
+                              "highest-motion scenes first -- the calmest scenes making up the remaining "
+                              "percentage are duplicated instead. Default 50. 100 interpolates everything "
+                              "(byte-for-byte the same as leaving --rife-hybrid-framerate off); 0 duplicates "
+                              "everything (no real interpolation anywhere)."))
     parser.add_argument("--waifu2x-upscale", action="store_true",
                         help=("after conversion finishes, run the finished output through waifu2x (a "
                               "separate, dedicated AI upscaler bundled with this app) as one extra step. "

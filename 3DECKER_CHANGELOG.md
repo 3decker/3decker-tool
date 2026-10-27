@@ -30,6 +30,8 @@ All three share the same Convergence Smoothing, Hold Steady Per Scene, and Cut T
 
 **Improved: that same Hybrid Frame Rate scan now shows a real progress bar with percentage, speed, and ETA, instead of just a plain "Scanning..." message.** Same style as the progress bar RIFE itself shows right after — so it reads as one continuous progress experience instead of a blank wait followed by a detailed one.
 
+**Fixed: the Standalone RIFE Tool never actually showed what percentage Hybrid Frame Rate's Auto mode picked (or anything else that scan step reports) in its own Output box.** The message was real and correct — it just had nowhere to go, since the Standalone Tool wasn't capturing that particular kind of message like it already does for everything else in its Output box. It now shows up there too, same as it already does on the main Processor tab.
+
 ## Update — October 26, 2026
 
 **Added: "RIFE Motion Detail" — a new setting to reduce blur/ghosting on fast-motion scenes during RIFE Frame Interpolation.** RIFE creates new in-between frames by tracking how things moved between two real frames; on fast or large motion, that tracking can fail to find a clean match and blends the frames together instead, which is what you see as blur or ghosting. This new setting lets RIFE's own motion-tracking step use more detail (at a real speed cost) specifically to fight that — raise it if you've noticed blur/ghosting on fast-motion scenes in a particular video. Available both on the main Processor tab (next to the other RIFE settings) and in the Standalone RIFE Tool. Defaults to the same balanced middle value RIFE always used before this setting existed, so nothing changes unless you touch it.

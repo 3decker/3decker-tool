@@ -16102,6 +16102,8 @@ class MainFrame(wx.Frame):
         self._set_rife_standalone_label(text)
 
     def run_rife_standalone(self, cmd, dv=None, hybrid_info=None):
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
         # Runs on a background thread via startWorker -- never blocks the GUI thread.
         # Kept out-of-process the same way the other standalone tools in this column
         # are (this app's own GPU/model state is never touched).
@@ -16126,6 +16128,22 @@ class MainFrame(wx.Frame):
         # to a local copy, never mutate the caller's.
         cmd = list(cmd)
         hybrid_ranges_path = None
+        # ADR-394 real bug fix: compute_standalone_hybrid_exclude_ranges() (and
+        # rife_hybrid.compute_hybrid_exclude_ranges() underneath it) report what they
+        # found/decided -- including the actual Auto-detected percentage -- via plain
+        # print(..., file=sys.stderr), the same convention every such message in this
+        # codebase uses. For the MAIN Processor tab that's enough on its own, because
+        # the whole conversion already runs inside utils.output_panel_scope(), which
+        # redirects sys.stdout/stderr into the Output panel for the entire run. The
+        # Standalone RIFE Tool has no such wrapping -- this method only ever captures
+        # its REAL SUBPROCESS's own stdout/stderr (proc.stderr below), so those
+        # print() calls (plain Python, same process, not the subprocess) went to this
+        # whole app's own real stderr instead -- normally invisible under pythonw.exe,
+        # so decker's real question ("why is it not showing in the output box") had a
+        # real answer, not user error. Fixed by redirecting stdout/stderr into a
+        # buffer for just the scan call, then folding that text into the same `output`
+        # string the rest of this method already builds and returns.
+        scan_log_buf = io.StringIO()
         if hybrid_info is not None:
             self.rife_standalone_stage = "hybrid_scan"
             # ADR-393: real progress bar + ETA for this scan (same formula/format as
@@ -16135,13 +16153,15 @@ class MainFrame(wx.Frame):
             wx.CallAfter(self.gauge_rife_standalone.Pulse)
             wx.CallAfter(self._set_rife_standalone_label, T("Scanning for Hybrid Frame Rate..."))
             from . import utils as iw3_utils
-            exclude_ranges = iw3_utils.compute_standalone_hybrid_exclude_ranges(
-                hybrid_info["input_path"], gpu_id=hybrid_info["gpu_id"],
-                rife_hybrid_percent=hybrid_info["rife_hybrid_percent"],
-                stop_event=self.rife_standalone_stop_event,
-                tqdm_fn=functools.partial(_RifeStandaloneScanProgressBar, self))
+            with redirect_stdout(scan_log_buf), redirect_stderr(scan_log_buf):
+                exclude_ranges = iw3_utils.compute_standalone_hybrid_exclude_ranges(
+                    hybrid_info["input_path"], gpu_id=hybrid_info["gpu_id"],
+                    rife_hybrid_percent=hybrid_info["rife_hybrid_percent"],
+                    stop_event=self.rife_standalone_stop_event,
+                    tqdm_fn=functools.partial(_RifeStandaloneScanProgressBar, self))
             if self.rife_standalone_cancelled:
-                return -1, T("Cancelled during the Hybrid Frame Rate scan -- nothing was written.")
+                return -1, (scan_log_buf.getvalue()
+                           + T("Cancelled during the Hybrid Frame Rate scan -- nothing was written."))
             if exclude_ranges:
                 hybrid_ranges_path = iw3_utils._write_rife_hybrid_exclude_ranges_file(
                     hybrid_info["output_path"], exclude_ranges)
@@ -16181,7 +16201,7 @@ class MainFrame(wx.Frame):
                     os.remove(hybrid_ranges_path)
                 except OSError:
                     pass
-        output = "".join(stderr_chunks)
+        output = scan_log_buf.getvalue() + "".join(stderr_chunks)
 
         if dv and proc.returncode == 0 and not self.rife_standalone_cancelled:
             # Optional second step: put the ORIGINAL movie's Dolby Vision back on the smoothed file
@@ -22334,6 +22354,28 @@ def _self_test_run_rife_standalone_hybrid_scan():
             assert "--hybrid-exclude-ranges-file" in popen_cmd, popen_cmd
             ranges_path = popen_cmd[popen_cmd.index("--hybrid-exclude-ranges-file") + 1]
             assert not path.exists(ranges_path), "sidecar must be removed once the run finished"
+
+            # (b.5) ADR-394 real bug fix: compute_standalone_hybrid_exclude_ranges()
+            # (and rife_hybrid.compute_hybrid_exclude_ranges() underneath it) report
+            # what they decided -- including the actual Auto-detected percentage --
+            # via plain print(..., file=sys.stderr), which used to just vanish into
+            # this whole app's own real stderr (invisible under pythonw.exe) instead
+            # of ever reaching the Standalone Tool's own Output box. Simulates that
+            # real print() call (not just a mocked return value) and confirms the
+            # exact text comes back in `output`.
+            def _fake_compute_with_real_print(*args, **kwargs):
+                print("[iw3] Hybrid Frame Rate: Auto mode detected 62% as this movie's "
+                      "own action/calm split.", file=sys.stderr)
+                return [(0.0, 5.0)]
+
+            with mock.patch.object(iw3_utils, "compute_standalone_hybrid_exclude_ranges",
+                                   side_effect=_fake_compute_with_real_print), \
+                 mock.patch.object(gui_mod.subprocess, "Popen", return_value=_FakeProc()):
+                frame.rife_standalone_cancelled = False
+                frame.rife_standalone_stop_event.clear()
+                returncode, output = frame.run_rife_standalone(list(base_cmd), dv=None, hybrid_info=hybrid_info)
+            assert returncode == 0, returncode
+            assert "Auto mode detected 62%" in output, output
 
             # (c) nothing to exclude -> no flag added at all.
             with mock.patch.object(iw3_utils, "compute_standalone_hybrid_exclude_ranges", return_value=[]), \

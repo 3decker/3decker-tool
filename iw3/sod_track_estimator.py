@@ -71,7 +71,9 @@ class SodTrackEstimator():
         if not _CV2_AVAILABLE:
             raise ImportError(
                 "OpenCV (cv2) is required for sod_track convergence mode.\n"
-                f"Run in nunif-prompt.bat: pip install opencv-python==4.10.0.84"
+                # ADR-396: opencv-contrib-python, not plain opencv-python -- sod_track
+                # needs cv2.TrackerCSRT_create, which only exists in the contrib build.
+                f"Run in nunif-prompt.bat: pip install opencv-contrib-python==4.10.0.84"
                 + (f"\n({_CV2_IMPORT_ERROR.__class__.__name__}: {_CV2_IMPORT_ERROR})"
                    if _CV2_IMPORT_ERROR is not None else "")
             )

@@ -13,8 +13,9 @@ try:
         # Real user report: opencv-python 5.0.0.93 (an unpinned pip install's default at
         # the time) imports fine but ships without its Haar cascade data files at all, so
         # this load silently fails -- CascadeClassifier.empty() is the only signal. Telling
-        # the user to "pip install opencv-python" again (the generic message below) would
-        # just reinstall the same broken version, so this case gets its own real diagnosis.
+        # the user to "pip install opencv-contrib-python" again (the generic message
+        # below) would just reinstall the same broken version, so this case gets its own
+        # real diagnosis.
         _CV2_CASCADE_MISSING = True
 except Exception as e:
     _CV2_AVAILABLE = False
@@ -36,11 +37,15 @@ class FaceConvergenceEstimator():
                     "OpenCV (cv2) is installed, but this version is missing its face "
                     "detection data file (a known packaging issue in some opencv-python "
                     "releases, including 5.0.0.93).\n"
-                    "Run in nunif-prompt.bat: pip install opencv-python==4.10.0.84"
+                    # ADR-396: opencv-contrib-python, not plain opencv-python -- this
+                    # project's own baseline pin switched so sod_track's own
+                    # cv2.TrackerCSRT_create (contrib-only) also works; contrib is a
+                    # strict superset, so this still fixes the missing cascade data too.
+                    "Run in nunif-prompt.bat: pip install opencv-contrib-python==4.10.0.84"
                 )
             raise ImportError(
                 "OpenCV (cv2) is required for face_detect convergence mode.\n"
-                f"Run in nunif-prompt.bat: pip install opencv-python==4.10.0.84"
+                f"Run in nunif-prompt.bat: pip install opencv-contrib-python==4.10.0.84"
                 + (f"\n({_CV2_IMPORT_ERROR.__class__.__name__}: {_CV2_IMPORT_ERROR})"
                    if _CV2_IMPORT_ERROR is not None else "")
             )

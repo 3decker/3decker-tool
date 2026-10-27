@@ -13,12 +13,22 @@ diskcache
 psutil
 pyyaml
 platformdirs
-# opencv-python==4.10.0.84 pinned below: face_detect convergence mode loads a bundled
-# Haar cascade XML file (iw3/face_convergence_estimator.py) via cv2.data.haarcascades --
-# real user report confirmed opencv-python 5.0.0.93 (the unpinned default at the time)
-# ships without those data files at all, silently breaking face_detect. 4.10.0.84 is the
-# user's own confirmed-working version, not a guess.
-opencv-python==4.10.0.84
+# opencv-contrib-python==4.10.0.84 pinned below (ADR-396): face_detect convergence mode
+# loads a bundled Haar cascade XML file (iw3/face_convergence_estimator.py) via
+# cv2.data.haarcascades -- real user report confirmed opencv-python 5.0.0.93 (the
+# unpinned default at the time) ships without those data files at all, silently breaking
+# face_detect. 4.10.0.84 is the user's own confirmed-working version, not a guess.
+# Originally pinned as plain opencv-python; switched to opencv-contrib-python (ADR-396)
+# once sod_track's convergence mode (ADR-390) needed cv2.TrackerCSRT_create, which only
+# exists in the contrib build -- a fresh install of plain opencv-python has no
+# TrackerCSRT_create at all and sod_track fails outright. contrib is a strict superset of
+# plain opencv-python at the same version (same cv2 import, same Haar cascade data, all of
+# plain opencv-python's own modules plus the extra ones), so face_detect keeps working
+# unchanged -- this is not a second, separate cv2 package, it replaces the plain one.
+# Never install opencv-python and opencv-contrib-python side by side -- they both provide
+# the same cv2 module and pip does not know they conflict; always `pip uninstall
+# opencv-python` first if migrating an existing environment by hand.
+opencv-contrib-python==4.10.0.84
 packaging
 filelock
 

@@ -34168,6 +34168,86 @@ def _self_test_sod_track_estimator():
     print("_self_test_sod_track_estimator: PASS")
 
 
+def _self_test_sod_track_downscale_perf_fix():
+    """ADR-395 real perf fix: sod_track's CSRT appearance tracker used to run on the
+    FULL native resolution every single frame -- confirmed as the real cause of a
+    real 4K job's speed dropping from ~5fps to ~2.1fps (reported directly), since
+    sod_v1 -- the only real comparison point -- never touches the CPU in its own hot
+    path at all. Fixed by downscaling (on GPU, before the CPU transfer) to at most
+    _TRACK_MAX_DIM on the longest side before handing frames to CSRT, converting box
+    coordinates back to full resolution afterward.
+
+    The pre-existing _self_test_sod_track_estimator uses an 8x8 frame, far too small
+    to ever trigger the downscale path at all (scale stays 1.0) -- this test uses a
+    1920x1080 frame (scale = 480/1920 = 0.25) specifically to confirm: the scale
+    factor itself is computed correctly and never upscales a source already smaller
+    than _TRACK_MAX_DIM; the box handed to tracker.init() is in DOWNSCALED
+    coordinates, not the raw full-res saliency box; and a box returned from a
+    successful tracker.update() (also in downscaled coordinates) is converted back
+    to full-resolution coordinates before being stored/used for the real depth
+    lookup."""
+    import types
+    from unittest import mock
+    import iw3.sod_track_estimator as ST
+
+    H, W = 1080, 1920
+    expected_scale = 480 / 1920
+    assert abs(ST.SodTrackEstimator._track_scale_factor(H, W) - expected_scale) < 1e-9
+    # A source already smaller than _TRACK_MAX_DIM must never be upscaled.
+    assert ST.SodTrackEstimator._track_scale_factor(200, 300) == 1.0
+
+    depth = torch.zeros(1, 1, H, W)
+    depth[:, :, :, :W // 2] = 0.2
+    depth[:, :, :, W // 2:] = 0.8
+    rgb = torch.rand(1, 3, H, W)
+
+    def fake_infer(rgb_, depth_):
+        sal = torch.zeros(1, 1, H, W)
+        sal[0, 0, :, :W // 2] = 0.9  # left half salient -> full-res box (0, 0, W//2, H)
+        return sal, depth_
+
+    class _FakeTracker():
+        def __init__(self):
+            self.inited_with = None
+            self.update_return = None
+
+        def init(self, frame, box):
+            self.inited_with = box
+
+        def update(self, frame):
+            return self.update_return
+
+    est = ST.SodTrackEstimator.__new__(ST.SodTrackEstimator)
+    est.device = torch.device("cpu")
+    est.convergence = 0.5
+    est.enable_ema = False
+    est.decay = 0.9
+    est.scene_hold = False
+    est.cut_smooth = 0
+    est.convergence_ema = None
+    est.tracker = ST.SceneHoldTracker(0.9)
+    est._track_state = None
+    est.model = types.SimpleNamespace(infer=fake_infer)
+
+    fake_tracker = _FakeTracker()
+    with mock.patch.object(ST, "_create_csrt_tracker", return_value=fake_tracker):
+        est(rgb, depth, reset_pts=[False])
+        expected_init_box = (0, 0, round(W // 2 * expected_scale), round(H * expected_scale))
+        assert fake_tracker.inited_with == expected_init_box, fake_tracker.inited_with
+        assert est._track_state[0]["scale"] == expected_scale
+
+        scaled_update_box = (10, 20, 100, 200)
+        fake_tracker.update_return = (True, scaled_update_box)
+        est(rgb, depth, reset_pts=[False])
+        sx, sy, sw, sh = scaled_update_box
+        expected_full_box = (round(sx / expected_scale), round(sy / expected_scale),
+                             round(sw / expected_scale), round(sh / expected_scale))
+        assert est._track_state[0]["box"] == expected_full_box, \
+            (est._track_state[0]["box"], expected_full_box)
+
+    print("_self_test_sod_track_downscale_perf_fix: PASS")
+
+
 def _self_test_convergence_new_modes_gui():
     """ADR-388/389/390: depth_percentile/clip_shot/sod_track must be real, selectable
     choices in the GUI combo box, share the existing Convergence Smoothing/Hold Steady
@@ -35792,6 +35872,7 @@ def _run_self_tests():
         _self_test_depth_percentile_estimator,
         _self_test_clip_shot_estimator,
         _self_test_sod_track_estimator,
+        _self_test_sod_track_downscale_perf_fix,
         _self_test_convergence_new_modes_gui,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

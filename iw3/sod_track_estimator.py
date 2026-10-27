@@ -61,6 +61,10 @@ class SodTrackEstimator():
     """
 
     _REINIT_INTERVAL = 90  # frames -- see module docstring
+    # ADR-395: CSRT's own per-frame appearance tracking runs on a frame downscaled to
+    # at most this many pixels on its longest side -- real reported perf fix, see
+    # _track_scale_factor()'s own docstring for why.
+    _TRACK_MAX_DIM = 480
 
     def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False,
                  scene_hold=False, cut_smooth=0):
@@ -122,15 +126,42 @@ class SodTrackEstimator():
         return self._bbox_from_mask(sal_full > 0.5, H, W)
 
     @staticmethod
-    def _frame_to_bgr(rgb_single):
+    def _track_scale_factor(H, W):
+        """ADR-395 real perf fix: CSRT's own per-frame CPU cost (and the GPU->CPU
+        transfer feeding it) scales with the frame's own resolution -- running it on
+        a full 4K frame every single frame (the real reported cause of a 4K job
+        dropping from ~5fps to ~2.1fps) is both unnecessary and far more expensive
+        than sod_v1's own entirely-GPU-resident hot path. CSRT only needs enough
+        detail to track the subject's own appearance, not native resolution -- same
+        spirit as SOD's own 192x192 input and the Hybrid Frame Rate motion scan's
+        64x36 downscale, just a size actually suited to appearance tracking rather
+        than a coarse signal. Never upscales (a sub-480p source tracks at its own
+        native size, unchanged)."""
+        longest = max(H, W)
+        return min(1.0, SodTrackEstimator._TRACK_MAX_DIM / longest) if longest > 0 else 1.0
+
+    @staticmethod
+    def _frame_to_bgr(rgb_single, scale=1.0):
+        """Downscales ON GPU (cheap) BEFORE the CPU transfer, so both the PCIe
+        transfer and cv2's own per-frame work shrink with `scale` -- not just the
+        cv2.cvtColor/resize cost, the data volume moved off the GPU too."""
+        if scale < 1.0:
+            new_h = max(1, round(rgb_single.shape[-2] * scale))
+            new_w = max(1, round(rgb_single.shape[-1] * scale))
+            rgb_single = F.interpolate(rgb_single.unsqueeze(0), size=(new_h, new_w),
+                                       mode="bilinear", align_corners=False)[0]
         frame = (rgb_single.permute(1, 2, 0).cpu().float() * 255).clamp(0, 255).byte().numpy()
         return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
     def _reinit(self, rgb_single, depth_single, H, W):
-        box = self._detect_box(rgb_single, depth_single, H, W)
+        box = self._detect_box(rgb_single, depth_single, H, W)  # full-res -- SOD only runs here
+        scale = self._track_scale_factor(H, W)
+        x, y, w, h = box
+        scaled_box = (round(x * scale), round(y * scale),
+                     max(1, round(w * scale)), max(1, round(h * scale)))
         tracker = _create_csrt_tracker()
-        tracker.init(self._frame_to_bgr(rgb_single), box)
-        return {"tracker": tracker, "box": box, "frames_since_reinit": 0}
+        tracker.init(self._frame_to_bgr(rgb_single, scale), scaled_box)
+        return {"tracker": tracker, "box": box, "scale": scale, "frames_since_reinit": 0}
 
     def __call__(self, rgb, depth, reset_pts=None):
         B = depth.shape[0]
@@ -147,13 +178,16 @@ class SodTrackEstimator():
             elif state["frames_since_reinit"] >= self._REINIT_INTERVAL:
                 state = self._reinit(rgb[i], depth[i], H, W)
             else:
-                ok, box = state["tracker"].update(self._frame_to_bgr(rgb[i]))
+                scale = state["scale"]
+                ok, box = state["tracker"].update(self._frame_to_bgr(rgb[i], scale))
                 if ok:
-                    x, y, w, h = box
-                    x = max(0, min(W - 1, int(round(x))))
-                    y = max(0, min(H - 1, int(round(y))))
-                    w = max(1, min(W - x, int(round(w))))
-                    h = max(1, min(H - y, int(round(h))))
+                    # box is in the DOWNSCALED frame's own coordinates -- convert back
+                    # to full resolution before storing/using it against `depth`.
+                    sx, sy, sw, sh = box
+                    x = max(0, min(W - 1, int(round(sx / scale))))
+                    y = max(0, min(H - 1, int(round(sy / scale))))
+                    w = max(1, min(W - x, int(round(sw / scale))))
+                    h = max(1, min(H - y, int(round(sh / scale))))
                     state["box"] = (x, y, w, h)
                     state["frames_since_reinit"] += 1
                 else:

@@ -8102,6 +8102,224 @@ class MainFrame(wx.Frame):
         sizer_upscale = wx.StaticBoxSizer(self.grp_upscale, wx.VERTICAL)
         sizer_upscale.Add(pane_header_row_upscale, 0, wx.ALL | wx.EXPAND, 4)
 
+        # --- standalone tool: FX Pop-Out Overlay ---
+        # Composites a rain/snow/fire/smoke/etc. effect clip onto an already-finished 3D
+        # (SBS/TB) video, giving the effect its own pop-out parallax -- a different
+        # horizontal crop/offset per eye -- entirely independent of the AI depth pipeline,
+        # which can't give a thin, see-through, numerous effect like rain or fire its own
+        # real depth (see iw3/docs/best_quality_3d_conversion_notes.md's own note on this).
+        # Runs python -m iw3.fx_overlay_cli as its own subprocess, same out-of-process
+        # convention as every other Standalone Tool here.
+        self.grp_fxoverlay = wx.StaticBox(self.tab_tools, label=T("FX Pop-Out Overlay (Standalone Tool)"))
+
+        self.cpn_fxoverlay = wx.CollapsiblePane(self.grp_fxoverlay, label=T("Settings"), name="cpn_fxoverlay")
+        self.cpn_fxoverlay.Collapse(True)
+        self.cpn_fxoverlay.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED, self.on_toggled_standalone_tools_collapsible_pane)
+        self.cpn_fxoverlay.GetPane().SetName("cpn_fxoverlay_pane")
+        fxoverlay_pane = self.cpn_fxoverlay.GetPane()
+
+        self.lbl_fxoverlay_input = wx.StaticText(fxoverlay_pane, label=T("Finished 3D Video"))
+        self.txt_fxoverlay_input = wx.TextCtrl(fxoverlay_pane, name="txt_fxoverlay_input")
+        self.txt_fxoverlay_input.SetToolTip(
+            T("What it's for: your already-converted 3D video (side-by-side or top-bottom) that "
+              "you want to add a popping-out rain/snow/fire/etc. effect to.\n"
+              "Why this is a separate tool: the AI depth step can't give a thin, see-through, "
+              "numerous effect like rain or fire its own real depth -- it just blends into "
+              "whatever is behind it. This tool skips the AI entirely and shifts the effect clip "
+              "itself between the two eyes to make it pop out.\n"
+              "Con: this tool always re-encodes the whole video, which REMOVES any Dolby "
+              "Vision/HDR grading the file has -- the output is plain SDR. There is no Dolby "
+              "Vision/HDR re-attach option here; if you need to keep it, run the standalone "
+              "HDR/DV Reinjection tool on this tool's output afterward.\n"
+              "Recommended: your already-finished 3D output file."))
+        self.btn_fxoverlay_input = wx.Button(fxoverlay_pane, label=T("..."))
+
+        self.lbl_fxoverlay_overlay = wx.StaticText(fxoverlay_pane, label=T("Effect Clip (Rain/Snow/Fire)"))
+        self.txt_fxoverlay_overlay = wx.TextCtrl(fxoverlay_pane, name="txt_fxoverlay_overlay")
+        self.txt_fxoverlay_overlay.SetToolTip(
+            T("What it's for: the rain/snow/fire/smoke/sparks effect clip to lay on top of the "
+              "video above. Can be a plain clip filmed/rendered over black (use Screen blend "
+              "mode below) or a clip with its own real transparency/alpha channel (use Alpha "
+              "Channel blend mode).\n"
+              "Con: this tool does not generate effects itself -- you supply a separate stock "
+              "or rendered clip.\n"
+              "Recommended: a seamless, loopable effect clip, ideally at or above the video's "
+              "own resolution."))
+        self.btn_fxoverlay_overlay = wx.Button(fxoverlay_pane, label=T("..."))
+
+        self.lbl_fxoverlay_output = wx.StaticText(fxoverlay_pane, label=T("Output File (optional)"))
+        self.txt_fxoverlay_output = wx.TextCtrl(fxoverlay_pane, name="txt_fxoverlay_output")
+        self.txt_fxoverlay_output.SetToolTip(
+            T("Where the result is written. Leave it empty to save '<name>_fxoverlay<ext>' next "
+              "to the Finished 3D Video. You can also type or pick a folder here, and the same "
+              "name is used inside it.\n"
+              "How it's safe: neither input file is ever modified, and an existing output is "
+              "never overwritten -- Run refuses and the log says so.\n"
+              "Recommended: leave it empty."))
+        self.btn_fxoverlay_output = wx.Button(fxoverlay_pane, label=T("..."))
+
+        self.lbl_fxoverlay_layout = wx.StaticText(fxoverlay_pane, label=T("3D Layout"))
+        self.cbo_fxoverlay_layout = wx.ComboBox(fxoverlay_pane, name="cbo_fxoverlay_layout")
+        self.cbo_fxoverlay_layout.SetEditable(False)
+        self.cbo_fxoverlay_layout.Append(T("Auto-Detect"), None)
+        self.cbo_fxoverlay_layout.Append(T("Full Side-by-Side"), "full_sbs")
+        self.cbo_fxoverlay_layout.Append(T("Half Side-by-Side"), "half_sbs")
+        self.cbo_fxoverlay_layout.Append(T("Full Top-Bottom"), "full_tb")
+        self.cbo_fxoverlay_layout.Append(T("Half Top-Bottom"), "half_tb")
+        self.cbo_fxoverlay_layout.SetSelection(0)
+        self.cbo_fxoverlay_layout.SetToolTip(
+            T("What it's for: tells this tool how your finished video's two eyes are packed, so "
+              "it can split them apart and put them back together correctly.\n"
+              "Auto-Detect: works out Side-by-Side vs Top-Bottom and Full vs Half from the "
+              "video's own picture size -- the same guess the 3D Blu-ray MVC tool uses.\n"
+              "Con: a wrong manual choice splits the picture in the wrong place and gives a "
+              "broken result.\n"
+              "Recommended: Auto-Detect."))
+
+        self.lbl_fxoverlay_blend_mode = wx.StaticText(fxoverlay_pane, label=T("Blend Mode"))
+        self.cbo_fxoverlay_blend_mode = wx.ComboBox(fxoverlay_pane, name="cbo_fxoverlay_blend_mode")
+        self.cbo_fxoverlay_blend_mode.SetEditable(False)
+        self.cbo_fxoverlay_blend_mode.Append(T("Screen (black background)"), "screen")
+        self.cbo_fxoverlay_blend_mode.Append(T("Alpha Channel"), "alpha")
+        self.cbo_fxoverlay_blend_mode.SetSelection(0)
+        self.cbo_fxoverlay_blend_mode.SetToolTip(
+            T("What it's for: how the effect clip's own pixels combine with the video's picture.\n"
+              "Screen (black background): for an effect clip filmed/rendered over plain black -- "
+              "the black areas vanish and bright areas (rain streaks, fire, snow) are added on "
+              "top. The right choice for most free stock effect clips.\n"
+              "Alpha Channel: for an effect clip that carries its own real transparency "
+              "information (for example ProRes 4444 or VP9 with alpha) -- uses that "
+              "transparency directly instead of guessing from black.\n"
+              "Recommended: Screen, unless your clip specifically says it has an alpha channel."))
+
+        self.lbl_fxoverlay_pop_strength = wx.StaticText(fxoverlay_pane, label=T("Pop Strength"))
+        self.txt_fxoverlay_pop_strength = wx.TextCtrl(fxoverlay_pane, value="0.5",
+                                                        name="txt_fxoverlay_pop_strength")
+        self.txt_fxoverlay_pop_strength.SetToolTip(
+            T("What it's for: how far in FRONT of the screen the effect appears to float, by "
+              "shifting the left-eye and right-eye copies of the effect clip apart from each "
+              "other.\n"
+              "Values: 0.0 (no pop -- sits flat on the screen) to 1.0 (the strongest pop this "
+              "tool allows).\n"
+              "Con: too strong can make the effect look like it is floating oddly far out in "
+              "front of everything else in the shot.\n"
+              "Recommended: start at 0.5 and adjust by eye on a short test clip."))
+
+        self.lbl_fxoverlay_opacity = wx.StaticText(fxoverlay_pane, label=T("Opacity"))
+        self.txt_fxoverlay_opacity = wx.TextCtrl(fxoverlay_pane, value="1.0", name="txt_fxoverlay_opacity")
+        self.txt_fxoverlay_opacity.SetToolTip(
+            T("What it's for: how visible the whole effect is, separately from how far it pops "
+              "out (Pop Strength above).\n"
+              "Values: 0.0 (invisible) to 1.0 (fully visible).\n"
+              "Recommended: 1.0 for Screen blend mode with a typical stock clip; lower it if the "
+              "effect looks too strong."))
+
+        self.chk_fxoverlay_loop = wx.CheckBox(fxoverlay_pane, label=T("Loop Effect Clip if Shorter"),
+                                              name="chk_fxoverlay_loop")
+        self.chk_fxoverlay_loop.SetValue(True)
+        self.chk_fxoverlay_loop.SetToolTip(
+            T("What it's for: repeats the effect clip from its own start if it is shorter than "
+              "the video, instead of running out partway through.\n"
+              "Con: a short, obviously-looping clip can repeat noticeably over a long movie.\n"
+              "Recommended: checked, unless your effect clip is already at least as long as the "
+              "video."))
+
+        self.chk_fxoverlay_start_time = wx.CheckBox(fxoverlay_pane, label=T("Start"),
+                                                     name="chk_fxoverlay_start_time")
+        self.chk_fxoverlay_start_time.SetToolTip(
+            T("What it's for: only applies the effect from this point onward (for example, just "
+              "the storm scene), instead of the whole video. Leave unchecked to start from the "
+              "beginning.\n"
+              "Recommended: leave unchecked unless you only want the effect on part of the "
+              "movie."))
+        self.txt_fxoverlay_start_time = TimeCtrl(fxoverlay_pane, value="00:00:00", fmt24hr=True,
+                                                  name="txt_fxoverlay_start_time")
+        self.chk_fxoverlay_end_time = wx.CheckBox(fxoverlay_pane, label=T("End"),
+                                                   name="chk_fxoverlay_end_time")
+        self.chk_fxoverlay_end_time.SetToolTip(
+            T("Same idea as Start, but for where the effect should stop. Leave unchecked to "
+              "continue to the end of the video."))
+        self.txt_fxoverlay_end_time = TimeCtrl(fxoverlay_pane, value="00:00:00", fmt24hr=True,
+                                                name="txt_fxoverlay_end_time")
+
+        self.btn_fxoverlay_run = wx.Button(fxoverlay_pane, label=T("Run"))
+        self.btn_fxoverlay_run.SetToolTip(
+            T("What it's for: runs the overlay as a separate background process (python -m "
+              "iw3.fx_overlay_cli). Neither input file is ever modified -- a brand new file is "
+              "written.\n"
+              "How it's safe: an existing output file is never overwritten.\n"
+              "Con: this re-encodes the whole processed range, so a full movie takes real time.\n"
+              "Recommended: try a short clip first to check the pop direction and strength look "
+              "right before running a whole movie."))
+        self.btn_fxoverlay_cancel = wx.Button(fxoverlay_pane, label=T("Cancel"))
+        self.btn_fxoverlay_cancel.Disable()
+        self.btn_fxoverlay_cancel.SetToolTip(
+            T("Stops the running job and the ffmpeg process it started. The partial output file "
+              "this run created is removed. Both input files are never touched."))
+        self.fxoverlay_proc = None
+        self.fxoverlay_cancelled = False
+        self.fxoverlay_start_time = 0.0
+        self.fxoverlay_output_path = None
+        self.fxoverlay_created_output = False
+
+        # ADR-250: shared with every other Standalone Tool -- see its construction above.
+        self.txt_fxoverlay_log = self.txt_standalone_log
+        self.btn_fxoverlay_clear = self.btn_standalone_log_clear
+
+        self.gauge_fxoverlay = wx.Gauge(fxoverlay_pane, style=wx.GA_HORIZONTAL)
+        self.gauge_fxoverlay.SetToolTip(
+            T("Shows that the job is working. This tool does not report a frame count, so the "
+              "bar moves back and forth while it runs, with the elapsed time beside it."))
+        self.lbl_fxoverlay_progress = wx.StaticText(fxoverlay_pane, label="")
+
+        self.btn_fxoverlay_input.Bind(wx.EVT_BUTTON, self.on_click_btn_fxoverlay_input)
+        self.btn_fxoverlay_overlay.Bind(wx.EVT_BUTTON, self.on_click_btn_fxoverlay_overlay)
+        self.btn_fxoverlay_output.Bind(wx.EVT_BUTTON, self.on_click_btn_fxoverlay_output)
+        self.btn_fxoverlay_run.Bind(wx.EVT_BUTTON, self.on_click_btn_fxoverlay_run)
+        self.btn_fxoverlay_cancel.Bind(wx.EVT_BUTTON, self.on_click_btn_fxoverlay_cancel)
+
+        layout_fxoverlay = wx.GridBagSizer(vgap=4, hgap=4)
+        layout_fxoverlay.SetEmptyCellSize((0, 0))
+        h = -1
+        layout_fxoverlay.Add(self.lbl_fxoverlay_input, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.txt_fxoverlay_input, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.btn_fxoverlay_input, (h, 3), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.lbl_fxoverlay_overlay, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.txt_fxoverlay_overlay, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.btn_fxoverlay_overlay, (h, 3), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.lbl_fxoverlay_output, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.txt_fxoverlay_output, (h, 1), (0, 2), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.btn_fxoverlay_output, (h, 3), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.lbl_fxoverlay_layout, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.cbo_fxoverlay_layout, (h, 1), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.lbl_fxoverlay_blend_mode, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.cbo_fxoverlay_blend_mode, (h, 3), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.lbl_fxoverlay_pop_strength, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.txt_fxoverlay_pop_strength, (h, 1), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.lbl_fxoverlay_opacity, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.txt_fxoverlay_opacity, (h, 3), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.chk_fxoverlay_loop, (h := h + 1, 0), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.chk_fxoverlay_start_time, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.txt_fxoverlay_start_time, (h, 1), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.chk_fxoverlay_end_time, (h, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.txt_fxoverlay_end_time, (h, 3), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.gauge_fxoverlay, (h := h + 1, 0), (0, 2),
+                             flag=wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+        layout_fxoverlay.Add(self.btn_fxoverlay_run, (h, 2), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.btn_fxoverlay_cancel, (h, 3), flag=wx.EXPAND)
+        layout_fxoverlay.Add(self.lbl_fxoverlay_progress, (h := h + 1, 0), (0, 4),
+                             flag=wx.ALIGN_CENTER_VERTICAL)
+        fxoverlay_pane.SetSizer(layout_fxoverlay)
+
+        self.pnl_fxoverlay_dot = wx.Panel(self.grp_fxoverlay, size=self.FromDIP((10, 10)))
+        self.pnl_fxoverlay_dot.SetBackgroundColour(wx.Colour(34, 211, 238))
+        pane_header_row_fxoverlay = wx.BoxSizer(wx.HORIZONTAL)
+        pane_header_row_fxoverlay.Add(self.pnl_fxoverlay_dot, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        pane_header_row_fxoverlay.Add(self.cpn_fxoverlay, 1, wx.EXPAND)
+
+        sizer_fxoverlay = wx.StaticBoxSizer(self.grp_fxoverlay, wx.VERTICAL)
+        sizer_fxoverlay.Add(pane_header_row_fxoverlay, 0, wx.ALL | wx.EXPAND, 4)
+
         # ADR-274: real end-user idea, relayed by decker -- "making the stereo format
         # drop-down something where people could simply pick the type of output they
         # want in one place rather than having a bunch of standalone tools." Scoped
@@ -8205,6 +8423,7 @@ class MainFrame(wx.Frame):
         tab_layout.Add(sizer_makemkv, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_vobsub, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_upscale, 0, wx.ALL | wx.EXPAND, 4)
+        tab_layout.Add(sizer_fxoverlay, 0, wx.ALL | wx.EXPAND, 4)
         tab_layout.Add(sizer_standalone_log, 1, wx.ALL | wx.EXPAND, 4)
         self.tab_tools.SetSizer(tab_layout)
 
@@ -9909,7 +10128,7 @@ class MainFrame(wx.Frame):
                       "cpn_audiorestore", "cpn_stereotag", "cpn_sharpen", "cpn_rife_standalone",
                       "cpn_bitrate_cap_standalone",
                       "cpn_bluray", "cpn_sbs2mvc", "cpn_hdr_to_sdr", "cpn_makemkv", "cpn_vobsub",
-                      "cpn_upscale")
+                      "cpn_upscale", "cpn_fxoverlay")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return [self.sld_sharpen_strength_standalone] + panes
 
@@ -16026,6 +16245,189 @@ class MainFrame(wx.Frame):
         self.btn_bitrate_cap_standalone_cancel.Enable()
         self.SetStatusText(T("Limiting bitrate..."))
         startWorker(self.on_exit_bitrate_cap_standalone_worker, self.run_bitrate_cap_standalone, wargs=(cmd,))
+
+    def on_click_btn_fxoverlay_input(self, event):
+        with wx.FileDialog(self, message=T("Select the finished 3D video"),
+                           wildcard="Video files (*.mkv;*.mp4;*.m2ts;*.ts)|*.mkv;*.mp4;*.m2ts;*.ts|All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_fxoverlay_input.GetValue():
+                dlg.SetPath(self.txt_fxoverlay_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_fxoverlay_input.SetValue(dlg.GetPath())
+
+    def on_click_btn_fxoverlay_overlay(self, event):
+        with wx.FileDialog(self, message=T("Select the effect clip (rain/snow/fire/etc.)"),
+                           wildcard="Video files (*.mkv;*.mp4;*.mov;*.webm)|*.mkv;*.mp4;*.mov;*.webm|"
+                                    "All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_fxoverlay_overlay.GetValue():
+                dlg.SetPath(self.txt_fxoverlay_overlay.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_fxoverlay_overlay.SetValue(dlg.GetPath())
+
+    def on_click_btn_fxoverlay_output(self, event):
+        with wx.FileDialog(self, message=T("Select where to save the result"),
+                           wildcard="Video files (*.mkv;*.mp4)|*.mkv;*.mp4|All files (*.*)|*.*",
+                           style=wx.FD_SAVE) as dlg:
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_fxoverlay_output.SetValue(dlg.GetPath())
+
+    def on_click_btn_fxoverlay_cancel(self, event):
+        proc = self.fxoverlay_proc
+        if proc is not None and proc.poll() is None:
+            self.fxoverlay_cancelled = True
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            self.btn_fxoverlay_cancel.Disable()
+
+    def _remove_partial_fxoverlay_outputs(self):
+        """Cancel only: removes the output this run created, plus its mid-encode temp file
+        (fx_overlay_cli.run() encodes to this name first, then os.replace()s it into the real
+        output -- CS-IO-001 -- so a Cancel mid-encode leaves only the temp name, never the real
+        output). Never either input file, and never an output that already existed before this
+        run (fxoverlay_created_output is False then)."""
+        from .fx_overlay_cli import fxoverlay_tmp_path
+        if not self.fxoverlay_created_output:
+            return
+        output = self.fxoverlay_output_path
+        if not output:
+            return
+        for candidate in (output, fxoverlay_tmp_path(output)):
+            try:
+                if path.exists(candidate) and path.getmtime(candidate) >= self.fxoverlay_start_time - 1:
+                    os.remove(candidate)
+            except OSError:
+                pass
+
+    def _pulse_fxoverlay(self, elapsed):
+        self.gauge_fxoverlay.Pulse()
+        self.lbl_fxoverlay_progress.SetLabel(
+            f"{T('Working')} -- {T('elapsed')} {self._format_duration(elapsed)}")
+
+    def run_fxoverlay(self, cmd):
+        # Runs on a background thread via startWorker -- never blocks the GUI thread. Out-of-
+        # process, same convention as every other Standalone Tool. The CLI prints no frame
+        # progress, so this only pulses the bar and shows elapsed time while it runs.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, encoding="utf-8", errors="replace")
+        self.fxoverlay_proc = proc
+        chunks = []
+
+        def _drain_output():
+            for line in proc.stdout:
+                chunks.append(line)
+
+        reader = threading.Thread(target=_drain_output, daemon=True)
+        reader.start()
+        while True:
+            try:
+                proc.wait(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                wx.CallAfter(self._pulse_fxoverlay, time() - self.fxoverlay_start_time)
+        reader.join(timeout=5)
+        return proc.returncode, "".join(chunks)
+
+    def on_exit_fxoverlay_worker(self, result):
+        self.btn_fxoverlay_run.Enable()
+        self.btn_fxoverlay_clear.Enable()
+        self.btn_fxoverlay_cancel.Disable()
+        self.fxoverlay_proc = None
+        try:
+            returncode, output = result.get()
+        except:  # noqa
+            e_type, e, tb = sys.exc_info()
+            message = getattr(e, "message", str(e))
+            traceback.print_tb(tb)
+            self.txt_fxoverlay_log.AppendText(message)
+            self.SetStatusText(T("Error"))
+            wx.MessageBox(message, f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+
+        self._write_standalone_job_log(T("FX Pop-Out Overlay"), self.fxoverlay_output_path, output)
+        self.txt_fxoverlay_log.SetValue(output)
+        self.txt_fxoverlay_log.ShowPosition(self.txt_fxoverlay_log.GetLastPosition())
+        if self.fxoverlay_cancelled:
+            self._remove_partial_fxoverlay_outputs()
+            self.lbl_fxoverlay_progress.SetLabel(T("Cancelled -- the input files were not modified"))
+            self.SetStatusText(T("FX Pop-Out Overlay cancelled"))
+        elif returncode == 0:
+            self.gauge_fxoverlay.SetRange(1)
+            self.gauge_fxoverlay.SetValue(1)
+            self.lbl_fxoverlay_progress.SetLabel(T("Done -- the input files were not modified"))
+            self.SetStatusText(T("FX Pop-Out Overlay applied successfully"))
+        else:
+            self.gauge_fxoverlay.SetValue(0)
+            self.lbl_fxoverlay_progress.SetLabel(T("Failed or refused -- see the log box"))
+            self.SetStatusText(T("FX Pop-Out Overlay failed or refused -- see the log below"))
+            wx.MessageBox(T("FX Pop-Out Overlay failed or refused -- see the log box for the exact "
+                            "reason. The input files were not modified."),
+                          T("FX Pop-Out Overlay"), wx.OK | wx.ICON_ERROR)
+
+    def _build_fxoverlay_cmd(self, input_path, overlay_path, output_path, layout, blend_mode,
+                             pop_strength, opacity, loop, start_time, end_time):
+        """The one CLI command for a Run. Optional flags are only added when filled in/checked."""
+        cmd = [sys.executable, "-m", "iw3.fx_overlay_cli",
+               "--input", input_path, "--overlay", overlay_path,
+               "--blend-mode", blend_mode, "--pop-strength", pop_strength, "--opacity", opacity]
+        if output_path:
+            cmd += ["--output", output_path]
+        if layout:
+            cmd += ["--layout", layout]
+        if loop:
+            cmd += ["--loop"]
+        if start_time:
+            cmd += ["--start-time", start_time]
+        if end_time:
+            cmd += ["--end-time", end_time]
+        return cmd
+
+    def on_click_btn_fxoverlay_run(self, event):
+        from .fx_overlay_cli import resolve_output_path
+        input_path = self.txt_fxoverlay_input.GetValue().strip()
+        overlay_path = self.txt_fxoverlay_overlay.GetValue().strip()
+        output_path = self.txt_fxoverlay_output.GetValue().strip()
+        layout = self.cbo_fxoverlay_layout.GetClientData(self.cbo_fxoverlay_layout.GetSelection())
+        blend_mode = self.cbo_fxoverlay_blend_mode.GetClientData(self.cbo_fxoverlay_blend_mode.GetSelection())
+        pop_strength = self.txt_fxoverlay_pop_strength.GetValue().strip()
+        opacity = self.txt_fxoverlay_opacity.GetValue().strip()
+        loop = self.chk_fxoverlay_loop.GetValue()
+        start_time = self.txt_fxoverlay_start_time.GetValue() if self.chk_fxoverlay_start_time.GetValue() else None
+        end_time = self.txt_fxoverlay_end_time.GetValue() if self.chk_fxoverlay_end_time.GetValue() else None
+
+        if not input_path or not path.isfile(input_path):
+            wx.MessageBox(T("Select a valid finished 3D video file first (a folder can't be used here)."),
+                          T("FX Pop-Out Overlay"), wx.OK | wx.ICON_WARNING)
+            return
+        if not overlay_path or not path.isfile(overlay_path):
+            wx.MessageBox(T("Select a valid effect clip file first."),
+                          T("FX Pop-Out Overlay"), wx.OK | wx.ICON_WARNING)
+            return
+        if not validate_number(pop_strength, 0.0, 1.0):
+            self.show_validation_error_message(T("Pop Strength"), 0.0, 1.0)
+            return
+        if not validate_number(opacity, 0.0, 1.0):
+            self.show_validation_error_message(T("Opacity"), 0.0, 1.0)
+            return
+
+        # Remember what this run would write, so Cancel removes only that. If the output already
+        # exists the CLI refuses the run, and nothing is marked as created.
+        resolved_output = resolve_output_path(input_path, output_path)
+        self.fxoverlay_output_path = resolved_output
+        self.fxoverlay_created_output = not path.exists(resolved_output)
+
+        cmd = self._build_fxoverlay_cmd(input_path, overlay_path, output_path, layout, blend_mode,
+                                        pop_strength, opacity, loop, start_time, end_time)
+        self.txt_fxoverlay_log.SetValue(T("Running...\n"))
+        self.gauge_fxoverlay.SetRange(1)
+        self.gauge_fxoverlay.SetValue(0)
+        self.lbl_fxoverlay_progress.SetLabel("")
+        self.fxoverlay_start_time = time()
+        self.btn_fxoverlay_run.Disable()
+        self.btn_fxoverlay_clear.Disable()
+        self.fxoverlay_cancelled = False
+        self.btn_fxoverlay_cancel.Enable()
+        self.SetStatusText(T("Compositing FX overlay..."))
+        startWorker(self.on_exit_fxoverlay_worker, self.run_fxoverlay, wargs=(cmd,))
 
     def _build_rife_standalone_job(self, input_path, output_path):
         """Builds the one RIFE run for input_path -> output_path from the panel's current options. Shared by

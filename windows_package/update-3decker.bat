@@ -69,6 +69,25 @@ if %ERRORLEVEL% neq 0 goto :on_error
 call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-torch-%TORCH_VARIANT%.txt"
 if %ERRORLEVEL% neq 0 goto :on_error
 call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements.txt"
+@rem ADR-397: requirements.txt pins opencv-contrib-python (needed by sod_track's
+@rem cv2.TrackerCSRT_create), but mmengine (also in requirements.txt, used by
+@rem MoGe-based depth models) declares its own, unrelated, unpinned dependency on
+@rem plain opencv-python -- pip has no way to know contrib already satisfies that
+@rem cv2 import under a different project name, so it tries to install plain
+@rem opencv-python too, which writes into the SAME cv2\ folder and can silently
+@rem overwrite the contrib build's own TrackerCSRT-capable cv2.pyd. Confirmed real
+@rem (decker hit this directly, 2026-10-27): the step above used to be fatal
+@rem (goto :on_error aborted this ENTIRE script -- skipping every later step,
+@rem model downloads/ffmpeg updates/warmup included) on this one conflict even
+@rem though every OTHER package in that file installed fine, and even when it
+@rem succeeds, it can succeed into the WRONG state (plain opencv-python winning
+@rem the overwrite). There is no way to tell pip's resolver "opencv-contrib-python
+@rem already satisfies opencv-python" -- so rather than fight it, the step above
+@rem is no longer fatal on its own, and this forced reinstall right after it is
+@rem the real, authoritative, ALWAYS-LAST write that guarantees the correct
+@rem contrib build is what's actually on disk once this script moves on,
+@rem regardless of what happened above.
+call :pip_retry --force-reinstall --no-deps opencv-contrib-python==4.10.0.84
 if %ERRORLEVEL% neq 0 goto :on_error
 call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-gui.txt"
 if %ERRORLEVEL% neq 0 goto :on_error

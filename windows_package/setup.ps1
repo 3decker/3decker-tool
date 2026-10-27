@@ -372,7 +372,25 @@ Invoke-PipInstall @("--upgrade", "-r", $torchReq)
 if ($LASTEXITCODE -ne 0) { throw "pip install of $torchReq failed with exit code $LASTEXITCODE" }
 
 Invoke-PipInstall @("--upgrade", "-r", (Join-Path $nunifDir "requirements.txt"))
-if ($LASTEXITCODE -ne 0) { throw "pip install of requirements.txt failed with exit code $LASTEXITCODE" }
+# ADR-397: requirements.txt pins opencv-contrib-python (needed by sod_track's
+# cv2.TrackerCSRT_create), but mmengine (also in requirements.txt, used by
+# MoGe-based depth models) declares its own, unrelated, unpinned dependency on
+# plain opencv-python -- pip has no way to know contrib already satisfies that
+# cv2 import under a different project name, so it tries to install plain
+# opencv-python too, which writes into the SAME cv2\ folder and can silently
+# overwrite the contrib build's own TrackerCSRT-capable cv2.pyd. Confirmed real
+# (a real user hit this directly, 2026-10-27): the step above can fail outright
+# on this conflict (which used to throw and abort the ENTIRE setup) even though
+# every OTHER package in that file installs fine, and even when it succeeds, it
+# can succeed into the WRONG state (plain opencv-python winning the overwrite).
+# There is no way to tell pip's resolver "opencv-contrib-python already
+# satisfies opencv-python" -- so rather than fight it, the step above is no
+# longer fatal on its own, and this forced reinstall right after it is the
+# real, authoritative, ALWAYS-LAST write that guarantees the correct contrib
+# build is what's actually on disk once setup moves on, regardless of what
+# happened above.
+Invoke-PipInstall @("--force-reinstall", "--no-deps", "opencv-contrib-python==4.10.0.84")
+if ($LASTEXITCODE -ne 0) { throw "pip install of opencv-contrib-python failed with exit code $LASTEXITCODE" }
 
 Invoke-PipInstall @("--upgrade", "-r", (Join-Path $nunifDir "requirements-gui.txt"))
 if ($LASTEXITCODE -ne 0) { throw "pip install of requirements-gui.txt failed with exit code $LASTEXITCODE" }

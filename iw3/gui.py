@@ -4266,6 +4266,33 @@ class MainFrame(wx.Frame):
               "Recommended: leave it off (FP32) unless speed matters more to you than the unreviewed "
               "quality tradeoff."))
 
+        # ADR-386: exposes RIFE's own flow-estimation "scale" parameter (matches the
+        # official Practical-RIFE inference_video.py --scale convention) -- previously
+        # hardcoded to 1.0 with no way to change it. Real motivation: fast/large-motion
+        # scenes can blur/ghost because RIFE's motion tracking has trouble finding a
+        # clean match between the two real frames; a higher scale gives that tracking
+        # step more detail to work with.
+        self.lbl_rife_scale = wx.StaticText(self.grp_postprocess, label=T("RIFE Motion Detail"))
+        self.cbo_rife_scale = wx.ComboBox(self.grp_postprocess,
+                                          choices=["0.25", "0.5", "1.0", "2.0", "4.0"],
+                                          name="cbo_rife_scale")
+        self.cbo_rife_scale.SetEditable(False)
+        self.cbo_rife_scale.SetStringSelection("1.0")
+        self.cbo_rife_scale.SetToolTip(
+            T("What it's for: how much detail RIFE's own motion-tracking step uses when it works out "
+              "how things moved between two real frames, before building the new in-between frame(s). "
+              "This is the real, direct cause of blur/ghosting on some scenes -- when motion is fast or "
+              "large, tracking can fail to find a clean match and RIFE blends the two frames together "
+              "instead of properly tracking the movement.\n"
+              "Values: 1.0 (default) is a balanced middle ground. 2.0/4.0 give motion-tracking more "
+              "detail to work with -- can reduce blur/ghosting specifically on fast or large motion, at "
+              "a real added processing cost. 0.25/0.5 are faster but can make blur on fast motion worse -- "
+              "mainly useful on very high-resolution (4K+) sources where speed is the priority.\n"
+              "Con: higher values add real processing time on top of an already-slow RIFE pass, with no "
+              "benefit on scenes that weren't blurry to begin with.\n"
+              "Recommended: 1.0 for most videos. Try 2.0 only on a specific source where you've actually "
+              "noticed blur/ghosting on fast-motion scenes."))
+
         # ADR-384: Avatar: The Way of Water's own "hybrid frame rate" technique -- the
         # output file stays one constant frame rate throughout, but only the movie's
         # own highest-motion scenes get real new RIFE frames; calmer/dialogue scenes
@@ -4749,6 +4776,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_rife_gpu, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.cbo_rife_gpu, (j, 1), flag=wx.EXPAND)
         layout.Add(self.chk_rife_fp16, (j, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_rife_scale, (j := j + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
+        layout.Add(self.cbo_rife_scale, (j, 1), flag=wx.EXPAND)
         layout.Add(self.chk_rife_hybrid_framerate, (j := j + 1, 0), (0, 2),
                   flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT, border=14)
         layout.Add(self.lbl_rife_hybrid_percent, (j := j + 1, 0),
@@ -6389,6 +6418,27 @@ class MainFrame(wx.Frame):
               "Recommended: leave unchecked (FP32, the default) for the best picture. Turn it on only when "
               "speed matters more to you than the ghosting risk in fast scenes."))
 
+        # ADR-386: same RIFE flow-estimation "scale" knob as the main Processor tab's own
+        # cbo_rife_scale -- see that widget's tooltip for the full explanation. Kept as its
+        # own separate control here since the Standalone RIFE Tool already duplicates every
+        # other RIFE setting (model/fp16/etc.) rather than sharing widgets with the main tab.
+        self.lbl_rife_standalone_scale = wx.StaticText(self.cpn_rife_standalone.GetPane(),
+                                                          label=T("RIFE Motion Detail"))
+        self.cbo_rife_standalone_scale = wx.ComboBox(self.cpn_rife_standalone.GetPane(),
+                                                       choices=["0.25", "0.5", "1.0", "2.0", "4.0"],
+                                                       name="cbo_rife_standalone_scale")
+        self.cbo_rife_standalone_scale.SetEditable(False)
+        self.cbo_rife_standalone_scale.SetStringSelection("1.0")
+        self.cbo_rife_standalone_scale.SetToolTip(
+            T("What it's for: how much detail RIFE's own motion-tracking step uses when it works out how "
+              "things moved between two real frames -- the direct cause of blur/ghosting on some scenes.\n"
+              "Values: 1.0 (default) is a balanced middle ground. 2.0/4.0 give motion-tracking more detail "
+              "to work with -- can reduce blur/ghosting on fast/large motion, at a real added processing "
+              "cost. 0.25/0.5 are faster but can make fast-motion blur worse -- mainly useful on very "
+              "high-resolution (4K+) sources where speed is the priority.\n"
+              "Recommended: 1.0 for most videos. Try 2.0 only if you've noticed blur/ghosting on fast "
+              "motion in this specific source."))
+
         # Optional: re-attach Dolby Vision after RIFE (ADR-193 follow-up)
         self.lbl_rife_standalone_dv_source = wx.StaticText(self.cpn_rife_standalone.GetPane(),
                                                              label=T("Original DV Source (optional)"))
@@ -6551,6 +6601,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_rife_standalone_codec, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_standalone_codec, (h, 1), flag=wx.EXPAND)
         layout.Add(self.chk_rife_standalone_fp16, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_rife_standalone_scale, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_rife_standalone_scale, (h, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_dv_source, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_dv_source, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_dv_source, (h, 3), flag=wx.EXPAND)
@@ -11182,6 +11234,8 @@ class MainFrame(wx.Frame):
         self.cbo_rife_mode.Enable(enabled)
         self.cbo_rife_gpu.Enable(enabled)
         self.chk_rife_fp16.Enable(enabled)
+        self.lbl_rife_scale.Enable(enabled)
+        self.cbo_rife_scale.Enable(enabled)
         self.chk_rife_hybrid_framerate.Enable(enabled)
         hybrid_percent_enabled = enabled and self.chk_rife_hybrid_framerate.GetValue()
         self.lbl_rife_hybrid_percent.Enable(hybrid_percent_enabled)
@@ -11978,6 +12032,7 @@ class MainFrame(wx.Frame):
             rife_multiplier=rife_multiplier,
             rife_target_fps=rife_target_fps,
             rife_fp16=self.chk_rife_fp16.GetValue(),
+            rife_scale=float(self.cbo_rife_scale.GetValue()),
             rife_hybrid_framerate=self.chk_rife_hybrid_framerate.GetValue(),
             rife_hybrid_percent=float(self.txt_rife_hybrid_percent.GetValue() or "50"),
             rife_dv_frame_count_tolerance=int(self.txt_rife_dv_frame_count_tolerance.GetValue() or "0"),
@@ -13344,6 +13399,7 @@ class MainFrame(wx.Frame):
 
         self.chk_rife_interpolate.SetValue(bool(args.rife_interpolate))
         self.chk_rife_fp16.SetValue(bool(getattr(args, "rife_fp16", False)))
+        _apply_combo_value(self.cbo_rife_scale, getattr(args, "rife_scale", 1.0))
         self.chk_rife_hybrid_framerate.SetValue(bool(getattr(args, "rife_hybrid_framerate", False)))
         _apply_combo_value(self.txt_rife_hybrid_percent, getattr(args, "rife_hybrid_percent", 50))
         _apply_combo_value(self.txt_rife_dv_frame_count_tolerance,
@@ -16538,6 +16594,12 @@ class MainFrame(wx.Frame):
         # existing command.
         if self.chk_rife_standalone_fp16.GetValue():
             cmd += ["--fp16"]
+        # ADR-386: same omit-unless-touched convention as --fp16/--video-codec above --
+        # only appended when it differs from rife_cli.py's own default (1.0), so anyone
+        # who doesn't touch this new control gets today's exact existing command.
+        rife_scale = self.cbo_rife_standalone_scale.GetValue()
+        if rife_scale != "1.0":
+            cmd += ["--rife-scale", rife_scale]
 
         return cmd, dv
 
@@ -21719,13 +21781,15 @@ def _self_test_rife_standalone_panel():
                      "cbo_rife_standalone_model", "cbo_rife_standalone_mode",
                      "txt_rife_standalone_target_fps", "cbo_rife_standalone_gpu",
                      "cbo_rife_standalone_codec", "chk_rife_standalone_fp16",
-                     "btn_rife_standalone_run"):
+                     "cbo_rife_standalone_scale", "btn_rife_standalone_run"):
             ctrl = getattr(frame, name)
             assert ctrl.GetParent() is frame.cpn_rife_standalone.GetPane(), name
 
         # ADR-331: --fp16 is opt-in only -- unchecked by default, zero behavior
         # change for anyone who doesn't touch it (same guarantee as ADR-327).
         assert frame.chk_rife_standalone_fp16.GetValue() is False
+        # ADR-386: same omit-unless-touched guarantee for the new scale control.
+        assert frame.cbo_rife_standalone_scale.GetValue() == "1.0"
         # ADR-250: txt_rife_standalone_log is now a plain alias to the one shared
         # txt_standalone_log, parented to grp_standalone_log at the bottom of the
         # whole tab -- not inside this tool's own pane like the fields above.
@@ -21866,6 +21930,24 @@ def _self_test_rife_standalone_panel():
             frame.on_click_btn_rife_standalone_run(None)
             cmd = captured["cmd"]
             assert "--fp16" in cmd, cmd
+
+            # ADR-386: cbo_rife_standalone_scale, default "1.0" -> must be absent
+            # (same omit-unless-touched guarantee as --fp16/--video-codec above).
+            assert "--rife-scale" not in cmd, cmd
+
+            # Changed to a non-default value -> --rife-scale appended with that value.
+            captured.clear()
+            frame.cbo_rife_standalone_scale.SetValue("2.0")
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert "--rife-scale" in cmd and "2.0" in cmd, cmd
+
+            # Reset to default -> --rife-scale disappears again.
+            captured.clear()
+            frame.cbo_rife_standalone_scale.SetValue("1.0")
+            frame.on_click_btn_rife_standalone_run(None)
+            cmd = captured["cmd"]
+            assert "--rife-scale" not in cmd, cmd
 
             # Unchecked again -> --fp16 disappears (not sticky/broken).
             captured.clear()
@@ -29737,6 +29819,97 @@ def _self_test_rife_fp16_processor_checkbox():
     print("_self_test_rife_fp16_processor_checkbox: PASS")
 
 
+def _self_test_rife_scale_processor_combo():
+    """ADR-386: Main Processor tab RIFE Motion Detail combo (cbo_rife_scale) -- exposes RIFE's own
+    flow-estimation "scale" parameter (previously hardcoded to 1.0, never user-adjustable), the real
+    cause of blur/ghosting on fast/large-motion scenes. Mirrors _self_test_rife_fp16_processor_checkbox
+    exactly: checks the combo exists under grp_postprocess, defaults to "1.0", is enabled only while
+    RIFE Interpolate is on, parse_args() carries rife_scale (1.0 by default, the chosen value when
+    changed), apply_parsed_args_to_gui() restores it (including from an args object with no rife_scale
+    attribute at all -- old saved configs), and utils._run_rife_interpolation() appends --rife-scale to
+    the real iw3.rife_cli command only when it differs from 1.0, leaving the command otherwise
+    byte-for-byte identical to the unset case. Subprocess is mocked; no GPU, no movie."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        assert frame.cbo_rife_scale.GetParent() is frame.grp_postprocess
+        assert frame.cbo_rife_scale.GetValue() == "1.0"
+        tip = frame.cbo_rife_scale.GetToolTip().GetTip()
+        assert "1.0" in tip and "blur" in tip.lower(), tip
+
+        frame.pnl_file.set_input_path("C:\\test input dir\\movie.mkv")
+        frame.pnl_file.set_output_path("C:\\test output dir")
+
+        frame.chk_rife_interpolate.SetValue(False)
+        frame.update_rife_interpolate()
+        assert not frame.cbo_rife_scale.IsEnabled()
+        frame.chk_rife_interpolate.SetValue(True)
+        frame.update_rife_interpolate()
+        assert frame.cbo_rife_scale.IsEnabled()
+
+        assert frame.parse_args(skip_set_state=True).rife_scale == 1.0
+        frame.cbo_rife_scale.SetValue("2.0")
+        args_on = frame.parse_args(skip_set_state=True)
+        assert args_on.rife_scale == 2.0
+
+        frame.cbo_rife_scale.SetValue("1.0")
+        frame.apply_parsed_args_to_gui(args_on)
+        assert frame.cbo_rife_scale.GetValue() == "2.0"
+        del args_on.rife_scale
+        frame.cbo_rife_scale.SetValue("4.0")
+        frame.apply_parsed_args_to_gui(args_on)
+        assert frame.cbo_rife_scale.GetValue() == "1.0", "old config without rife_scale must default to 1.0"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    captured = []
+
+    def fake_run_cli(cmd, cwd, args, prefix, desc):
+        captured.append(list(cmd))
+        with open(cmd[cmd.index("-o") + 1], "wb") as f:
+            f.write(b"fake rife output")
+        return 0, "", False
+
+    base = dict(rife_interpolate=True, state={}, rife_model=None,
+                rife_multiplier=None, rife_target_fps=None, rife_gpu=0)
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x")
+        real_run_cli = U._run_cli_with_progress
+        U._run_cli_with_progress = fake_run_cli
+        try:
+            with mock.patch.object(U, "_load_rife_scene_cut_times", lambda p, a: None):
+                for a in (types.SimpleNamespace(**base),
+                          types.SimpleNamespace(**base, rife_scale=1.0),
+                          types.SimpleNamespace(**base, rife_scale=2.0)):
+                    result = U._run_rife_interpolation(src, a)
+                    assert result is not None and path.exists(result), result
+                    os.remove(result)
+        finally:
+            U._run_cli_with_progress = real_run_cli
+
+    legacy_cmd, off_cmd, on_cmd = captured
+    assert "--rife-scale" not in legacy_cmd and "--rife-scale" not in off_cmd, captured
+    assert legacy_cmd == off_cmd, "unset must be byte-for-byte identical to the pre-change command"
+    assert "--rife-scale" in on_cmd and "2.0" in on_cmd, on_cmd
+    assert [x for x in on_cmd if x not in ("--rife-scale", "2.0")] == off_cmd, on_cmd
+
+    print("_self_test_rife_scale_processor_combo: PASS")
+
+
 def _self_test_dolby_vision_step_progress():
     """The Dolby Vision step after RIFE used to show no frames / FPS / ETA. reinject_hdr_cli prints
     "IW3_REINJECT_PROGRESS <stage> <done> <total>" (seconds for the two decode passes, BYTES of a growing temp file
@@ -34637,6 +34810,7 @@ def _run_self_tests():
         _self_test_rife_standalone_dv_and_cancel,
         _self_test_rife_standalone_folder_batch,
         _self_test_rife_fp16_processor_checkbox,
+        _self_test_rife_scale_processor_combo,
         _self_test_sbs2mvc_text_subtitles,
         _self_test_sbs2mvc_truehd_eac3_audio_handling,
         _self_test_sbs2mvc_allow_lossless_eac3_on_disc,

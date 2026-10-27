@@ -1192,6 +1192,9 @@ def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_pa
         cmd += ["--rife-multiplier", str(rife_multiplier)]
     if getattr(args, "rife_fp16", False):
         cmd += ["--fp16"]
+    rife_scale = float(getattr(args, "rife_scale", 1.0) or 1.0)
+    if rife_scale != 1.0:
+        cmd += ["--rife-scale", str(rife_scale)]
     if force_hevc:
         # DV/HDR10+ can only exist in HEVC; rife_cli's own default is H.264
         codec = getattr(args, "video_codec", None)

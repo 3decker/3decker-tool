@@ -130,6 +130,17 @@ def create_parser():
                               "source this job converted -- not intended to be set by hand. Omitted "
                               "(the default): unchanged prior behavior, every real-frame pair is "
                               "interpolated unconditionally.")
+    parser.add_argument("--rife-scale", type=float, default=1.0,
+                         choices=[0.25, 0.5, 1.0, 2.0, 4.0],
+                         help="flow-estimation scale passed straight through to the official RIFE "
+                              "model's own inference(), matching Practical-RIFE's inference_video.py "
+                              "--scale convention exactly. Lower than 1.0 downscales the image before "
+                              "motion tracking (faster, recommended for 4K+ sources, less accurate on "
+                              "fast motion). Higher than 1.0 (2.0/4.0) gives the motion-tracking step "
+                              "more detail to work with, which can reduce blur/ghosting on scenes with "
+                              "fast or large motion, at a real speed cost -- most useful on lower-"
+                              "resolution sources where there's headroom to spend. Default 1.0 (the "
+                              "original, unchanged behavior) is a balanced middle ground.")
     parser.add_argument("--hybrid-exclude-ranges-file", type=str, default=None,
                          help="path to a JSON file containing a list of [start_sec, end_sec] time "
                               "ranges (relative to THIS video's own start) to exclude from real "
@@ -339,7 +350,7 @@ def _is_near_duplicate_pair(pending, x):
             and diff.max().item() < _DUPLICATE_MAX_DIFF_THRESHOLD)
 
 
-def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
+def _make_frame_callback(model, device, ratio_state, manifest_frames=None, rife_scale=1.0):
     # Buffers exactly the previous decoded frame; when the next frame arrives,
     # computes this pair's interpolation timesteps (see _compute_pair_timesteps)
     # and emits [previous, *interpolated-in-between-frames] so playback order
@@ -435,7 +446,7 @@ def _make_frame_callback(model, device, ratio_state, manifest_frames=None):
                 source_tensor = pending if nearest == pending_source_index else x
                 middle = source_tensor.clone()
             else:
-                middle = interpolate_frame(model, pending, x, timestep=float(t), scale=1.0)
+                middle = interpolate_frame(model, pending, x, timestep=float(t), scale=rife_scale)
             out_frames.append(middle.squeeze(0))
             if manifest_frames is not None:
                 entry = {"real": False, "nearest_real_index": nearest}
@@ -613,14 +624,16 @@ def _load_hybrid_exclude_ranges_file(hybrid_exclude_ranges_file):
 
 def run(input_path, output_path, rife_model=DEFAULT_RIFE_MODEL, gpu=0,
         rife_multiplier=None, rife_target_fps=None, video_codec=None,
-        scene_cut_times_file=None, hybrid_exclude_ranges_file=None, fp16=False):
+        scene_cut_times_file=None, hybrid_exclude_ranges_file=None, fp16=False,
+        rife_scale=1.0):
     device = create_device(gpu)
     model = load_rife_model(rife_model, device, fp16=fp16)
     ratio_state = {"ratio": None, "cut_pair_indices": None, "hybrid_exclude_pair_indices": None}
     scene_cut_times = _load_scene_cut_times_file(scene_cut_times_file)
     hybrid_exclude_ranges = _load_hybrid_exclude_ranges_file(hybrid_exclude_ranges_file)
     manifest_frames = []
-    frame_callback = _make_frame_callback(model, device, ratio_state, manifest_frames)
+    frame_callback = _make_frame_callback(model, device, ratio_state, manifest_frames,
+                                           rife_scale=rife_scale)
     fps_info = {}
     # ADR-269: read once, up front -- input_path never changes mid-run, and this way
     # a source-read failure (logged inside the helper as None) can't happen more than
@@ -1416,6 +1429,81 @@ def _test_rife_hybrid_frame_rate():
     print("_test_rife_hybrid_frame_rate: PASS")
 
 
+def _test_rife_scale_parameter():
+    """--rife-scale: the real RIFE flow-estimation scale knob (matches the official
+    Practical-RIFE inference_video.py --scale convention), previously hardcoded to
+    1.0 at the interpolate_frame() call site inside the real frame_callback -- never
+    user-adjustable. Added so fast/large-motion scenes can trade more compute for
+    less blur/ghosting (scale > 1.0), independent of everything else RIFE does.
+
+    Part 1: create_parser() accepts only the five official values and defaults to
+    1.0 when omitted (byte-for-byte unchanged behavior for every existing caller
+    that never passes this flag).
+
+    Part 2: drives the REAL, unmodified _make_frame_callback (same CS-TEST-001
+    sentinel technique as _test_rife_hybrid_frame_rate) with a fake interpolate_frame
+    that records the exact `scale` kwarg it was called with each time, proving
+    run()'s rife_scale argument reaches the real per-pair interpolate_frame() call
+    and that the default (rife_scale omitted from _make_frame_callback entirely)
+    still produces scale=1.0 -- the original, pre-feature value."""
+    from unittest.mock import patch
+
+    # Part 1: parser defaults/choices.
+    args_default = create_parser().parse_args(["-i", "in.mp4", "-o", "out.mp4"])
+    assert args_default.rife_scale == 1.0, args_default.rife_scale
+    args_explicit = create_parser().parse_args(["-i", "in.mp4", "-o", "out.mp4", "--rife-scale", "2.0"])
+    assert args_explicit.rife_scale == 2.0, args_explicit.rife_scale
+    try:
+        create_parser().parse_args(["-i", "in.mp4", "-o", "out.mp4", "--rife-scale", "3.0"])
+        assert False, "an off-list --rife-scale value must be rejected by argparse choices"
+    except SystemExit:
+        pass
+
+    # Part 2: real threading through _make_frame_callback -> interpolate_frame.
+    seen_scales = []
+
+    def fake_interpolate_frame(model, img0, img1, timestep=0.5, scale=1.0):
+        seen_scales.append(scale)
+        return torch.full_like(img0, 1.0)
+
+    def fake_to_tensor(frame, device=None):
+        return torch.full((1, 2, 2), float(frame))
+
+    ratio_state = {"ratio": Fraction(2), "cut_pair_indices": set()}
+
+    with patch(f"{__name__}.interpolate_frame", fake_interpolate_frame), \
+         patch.object(VU, "to_tensor", fake_to_tensor):
+        frame_callback = _make_frame_callback(
+            model=None, device=torch.device("cpu"), ratio_state=ratio_state,
+            manifest_frames=[], rife_scale=2.0)
+        for i in range(4):
+            frame_callback(i)
+        frame_callback(None)
+    assert seen_scales, "no interpolate_frame call was recorded"
+    assert all(s == 2.0 for s in seen_scales), seen_scales
+
+    # Omitting rife_scale entirely (every pre-existing caller) must still produce
+    # exactly the original scale=1.0 default -- no silent behavior change.
+    seen_scales_default = []
+
+    def fake_interpolate_frame_default(model, img0, img1, timestep=0.5, scale=1.0):
+        seen_scales_default.append(scale)
+        return torch.full_like(img0, 1.0)
+
+    with patch(f"{__name__}.interpolate_frame", fake_interpolate_frame_default), \
+         patch.object(VU, "to_tensor", fake_to_tensor):
+        frame_callback2 = _make_frame_callback(
+            model=None, device=torch.device("cpu"), ratio_state=dict(ratio_state),
+            manifest_frames=[])
+        for i in range(4):
+            frame_callback2(i)
+        frame_callback2(None)
+    assert seen_scales_default, "no interpolate_frame call was recorded (default case)"
+    assert all(s == 1.0 for s in seen_scales_default), seen_scales_default
+
+    print("_test_rife_scale_parameter: PASS")
+
+
 def _test_rife_video_codec_options():
     """Regression test for the real, confirmed fix (2026-09-08, see
     docs/ai/AI_DECISIONS.md ADR-051/ADR-064 amendments) for the bug that RIFE could
@@ -1817,6 +1905,7 @@ def _run_self_tests():
     _test_rife_scene_cut_protection()
     _test_rife_duplicate_frame_detection()
     _test_rife_hybrid_frame_rate()
+    _test_rife_scale_parameter()
     _test_rife_video_codec_options()
     _test_rife_output_pix_fmt()
     _test_rife_carries_forward_source_comment_metadata()
@@ -1835,7 +1924,7 @@ def main(argv=None):
         rife_multiplier=args.rife_multiplier, rife_target_fps=args.rife_target_fps,
         video_codec=args.video_codec, scene_cut_times_file=args.scene_cut_times_file,
         hybrid_exclude_ranges_file=args.hybrid_exclude_ranges_file,
-        fp16=args.fp16)
+        fp16=args.fp16, rife_scale=args.rife_scale)
 
 
 if __name__ == "__main__":

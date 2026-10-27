@@ -52,6 +52,9 @@ from .stereo_model_factory import create_stereo_model
 from .inpaint_utils import INPAINT_MODELS
 from .convergence_estimator import ConvergenceEstimator
 from .face_convergence_estimator import FaceConvergenceEstimator
+from .depth_percentile_estimator import DepthPercentileEstimator
+from .clip_shot_estimator import ClipShotEstimator
+from .sod_track_estimator import SodTrackEstimator
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
@@ -1066,6 +1069,41 @@ def _ensure_hybrid_scene_cut_times(scene_source_path, args):
     if not segment_pts:
         return None
     return sorted(p / scan_fps for p in segment_pts)
+
+
+def compute_standalone_hybrid_exclude_ranges(video_path, gpu_id=0, hwaccel=None,
+                                              disable_software_fallback=False,
+                                              rife_hybrid_percent=50,
+                                              stop_event=None, suspend_event=None, tqdm_fn=None):
+    """ADR-388: Hybrid Frame Rate's own scene-boundary + motion scan, for the Standalone
+    RIFE Tool (gui.py's _build_rife_standalone_job) -- NOT the main pipeline's own
+    _run_rife_interpolation above. Unlike the main pipeline, there is no separate
+    "original 2D source" vs. "already-converted output" distinction in the standalone
+    tool: video_path plays BOTH roles (scanned for scene cuts AND for motion), since
+    it's the only file this tool ever has to work with.
+
+    Builds its own throwaway args Namespace with every attribute
+    _ensure_hybrid_scene_cut_times()/rife_hybrid.compute_hybrid_exclude_ranges() need
+    (max_fps=30, matching create_parser()'s own default, so a cache built here is
+    reusable by a later Scene Detection run against the same file with default
+    settings, and vice versa; no start/end trim, since the standalone tool always
+    processes the whole file). `gpu_id` picks the SAME device the RIFE job itself will
+    use for the scene/motion scan models -- there's no separate device control for this
+    in the standalone tool, and reusing the RIFE GPU avoids needing one.
+
+    Returns the exclude ranges list (possibly empty), or None on any failure/refusal --
+    same never-block-the-run contract as compute_hybrid_exclude_ranges itself. Never
+    raises."""
+    from . import rife_hybrid
+    fake_args = argparse.Namespace(
+        max_fps=30, scene_cache_file=None, scene_cache_dir=None,
+        start_time=None, end_time=None,
+        hwaccel=hwaccel, disable_software_fallback=disable_software_fallback,
+        rife_hybrid_percent=rife_hybrid_percent,
+        state={"device": create_device(gpu_id), "stop_event": stop_event,
+               "suspend_event": suspend_event, "tqdm_fn": tqdm_fn})
+    scene_cut_times = _ensure_hybrid_scene_cut_times(video_path, fake_args)
+    return rife_hybrid.compute_hybrid_exclude_ranges(video_path, scene_cut_times, fake_args)
 
 
 def _write_rife_scene_cut_times_file(interpolated_path, scene_cut_times):
@@ -7976,8 +8014,16 @@ def create_parser(required_true=True):
     parser.add_argument("--warp-steps", type=int, help=("warp steps for row_flow_v3"))
     parser.add_argument("--convergence", "-c", type=float, default=0.5,
                         help=("(normalized) distance of convergence plane(screen position). 0-1 is reasonable value"))
-    parser.add_argument("--convergence-mode", type=str, choices=["constant", "sod_v1", "face_detect"], default="constant",
-                        help=("auto convergence mode"))
+    parser.add_argument("--convergence-mode", type=str,
+                        choices=["constant", "sod_v1", "face_detect", "depth_percentile", "clip_shot", "sod_track"],
+                        default="constant",
+                        help=("auto convergence mode. constant: fixed value. sod_v1: AI saliency model picks "
+                              "the subject every frame. face_detect: centers on detected faces. "
+                              "depth_percentile: zero-model, uses the full frame's own depth histogram. "
+                              "clip_shot: depth_percentile biased by a CLIP close-up/wide-shot judgment. "
+                              "sod_track: sod_v1's saliency model picks a subject once per shot, then a real "
+                              "cv2 appearance tracker follows it continuously (see ADR-390 for how this "
+                              "differs from --convergence-subject-lock)."))
     parser.add_argument("--convergence-smoothing", type=float, default=0.9,
                         help=("How quickly auto convergence modes (sod_v1/face_detect) react to change. "
                               "Plain per-frame EMA decay by default; with --convergence-scene-hold, instead "
@@ -8891,6 +8937,33 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             raise RuntimeError(
                 f"face_detect convergence mode failed to initialize.\n"
                 f"If mediapipe is missing, run: pip install mediapipe absl-py protobuf attrs flatbuffers\n"
+                f"Error: {type(e).__name__}: {e}"
+            ) from e
+    elif args.convergence_mode == "depth_percentile":
+        convergence_model = DepthPercentileEstimator(
+            args.convergence,
+            decay=getattr(args, "convergence_smoothing", 0.9),
+            scene_hold=getattr(args, "convergence_scene_hold", False),
+            cut_smooth=getattr(args, "convergence_cut_smooth", 0))
+    elif args.convergence_mode == "clip_shot":
+        convergence_model = ClipShotEstimator(
+            args.convergence, device_id=args.gpu[0],
+            decay=getattr(args, "convergence_smoothing", 0.9),
+            scene_hold=getattr(args, "convergence_scene_hold", False),
+            cut_smooth=getattr(args, "convergence_cut_smooth", 0))
+    elif args.convergence_mode == "sod_track":
+        try:
+            convergence_model = SodTrackEstimator(
+                args.convergence, device_id=args.gpu[0],
+                decay=getattr(args, "convergence_smoothing", 0.9),
+                compile=args.compile,
+                scene_hold=getattr(args, "convergence_scene_hold", False),
+                cut_smooth=getattr(args, "convergence_cut_smooth", 0))
+        except Exception as e:
+            raise RuntimeError(
+                f"sod_track convergence mode failed to initialize.\n"
+                f"If opencv's contrib tracking module is missing, run: "
+                f"pip install opencv-contrib-python==4.10.0.84\n"
                 f"Error: {type(e).__name__}: {e}"
             ) from e
 

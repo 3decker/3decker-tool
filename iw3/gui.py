@@ -1468,8 +1468,10 @@ class MainFrame(wx.Frame):
         self.chk_stereo_show_advanced.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_stereo_show_advanced)
 
         self.lbl_convergence = wx.StaticText(self.grp_stereo, label=T("Convergence Plane"))
-        self.cbo_convergence_mode = wx.ComboBox(self.grp_stereo, choices=["constant", "sod_v1", "face_detect"],
-                                                name="cbo_convergence_mode")
+        self.cbo_convergence_mode = wx.ComboBox(
+            self.grp_stereo,
+            choices=["constant", "sod_v1", "face_detect", "depth_percentile", "clip_shot", "sod_track"],
+            name="cbo_convergence_mode")
         self.cbo_convergence_mode.SetEditable(False)
         self.cbo_convergence_mode.SetSelection(0)
         self.cbo_convergence_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_mode)
@@ -1482,17 +1484,32 @@ class MainFrame(wx.Frame):
               "visually important subject.\n"
               "face_detect: same idea, but automatically centers on detected faces specifically, ignoring "
               "the value box.\n"
-              "Con of sod_v1/face_detect: every time the convergence point moves — even smoothed — your "
-              "eyes have to physically readjust their focus angle to keep the image comfortable to view. "
-              "By default, sod_v1 re-evaluates every frame and can drift even WITHIN a single unbroken shot "
-              "(someone shifts position, the camera pans slightly) -- see \"Hold Steady Per Scene\" just "
-              "below to fix that.\n"
-              "When sod_v1/face_detect genuinely help: a push/pull \"reveal\" shot where the camera moves "
-              "from a tight close-up to a wide shot within one continuous take — a fixed constant value "
-              "structurally can't be right for both ends of that move, but sod_v1 can track it.\n"
+              "depth_percentile: no AI model at all -- picks a position using the Convergence Bias value "
+              "within the FULL frame's own depth range (not just a subject region). Free (no extra "
+              "inference cost) and content-agnostic.\n"
+              "clip_shot: same as depth_percentile, but a CLIP AI model judges whether each shot is a "
+              "close-up or a wide shot and nudges the position toward more pop-out on close-ups, staying "
+              "neutral (same as plain depth_percentile) on wide shots. Falls back to plain depth_percentile "
+              "automatically if its model can't be downloaded.\n"
+              "sod_track: like sod_v1, but instead of re-running the saliency AI every single frame, it "
+              "picks a subject once per shot and then a real video-tracking algorithm (the same kind used "
+              "in video editing software) follows that subject's actual appearance continuously -- "
+              "different from Subject Lock below, which only affects HOW OFTEN sod_v1 is allowed to switch "
+              "which freshly re-detected region it's using, not genuine frame-to-frame tracking.\n"
+              "Con of sod_v1/face_detect/sod_track/clip_shot: every time the convergence point moves — even "
+              "smoothed — your eyes have to physically readjust their focus angle to keep the image "
+              "comfortable to view. By default, sod_v1 re-evaluates every frame and can drift even WITHIN a "
+              "single unbroken shot (someone shifts position, the camera pans slightly) -- see \"Hold "
+              "Steady Per Scene\" just below to fix that.\n"
+              "When sod_v1/face_detect/sod_track genuinely help: a push/pull \"reveal\" shot where the "
+              "camera moves from a tight close-up to a wide shot within one continuous take — a fixed "
+              "constant value structurally can't be right for both ends of that move, but these can track "
+              "it.\n"
               "Recommended: constant for most content — steadier and closer to real stereographer practice. "
-              "Reserve sod_v1/face_detect (ideally with Hold Steady Per Scene on) for content dominated by "
-              "continuous push/pull reveal shots, or scenes that vary a lot in framing/distance."))
+              "depth_percentile is a reasonable free middle ground if constant feels wrong for varied "
+              "footage but you don't want AI-model overhead. Reserve sod_v1/face_detect/sod_track/clip_shot "
+              "(ideally with Hold Steady Per Scene on) for content dominated by continuous push/pull reveal "
+              "shots, or scenes that vary a lot in framing/distance."))
 
         self.cbo_convergence = EditableComboBox(self.grp_stereo, choices=["0.0", "0.25", "0.5", "1.0"],
                                                 name="cbo_convergence")
@@ -1500,8 +1517,10 @@ class MainFrame(wx.Frame):
         self.cbo_convergence.SetToolTip(
             T("Also called Convergence Plane. Where the \"screen depth\" sits, from 0 (everything pops "
               "out toward you) to 1 (everything sits behind the screen). Only used directly when mode is "
-              "\"constant\" — for sod_v1 it acts as a relative offset within the detected subject's depth "
-              "range. Recommended: 0.5 as a balanced starting point."))
+              "\"constant\" — for sod_v1/sod_track it acts as a relative offset within the detected "
+              "subject's depth range, and for depth_percentile/clip_shot it acts as a relative offset "
+              "within the WHOLE frame's own depth range (clip_shot additionally nudges this toward more "
+              "pop-out automatically on close-up shots). Recommended: 0.5 as a balanced starting point."))
         self.sld_stereo_convergence = _build_stereo_slider(self.grp_stereo, self.cbo_convergence, 0.0, 1.0, 100)
 
         self.lbl_convergence_bias_preset = wx.StaticText(self.grp_stereo, label=T("Convergence Bias"))
@@ -6445,6 +6464,52 @@ class MainFrame(wx.Frame):
               "Recommended: 1.0 for most videos. Try 2.0 only if you've noticed blur/ghosting on fast "
               "motion in this specific source."))
 
+        # ADR-388: same Hybrid Frame Rate feature as the main Processor tab's own
+        # chk_rife_hybrid_framerate/txt_rife_hybrid_percent -- kept as its own separate
+        # control here for the same reason cbo_rife_standalone_scale is, above. Unlike the
+        # main tab, there is no separate "original 2D source" concept in the Standalone
+        # tool -- the input file being smoothed plays both roles (scanned for scene cuts
+        # AND for motion), see utils.compute_standalone_hybrid_exclude_ranges().
+        self.chk_rife_standalone_hybrid_framerate = wx.CheckBox(
+            self.cpn_rife_standalone.GetPane(), label=T("Hybrid Frame Rate"),
+            name="chk_rife_standalone_hybrid_framerate")
+        self.chk_rife_standalone_hybrid_framerate.SetValue(False)
+        self.chk_rife_standalone_hybrid_framerate.SetToolTip(
+            T("What it's for: Avatar: The Way of Water's own technique for high-frame-rate playback -- "
+              "the finished file stays ONE constant frame rate throughout, but only the busiest (most "
+              "motion) scenes get real new interpolated frames; calmer scenes duplicate the real frame "
+              "instead, for a lower, more film-like motion feel. Same feature as the main Processor "
+              "tab's own Hybrid Frame Rate -- see that one's tooltip for the full explanation.\n"
+              "How it decides which scenes are which: fully automatic -- finds scene boundaries on its "
+              "own (scanning this input file directly, caching the result) and measures how much each "
+              "scene actually moves, then interpolates the busiest scenes first until roughly the "
+              "percentage set below is reached. With fewer than 2 real scenes found, this has no effect.\n"
+              "Con: the scene scan (first time only) plus the motion scan add real time on top of an "
+              "already-slow RIFE pass.\n"
+              "Recommended: off (default) for RIFE's normal, fully-interpolated behavior."))
+        self.lbl_rife_standalone_hybrid_percent = wx.StaticText(
+            self.cpn_rife_standalone.GetPane(), label=T("Hybrid: Action %"))
+        self.txt_rife_standalone_hybrid_percent = EditableComboBox(
+            self.cpn_rife_standalone.GetPane(), choices=["Auto", "30", "50", "70"],
+            name="txt_rife_standalone_hybrid_percent")
+        self.txt_rife_standalone_hybrid_percent.SetValue("50")
+        self.txt_rife_standalone_hybrid_percent.SetToolTip(
+            T("Only affects Hybrid Frame Rate above. Roughly what percentage of this file's total "
+              "RUNTIME (not scene count) gets real RIFE interpolation, biased toward the highest-motion "
+              "scenes first -- the calmest scenes making up the rest are duplicated instead.\n"
+              "Values: 100 interpolates everything (same as leaving Hybrid Frame Rate off). 0 duplicates "
+              "everything. 50 (default) is an even split by runtime. Auto finds this file's own natural "
+              "break between calm and busy scenes instead of using one fixed number -- see the main "
+              "Processor tab's own identical field for the full explanation. Either way, the percentage "
+              "actually used is printed to the log below.\n"
+              "Recommended: 50 as a starting point."))
+        self.chk_rife_standalone_hybrid_framerate.Bind(
+            wx.EVT_CHECKBOX, self.on_changed_chk_rife_standalone_hybrid_framerate)
+        # Starts disabled to match the checkbox's own unchecked default -- toggled by
+        # on_changed_chk_rife_standalone_hybrid_framerate below from then on.
+        self.lbl_rife_standalone_hybrid_percent.Enable(False)
+        self.txt_rife_standalone_hybrid_percent.Enable(False)
+
         # Optional: re-attach Dolby Vision after RIFE (ADR-193 follow-up)
         self.lbl_rife_standalone_dv_source = wx.StaticText(self.cpn_rife_standalone.GetPane(),
                                                              label=T("Original DV Source (optional)"))
@@ -6609,6 +6674,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_rife_standalone_fp16, (h, 2), (0, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_rife_standalone_scale, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_rife_standalone_scale, (h, 1), flag=wx.EXPAND)
+        layout.Add(self.chk_rife_standalone_hybrid_framerate, (h := h + 1, 0), (0, 2),
+                  flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_rife_standalone_hybrid_percent, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.txt_rife_standalone_hybrid_percent, (h, 1), flag=wx.EXPAND)
         layout.Add(self.lbl_rife_standalone_dv_source, (h := h + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.txt_rife_standalone_dv_source, (h, 1), (0, 2), flag=wx.EXPAND)
         layout.Add(self.btn_rife_standalone_dv_source, (h, 3), flag=wx.EXPAND)
@@ -11003,7 +11072,10 @@ class MainFrame(wx.Frame):
         # Fixes a separate, earlier-stage flicker in the sod_v1 subject pick itself --
         # unlike Cut Transition Smoothing, it has nothing to do with Hold Steady Per Scene
         # being checked, so it's only gated on the mode (and only sod_v1, not face_detect,
-        # which doesn't use this saliency-mask mechanism at all).
+        # depth_percentile, clip_shot or sod_track, none of which use this saliency-mask
+        # per-frame-redetection mechanism at all -- sod_track in particular fixes the same
+        # kind of instability through genuine continuous appearance tracking instead, so
+        # Subject Lock's per-frame-redetection-matching concept is simply inapplicable to it).
         on = self.cbo_convergence_mode.GetValue() == "sod_v1"
         self.lbl_convergence_subject_lock.Enable(on)
         self.cbo_convergence_subject_lock.Enable(on)
@@ -15854,6 +15926,14 @@ class MainFrame(wx.Frame):
     def on_changed_cbo_rife_standalone_mode(self, event):
         self.update_rife_standalone_mode()
 
+    def on_changed_chk_rife_standalone_hybrid_framerate(self, event):
+        # ADR-388: same pattern as the main Processor tab's update_rife_interpolate() --
+        # the percent field only matters (and is only enabled) while the checkbox itself
+        # is checked.
+        enabled = self.chk_rife_standalone_hybrid_framerate.GetValue()
+        self.lbl_rife_standalone_hybrid_percent.Enable(enabled)
+        self.txt_rife_standalone_hybrid_percent.Enable(enabled)
+
     def _set_rife_standalone_label(self, text):
         # Every progress-label write goes through here so folder mode can prefix "File 2 of 5: name -- ".
         # The prefix is empty for a single-file run, so its label text is unchanged.
@@ -15963,6 +16043,15 @@ class MainFrame(wx.Frame):
         # reason, written manifest path) still goes to stderr exactly as before,
         # captured here into the same combined log text this method has always
         # returned.
+        # ADR-388: Hybrid Frame Rate's sidecar exclude-ranges file (written by
+        # _build_rife_standalone_job, read once by rife_cli.py's own subprocess) is
+        # internal plumbing, same lifecycle as the main pipeline's own
+        # hybrid_exclude_ranges_path cleanup in utils._run_rife_interpolation -- never
+        # left behind once this process (success, failure, or cancel) is done with it.
+        hybrid_ranges_path = None
+        if "--hybrid-exclude-ranges-file" in cmd:
+            hybrid_ranges_path = cmd[cmd.index("--hybrid-exclude-ranges-file") + 1]
+
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True, bufsize=1)
         self.rife_standalone_proc = proc
@@ -15976,19 +16065,26 @@ class MainFrame(wx.Frame):
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stderr_thread.start()
 
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("IW3_RIFE_PROGRESS "):
-                parts = line.split(" ")
-                if len(parts) == 3:
-                    try:
-                        done, total = int(parts[1]), int(parts[2])
-                    except ValueError:
-                        continue
-                    wx.CallAfter(self._update_rife_standalone_progress, done, total)
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("IW3_RIFE_PROGRESS "):
+                    parts = line.split(" ")
+                    if len(parts) == 3:
+                        try:
+                            done, total = int(parts[1]), int(parts[2])
+                        except ValueError:
+                            continue
+                        wx.CallAfter(self._update_rife_standalone_progress, done, total)
 
-        proc.wait()
-        stderr_thread.join(timeout=5)
+            proc.wait()
+        finally:
+            stderr_thread.join(timeout=5)
+            if hybrid_ranges_path:
+                try:
+                    os.remove(hybrid_ranges_path)
+                except OSError:
+                    pass
         output = "".join(stderr_chunks)
 
         if dv and proc.returncode == 0 and not self.rife_standalone_cancelled:
@@ -16614,6 +16710,20 @@ class MainFrame(wx.Frame):
         rife_scale = self.cbo_rife_standalone_scale.GetValue()
         if rife_scale != "1.0":
             cmd += ["--rife-scale", rife_scale]
+
+        # ADR-388: same Hybrid Frame Rate feature as the main Processor tab -- see
+        # utils.compute_standalone_hybrid_exclude_ranges() for why this builds its own
+        # throwaway args rather than reusing a real parsed Namespace (the standalone
+        # tool has no such object -- it builds `cmd` straight from widget values).
+        if self.chk_rife_standalone_hybrid_framerate.GetValue():
+            from . import utils as iw3_utils
+            hybrid_percent_text = (self.txt_rife_standalone_hybrid_percent.GetValue() or "50").strip()
+            hybrid_percent = ("Auto" if hybrid_percent_text.lower() == "auto" else float(hybrid_percent_text))
+            exclude_ranges = iw3_utils.compute_standalone_hybrid_exclude_ranges(
+                input_path, gpu_id=gpu_id, rife_hybrid_percent=hybrid_percent)
+            if exclude_ranges:
+                ranges_path = iw3_utils._write_rife_hybrid_exclude_ranges_file(output_path, exclude_ranges)
+                cmd += ["--hybrid-exclude-ranges-file", ranges_path]
 
         return cmd, dv
 
@@ -21795,7 +21905,8 @@ def _self_test_rife_standalone_panel():
                      "cbo_rife_standalone_model", "cbo_rife_standalone_mode",
                      "txt_rife_standalone_target_fps", "cbo_rife_standalone_gpu",
                      "cbo_rife_standalone_codec", "chk_rife_standalone_fp16",
-                     "cbo_rife_standalone_scale", "btn_rife_standalone_run"):
+                     "cbo_rife_standalone_scale", "chk_rife_standalone_hybrid_framerate",
+                     "txt_rife_standalone_hybrid_percent", "btn_rife_standalone_run"):
             ctrl = getattr(frame, name)
             assert ctrl.GetParent() is frame.cpn_rife_standalone.GetPane(), name
 
@@ -21804,6 +21915,18 @@ def _self_test_rife_standalone_panel():
         assert frame.chk_rife_standalone_fp16.GetValue() is False
         # ADR-386: same omit-unless-touched guarantee for the new scale control.
         assert frame.cbo_rife_standalone_scale.GetValue() == "1.0"
+        # ADR-388: Hybrid Frame Rate off by default, percent field "50" but disabled
+        # until the checkbox itself is checked (same two-field gating pattern as the
+        # main Processor tab's own chk_rife_hybrid_framerate/txt_rife_hybrid_percent).
+        assert frame.chk_rife_standalone_hybrid_framerate.GetValue() is False
+        assert frame.txt_rife_standalone_hybrid_percent.GetValue() == "50"
+        assert not frame.txt_rife_standalone_hybrid_percent.IsEnabled()
+        frame.chk_rife_standalone_hybrid_framerate.SetValue(True)
+        frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
+        assert frame.txt_rife_standalone_hybrid_percent.IsEnabled()
+        frame.chk_rife_standalone_hybrid_framerate.SetValue(False)
+        frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
+        assert not frame.txt_rife_standalone_hybrid_percent.IsEnabled()
         # ADR-250: txt_rife_standalone_log is now a plain alias to the one shared
         # txt_standalone_log, parented to grp_standalone_log at the bottom of the
         # whole tab -- not inside this tool's own pane like the fields above.
@@ -21969,6 +22092,68 @@ def _self_test_rife_standalone_panel():
             frame.on_click_btn_rife_standalone_run(None)
             cmd = captured["cmd"]
             assert "--fp16" not in cmd, cmd
+
+            # ADR-388: Hybrid Frame Rate off by default -> no flag, and
+            # compute_standalone_hybrid_exclude_ranges is never even called (no scene/
+            # motion scan cost paid for a feature nobody turned on).
+            import json
+            from unittest import mock
+            from . import utils as iw3_utils_test
+            with mock.patch.object(iw3_utils_test, "compute_standalone_hybrid_exclude_ranges") as mock_compute:
+                captured.clear()
+                frame.on_click_btn_rife_standalone_run(None)
+                cmd = captured["cmd"]
+                assert "--hybrid-exclude-ranges-file" not in cmd, cmd
+                mock_compute.assert_not_called()
+
+                # Checked, with a real exclude range returned -> the flag is appended
+                # with a real sidecar file (written for real by
+                # _write_rife_hybrid_exclude_ranges_file -- no GPU needed for that, it's
+                # just JSON) that genuinely exists and holds the given ranges; the input
+                # file itself (not some other path) and the GPU actually selected (CPU,
+                # -1) are what get passed through.
+                frame.chk_rife_standalone_hybrid_framerate.SetValue(True)
+                frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
+                mock_compute.return_value = [(0.0, 5.0)]
+                captured.clear()
+                frame.on_click_btn_rife_standalone_run(None)
+                cmd = captured["cmd"]
+                assert "--hybrid-exclude-ranges-file" in cmd, cmd
+                ranges_path = cmd[cmd.index("--hybrid-exclude-ranges-file") + 1]
+                assert path.exists(ranges_path), ranges_path
+                with open(ranges_path, "r", encoding="utf-8") as f:
+                    assert json.load(f) == [[0.0, 5.0]]
+                os.remove(ranges_path)
+                mock_compute.assert_called_once_with(input_path, gpu_id=-1, rife_hybrid_percent=50.0)
+
+                # "Auto" is passed straight through (not coerced to a number).
+                frame.txt_rife_standalone_hybrid_percent.SetValue("Auto")
+                mock_compute.reset_mock()
+                mock_compute.return_value = [(0.0, 5.0)]
+                captured.clear()
+                frame.on_click_btn_rife_standalone_run(None)
+                mock_compute.assert_called_once_with(input_path, gpu_id=-1, rife_hybrid_percent="Auto")
+                ranges_path = captured["cmd"][captured["cmd"].index("--hybrid-exclude-ranges-file") + 1]
+                os.remove(ranges_path)
+                frame.txt_rife_standalone_hybrid_percent.SetValue("50")
+
+                # Nothing to exclude (e.g. fewer than 2 scenes) -> no flag, no sidecar
+                # file left behind.
+                mock_compute.return_value = []
+                captured.clear()
+                frame.on_click_btn_rife_standalone_run(None)
+                cmd = captured["cmd"]
+                assert "--hybrid-exclude-ranges-file" not in cmd, cmd
+
+                # Unchecked again -> back to no flag and no call, not sticky/broken.
+                frame.chk_rife_standalone_hybrid_framerate.SetValue(False)
+                frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
+                mock_compute.reset_mock()
+                captured.clear()
+                frame.on_click_btn_rife_standalone_run(None)
+                cmd = captured["cmd"]
+                assert "--hybrid-exclude-ranges-file" not in cmd, cmd
+                mock_compute.assert_not_called()
     finally:
         gui_mod.startWorker = orig_start_worker
         if frame is not None:
@@ -29639,6 +29824,64 @@ def _self_test_rife_hybrid_framerate_plumbing():
     print("_self_test_rife_hybrid_framerate_plumbing: PASS")
 
 
+def _self_test_compute_standalone_hybrid_exclude_ranges():
+    """ADR-388: utils.compute_standalone_hybrid_exclude_ranges() -- the Standalone
+    RIFE Tool's own entry point into Hybrid Frame Rate, built because that tool has
+    no parsed args Namespace of its own (gui.py's _build_rife_standalone_job builds
+    a plain cmd list straight from widget values). Confirms it builds a correct
+    throwaway args object (max_fps=30, matching create_parser()'s own default so a
+    cache this builds is reusable by a later real Scene Detection run against the
+    same file and vice versa; no start/end trim, since the standalone tool always
+    processes the whole file; the given rife_hybrid_percent passed straight through
+    unmodified, including the literal "Auto") and that video_path is used as BOTH
+    the scene-cut-detection source AND the motion-scan target -- the "no separate
+    original source" design this function exists for, unlike the main pipeline's
+    own two-different-paths version. _ensure_hybrid_scene_cut_times and
+    rife_hybrid.compute_hybrid_exclude_ranges are both mocked -- no real scan, no
+    GPU, no movie file needed."""
+    from unittest import mock
+    from . import utils as U
+    from . import rife_hybrid
+
+    captured = {}
+
+    def fake_ensure_cut_times(scene_source_path, args):
+        captured["scene_source_path"] = scene_source_path
+        captured["ensure_args"] = args
+        return [10.0, 20.0]
+
+    def fake_compute(video_path, scene_cut_times, args):
+        captured["video_path"] = video_path
+        captured["scene_cut_times"] = scene_cut_times
+        captured["compute_args"] = args
+        return [(0.0, 10.0)]
+
+    with mock.patch.object(U, "_ensure_hybrid_scene_cut_times", side_effect=fake_ensure_cut_times), \
+         mock.patch.object(rife_hybrid, "compute_hybrid_exclude_ranges", side_effect=fake_compute):
+        result = U.compute_standalone_hybrid_exclude_ranges(
+            "movie.mp4", gpu_id=-1, rife_hybrid_percent="Auto")
+
+    assert result == [(0.0, 10.0)], result
+    assert captured["scene_source_path"] == "movie.mp4", captured["scene_source_path"]
+    assert captured["video_path"] == "movie.mp4", captured["video_path"]
+    assert captured["scene_cut_times"] == [10.0, 20.0], captured["scene_cut_times"]
+    ensure_args, compute_args = captured["ensure_args"], captured["compute_args"]
+    assert ensure_args is compute_args, "the same throwaway args object must be passed to both calls"
+    assert ensure_args.max_fps == 30, ensure_args.max_fps
+    assert ensure_args.start_time is None and ensure_args.end_time is None
+    assert ensure_args.scene_cache_file is None and ensure_args.scene_cache_dir is None
+    assert ensure_args.rife_hybrid_percent == "Auto", ensure_args.rife_hybrid_percent
+    assert ensure_args.state["device"].type == "cpu", ensure_args.state["device"]
+
+    # A numeric percent is also passed straight through, unmodified.
+    with mock.patch.object(U, "_ensure_hybrid_scene_cut_times", side_effect=fake_ensure_cut_times), \
+         mock.patch.object(rife_hybrid, "compute_hybrid_exclude_ranges", side_effect=fake_compute):
+        U.compute_standalone_hybrid_exclude_ranges("movie.mp4", gpu_id=-1, rife_hybrid_percent=30.0)
+    assert captured["compute_args"].rife_hybrid_percent == 30.0, captured["compute_args"].rife_hybrid_percent
+
+    print("_self_test_compute_standalone_hybrid_exclude_ranges: PASS")
+
+
 def _self_test_rife_hybrid_framerate_gui():
     """ADR-384 "Hybrid Frame Rate" GUI: checkbox + "Hybrid: Action %" field exist
     under grp_postprocess, both off/default (False / "50"), gated the same way as
@@ -33363,6 +33606,299 @@ def _self_test_convergence_subject_lock_gui_and_metadata():
     print("_self_test_convergence_subject_lock_gui_and_metadata: PASS")
 
 
+def _self_test_depth_percentile_estimator():
+    """ADR-388: depth_percentile reuses sod_v1's own quantile-position math
+    (ConvergenceEstimator._quantile_position), applied to the FULL frame's own depth
+    histogram instead of an AI-picked saliency region -- zero extra model/inference
+    cost. Tests the real DepthPercentileEstimator class directly: the pure math
+    against ConvergenceEstimator's own static helper, and its EMA/scene_hold wiring
+    (mirrors _self_test_convergence_scene_hold's own ADR-232 section). No GPU/model
+    needed -- depth_percentile never loads one."""
+    from unittest import mock
+    import iw3.convergence_estimator as CE
+    import iw3.depth_percentile_estimator as DP
+
+    depth = torch.rand(2, 1, 16, 16)
+    pos = 0.3
+    z = DP.DepthPercentileEstimator.depth_position_from_full_frame(depth, pos)
+    for i in range(2):
+        expected = CE.ConvergenceEstimator._quantile_position(
+            depth[i].flatten(), pos, depth.device, depth.dtype).clamp(0, 1)
+        assert abs(z[i].item() - expected.item()) < 1e-6, \
+            "must match ConvergenceEstimator's own quantile-position math over the whole frame"
+
+    def make_est(scene_hold):
+        est = DP.DepthPercentileEstimator.__new__(DP.DepthPercentileEstimator)
+        est.convergence = 0.5
+        est.enable_ema = True
+        est.decay = 0.9
+        est.scene_hold = scene_hold
+        est.cut_smooth = 0
+        est.convergence_ema = None
+        est.tracker = DP.SceneHoldTracker(0.9)
+        est.model = None
+        est.device = None
+        return est
+
+    depth3 = torch.full((3, 1, 4, 4), 0.5)
+    rgb3 = torch.rand(3, 3, 4, 4)
+
+    est_on = make_est(scene_hold=True)
+    with mock.patch.object(DP.DepthPercentileEstimator, "depth_position_from_full_frame",
+                           return_value=torch.tensor([0.2, 0.2, 0.9]).reshape(3, 1, 1, 1)):
+        z1 = est_on(rgb3, depth3, reset_pts=[False, False, True])
+    assert z1[0].item() == z1[1].item(), "scene_hold=True: no cut between frames 0/1 -- must hold the same value"
+
+    est_off = make_est(scene_hold=False)
+    with mock.patch.object(DP.DepthPercentileEstimator, "depth_position_from_full_frame",
+                           return_value=torch.tensor([0.2, 0.6, 0.9]).reshape(3, 1, 1, 1)):
+        z2 = est_off(rgb3, depth3, reset_pts=[False, False, False])
+    assert z2[0].item() != z2[1].item() != z2[2].item(), \
+        "scene_hold=False must keep the original per-frame-reacting EMA"
+    expected0 = 0.2
+    expected1 = 0.9 * expected0 + 0.1 * 0.6
+    assert abs(z2[0].item() - expected0) < 1e-5 and abs(z2[1].item() - expected1) < 1e-5, \
+        "scene_hold=False must match the exact original EMA formula"
+
+    print("_self_test_depth_percentile_estimator: PASS")
+
+
+def _self_test_clip_shot_estimator():
+    """ADR-389: clip_shot biases depth_percentile's own full-frame quantile-position
+    math using a CLIP-judged close-up/wide-shot "closeness" score (0 = wide, or CLIP
+    unavailable -> unchanged from plain depth_percentile; 1 = extreme close-up ->
+    biased toward more pop-out by exactly _BIAS_STRENGTH). Tests: the reimplemented
+    CLIP ViT-B/32 image-tower architecture itself (a real forward pass with random,
+    untrained weights -- proves the layer shapes/key names are wired correctly with
+    no download needed), the download-failure fallback path (never raises), and the
+    bias-mapping formula directly against a mocked closeness score. No GPU/network
+    needed anywhere in this test."""
+    from unittest import mock
+    import iw3.convergence_estimator as CE
+    import iw3.clip_shot_estimator as CS
+
+    # architecture smoke test
+    model = CS.ClipVisual()
+    x = model.preprocess(torch.rand(2, 3, 100, 140))
+    assert x.shape == (2, 3, 224, 224)
+    out = model(x)
+    assert out.shape == (2, 512)
+
+    # a failed/offline weights download must degrade cleanly, never raise
+    with mock.patch.object(CS, "_weights_path", return_value="__clip_shot_self_test_nonexistent__.pth"), \
+         mock.patch("os.makedirs"), \
+         mock.patch("torch.hub.download_url_to_file", side_effect=OSError("offline")):
+        path_result = CS._ensure_clip_visual_weights(progress=False)
+    assert path_result == "", "a failed download must return '' instead of raising"
+
+    def make_est():
+        est = CS.ClipShotEstimator.__new__(CS.ClipShotEstimator)
+        est.convergence = 0.6
+        est.enable_ema = False
+        est.decay = 0.9
+        est.scene_hold = False
+        est.cut_smooth = 0
+        est.convergence_ema = None
+        est.tracker = CS.SceneHoldTracker(0.9)
+        est.model = None
+        est.anchor_close = None
+        est.anchor_wide = None
+        return est
+
+    depth = torch.rand(2, 1, 8, 8)
+    rgb = torch.rand(2, 3, 8, 8)
+
+    # model unavailable -- closeness forced to 0 -- must be byte-identical to plain
+    # depth_percentile at the user's own Convergence Bias value.
+    est_fallback = make_est()
+    z_fallback = est_fallback(rgb, depth)
+    for i in range(2):
+        expected = CE.ConvergenceEstimator._quantile_position(
+            depth[i].flatten(), 0.6, depth.device, depth.dtype).clamp(0, 1)
+        assert abs(z_fallback[i].item() - expected.item()) < 1e-6
+
+    # bias formula: closeness=1.0 must shift the effective position DOWN by exactly
+    # _BIAS_STRENGTH (more foreground pop); closeness=0.0 must stay neutral.
+    est_bias = make_est()
+    with mock.patch.object(CS.ClipShotEstimator, "_closeness", return_value=torch.tensor([1.0, 0.0])):
+        z_bias = est_bias(rgb, depth)
+    expected_close = CE.ConvergenceEstimator._quantile_position(
+        depth[0].flatten(), 0.6 - CS.ClipShotEstimator._BIAS_STRENGTH, depth.device, depth.dtype).clamp(0, 1)
+    expected_wide = CE.ConvergenceEstimator._quantile_position(
+        depth[1].flatten(), 0.6, depth.device, depth.dtype).clamp(0, 1)
+    assert abs(z_bias[0].item() - expected_close.item()) < 1e-6, "closeness=1.0 must bias toward more pop-out"
+    assert abs(z_bias[1].item() - expected_wide.item()) < 1e-6, \
+        "closeness=0 (wide) must stay neutral -- identical to plain depth_percentile"
+
+    print("_self_test_clip_shot_estimator: PASS")
+
+
+def _self_test_sod_track_estimator():
+    """ADR-390: sod_track picks a subject once per shot via the SOD_v1 saliency model,
+    then follows it with a real continuous cv2 appearance tracker instead of
+    re-running SOD every frame -- genuinely different from sod_v1's own Subject Lock,
+    which only gates how often a FRESH per-frame SOD redetection is allowed to switch
+    which region it's using, with no actual frame-to-frame tracking at all. Tests the
+    real SodTrackEstimator class directly: _bbox_from_mask, the real-SOD-only-once /
+    cv2-tracks-after logic, immediate reinit on tracker failure, periodic reinit at
+    _REINIT_INTERVAL, and scene-cut state clearing. Stubbed SOD model + stubbed cv2
+    tracker (pure tensor math) -- no GPU/download/opencv-contrib needed."""
+    import types
+    from unittest import mock
+    import iw3.sod_track_estimator as ST
+
+    mask = torch.zeros(8, 8, dtype=torch.bool)
+    mask[2:5, 1:3] = True
+    assert ST.SodTrackEstimator._bbox_from_mask(mask, 8, 8) == (1, 2, 2, 3)
+    empty = torch.zeros(8, 8, dtype=torch.bool)
+    assert ST.SodTrackEstimator._bbox_from_mask(empty, 8, 8) == (0, 0, 8, 8), \
+        "an empty mask must fall back to the full frame"
+
+    class _FakeTracker():
+        def __init__(self, ok_sequence):
+            self._ok_sequence = iter(ok_sequence)
+            self.inited_with = None
+
+        def init(self, frame, box):
+            self.inited_with = box
+
+        def update(self, frame):
+            return next(self._ok_sequence)
+
+    H, W = 8, 8
+    depth = torch.zeros(1, 1, H, W)
+    depth[:, :, :, :4] = 0.2
+    depth[:, :, :, 4:] = 0.8
+    rgb = torch.rand(1, 3, H, W)
+
+    def fake_infer(rgb_, depth_):
+        sal = torch.zeros(1, 1, H, W)
+        sal[0, 0, 0:8, 0:4] = 0.9  # left half salient
+        return sal, depth_
+
+    est = ST.SodTrackEstimator.__new__(ST.SodTrackEstimator)
+    est.device = torch.device("cpu")
+    est.convergence = 0.5
+    est.enable_ema = False
+    est.decay = 0.9
+    est.scene_hold = False
+    est.cut_smooth = 0
+    est.convergence_ema = None
+    est.tracker = ST.SceneHoldTracker(0.9)
+    est._track_state = None
+    est.model = types.SimpleNamespace(infer=fake_infer)
+
+    # The SAME tracker instance is reused across every reinit below (_create_csrt_tracker
+    # mocked to always hand back this one object) -- its own ok_sequence is scripted to
+    # match the exact three real .update() calls this timeline makes (reinit calls never
+    # call .update() at all, only .init()): call 2 (succeeds), call 3 (fails, forcing an
+    # immediate reinit), call 5 (succeeds again, after the periodic reinit in call 4).
+    fake_tracker = _FakeTracker([
+        (True, (0, 0, 4, 8)),
+        (False, (0, 0, 0, 0)),
+        (True, (0, 0, 4, 8)),
+    ])
+
+    with mock.patch.object(ST, "_create_csrt_tracker", return_value=fake_tracker):
+        # first call: no state at all -- must reinitialize via the real SOD model
+        z0 = est(rgb, depth, reset_pts=[False])
+        assert est._track_state[0]["frames_since_reinit"] == 0
+        assert fake_tracker.inited_with == (0, 0, 4, 8)
+        expected0 = ST.ConvergenceEstimator._quantile_position(
+            depth[0, :, 0:8, 0:4].flatten(), 0.5, depth.device, depth.dtype).clamp(0, 1)
+        assert abs(z0.item() - expected0.item()) < 1e-6
+
+        # a successful tracker update must NOT re-run SOD, and must advance the counter
+        calls = {"infer": 0}
+
+        def counting_infer(rgb_, depth_):
+            calls["infer"] += 1
+            return fake_infer(rgb_, depth_)
+        est.model.infer = counting_infer
+
+        est(rgb, depth, reset_pts=[False])
+        assert calls["infer"] == 0, "a successful tracker update must not re-run SOD"
+        assert est._track_state[0]["frames_since_reinit"] == 1
+
+        # a lost tracker (ok=False) must reinitialize immediately via SOD, not wait for
+        # the next scheduled interval
+        est(rgb, depth, reset_pts=[False])
+        assert calls["infer"] == 1, "a lost tracker must reinitialize immediately via SOD"
+        assert est._track_state[0]["frames_since_reinit"] == 0
+
+        # reaching the periodic reinit interval must re-run SOD even with no tracker failure
+        est._track_state[0]["frames_since_reinit"] = ST.SodTrackEstimator._REINIT_INTERVAL
+        est(rgb, depth, reset_pts=[False])
+        assert calls["infer"] == 2, "reaching the reinit interval must re-run SOD"
+
+        # a real scene cut must clear the tracked state for the NEXT frame
+        est(rgb, depth, reset_pts=[True])
+        assert est._track_state[0] is None, "a scene cut must clear the tracked state"
+
+    print("_self_test_sod_track_estimator: PASS")
+
+
+def _self_test_convergence_new_modes_gui():
+    """ADR-388/389/390: depth_percentile/clip_shot/sod_track must be real, selectable
+    choices in the GUI combo box, share the existing Convergence Smoothing/Hold Steady
+    Per Scene/Cut Transition Smoothing/overlay/scene-log gating with sod_v1/face_detect
+    (all are "auto" modes in the exact same sense -- != "constant"), round-trip
+    correctly through the CLI/job-log metadata, and must NOT enable Subject Lock
+    (sod_v1-only; see update_convergence_subject_lock's own comment for why sod_track
+    in particular doesn't reuse it)."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        choices = list(frame.cbo_convergence_mode.GetItems())
+        for mode in ("depth_percentile", "clip_shot", "sod_track"):
+            assert mode in choices, f"{mode} must be a real selectable choice"
+
+        for mode in ("depth_percentile", "clip_shot", "sod_track"):
+            frame.cbo_convergence_mode.SetValue(mode)
+            frame.update_convergence_mode()
+            assert frame.cbo_convergence_smoothing.IsEnabled(), f"{mode}: smoothing must enable"
+            assert frame.chk_convergence_scene_hold.IsEnabled(), f"{mode}: scene hold must enable"
+            assert frame.chk_convergence_overlay.IsEnabled(), f"{mode}: overlay must enable"
+            assert frame.chk_convergence_scene_log.IsEnabled(), f"{mode}: scene log must enable"
+            assert not frame.cbo_convergence_subject_lock.IsEnabled(), \
+                f"{mode}: Subject Lock must stay disabled -- sod_v1-only"
+
+            frame.chk_scene_detect.SetValue(True)
+            frame.chk_convergence_scene_hold.SetValue(True)
+            frame.on_changed_chk_convergence_scene_hold(wx.CommandEvent())
+            args = frame.parse_args(skip_set_state=True)
+            assert args.convergence_mode == mode
+            assert mode in frame.get_cli_command()
+
+            frame.chk_convergence_scene_hold.SetValue(False)
+            frame.apply_parsed_args_to_gui(args)
+            assert frame.cbo_convergence_mode.GetValue() == mode, "restore must bring the mode back"
+            assert frame.chk_convergence_scene_hold.GetValue() is True
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.chk_convergence_scene_hold.IsEnabled(), "must disable again back on constant"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # metadata/filename tagging is already generic on "!= constant" -- confirm it
+    # fires for all three new modes too, same as sod_v1/face_detect.
+    parser = U.create_parser(required_true=False)
+    for mode in ("depth_percentile", "clip_shot", "sod_track"):
+        args = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                  "--convergence-mode", mode])
+        args.video_extension = ".mkv"
+        assert f"iw3_convergence_mode={mode}" in U._build_iw3_comment_metadata(args, video=True)
+
+    print("_self_test_convergence_new_modes_gui: PASS")
+
+
 def _self_test_convergence_overlay():
     """ADR-233: real user request -- a debug overlay for Convergence Plane, mirroring Auto 3D
     Strength's own "Show strength on video (debug)". Tests iw3.frame_overlay.stamp_values()
@@ -34910,6 +35446,7 @@ def _run_self_tests():
         _self_test_rife_disk_space_check,
         _self_test_ensure_hybrid_scene_cut_times,
         _self_test_rife_hybrid_framerate_plumbing,
+        _self_test_compute_standalone_hybrid_exclude_ranges,
         _self_test_rife_hybrid_framerate_gui,
         _self_test_standalone_tool_titles_share_accent_colour,
         _self_test_pop_feather,
@@ -34920,6 +35457,10 @@ def _run_self_tests():
         _self_test_convergence_overlay,
         _self_test_convergence_scene_log_gui_and_metadata,
         _self_test_convergence_scene_log_accumulation,
+        _self_test_depth_percentile_estimator,
+        _self_test_clip_shot_estimator,
+        _self_test_sod_track_estimator,
+        _self_test_convergence_new_modes_gui,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,
         _self_test_default_output_dir_name_is_3decker,

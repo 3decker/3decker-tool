@@ -8,6 +8,20 @@ from .convergence_tracker import SceneHoldTracker
 
 SOD_URL = "https://github.com/nagadomi/nunif/releases/download/0.0.0/iw3_sod_v1_20260125.pth"
 
+
+def _load_sod_model(device_id, compile=False):
+    """Shared SOD_v1 model loader -- used by both ConvergenceEstimator (sod_v1 mode) and
+    SodTrackEstimator (sod_track mode, see sod_track_estimator.py), which reuses this exact
+    same model purely for its one-off initial saliency mask/bounding box per shot, handing
+    off to a real cv2 appearance tracker afterward instead of re-running SOD every frame."""
+    with TorchHubDir(HUB_MODEL_DIR):
+        model, _ = load_model(SOD_URL, device_ids=[device_id], weights_only=True)
+        model = model.eval().fuse()
+        # SOD input is resized to 192x192, recompilation does not occur due to image size differences.
+        # However, recompilation does occur when the batch size changes.
+        model = model.compile(mode=compile)
+    return model
+
 # Real confirmed finding: thresholding the raw saliency map at a hard 0.5 cutoff every
 # frame, with zero memory of what won last frame, lets two similarly-salient regions in
 # noisy real footage flip which one counts as "the subject" from pure per-frame noise --
@@ -24,13 +38,8 @@ _SUBJECT_MATCH_IOU = 0.5
 class ConvergenceEstimator():
     def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False, scene_hold=False,
                  cut_smooth=0, subject_lock=0):
-        with TorchHubDir(HUB_MODEL_DIR):
-            self.model, _ = load_model(SOD_URL, device_ids=[device_id], weights_only=True)
-            self.model = self.model.eval().fuse()
-            # SOD input is resized to 192x192, recompilation does not occur due to image size differences.
-            # However, recompilation does occur when the batch size changes.
-            self.model = self.model.compile(mode=compile)
-            self.convergence = convergence
+        self.model = _load_sod_model(device_id, compile)
+        self.convergence = convergence
 
         self.device = create_device(device_id)
         self.enable_ema = enable_ema

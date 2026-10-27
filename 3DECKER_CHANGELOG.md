@@ -15,7 +15,16 @@ it matters.
 
 ## Latest Update — October 27, 2026
 
+**Added: three new Convergence Plane modes — "depth_percentile," "clip_shot," and "sod_track."** Convergence Plane decides where the "screen depth" sits — the point that looks like it's exactly at the screen surface, with everything else popping toward or receding from it. Until now there were three choices: a fixed value, or one of two AI auto-pickers (sod_v1, face_detect). Three more are now available, all real and fully working, selectable from the same dropdown in the app and on the command line:
+- **depth_percentile** — no AI model at all. It uses the Convergence Bias value against the WHOLE frame's own depth range instead of one AI-picked subject, so it's free (no extra processing cost) and works on any content.
+- **clip_shot** — the same idea as depth_percentile, but a CLIP AI model looks at whether each shot is a close-up or a wide shot, and automatically nudges things toward a bit more pop-out on close-ups while staying neutral on wide shots. If its model can't be downloaded, it just behaves exactly like plain depth_percentile instead of failing.
+- **sod_track** — like sod_v1, but instead of re-picking the subject completely fresh every single frame, it picks the subject once per shot and then a real video-tracking algorithm (the same kind used in video editing software) follows that exact subject's appearance continuously from frame to frame. This is different from the existing Subject Lock setting, which only controls how often sod_v1 is allowed to switch which freshly re-detected region it's using — it doesn't actually track anything across frames the way sod_track does.
+
+All three share the same Convergence Smoothing, Hold Steady Per Scene, and Cut Transition Smoothing controls the existing auto modes already use. Every control's tooltip explains the new modes in the same plain-language style as everything else.
+
 **Added: an "Auto" option for Hybrid Frame Rate's "Action %" field — instead of picking one fixed percentage yourself, 3DECKER can now figure out the right split for each movie on its own.** There's no single best percentage for every movie — a slow dialogue-heavy film and a constant-action movie genuinely call for different splits. Hybrid Frame Rate already measures how much motion is in every scene before deciding anything; Auto mode uses that same information to find THIS movie's own natural break between its calmer and busier scenes and splits there automatically, instead of you having to guess a number. If no clear break is found, it safely falls back to the same 50% default as before. Either way — whether you typed a fixed number or used Auto — the percentage actually used is now printed both live in the Output panel while it's running and in the saved job log, so you can always see what it picked. Just select "Auto" from the "Hybrid: Action %" dropdown; leaving it on a fixed number works exactly as before.
+
+**Added: Hybrid Frame Rate is now also available in the Standalone RIFE Tool, not just the main Processor tab.** Same feature, same "Hybrid: Action %" field (including the new Auto option above) — the Standalone Tool scans the file you point it at directly, since it doesn't have the main tab's separate "original movie" concept. Off by default, same as the main tab.
 
 ## Update — October 26, 2026
 

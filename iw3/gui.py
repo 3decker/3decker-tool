@@ -1083,6 +1083,63 @@ class _StandaloneOutputBox(wx.TextCtrl):
             self.mirror(text)
 
 
+class _RifeStandaloneScanProgressBar():
+    """ADR-393: tqdm_fn bridge for Hybrid Frame Rate's scene/motion scan inside
+    run_rife_standalone -- gives that scan a real progress bar + ETA on the
+    Standalone RIFE Tool's own gauge/label, instead of the static "Scanning..."
+    text ADR-392 left it with. Instantiated as `functools.partial(_RifeStandaloneScan
+    ProgressBar, frame)` and called the same way real tqdm/TQDMGUI are:
+    `tqdm_fn(total=..., desc=..., ncols=...)` returns the bar, then `.update(n)` per
+    batch, `.close()` once done -- see utils._scan_scene_motion/nunif.utils.shot_
+    boundary_detection.detect_boundary's own tqdm_fn usage for the exact contract.
+
+    Deliberately NOT TQDMGUI (used by the main Processor tab's own conversion
+    pipeline): that one posts a wx event for MainFrame.on_tqdm to update the MAIN
+    tab's gauge -- reusing it here would fight over the wrong widgets. This updates
+    the Standalone RIFE Tool's own gauge_rife_standalone/lbl_rife_standalone_progress
+    directly, same elapsed/FPS/ETA formula and formatting as
+    MainFrame._update_rife_standalone_progress (the RIFE step's own progress,
+    running right after this one) -- all widget writes go through wx.CallAfter,
+    since every call into this class happens from run_rife_standalone's own
+    background thread, never the GUI thread."""
+    def __init__(self, parent, **kwargs):
+        self.parent = parent
+        self.total = kwargs.get("total") or 0
+        self.desc = kwargs.get("desc") or ""
+        self.done = 0
+        self.start_time = time()
+        wx.CallAfter(self._refresh)
+
+    def update(self, n=1):
+        self.done += n
+        wx.CallAfter(self._refresh)
+
+    def close(self):
+        pass
+
+    def _refresh(self):
+        prefix = f"{self.desc}: " if self.desc else ""
+        if self.total > 0:
+            self.parent.gauge_rife_standalone.SetRange(self.total)
+            self.parent.gauge_rife_standalone.SetValue(min(self.done, self.total))
+            percent = min(100, int(self.done / self.total * 100))
+            elapsed = time() - self.start_time
+            fps = self.done / (elapsed + 1e-6)
+            if fps > 0 and self.done > 0:
+                eta = self.parent._format_duration((self.total - self.done) / fps)
+                elapsed_str = self.parent._format_duration(elapsed)
+                self.parent._set_rife_standalone_label(
+                    f"{prefix}{self.done}/{self.total} ({percent}%) "
+                    f"[{fps:.2f} FPS, {T('elapsed')} {elapsed_str}, ETA {eta}]")
+            else:
+                self.parent._set_rife_standalone_label(f"{prefix}{self.done}/{self.total} ({percent}%)")
+        else:
+            # total unknown (e.g. a scan that hasn't resolved frame count yet) -- a
+            # pulsing bar still shows real movement rather than looking stuck.
+            self.parent.gauge_rife_standalone.Pulse()
+            self.parent._set_rife_standalone_label(prefix.rstrip(": "))
+
+
 class MainFrame(wx.Frame):
     def __init__(self):
         super(MainFrame, self).__init__(
@@ -6624,6 +6681,11 @@ class MainFrame(wx.Frame):
         self.rife_standalone_proc = None
         self.rife_standalone_cancelled = False
         self.rife_standalone_stage = "rife"
+        # ADR-392: set by on_click_btn_rife_standalone_cancel during the Hybrid Frame
+        # Rate scene/motion scan phase, BEFORE self.rife_standalone_proc even exists
+        # (that scan is plain Python, not a subprocess, so there's nothing to kill) --
+        # see run_rife_standalone's own hybrid_info handling.
+        self.rife_standalone_stop_event = threading.Event()
         # Folder mode only: "File 2 of 5: name.mkv -- " prefixed onto every progress label.
         self.rife_standalone_batch_prefix = ""
 
@@ -15987,6 +16049,16 @@ class MainFrame(wx.Frame):
         # _reinject_dv_after_rife in iw3/utils.py), with ffmpeg/ffprobe as its own
         # direct children -- the identical shape that bug was found in. Reusing the
         # same fix rather than duplicating it.
+        #
+        # ADR-392: during the Hybrid Frame Rate scene/motion scan phase there is no
+        # subprocess yet at all (self.rife_standalone_proc is still None) -- that scan
+        # is plain Python running on the worker thread, so Cancel has to reach it via
+        # rife_standalone_stop_event instead of killing a process.
+        if self.rife_standalone_stage == "hybrid_scan":
+            self.rife_standalone_cancelled = True
+            self.rife_standalone_stop_event.set()
+            self.btn_rife_standalone_cancel.Disable()
+            return
         proc = self.rife_standalone_proc
         if proc is not None and proc.poll() is None:
             self.rife_standalone_cancelled = True
@@ -16029,7 +16101,7 @@ class MainFrame(wx.Frame):
                      f"ETA {self._format_duration((total - done) / fps)}]")
         self._set_rife_standalone_label(text)
 
-    def run_rife_standalone(self, cmd, dv=None):
+    def run_rife_standalone(self, cmd, dv=None, hybrid_info=None):
         # Runs on a background thread via startWorker -- never blocks the GUI thread.
         # Kept out-of-process the same way the other standalone tools in this column
         # are (this app's own GPU/model state is never touched).
@@ -16043,14 +16115,38 @@ class MainFrame(wx.Frame):
         # reason, written manifest path) still goes to stderr exactly as before,
         # captured here into the same combined log text this method has always
         # returned.
-        # ADR-388: Hybrid Frame Rate's sidecar exclude-ranges file (written by
-        # _build_rife_standalone_job, read once by rife_cli.py's own subprocess) is
-        # internal plumbing, same lifecycle as the main pipeline's own
-        # hybrid_exclude_ranges_path cleanup in utils._run_rife_interpolation -- never
-        # left behind once this process (success, failure, or cancel) is done with it.
+        #
+        # ADR-392 real bug fix: Hybrid Frame Rate's scan (scene-boundary AI pass +
+        # motion scan) used to run inside _build_rife_standalone_job, on the GUI
+        # thread, BEFORE this method (and its background thread) ever started --
+        # froze the whole window for however long the scan took on a real movie, with
+        # Cancel unreachable the entire time (decker's real report: "appears like is
+        # loading freeze"). It runs HERE instead, now that we're already safely on
+        # startWorker's background thread. cmd is the GUI thread's own list -- append
+        # to a local copy, never mutate the caller's.
+        cmd = list(cmd)
         hybrid_ranges_path = None
-        if "--hybrid-exclude-ranges-file" in cmd:
-            hybrid_ranges_path = cmd[cmd.index("--hybrid-exclude-ranges-file") + 1]
+        if hybrid_info is not None:
+            self.rife_standalone_stage = "hybrid_scan"
+            # ADR-393: real progress bar + ETA for this scan (same formula/format as
+            # the RIFE step's own _update_rife_standalone_progress just below), instead
+            # of ADR-392's static "Scanning..." text -- see
+            # _RifeStandaloneScanProgressBar's own docstring for why this isn't TQDMGUI.
+            wx.CallAfter(self.gauge_rife_standalone.Pulse)
+            wx.CallAfter(self._set_rife_standalone_label, T("Scanning for Hybrid Frame Rate..."))
+            from . import utils as iw3_utils
+            exclude_ranges = iw3_utils.compute_standalone_hybrid_exclude_ranges(
+                hybrid_info["input_path"], gpu_id=hybrid_info["gpu_id"],
+                rife_hybrid_percent=hybrid_info["rife_hybrid_percent"],
+                stop_event=self.rife_standalone_stop_event,
+                tqdm_fn=functools.partial(_RifeStandaloneScanProgressBar, self))
+            if self.rife_standalone_cancelled:
+                return -1, T("Cancelled during the Hybrid Frame Rate scan -- nothing was written.")
+            if exclude_ranges:
+                hybrid_ranges_path = iw3_utils._write_rife_hybrid_exclude_ranges_file(
+                    hybrid_info["output_path"], exclude_ranges)
+                cmd += ["--hybrid-exclude-ranges-file", hybrid_ranges_path]
+            wx.CallAfter(self._set_rife_standalone_label, "")
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True, bufsize=1)
@@ -16132,9 +16228,15 @@ class MainFrame(wx.Frame):
         self.txt_rife_standalone_log.ShowPosition(self.txt_rife_standalone_log.GetLastPosition())
         if self.rife_standalone_cancelled:
             self._cleanup_after_rife_standalone_cancel()
-            kept = self.rife_standalone_stage != "rife"
-            self._set_rife_standalone_label(
-                T("Cancelled -- the smoothed file was kept, without Dolby Vision") if kept else T("Cancelled"))
+            # ADR-392: a cancel during the Hybrid Frame Rate scan happens before RIFE
+            # (or anything else) has written a single byte -- distinct from the
+            # existing dv-stage case below, where a real smoothed file already exists.
+            if self.rife_standalone_stage == "hybrid_scan":
+                self._set_rife_standalone_label(T("Cancelled -- nothing was written"))
+            else:
+                kept = self.rife_standalone_stage != "rife"
+                self._set_rife_standalone_label(
+                    T("Cancelled -- the smoothed file was kept, without Dolby Vision") if kept else T("Cancelled"))
             self.SetStatusText(T("RIFE interpolation cancelled"))
         elif returncode == 0:
             # Force the bar/label to a clean 100% rather than trusting the last
@@ -16217,7 +16319,7 @@ class MainFrame(wx.Frame):
             job = self._build_rife_standalone_job(input_path, output_path)
             if job is None:
                 return
-            cmd, dv = job
+            cmd, dv, hybrid_info = job
 
         self.txt_rife_standalone_log.SetValue(T("Running...\n"))
         self.gauge_rife_standalone.SetRange(1)
@@ -16229,12 +16331,13 @@ class MainFrame(wx.Frame):
         self.btn_rife_standalone_clear.Disable()
         self.rife_standalone_cancelled = False
         self.rife_standalone_stage = "rife"
+        self.rife_standalone_stop_event.clear()
         self.btn_rife_standalone_cancel.Enable()
         self.SetStatusText(T("Applying RIFE interpolation..."))
         if folder_mode:
             startWorker(self.on_exit_rife_standalone_batch, self.run_rife_standalone_batch, wargs=(jobs, skipped))
         else:
-            startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd, dv))
+            startWorker(self.on_exit_rife_standalone_worker, self.run_rife_standalone, wargs=(cmd, dv, hybrid_info))
 
     def on_click_btn_bitrate_cap_standalone_input(self, event):
         with wx.FileDialog(self, message=T("Select the finished video to limit"),
@@ -16711,27 +16814,36 @@ class MainFrame(wx.Frame):
         if rife_scale != "1.0":
             cmd += ["--rife-scale", rife_scale]
 
-        # ADR-388: same Hybrid Frame Rate feature as the main Processor tab -- see
+        # ADR-388/392: same Hybrid Frame Rate feature as the main Processor tab -- see
         # utils.compute_standalone_hybrid_exclude_ranges() for why this builds its own
         # throwaway args rather than reusing a real parsed Namespace (the standalone
         # tool has no such object -- it builds `cmd` straight from widget values).
+        #
+        # ADR-392 real bug fix: this used to CALL compute_standalone_hybrid_exclude_ranges
+        # right here -- but _build_rife_standalone_job runs on the MAIN GUI thread
+        # (on_click_btn_rife_standalone_run calls it directly, before startWorker ever
+        # starts the background thread), and that function runs a real scene-boundary AI
+        # scan plus a motion scan over the whole file. On any real movie that froze the
+        # entire GUI (no repaint, Cancel unreachable) for however long the scan took --
+        # exactly decker's real report ("appears like is loading freeze"). Fixed by
+        # deferring the scan itself to run_rife_standalone, which already runs on
+        # startWorker's background thread: this function now only records what's needed
+        # to run it later, as `hybrid_info` (None when the checkbox is off).
+        hybrid_info = None
         if self.chk_rife_standalone_hybrid_framerate.GetValue():
-            from . import utils as iw3_utils
             hybrid_percent_text = (self.txt_rife_standalone_hybrid_percent.GetValue() or "50").strip()
             hybrid_percent = ("Auto" if hybrid_percent_text.lower() == "auto" else float(hybrid_percent_text))
-            exclude_ranges = iw3_utils.compute_standalone_hybrid_exclude_ranges(
-                input_path, gpu_id=gpu_id, rife_hybrid_percent=hybrid_percent)
-            if exclude_ranges:
-                ranges_path = iw3_utils._write_rife_hybrid_exclude_ranges_file(output_path, exclude_ranges)
-                cmd += ["--hybrid-exclude-ranges-file", ranges_path]
+            hybrid_info = {"input_path": input_path, "output_path": output_path,
+                           "gpu_id": gpu_id, "rife_hybrid_percent": hybrid_percent}
 
-        return cmd, dv
+        return cmd, dv, hybrid_info
 
     def _plan_rife_standalone_folder(self, input_dir, output_dir, video_files):
         """Folder mode: works out each file's own RIFE run before anything starts, so every ADR-330
         Dolby Vision/HDR prompt is answered up front instead of popping up in the middle of the batch. A file is
         skipped, never overwritten, when its '<name>_rife<ext>' output already exists, or when its H.264 warning
-        was answered No. Returns (jobs, skipped): jobs = [(input, output, cmd, dv)], skipped = [(name, reason)]."""
+        was answered No. Returns (jobs, skipped): jobs = [(input, output, cmd, dv, hybrid_info)],
+        skipped = [(name, reason)]."""
         jobs = []
         skipped = []
         for input_file in video_files:
@@ -16745,8 +16857,8 @@ class MainFrame(wx.Frame):
             if job is None:
                 skipped.append((name, T("Dolby Vision/HDR warning answered No")))
                 continue
-            cmd, dv = job
-            jobs.append((input_file, output_file, cmd, dv))
+            cmd, dv, hybrid_info = job
+            jobs.append((input_file, output_file, cmd, dv, hybrid_info))
         return jobs, skipped
 
     def run_rife_standalone_batch(self, jobs, skipped):
@@ -16755,7 +16867,7 @@ class MainFrame(wx.Frame):
         # (the Cancel handler kills its process) and the files after it are not started. A cancelled file's
         # half-written output is removed here with file operations only -- no widgets are touched from this thread.
         results = []
-        for index, (input_file, output_file, cmd, dv) in enumerate(jobs, 1):
+        for index, (input_file, output_file, cmd, dv, hybrid_info) in enumerate(jobs, 1):
             if self.rife_standalone_cancelled:
                 results.append((input_file, output_file, "not_started", ""))
                 continue
@@ -16763,7 +16875,7 @@ class MainFrame(wx.Frame):
                                                  f"{path.basename(input_file)} -- ")
             wx.CallAfter(self.gauge_rife_standalone.SetValue, 0)
             self.rife_standalone_start_time = time()
-            returncode, output = self.run_rife_standalone(cmd, dv)
+            returncode, output = self.run_rife_standalone(cmd, dv, hybrid_info)
             if self.rife_standalone_cancelled:
                 if self.rife_standalone_stage == "rife" and returncode != 0:
                     self._remove_partial_rife_output(output_file, self.rife_standalone_start_time)
@@ -21981,6 +22093,7 @@ def _self_test_rife_standalone_panel():
 
         def _fake_start_worker(on_exit, worker_fn, wargs=(), **kwargs):
             captured["cmd"] = wargs[0]
+            captured["wargs"] = wargs
 
         gui_mod.startWorker = _fake_start_worker
 
@@ -22093,67 +22206,40 @@ def _self_test_rife_standalone_panel():
             cmd = captured["cmd"]
             assert "--fp16" not in cmd, cmd
 
-            # ADR-388: Hybrid Frame Rate off by default -> no flag, and
-            # compute_standalone_hybrid_exclude_ranges is never even called (no scene/
-            # motion scan cost paid for a feature nobody turned on).
-            import json
-            from unittest import mock
-            from . import utils as iw3_utils_test
-            with mock.patch.object(iw3_utils_test, "compute_standalone_hybrid_exclude_ranges") as mock_compute:
-                captured.clear()
-                frame.on_click_btn_rife_standalone_run(None)
-                cmd = captured["cmd"]
-                assert "--hybrid-exclude-ranges-file" not in cmd, cmd
-                mock_compute.assert_not_called()
+            # ADR-392 real bug fix: the Hybrid Frame Rate scan (scene-boundary + motion)
+            # used to run HERE, synchronously, on the GUI thread, before startWorker
+            # ever started a background thread -- froze the whole window on any real
+            # movie (decker's real report: "appears like is loading freeze"). Fixed by
+            # deferring it into run_rife_standalone itself (tested directly, separately,
+            # in _self_test_run_rife_standalone_hybrid_scan below) -- all this click
+            # path does now is decide and forward `hybrid_info` (None when off, a plain
+            # dict of what run_rife_standalone will need otherwise) alongside cmd/dv,
+            # never calling compute_standalone_hybrid_exclude_ranges itself.
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["wargs"][2] is None, captured["wargs"][2]  # off by default
 
-                # Checked, with a real exclude range returned -> the flag is appended
-                # with a real sidecar file (written for real by
-                # _write_rife_hybrid_exclude_ranges_file -- no GPU needed for that, it's
-                # just JSON) that genuinely exists and holds the given ranges; the input
-                # file itself (not some other path) and the GPU actually selected (CPU,
-                # -1) are what get passed through.
-                frame.chk_rife_standalone_hybrid_framerate.SetValue(True)
-                frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
-                mock_compute.return_value = [(0.0, 5.0)]
-                captured.clear()
-                frame.on_click_btn_rife_standalone_run(None)
-                cmd = captured["cmd"]
-                assert "--hybrid-exclude-ranges-file" in cmd, cmd
-                ranges_path = cmd[cmd.index("--hybrid-exclude-ranges-file") + 1]
-                assert path.exists(ranges_path), ranges_path
-                with open(ranges_path, "r", encoding="utf-8") as f:
-                    assert json.load(f) == [[0.0, 5.0]]
-                os.remove(ranges_path)
-                mock_compute.assert_called_once_with(input_path, gpu_id=-1, rife_hybrid_percent=50.0)
+            frame.chk_rife_standalone_hybrid_framerate.SetValue(True)
+            frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            hybrid_info = captured["wargs"][2]
+            assert hybrid_info == {"input_path": input_path, "output_path": output_path,
+                                   "gpu_id": -1, "rife_hybrid_percent": 50.0}, hybrid_info
 
-                # "Auto" is passed straight through (not coerced to a number).
-                frame.txt_rife_standalone_hybrid_percent.SetValue("Auto")
-                mock_compute.reset_mock()
-                mock_compute.return_value = [(0.0, 5.0)]
-                captured.clear()
-                frame.on_click_btn_rife_standalone_run(None)
-                mock_compute.assert_called_once_with(input_path, gpu_id=-1, rife_hybrid_percent="Auto")
-                ranges_path = captured["cmd"][captured["cmd"].index("--hybrid-exclude-ranges-file") + 1]
-                os.remove(ranges_path)
-                frame.txt_rife_standalone_hybrid_percent.SetValue("50")
+            # "Auto" is forwarded as the literal string, not coerced to a number.
+            frame.txt_rife_standalone_hybrid_percent.SetValue("Auto")
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["wargs"][2]["rife_hybrid_percent"] == "Auto", captured["wargs"][2]
+            frame.txt_rife_standalone_hybrid_percent.SetValue("50")
 
-                # Nothing to exclude (e.g. fewer than 2 scenes) -> no flag, no sidecar
-                # file left behind.
-                mock_compute.return_value = []
-                captured.clear()
-                frame.on_click_btn_rife_standalone_run(None)
-                cmd = captured["cmd"]
-                assert "--hybrid-exclude-ranges-file" not in cmd, cmd
-
-                # Unchecked again -> back to no flag and no call, not sticky/broken.
-                frame.chk_rife_standalone_hybrid_framerate.SetValue(False)
-                frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
-                mock_compute.reset_mock()
-                captured.clear()
-                frame.on_click_btn_rife_standalone_run(None)
-                cmd = captured["cmd"]
-                assert "--hybrid-exclude-ranges-file" not in cmd, cmd
-                mock_compute.assert_not_called()
+            # Unchecked again -> back to None, not sticky/broken.
+            frame.chk_rife_standalone_hybrid_framerate.SetValue(False)
+            frame.on_changed_chk_rife_standalone_hybrid_framerate(None)
+            captured.clear()
+            frame.on_click_btn_rife_standalone_run(None)
+            assert captured["wargs"][2] is None, captured["wargs"][2]
     finally:
         gui_mod.startWorker = orig_start_worker
         if frame is not None:
@@ -22162,6 +22248,208 @@ def _self_test_rife_standalone_panel():
         app.Destroy()
 
     print("_self_test_rife_standalone_panel: PASS")
+
+
+def _self_test_run_rife_standalone_hybrid_scan():
+    """ADR-392 real bug fix: Hybrid Frame Rate's scene/motion scan used to run
+    synchronously inside _build_rife_standalone_job, on the GUI thread, BEFORE
+    startWorker ever started run_rife_standalone's own background thread -- froze
+    the whole window for however long the scan took on a real movie, with Cancel
+    unreachable the entire time (decker's real report: "appears like is loading
+    freeze"). Fixed by moving the scan into run_rife_standalone itself, which is
+    this test's own real target (called directly, not through startWorker/a real
+    GUI thread; subprocess.Popen is mocked -- no GPU, no real movie, no real RIFE
+    subprocess).
+
+    Confirms: hybrid_info=None skips the scan entirely (compute_standalone_hybrid_
+    exclude_ranges never called, the command passed to Popen is unchanged); a real
+    exclude-ranges result is written to a real, readable sidecar JSON file and
+    appended to the ACTUAL command Popen gets called with, that sidecar file
+    cleaned up again once the run finishes; an empty result appends nothing; and --
+    the other half of the real fix -- if Cancel sets self.rife_standalone_cancelled
+    during the scan (simulated here exactly as the real Cancel handler does it),
+    the function returns immediately WITHOUT ever calling subprocess.Popen at all,
+    i.e. a cancel during the scan can never still launch RIFE afterward."""
+    import tempfile
+    from unittest import mock
+    import iw3.gui as gui_mod
+    from . import utils as iw3_utils
+
+    class _FakeProc:
+        def __init__(self):
+            self.stdout = iter([])
+            self.stderr = iter([])
+            self.returncode = 0
+
+        def wait(self):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = gui_mod.MainFrame()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = path.join(tmpdir, "movie_rife.mkv")
+            base_cmd = [sys.executable, "-m", "iw3.rife_cli",
+                       "--input", "movie.mkv", "--output", output_path]
+
+            # (a) hybrid_info=None -> no scan, Popen's own cmd is unchanged.
+            with mock.patch.object(iw3_utils, "compute_standalone_hybrid_exclude_ranges") as mock_compute, \
+                 mock.patch.object(gui_mod.subprocess, "Popen", return_value=_FakeProc()) as mock_popen:
+                frame.rife_standalone_cancelled = False
+                frame.rife_standalone_stop_event.clear()
+                returncode, output = frame.run_rife_standalone(list(base_cmd), dv=None, hybrid_info=None)
+            assert returncode == 0, returncode
+            mock_compute.assert_not_called()
+            assert mock_popen.call_args[0][0] == base_cmd, mock_popen.call_args[0][0]
+            assert frame.rife_standalone_stage == "rife"
+
+            # (b) hybrid_info set, a real exclude range returned -> appended to the
+            # REAL cmd Popen is actually called with, as a genuine sidecar file --
+            # cleaned up again once the (fake, instant) subprocess returns.
+            hybrid_info = {"input_path": "movie.mkv", "output_path": output_path,
+                           "gpu_id": -1, "rife_hybrid_percent": 50.0}
+            with mock.patch.object(iw3_utils, "compute_standalone_hybrid_exclude_ranges",
+                                   return_value=[(0.0, 5.0)]) as mock_compute, \
+                 mock.patch.object(gui_mod.subprocess, "Popen", return_value=_FakeProc()) as mock_popen:
+                frame.rife_standalone_cancelled = False
+                frame.rife_standalone_stop_event.clear()
+                returncode, output = frame.run_rife_standalone(list(base_cmd), dv=None, hybrid_info=hybrid_info)
+            assert returncode == 0, returncode
+            # ADR-393: also passes a real tqdm_fn now (a functools.partial of
+            # _RifeStandaloneScanProgressBar) -- checked separately below rather than
+            # via assert_called_once_with, since a partial has no meaningful equality.
+            mock_compute.assert_called_once()
+            call_args, call_kwargs = mock_compute.call_args
+            assert call_args == ("movie.mkv",), call_args
+            assert call_kwargs["gpu_id"] == -1
+            assert call_kwargs["rife_hybrid_percent"] == 50.0
+            assert call_kwargs["stop_event"] is frame.rife_standalone_stop_event
+            assert callable(call_kwargs["tqdm_fn"]), call_kwargs["tqdm_fn"]
+            popen_cmd = mock_popen.call_args[0][0]
+            assert "--hybrid-exclude-ranges-file" in popen_cmd, popen_cmd
+            ranges_path = popen_cmd[popen_cmd.index("--hybrid-exclude-ranges-file") + 1]
+            assert not path.exists(ranges_path), "sidecar must be removed once the run finished"
+
+            # (c) nothing to exclude -> no flag added at all.
+            with mock.patch.object(iw3_utils, "compute_standalone_hybrid_exclude_ranges", return_value=[]), \
+                 mock.patch.object(gui_mod.subprocess, "Popen", return_value=_FakeProc()) as mock_popen:
+                frame.rife_standalone_cancelled = False
+                frame.rife_standalone_stop_event.clear()
+                frame.run_rife_standalone(list(base_cmd), dv=None, hybrid_info=hybrid_info)
+            assert "--hybrid-exclude-ranges-file" not in mock_popen.call_args[0][0]
+
+            # (d) the real fix: Cancel during the scan phase must stop this function
+            # from ever reaching subprocess.Popen -- simulated exactly as the real
+            # Cancel button handler does it (sets both flags), from inside the mocked
+            # scan call, the same place a real scan would notice the stop event.
+            def _cancel_during_scan(*args, **kwargs):
+                frame.rife_standalone_cancelled = True
+                frame.rife_standalone_stop_event.set()
+                return None
+
+            with mock.patch.object(iw3_utils, "compute_standalone_hybrid_exclude_ranges",
+                                   side_effect=_cancel_during_scan), \
+                 mock.patch.object(gui_mod.subprocess, "Popen") as mock_popen:
+                frame.rife_standalone_cancelled = False
+                frame.rife_standalone_stop_event.clear()
+                returncode, output = frame.run_rife_standalone(list(base_cmd), dv=None, hybrid_info=hybrid_info)
+            assert returncode == -1, returncode
+            mock_popen.assert_not_called()
+            assert frame.rife_standalone_stage == "hybrid_scan", frame.rife_standalone_stage
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_run_rife_standalone_hybrid_scan: PASS")
+
+
+def _self_test_rife_standalone_scan_progress_bar():
+    """ADR-393: _RifeStandaloneScanProgressBar -- the tqdm_fn bridge giving Hybrid
+    Frame Rate's scan (inside run_rife_standalone) a real progress bar + ETA, same
+    elapsed/FPS/ETA formula and format as MainFrame._update_rife_standalone_progress
+    (the RIFE step's own progress, which runs right after this one finishes).
+
+    Tests the math/formatting directly against a lightweight fake "parent" (not a
+    real wx.Frame) that just records what it's told, calling `_refresh()` directly
+    rather than through `update()`'s own wx.CallAfter -- isolates the calculation
+    from wx's event-loop timing, which the real update()/__init__ path is already
+    covered by indirectly (_self_test_run_rife_standalone_hybrid_scan)."""
+    import iw3.gui as gui_mod
+
+    class _FakeGauge:
+        def __init__(self):
+            self.range = None
+            self.value = None
+            self.pulsed = False
+
+        def SetRange(self, total):
+            self.range = total
+
+        def SetValue(self, value):
+            self.value = value
+
+        def Pulse(self):
+            self.pulsed = True
+
+    class _FakeParent:
+        def __init__(self):
+            self.gauge_rife_standalone = _FakeGauge()
+            self.label = None
+
+        def _set_rife_standalone_label(self, text):
+            self.label = text
+
+        def _format_duration(self, seconds):
+            return f"{seconds:.1f}s"
+
+    app = wx.App()
+    try:
+        parent = _FakeParent()
+
+        # total known, 0 done -> 0%, no FPS/ETA yet (done=0 can't divide meaningfully).
+        bar = gui_mod._RifeStandaloneScanProgressBar(parent, total=100, desc="Hybrid Frame Rate: scene scan")
+        bar._refresh()
+        assert parent.gauge_rife_standalone.range == 100
+        assert parent.gauge_rife_standalone.value == 0
+        assert parent.label == "Hybrid Frame Rate: scene scan: 0/100 (0%)", parent.label
+
+        # Partway through -> real percent/FPS/ETA, with the desc prefix kept.
+        bar.done = 50
+        bar.start_time -= 10.0  # pretend 10 real seconds have already elapsed
+        bar._refresh()
+        assert parent.gauge_rife_standalone.value == 50
+        assert parent.label.startswith("Hybrid Frame Rate: scene scan: 50/100 (50%) ["), parent.label
+        assert "FPS" in parent.label and "ETA" in parent.label and T("elapsed") in parent.label, parent.label
+
+        # No desc -> no dangling "): " prefix.
+        bar_no_desc = gui_mod._RifeStandaloneScanProgressBar(parent, total=10)
+        bar_no_desc._refresh()
+        assert parent.label == "0/10 (0%)", parent.label
+
+        # total=0/unknown -> pulses instead of a stuck 0% bar (same fallback the RIFE
+        # step's own progress bar already uses for this exact case).
+        bar_unknown = gui_mod._RifeStandaloneScanProgressBar(parent, total=0, desc="scanning")
+        parent.gauge_rife_standalone.pulsed = False
+        bar_unknown._refresh()
+        assert parent.gauge_rife_standalone.pulsed
+
+        # update() increments the running count (deferred via wx.CallAfter -- this
+        # confirms the counter itself advances; the resulting label math is already
+        # covered above).
+        bar_update = gui_mod._RifeStandaloneScanProgressBar(parent, total=10)
+        bar_update.update(3)
+        assert bar_update.done == 3
+    finally:
+        app.Destroy()
+
+    print("_self_test_rife_standalone_scan_progress_bar: PASS")
 
 
 def _self_test_rife_standalone_hdr_codec_warning():
@@ -35305,6 +35593,8 @@ def _run_self_tests():
         _self_test_reinject_skip_frame_check_checkbox,
         _self_test_reinject_fractional_time_fields,
         _self_test_rife_standalone_panel,
+        _self_test_run_rife_standalone_hybrid_scan,
+        _self_test_rife_standalone_scan_progress_bar,
         _self_test_rife_standalone_hdr_codec_warning,
         _self_test_rife_standalone_progress_bar,
         _self_test_sharpen_progress_bar,

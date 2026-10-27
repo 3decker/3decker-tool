@@ -4330,7 +4330,7 @@ class MainFrame(wx.Frame):
               "you specifically want this hybrid look."))
         self.lbl_rife_hybrid_percent = wx.StaticText(self.grp_postprocess, label=T("Hybrid: Action %"))
         self.txt_rife_hybrid_percent = EditableComboBox(
-            self.grp_postprocess, choices=["30", "50", "70"], name="txt_rife_hybrid_percent")
+            self.grp_postprocess, choices=["Auto", "30", "50", "70"], name="txt_rife_hybrid_percent")
         self.txt_rife_hybrid_percent.SetValue("50")
         self.txt_rife_hybrid_percent.SetToolTip(
             T("Only affects Hybrid Frame Rate above. Roughly what percentage of the movie's total "
@@ -4339,8 +4339,14 @@ class MainFrame(wx.Frame):
               "Values: 100 interpolates everything (same as leaving Hybrid Frame Rate off). 0 duplicates "
               "everything (no real interpolation anywhere -- a real, if unusual, choice). 50 (default) "
               "is an even split by runtime.\n"
+              "Auto: instead of a fixed number, finds THIS movie's own natural break between its calmer "
+              "and busier scenes (the single biggest jump in motion between any two scenes, by runtime) "
+              "and splits there -- different movies get different percentages automatically. Falls back "
+              "to the 50% default if no clear break is found. Either way, the percentage actually used "
+              "is printed to the Output log/job log so you can see what it picked.\n"
               "Recommended: 50 as a starting point -- raise it if too much looks duplicated/static, "
-              "lower it if you want the calmer, lower-cadence look across more of the movie."))
+              "lower it if you want the calmer, lower-cadence look across more of the movie. Try Auto "
+              "if you'd rather not guess a number yourself."))
 
         # Same deliberate escape hatch as the standalone Retroactive HDR/DV Reinjection
         # panel's own txt_reinject_frame_count_tolerance (see its construction above) --
@@ -11612,7 +11618,8 @@ class MainFrame(wx.Frame):
                   "`Automated Scene Batch` to be turned on -- there are no scene "
                   "boundaries to key off of otherwise."))
             return None
-        if not validate_number(self.txt_rife_hybrid_percent.GetValue(), 0, 100):
+        if (self.txt_rife_hybrid_percent.GetValue().strip().lower() != "auto"
+                and not validate_number(self.txt_rife_hybrid_percent.GetValue(), 0, 100)):
             self.show_validation_error_message(T("Hybrid: Action %"), 0, 100)
             return None
         if self.chk_depth_blend.GetValue() and not validate_number(self.cbo_depth_blend_strength.GetValue(), 0.0, 1.0):
@@ -11707,6 +11714,13 @@ class MainFrame(wx.Frame):
         else:
             rife_multiplier = int(rife_mode[0])  # "2x"/"3x"/"4x" -> 2/3/4
             rife_target_fps = None
+
+        # "Auto" (ADR-387) is passed through as the literal string "Auto" -- rife_hybrid.py's
+        # compute_hybrid_exclude_ranges() detects that sentinel itself; any other value keeps
+        # the original float-percentage behavior unchanged.
+        _rife_hybrid_percent_text = (self.txt_rife_hybrid_percent.GetValue() or "50").strip()
+        rife_hybrid_percent = ("Auto" if _rife_hybrid_percent_text.lower() == "auto"
+                                else float(_rife_hybrid_percent_text))
 
         parser = create_parser(required_true=False)
 
@@ -12034,7 +12048,7 @@ class MainFrame(wx.Frame):
             rife_fp16=self.chk_rife_fp16.GetValue(),
             rife_scale=float(self.cbo_rife_scale.GetValue()),
             rife_hybrid_framerate=self.chk_rife_hybrid_framerate.GetValue(),
-            rife_hybrid_percent=float(self.txt_rife_hybrid_percent.GetValue() or "50"),
+            rife_hybrid_percent=rife_hybrid_percent,
             rife_dv_frame_count_tolerance=int(self.txt_rife_dv_frame_count_tolerance.GetValue() or "0"),
             rife_dv_skip_frame_check=self.chk_rife_dv_skip_frame_check.GetValue(),
             restore_audio_subtitles=self.chk_restore_audio_subtitles.GetValue(),
@@ -29719,6 +29733,27 @@ def _self_test_rife_hybrid_framerate_gui():
         # (see this test's own docstring for why).
         assert not validate_number("150", 0, 100), "out-of-range percent must fail validation"
         assert validate_number("50", 0, 100)
+
+        # ADR-387 "Auto" mode: parse_args() passes the literal string "Auto" straight
+        # through (never coerced to a float, and never refused by the 0-100 numeric
+        # check above -- that check is skipped specifically for this value).
+        frame.chk_rife_hybrid_framerate.SetValue(True)
+        frame.txt_rife_hybrid_percent.SetValue("Auto")
+        args_auto = frame.parse_args(skip_set_state=True)
+        assert args_auto is not None, "Auto must not be refused by the percent range check"
+        assert args_auto.rife_hybrid_percent == "Auto", args_auto.rife_hybrid_percent
+        # lowercase typed by hand must work the same way -- and comes back
+        # normalized to "Auto" (utils._parse_rife_hybrid_percent's own job, since
+        # it's the one that actually runs on this value, including on the
+        # STRING DEFAULT path parser.parse_args([]) takes here -- see its
+        # docstring for why that matters).
+        frame.txt_rife_hybrid_percent.SetValue("auto")
+        args_auto_lower = frame.parse_args(skip_set_state=True)
+        assert args_auto_lower.rife_hybrid_percent == "Auto", args_auto_lower.rife_hybrid_percent
+        # round-trips back to the exact "Auto" choice, not a mangled string
+        frame.txt_rife_hybrid_percent.SetValue("50")
+        frame.apply_parsed_args_to_gui(args_auto)
+        assert frame.txt_rife_hybrid_percent.GetValue() == "Auto", frame.txt_rife_hybrid_percent.GetValue()
     finally:
         if frame is not None:
             frame.Destroy()

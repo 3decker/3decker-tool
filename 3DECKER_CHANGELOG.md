@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 26, 2026
+## Latest Update — October 27, 2026
+
+**Added: an "Auto" option for Hybrid Frame Rate's "Action %" field — instead of picking one fixed percentage yourself, 3DECKER can now figure out the right split for each movie on its own.** There's no single best percentage for every movie — a slow dialogue-heavy film and a constant-action movie genuinely call for different splits. Hybrid Frame Rate already measures how much motion is in every scene before deciding anything; Auto mode uses that same information to find THIS movie's own natural break between its calmer and busier scenes and splits there automatically, instead of you having to guess a number. If no clear break is found, it safely falls back to the same 50% default as before. Either way — whether you typed a fixed number or used Auto — the percentage actually used is now printed both live in the Output panel while it's running and in the saved job log, so you can always see what it picked. Just select "Auto" from the "Hybrid: Action %" dropdown; leaving it on a fixed number works exactly as before.
+
+## Update — October 26, 2026
 
 **Added: "RIFE Motion Detail" — a new setting to reduce blur/ghosting on fast-motion scenes during RIFE Frame Interpolation.** RIFE creates new in-between frames by tracking how things moved between two real frames; on fast or large motion, that tracking can fail to find a clean match and blends the frames together instead, which is what you see as blur or ghosting. This new setting lets RIFE's own motion-tracking step use more detail (at a real speed cost) specifically to fight that — raise it if you've noticed blur/ghosting on fast-motion scenes in a particular video. Available both on the main Processor tab (next to the other RIFE settings) and in the Standalone RIFE Tool. Defaults to the same balanced middle value RIFE always used before this setting existed, so nothing changes unless you touch it.
 

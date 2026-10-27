@@ -21,7 +21,15 @@ Batch, same as iw3.utils._load_rife_scene_cut_times's own scene-cut-protection f
 rather than ever triggering a fresh scene-boundary scan itself -- this module's own
 motion scan is a SEPARATE, additional cost on top of that, so Hybrid Frame Rate is
 gated (in iw3/gui.py) on Scene Detection/Scene Batch already being on, exactly like
-Auto EMA by Scene Length's own precedent for the same reason."""
+Auto EMA by Scene Length's own precedent for the same reason.
+
+ADR-387 "Auto" percentage mode (real decker follow-up, 2026-10-27): the GUI's
+"Hybrid: Action %" field also accepts the literal value "Auto" instead of a fixed
+number -- see auto_select_interpolate_fraction() below for how that picks a
+per-movie percentage instead of a single number everyone shares, and
+compute_hybrid_exclude_ranges()'s own print() calls for how the percentage actually
+used (fixed or Auto-detected) always gets logged, live in the Output panel and in
+the job log (both tee the same stderr stream -- see utils.py's _job_log_scope())."""
 import sys
 import torch
 import nunif.utils.video as VU
@@ -161,6 +169,60 @@ def select_hybrid_exclude_ranges(scenes, interpolate_fraction=0.5):
     return sorted(exclude)
 
 
+def auto_select_interpolate_fraction(scenes, min_fraction=0.1, max_fraction=0.9,
+                                      default_fraction=0.5):
+    """ADR-387 "Auto" mode for the Action % field (real decker follow-up, 2026-10-27):
+    instead of a fixed runtime percentage chosen ahead of time, finds THIS movie's own
+    natural break between its calmer and busier scenes -- the single largest jump in
+    motion score anywhere in the scene list sorted by motion (same per-scene scores
+    select_hybrid_exclude_ranges already works from) -- and splits there, so different
+    movies get different percentages automatically instead of everyone sharing one
+    number.
+
+    Returns (interpolate_fraction, detected) -- detected=False means no usable gap was
+    found (fewer than 2 scenes, every scene reads as equally calm/busy, or every
+    candidate gap's own exclude-fraction falls outside [min_fraction, max_fraction] of
+    the movie's total runtime) and interpolate_fraction is default_fraction instead.
+    Auto never silently produces a 0%/100% extreme off a single degenerate scene or
+    scan noise -- it falls back to the same safe default a user would otherwise type
+    in by hand.
+
+    min_fraction/max_fraction bound how lopsided an AUTO-DETECTED split is allowed to
+    be, as a fraction of total runtime (not scene count): without this, one unusually
+    long calm (or busy) scene sitting right next to the biggest raw gap could swing
+    the whole movie to interpolating almost nothing, or almost everything, off that
+    single gap."""
+    if len(scenes) < 2:
+        return default_fraction, False
+    total_duration = sum(end - start for start, end, _ in scenes)
+    if total_duration <= 0:
+        return default_fraction, False
+
+    ordered = sorted(scenes, key=lambda s: s[2])  # ascending motion -- calmest first
+    cumulative = 0.0
+    cumulative_durations = []
+    for start, end, _motion in ordered:
+        cumulative += (end - start)
+        cumulative_durations.append(cumulative)
+
+    best_gap = 0.0
+    best_index = None
+    for i in range(len(ordered) - 1):
+        exclude_fraction = cumulative_durations[i] / total_duration
+        if exclude_fraction < min_fraction or exclude_fraction > max_fraction:
+            continue
+        gap = ordered[i + 1][2] - ordered[i][2]
+        if gap > best_gap:
+            best_gap = gap
+            best_index = i
+
+    if best_index is None:
+        return default_fraction, False
+
+    exclude_fraction = cumulative_durations[best_index] / total_duration
+    return max(0.0, min(1.0, 1.0 - exclude_fraction)), True
+
+
 def compute_hybrid_exclude_ranges(video_path, scene_cut_times, args):
     """Top-level entry point called from iw3.utils._run_rife_interpolation. Scans
     video_path's own motion (see _scan_scene_motion), buckets it against
@@ -198,7 +260,21 @@ def compute_hybrid_exclude_ranges(video_path, scene_cut_times, args):
         return None
 
     scenes = _bucket_motion_by_scene(samples, _MOTION_SCAN_FPS, scene_cut_times, total_duration)
-    interpolate_fraction = max(0.0, min(1.0, float(getattr(args, "rife_hybrid_percent", 50)) / 100.0))
+
+    raw_percent = getattr(args, "rife_hybrid_percent", 50)
+    auto_requested = isinstance(raw_percent, str) and raw_percent.strip().lower() == "auto"
+    if auto_requested:
+        interpolate_fraction, auto_detected = auto_select_interpolate_fraction(scenes)
+        if auto_detected:
+            print(f"[iw3] Hybrid Frame Rate: Auto mode detected {interpolate_fraction * 100:.0f}% "
+                  f"as this movie's own action/calm split (largest motion gap between its scenes).",
+                  file=sys.stderr)
+        else:
+            print(f"[iw3] Hybrid Frame Rate: Auto mode found no clear action/calm split for this "
+                  f"movie -- using the {interpolate_fraction * 100:.0f}% default instead.",
+                  file=sys.stderr)
+    else:
+        interpolate_fraction = max(0.0, min(1.0, float(raw_percent) / 100.0))
     exclude_ranges = select_hybrid_exclude_ranges(scenes, interpolate_fraction)
 
     if len(scenes) < 2:
@@ -295,6 +371,50 @@ def _test():
             self.assertEqual(select_hybrid_exclude_ranges([(0, 7200, 0.01)], 0.5), [])
             self.assertEqual(select_hybrid_exclude_ranges([], 0.5), [])
 
+    class TestAutoSelectInterpolateFraction(unittest.TestCase):
+        def test_finds_largest_gap(self):
+            # 4 equal-length scenes, motion scores 0.01, 0.05, 0.5, 0.9 -- the biggest
+            # jump is between 0.05 and 0.5 (index 1->2), which excludes exactly the
+            # first two scenes (50 of 100s = 50% exclude fraction, within bounds).
+            scenes = [(0, 25, 0.01), (25, 50, 0.05), (50, 75, 0.5), (75, 100, 0.9)]
+            fraction, detected = auto_select_interpolate_fraction(scenes)
+            self.assertTrue(detected)
+            self.assertAlmostEqual(fraction, 0.5)
+
+        def test_fewer_than_two_scenes_falls_back_to_default(self):
+            fraction, detected = auto_select_interpolate_fraction([(0, 100, 0.5)])
+            self.assertFalse(detected)
+            self.assertEqual(fraction, 0.5)
+            fraction, detected = auto_select_interpolate_fraction([])
+            self.assertFalse(detected)
+            self.assertEqual(fraction, 0.5)
+
+        def test_all_equal_motion_falls_back_to_default(self):
+            # No real gap anywhere -- every scene reads as equally calm/busy.
+            scenes = [(0, 10, 0.3), (10, 20, 0.3), (20, 30, 0.3)]
+            fraction, detected = auto_select_interpolate_fraction(scenes)
+            self.assertFalse(detected)
+            self.assertEqual(fraction, 0.5)
+
+        def test_out_of_bounds_gap_is_skipped_for_one_within_bounds(self):
+            # The biggest raw gap (index 0->1, 4.99) would exclude only 5% of runtime
+            # -- outside the default [0.1, 0.9] window -- so it's skipped in favor of
+            # the only remaining gap (index 1->2, just 0.1) that lands inside bounds,
+            # even though it's a far smaller jump in motion.
+            scenes = [(0, 5, 0.01), (5, 10, 5.0), (10, 100, 5.1)]
+            fraction, detected = auto_select_interpolate_fraction(scenes)
+            self.assertTrue(detected)
+            self.assertAlmostEqual(fraction, 0.9)  # excludes the first 10% (scenes 0+1)
+
+        def test_no_gap_within_bounds_falls_back_to_default(self):
+            # A single huge scene dominates runtime -- every candidate split lands
+            # outside [min_fraction, max_fraction], so this must fall back rather
+            # than ever picking a 0%/100%-adjacent extreme.
+            scenes = [(0, 1, 0.01), (1, 99, 0.5), (99, 100, 0.9)]
+            fraction, detected = auto_select_interpolate_fraction(scenes)
+            self.assertFalse(detected)
+            self.assertEqual(fraction, 0.5)
+
     class TestComputeHybridExcludeRanges(unittest.TestCase):
         def test_orchestration_and_graceful_failure(self):
             import types
@@ -327,9 +447,52 @@ def _test():
             self.assertEqual(result, [(0.0, 50.0)])
             self.assertIn("hwaccel", captured)
 
+        def test_auto_mode_detects_split_and_logs_it(self):
+            import io
+            import types
+            from contextlib import redirect_stderr
+
+            args = types.SimpleNamespace(state={}, hwaccel=None, disable_software_fallback=False,
+                                          rife_hybrid_percent="Auto")
+            fake_metadata = types.SimpleNamespace(get_duration=lambda: 100.0)
+
+            def fake_scan(video_path, **kwargs):
+                # two scenes: [0, 50) calm, [50, 100) busy -- same as test (c) above,
+                # but driven through Auto mode instead of a fixed percentage.
+                return [(i, 0.01) for i in range(0, 200)] + [(i, 0.9) for i in range(200, 400)]
+
+            buf = io.StringIO()
+            with patch.object(VU.VideoMetadata, "from_file", return_value=fake_metadata), \
+                 patch(f"{__name__}._scan_scene_motion", side_effect=fake_scan), \
+                 redirect_stderr(buf):
+                result = compute_hybrid_exclude_ranges("video.mkv", [50.0], args)
+            self.assertEqual(result, [(0.0, 50.0)])
+            # The actual percentage Auto picked must land in the printed log (live
+            # Output panel + job log both tee this same stream) -- decker's own
+            # explicit ask, not just a correct return value.
+            self.assertIn("Auto mode detected 50%", buf.getvalue())
+
+        def test_auto_mode_is_case_insensitive_and_falls_back_cleanly(self):
+            import types
+
+            args = types.SimpleNamespace(state={}, hwaccel=None, disable_software_fallback=False,
+                                          rife_hybrid_percent="auto")  # lowercase must also work
+            fake_metadata = types.SimpleNamespace(get_duration=lambda: 100.0)
+
+            def fake_scan(video_path, **kwargs):
+                # one giant calm scene, no real scene cuts at all -- Auto has nothing
+                # to detect, must fall back cleanly rather than raising.
+                return [(i, 0.01) for i in range(0, 400)]
+
+            with patch.object(VU.VideoMetadata, "from_file", return_value=fake_metadata), \
+                 patch(f"{__name__}._scan_scene_motion", side_effect=fake_scan):
+                result = compute_hybrid_exclude_ranges("video.mkv", None, args)
+            self.assertEqual(result, [])
+
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for case in (TestBucketMotionByScene, TestSelectHybridExcludeRanges, TestComputeHybridExcludeRanges):
+    for case in (TestBucketMotionByScene, TestSelectHybridExcludeRanges, TestAutoSelectInterpolateFraction,
+                 TestComputeHybridExcludeRanges):
         suite.addTests(loader.loadTestsFromTestCase(case))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

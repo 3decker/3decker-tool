@@ -7904,6 +7904,20 @@ def process_config_images(config, args, side_model):
         args.mapper = original_mapper
 
 
+def _parse_rife_hybrid_percent(value):
+    """argparse type= for --rife-hybrid-percent: a 0-100 float, or the literal
+    "Auto" (case-insensitive), ADR-387. A plain type=float here would reject
+    "Auto" twice over -- once for a real --rife-hybrid-percent Auto on the
+    command line, and once more subtly through argparse's OWN handling of a
+    string default set via set_defaults(): it runs any string default through
+    `type` too, even when parse_args([]) (gui.py's parse_args() own pattern)
+    never sees "Auto" on an actual command line -- a real crash this fixes,
+    confirmed by running the GUI self-test, not a hypothetical one."""
+    if isinstance(value, str) and value.strip().lower() == "auto":
+        return "Auto"
+    return float(value)
+
+
 def create_parser(required_true=True):
     class Range(object):
         def __init__(self, start, end):
@@ -8243,13 +8257,16 @@ def create_parser(required_true=True):
                               "interpolated normally). See --rife-hybrid-percent for how much of the runtime "
                               "gets real interpolation. Off by default -- omitted, behavior is byte-for-byte "
                               "unchanged."))
-    parser.add_argument("--rife-hybrid-percent", type=float, default=50,
+    parser.add_argument("--rife-hybrid-percent", type=_parse_rife_hybrid_percent, default=50,
                         help=("with --rife-hybrid-framerate: roughly what percentage of the movie's total "
                               "RUNTIME (not scene count) gets real RIFE interpolation, biased toward the "
                               "highest-motion scenes first -- the calmest scenes making up the remaining "
                               "percentage are duplicated instead. Default 50. 100 interpolates everything "
                               "(byte-for-byte the same as leaving --rife-hybrid-framerate off); 0 duplicates "
-                              "everything (no real interpolation anywhere)."))
+                              "everything (no real interpolation anywhere). ADR-387: also accepts the "
+                              "literal value Auto (case-insensitive) -- instead of a fixed percentage, finds "
+                              "this movie's own natural calm/action split and uses that instead; falls back "
+                              "to 50 if no clear split is found. See iw3/rife_hybrid.py."))
     parser.add_argument("--waifu2x-upscale", action="store_true",
                         help=("after conversion finishes, run the finished output through waifu2x (a "
                               "separate, dedicated AI upscaler bundled with this app) as one extra step. "

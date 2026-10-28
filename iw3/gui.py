@@ -1701,6 +1701,27 @@ class MainFrame(wx.Frame):
               "flipping mid-shot, with no cut happening) -- try a small value like 3 first and judge by "
               "eye."))
 
+        self.lbl_sod_track_update_interval = wx.StaticText(
+            self.grp_stereo, label=T("Tracking Update Interval"))
+        self.cbo_sod_track_update_interval = EditableComboBox(
+            self.grp_stereo, choices=["1", "2", "3", "4"], name="cbo_sod_track_update_interval")
+        self.cbo_sod_track_update_interval.SetValue("1")
+        self.cbo_sod_track_update_interval.SetToolTip(
+            T("Only affects sod_track Convergence Plane mode. A real reported speed gap: sod_track still "
+              "runs somewhat slower than sod_v1/constant even with its own earlier speed fix applied, "
+              "because unlike sod_v1 (which never leaves the graphics card), sod_track's tracking step "
+              "still has to pull a copy of each frame onto the processor (CPU) every single frame to "
+              "follow the subject.\n"
+              "How it works: at 1 (default), it does that every frame, exactly as before. At 2 or more, "
+              "it only actually does that real tracking work every Nth frame -- the frames in between just "
+              "keep using the last known subject position unchanged, skipping that frame-copy step "
+              "entirely.\n"
+              "Con: not free -- a higher value means the tracked box reacts more slowly if the subject is "
+              "moving quickly within one shot, since it's only being re-checked every few frames instead "
+              "of every frame.\n"
+              "Recommended: 1 (default) unless you specifically want more speed and your content doesn't "
+              "have fast-moving subjects within a single shot -- try 2 first and judge by eye."))
+
         self.chk_convergence_overlay = wx.CheckBox(
             self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
         self.chk_convergence_overlay.SetValue(False)
@@ -3367,6 +3388,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_cut_smooth, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_subject_lock, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_subject_lock, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_sod_track_update_interval, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_sod_track_update_interval, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_convergence_scene_log, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -10719,6 +10742,7 @@ class MainFrame(wx.Frame):
             self.cbo_nt_cut_smooth,
             self.cbo_convergence_cut_smooth,
             self.cbo_convergence_subject_lock,
+            self.cbo_sod_track_update_interval,
             self.cbo_face_protect,
             self.cbo_resolution,
             self.cbo_stereo_width,
@@ -11116,6 +11140,7 @@ class MainFrame(wx.Frame):
             self.chk_convergence_scene_log.Enable()
         self.update_convergence_cut_smooth()
         self.update_convergence_subject_lock()
+        self.update_sod_track_update_interval()
 
     def on_changed_cbo_convergence_mode(self, event):
         self.update_convergence_mode()
@@ -11141,6 +11166,14 @@ class MainFrame(wx.Frame):
         on = self.cbo_convergence_mode.GetValue() == "sod_v1"
         self.lbl_convergence_subject_lock.Enable(on)
         self.cbo_convergence_subject_lock.Enable(on)
+
+    def update_sod_track_update_interval(self):
+        # ADR-400: only sod_track has a real per-frame CPU tracking step for this to
+        # skip -- sod_v1 never leaves the GPU at all, and the other modes have no
+        # continuous frame-to-frame tracking concept either.
+        on = self.cbo_convergence_mode.GetValue() == "sod_track"
+        self.lbl_sod_track_update_interval.Enable(on)
+        self.cbo_sod_track_update_interval.Enable(on)
 
     def update_ema_normalize(self):
         if self.chk_ema_normalize.IsChecked():
@@ -11335,6 +11368,7 @@ class MainFrame(wx.Frame):
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
             self.chk_convergence_scene_hold, self.lbl_convergence_cut_smooth, self.cbo_convergence_cut_smooth,
             self.lbl_convergence_subject_lock, self.cbo_convergence_subject_lock,
+            self.lbl_sod_track_update_interval, self.cbo_sod_track_update_interval,
             self.chk_convergence_overlay, self.chk_convergence_scene_log,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
             self.lbl_face_protect, self.cbo_face_protect,
@@ -11703,6 +11737,9 @@ class MainFrame(wx.Frame):
             return None
         if not validate_number(self.cbo_convergence_subject_lock.GetValue(), 0, 30, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Subject Lock (frames)"), 0, 30)
+            return None
+        if not validate_number(self.cbo_sod_track_update_interval.GetValue(), 1, 10, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Tracking Update Interval"), 1, 10)
             return None
         if not validate_number(self.cbo_nt_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
@@ -12098,6 +12135,7 @@ class MainFrame(wx.Frame):
             convergence_scene_hold=self.chk_convergence_scene_hold.GetValue(),
             convergence_cut_smooth=int(self.cbo_convergence_cut_smooth.GetValue()),
             convergence_subject_lock=int(self.cbo_convergence_subject_lock.GetValue()),
+            sod_track_update_interval=int(self.cbo_sod_track_update_interval.GetValue()),
             convergence_overlay=self.chk_convergence_overlay.GetValue(),
             convergence_scene_log=self.chk_convergence_scene_log.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
@@ -13394,6 +13432,7 @@ class MainFrame(wx.Frame):
         self.chk_convergence_scene_hold.SetValue(bool(getattr(args, "convergence_scene_hold", False)))
         _apply_combo_value(self.cbo_convergence_cut_smooth, getattr(args, "convergence_cut_smooth", 0))
         _apply_combo_value(self.cbo_convergence_subject_lock, getattr(args, "convergence_subject_lock", 0))
+        _apply_combo_value(self.cbo_sod_track_update_interval, getattr(args, "sod_track_update_interval", 1))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
         self.chk_convergence_scene_log.SetValue(bool(getattr(args, "convergence_scene_log", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
@@ -34224,6 +34263,7 @@ def _self_test_sod_track_downscale_perf_fix():
     est.decay = 0.9
     est.scene_hold = False
     est.cut_smooth = 0
+    est.track_update_interval = 1
     est.convergence_ema = None
     est.tracker = ST.SceneHoldTracker(0.9)
     est._track_state = None
@@ -34291,6 +34331,162 @@ def _self_test_sod_track_csrt_degenerate_box_fix():
     assert state["tracker"] is not None, "real CSRT tracker.init() should no longer fail here"
 
     print("_self_test_sod_track_csrt_degenerate_box_fix: PASS")
+
+
+def _self_test_sod_track_update_interval():
+    """ADR-400: optional speed setting built after a real follow-up question -- sod_track
+    still runs ~10% slower than sod_v1/constant (4.70 vs ~5.20fps, real reported) even
+    after ADR-395's downscale fix, because every frame still needs a GPU->CPU transfer
+    for CSRT's own update, which sod_v1 (fully GPU-resident) never needs at all.
+    `track_update_interval` lets the real per-frame CSRT update (and its GPU->CPU
+    transfer) run only every Nth frame -- skipped frames must reuse the last tracked
+    box completely unchanged and must NOT call the tracker or the frame-conversion
+    helper at all (that's the actual source of the savings)."""
+    import types
+    from unittest import mock
+    import iw3.sod_track_estimator as ST
+
+    H, W = 200, 200  # small -- scale stays 1.0, keeps this test focused on the skip logic
+    depth = torch.zeros(1, 1, H, W)
+    rgb = torch.rand(1, 3, H, W)
+
+    def fake_infer(rgb_, depth_):
+        sal = torch.zeros(1, 1, H, W)
+        sal[0, 0, :, :W // 2] = 0.9
+        return sal, depth_
+
+    class _FakeTracker():
+        def __init__(self):
+            self.update_calls = 0
+
+        def init(self, frame, box):
+            pass
+
+        def update(self, frame):
+            self.update_calls += 1
+            return (True, (1, 1, 10, 10))
+
+    est = ST.SodTrackEstimator.__new__(ST.SodTrackEstimator)
+    est.device = torch.device("cpu")
+    est.convergence = 0.5
+    est.enable_ema = False
+    est.decay = 0.9
+    est.scene_hold = False
+    est.cut_smooth = 0
+    est.track_update_interval = 3
+    est.convergence_ema = None
+    est.tracker = ST.SceneHoldTracker(0.9)
+    est._track_state = None
+    est.model = types.SimpleNamespace(infer=fake_infer)
+
+    fake_tracker = _FakeTracker()
+    frame_to_bgr_calls = {"n": 0}
+    real_frame_to_bgr = ST.SodTrackEstimator._frame_to_bgr
+
+    def counting_frame_to_bgr(rgb_single, scale=1.0):
+        frame_to_bgr_calls["n"] += 1
+        return real_frame_to_bgr(rgb_single, scale)
+
+    with mock.patch.object(ST, "_create_csrt_tracker", return_value=fake_tracker), \
+         mock.patch.object(ST.SodTrackEstimator, "_frame_to_bgr", staticmethod(counting_frame_to_bgr)):
+        est(rgb, depth, reset_pts=[False])  # frame 0: reinit (SOD + tracker.init, no update() call)
+        assert fake_tracker.update_calls == 0
+        init_frame_to_bgr_calls = frame_to_bgr_calls["n"]
+
+        # frames_since_reinit sequence after reinit: 0 (this call), 1, 2, 3, 4, 5...
+        # real updates must land exactly at the multiples of 3: relative frame 0, 3.
+        for _ in range(6):
+            est(rgb, depth, reset_pts=[False])
+
+        assert fake_tracker.update_calls == 2, \
+            f"expected exactly 2 real tracker updates in 6 frames at interval=3, got {fake_tracker.update_calls}"
+        # One _frame_to_bgr call per real update (skipped frames must not call it at all).
+        assert frame_to_bgr_calls["n"] - init_frame_to_bgr_calls == 2, frame_to_bgr_calls["n"]
+
+    # interval=1 (default) must behave exactly as before -- every frame is a real update.
+    est2 = ST.SodTrackEstimator.__new__(ST.SodTrackEstimator)
+    est2.device = torch.device("cpu")
+    est2.convergence = 0.5
+    est2.enable_ema = False
+    est2.decay = 0.9
+    est2.scene_hold = False
+    est2.cut_smooth = 0
+    est2.track_update_interval = 1
+    est2.convergence_ema = None
+    est2.tracker = ST.SceneHoldTracker(0.9)
+    est2._track_state = None
+    est2.model = types.SimpleNamespace(infer=fake_infer)
+    fake_tracker2 = _FakeTracker()
+    with mock.patch.object(ST, "_create_csrt_tracker", return_value=fake_tracker2):
+        est2(rgb, depth, reset_pts=[False])  # reinit
+        for _ in range(4):
+            est2(rgb, depth, reset_pts=[False])
+        assert fake_tracker2.update_calls == 4, \
+            f"interval=1 must update every frame, unchanged, got {fake_tracker2.update_calls}"
+
+    print("_self_test_sod_track_update_interval: PASS")
+
+
+def _self_test_sod_track_update_interval_gui_and_cli():
+    """ADR-400 GUI/CLI coverage, same pattern as
+    _self_test_convergence_subject_lock_gui_and_metadata: default off (1), gated on
+    sod_track specifically, CLI round-trip, and the metadata tag only appears when
+    both the mode is sod_track AND the value is non-default."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.cbo_sod_track_update_interval.GetValue() == "1", "must default to off (every frame)"
+        assert not frame.cbo_sod_track_update_interval.IsEnabled(), \
+            "must be disabled when Convergence Plane is constant (its own starting default)"
+
+        frame.cbo_convergence_mode.SetValue("sod_v1")
+        frame.update_convergence_mode()
+        assert not frame.cbo_sod_track_update_interval.IsEnabled(), \
+            "must stay disabled on sod_v1 -- this setting is sod_track-only"
+
+        frame.cbo_convergence_mode.SetValue("sod_track")
+        frame.update_convergence_mode()
+        assert frame.cbo_sod_track_update_interval.IsEnabled(), "must enable once mode is sod_track"
+
+        frame.cbo_sod_track_update_interval.SetValue("3")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.sod_track_update_interval == 3
+        assert "--sod-track-update-interval" in frame.get_cli_command()
+
+        frame.cbo_sod_track_update_interval.SetValue("1")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_sod_track_update_interval.GetValue() == "3", "restore must bring the value back"
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.cbo_sod_track_update_interval.IsEnabled(), "must disable again back on constant"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                            "--convergence-mode", "sod_track", "--sod-track-update-interval", "3"])
+    on.video_extension = ".mkv"
+    assert "iw3_sod_track_update_interval=3" in U._build_iw3_comment_metadata(on, video=True)
+
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                             "--convergence-mode", "sod_track"])
+    off.video_extension = ".mkv"
+    assert "sod_track_update_interval" not in U._build_iw3_comment_metadata(off, video=True)
+
+    # sod_v1 never shows the tag even if the raw flag is non-default -- it's sod_track-only.
+    other_mode = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                    "--convergence-mode", "sod_v1", "--sod-track-update-interval", "3"])
+    other_mode.video_extension = ".mkv"
+    assert "sod_track_update_interval" not in U._build_iw3_comment_metadata(other_mode, video=True)
+
+    print("_self_test_sod_track_update_interval_gui_and_cli: PASS")
 
 
 def _self_test_convergence_new_modes_gui():
@@ -35919,6 +36115,8 @@ def _run_self_tests():
         _self_test_sod_track_estimator,
         _self_test_sod_track_downscale_perf_fix,
         _self_test_sod_track_csrt_degenerate_box_fix,
+        _self_test_sod_track_update_interval,
+        _self_test_sod_track_update_interval_gui_and_cli,
         _self_test_convergence_new_modes_gui,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

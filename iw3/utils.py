@@ -3951,6 +3951,9 @@ def _build_iw3_comment_metadata(args, video=True):
                 comment_parts.append(f"iw3_convergence_cut_smooth={args.convergence_cut_smooth}")
         if args.convergence_mode == "sod_v1" and getattr(args, "convergence_subject_lock", 0):
             comment_parts.append(f"iw3_convergence_subject_lock={args.convergence_subject_lock}")
+        if (args.convergence_mode == "sod_track"
+                and getattr(args, "sod_track_update_interval", 1) != 1):
+            comment_parts.append(f"iw3_sod_track_update_interval={args.sod_track_update_interval}")
         if getattr(args, "convergence_overlay", False):
             comment_parts.append("iw3_convergence_overlay=1")
         if getattr(args, "convergence_scene_log", False):
@@ -8048,6 +8051,15 @@ def create_parser(required_true=True):
                               "--convergence-cut-smooth cannot fix, since those only shape the value AFTER "
                               "a subject region has already been picked. 0 (default) is the original "
                               "per-frame pick, unchanged."))
+    parser.add_argument("--sod-track-update-interval", type=int, default=1,
+                        help=("ADR-400: only affects --convergence-mode sod_track. sod_track still runs "
+                              "somewhat slower than sod_v1/constant even after ADR-395's downscale fix, "
+                              "because unlike sod_v1 (fully GPU-resident), its CSRT tracker needs a frame "
+                              "copy pulled onto the CPU every single frame. When this is > 1, the real CPU "
+                              "tracking update only runs every Nth frame -- frames in between just reuse "
+                              "the last tracked box unchanged, skipping that transfer entirely. 1 (default) "
+                              "is the original every-frame behavior, unchanged. Trade-off: higher values "
+                              "react more slowly to a subject moving fast within one shot."))
     parser.add_argument("--convergence-overlay", action="store_true",
                         help=("ADR-233: debug -- writes the Convergence Plane value actually used into the "
                               "top-right corner of every frame (auto convergence modes only -- sod_v1/"
@@ -8958,7 +8970,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
                 decay=getattr(args, "convergence_smoothing", 0.9),
                 compile=args.compile,
                 scene_hold=getattr(args, "convergence_scene_hold", False),
-                cut_smooth=getattr(args, "convergence_cut_smooth", 0))
+                cut_smooth=getattr(args, "convergence_cut_smooth", 0),
+                track_update_interval=getattr(args, "sod_track_update_interval", 1))
         except Exception as e:
             raise RuntimeError(
                 f"sod_track convergence mode failed to initialize.\n"

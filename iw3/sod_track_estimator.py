@@ -72,7 +72,7 @@ class SodTrackEstimator():
     _TRACK_MIN_BOX_DIM = 20
 
     def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False,
-                 scene_hold=False, cut_smooth=0):
+                 scene_hold=False, cut_smooth=0, track_update_interval=1):
         if not _CV2_AVAILABLE:
             raise ImportError(
                 "OpenCV (cv2) is required for sod_track convergence mode.\n"
@@ -89,6 +89,16 @@ class SodTrackEstimator():
         self.decay = decay
         self.scene_hold = scene_hold
         self.cut_smooth = cut_smooth
+        # ADR-400: real follow-up to the ADR-395 perf fix -- sod_track still runs
+        # measurably slower than sod_v1/constant (a real reported ~10% gap, 4.70
+        # vs ~5.20fps on a 4K job) even after that fix, because unlike sod_v1 (which
+        # never leaves the GPU), sod_track still has to pull a frame copy onto the
+        # CPU for CSRT's own per-frame update -- every single frame, regardless of
+        # how small that copy is. When > 1, only every Nth frame actually runs that
+        # CPU update (the real cost); frames in between just reuse the last tracked
+        # box unchanged, skipping the GPU->CPU transfer and cv2 work entirely. 1
+        # (default) is the original every-frame behavior, unchanged.
+        self.track_update_interval = max(1, int(track_update_interval))
         self.convergence_ema = None
         self.tracker = SceneHoldTracker(decay, cut_smooth)
         self._track_state = None  # per-batch-slot list: {"tracker", "box", "frames_since_reinit"}
@@ -218,6 +228,11 @@ class SodTrackEstimator():
             elif state["tracker"] is None:
                 # ADR-399: tracker.init() failed for this shot -- hold the raw SOD
                 # detection's box unchanged until the next scheduled reinit/cut.
+                state["frames_since_reinit"] += 1
+            elif (self.track_update_interval > 1
+                  and state["frames_since_reinit"] % self.track_update_interval != 0):
+                # ADR-400: this frame is skipped on purpose -- reuse the last tracked
+                # box unchanged, with no GPU->CPU transfer and no cv2 work at all.
                 state["frames_since_reinit"] += 1
             else:
                 scale = state["scale"]

@@ -23,6 +23,7 @@ depth_percentile/sod_v1 (ConvergenceEstimator._quantile_position()), applied to 
 depth values INSIDE the currently tracked box, then smoothed with the same shared
 SceneHoldTracker the other auto modes use.
 """
+import sys
 import torch
 import torch.nn.functional as F
 
@@ -65,6 +66,10 @@ class SodTrackEstimator():
     # at most this many pixels on its longest side -- real reported perf fix, see
     # _track_scale_factor()'s own docstring for why.
     _TRACK_MAX_DIM = 480
+    # ADR-399: minimum box size (in the DOWNSCALED frame's own pixels) handed to
+    # cv2's CSRT tracker -- see _clamp_track_box()'s own docstring for why this
+    # exists.
+    _TRACK_MIN_BOX_DIM = 20
 
     def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, compile=False,
                  scene_hold=False, cut_smooth=0):
@@ -155,14 +160,45 @@ class SodTrackEstimator():
         frame = (rgb_single.permute(1, 2, 0).cpu().float() * 255).clamp(0, 255).byte().numpy()
         return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
+    @staticmethod
+    def _clamp_track_box(x, y, w, h, frame_w, frame_h):
+        """ADR-399: real reported crash -- cv2's CSRT tracker.init() asserts inside
+        its own internal cv::resize (!ssize.empty()) when handed a bounding box that
+        is too small relative to the frame (its internal padded/template resize math
+        rounds a dimension down to 0) or that falls even slightly outside the frame
+        bounds (an off-by-one from independently rounding x/w and y/h after the
+        ADR-395 downscale). Confirmed live on a real 4K job: a small/thin subject
+        box, shrunk further by ADR-395's downscale, tripped this. Clamps the box
+        CSRT actually tracks to a safe minimum size and strictly inside the frame --
+        this only affects what CSRT itself follows between reinits, not the
+        full-resolution `box` this same reinit already uses for its own depth
+        sampling (computed before this clamp, from the un-clamped SOD detection)."""
+        w = min(frame_w, max(SodTrackEstimator._TRACK_MIN_BOX_DIM, w))
+        h = min(frame_h, max(SodTrackEstimator._TRACK_MIN_BOX_DIM, h))
+        x = max(0, min(x, frame_w - w))
+        y = max(0, min(y, frame_h - h))
+        return (int(x), int(y), int(w), int(h))
+
     def _reinit(self, rgb_single, depth_single, H, W):
         box = self._detect_box(rgb_single, depth_single, H, W)  # full-res -- SOD only runs here
         scale = self._track_scale_factor(H, W)
         x, y, w, h = box
         scaled_box = (round(x * scale), round(y * scale),
                      max(1, round(w * scale)), max(1, round(h * scale)))
+        frame = self._frame_to_bgr(rgb_single, scale)
+        frame_h, frame_w = frame.shape[0], frame.shape[1]
+        scaled_box = self._clamp_track_box(*scaled_box, frame_w, frame_h)
         tracker = _create_csrt_tracker()
-        tracker.init(self._frame_to_bgr(rgb_single, scale), scaled_box)
+        try:
+            tracker.init(frame, scaled_box)
+        except cv2.error as e:
+            # ADR-399: belt-and-braces -- even after clamping, don't let an
+            # unforeseen CSRT edge case crash a multi-hour video job. Fall back to
+            # the raw SOD detection with no appearance tracking for this shot;
+            # the next scheduled reinit (or scene cut) tries CSRT again fresh.
+            print(f"[iw3] sod_track: CSRT tracker.init() failed ({e}) -- "
+                  f"falling back to untracked detection for this shot.", file=sys.stderr)
+            tracker = None
         return {"tracker": tracker, "box": box, "scale": scale, "frames_since_reinit": 0}
 
     def __call__(self, rgb, depth, reset_pts=None):
@@ -179,6 +215,10 @@ class SodTrackEstimator():
                 state = self._reinit(rgb[i], depth[i], H, W)
             elif state["frames_since_reinit"] >= self._REINIT_INTERVAL:
                 state = self._reinit(rgb[i], depth[i], H, W)
+            elif state["tracker"] is None:
+                # ADR-399: tracker.init() failed for this shot -- hold the raw SOD
+                # detection's box unchanged until the next scheduled reinit/cut.
+                state["frames_since_reinit"] += 1
             else:
                 scale = state["scale"]
                 ok, box = state["tracker"].update(self._frame_to_bgr(rgb[i], scale))

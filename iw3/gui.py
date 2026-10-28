@@ -34248,6 +34248,51 @@ def _self_test_sod_track_downscale_perf_fix():
     print("_self_test_sod_track_downscale_perf_fix: PASS")
 
 
+def _self_test_sod_track_csrt_degenerate_box_fix():
+    """ADR-399 real crash fix: a real 4K job ("Masters of the Universe", sod_track
+    convergence mode) crashed the whole run with
+    `cv2.error: ... resize.cpp:4152: error: (-215:Assertion failed) !ssize.empty()`
+    inside `tracker.init()`. Root cause confirmed from the real crash log: ADR-395's
+    downscale (needed for speed) can shrink a small/thin SOD-detected subject box
+    down to just a few pixels, which trips an internal cv2 CSRT bug on tiny/edge
+    boxes. Fixed with `_clamp_track_box()` (enforces a safe minimum size, strictly
+    inside the frame) plus a try/except fallback so even an unforeseen CSRT edge
+    case can no longer crash the whole job.
+
+    This test reproduces the exact real failure: a real cv2 CSRT tracker (not a
+    fake) initialized with the kind of degenerate 1x1 edge-of-frame box that used
+    to crash before the fix -- confirming the fix against the real OpenCV code
+    path that actually failed, not just a mocked stand-in."""
+    import iw3.sod_track_estimator as ST
+
+    # Pure clamp-logic checks.
+    assert ST.SodTrackEstimator._clamp_track_box(0, 0, 1, 1, 480, 270) == (0, 0, 20, 20)
+    cx, cy, cw, ch = ST.SodTrackEstimator._clamp_track_box(479, 269, 1, 1, 480, 270)
+    assert cx + cw <= 480 and cy + ch <= 270 and cw >= 20 and ch >= 20, \
+        (cx, cy, cw, ch)
+    # Full-frame fallback box (SOD finds no salient pixels at all) must pass through
+    # unchanged, already valid.
+    assert ST.SodTrackEstimator._clamp_track_box(0, 0, 480, 270, 480, 270) == (0, 0, 480, 270)
+
+    if not ST._CV2_AVAILABLE:
+        print("_self_test_sod_track_csrt_degenerate_box_fix: SKIP (cv2 not available)")
+        return
+
+    # Real cv2 CSRT against the exact real-world shape (real 4K-ish source) and the
+    # exact degenerate box pattern confirmed from the real crash log.
+    est = ST.SodTrackEstimator.__new__(ST.SodTrackEstimator)
+    est.model = None
+    H, W = 2160, 3840
+    rgb = torch.rand(3, H, W)
+    depth = torch.rand(1, H, W)
+    est._detect_box = lambda rgb_single, depth_single, h, w: (w - 1, h - 1, 1, 1)
+    state = ST.SodTrackEstimator._reinit(est, rgb, depth, H, W)
+    assert state["box"] == (W - 1, H - 1, 1, 1)
+    assert state["tracker"] is not None, "real CSRT tracker.init() should no longer fail here"
+
+    print("_self_test_sod_track_csrt_degenerate_box_fix: PASS")
+
+
 def _self_test_convergence_new_modes_gui():
     """ADR-388/389/390: depth_percentile/clip_shot/sod_track must be real, selectable
     choices in the GUI combo box, share the existing Convergence Smoothing/Hold Steady
@@ -35873,6 +35918,7 @@ def _run_self_tests():
         _self_test_clip_shot_estimator,
         _self_test_sod_track_estimator,
         _self_test_sod_track_downscale_perf_fix,
+        _self_test_sod_track_csrt_degenerate_box_fix,
         _self_test_convergence_new_modes_gui,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

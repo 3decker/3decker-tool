@@ -371,6 +371,13 @@ if ($LASTEXITCODE -ne 0) { throw "pip self-upgrade failed with exit code $LASTEX
 Invoke-PipInstall @("--upgrade", "-r", $torchReq)
 if ($LASTEXITCODE -ne 0) { throw "pip install of $torchReq failed with exit code $LASTEXITCODE" }
 
+# ADR-401: pre-empt the ADR-397/398 mmengine/windows_capture opencv-python
+# conflict BEFORE it can happen, instead of only cleaning it up afterward --
+# see ensure_opencv_python_stub.py's own module docs for why this is safe.
+# Never fatal: worst case this is a no-op and the ADR-397/398 safety net
+# below still catches it exactly as before.
+& $pythonExe (Join-Path $nunifDir "windows_package\ensure_opencv_python_stub.py")
+
 Invoke-PipInstall @("--upgrade", "-r", (Join-Path $nunifDir "requirements.txt"))
 
 Invoke-PipInstall @("--upgrade", "-r", (Join-Path $nunifDir "requirements-gui.txt"))

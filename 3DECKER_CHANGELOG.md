@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 27, 2026
+## Latest Update — October 28, 2026
+
+**Fixed: updating could show repeated, scary-looking "Access is denied" / "Download failed" messages during the Python package step — even though the update always actually finished correctly.** Two unrelated features (one of the AI depth models, and the Windows screen-capture feature) each separately try to pull in a plain version of the same video library this app already has the correct version of installed — something already guarded against (see October 27 below) so it could never actually break anything, but the guard worked by letting the failed attempt happen and then fixing it up afterward, which is why it kept showing up every single update. It's now headed off before it can even start, so that step no longer tries, fails, retries, and downloads ~44MB for nothing, twice per update. Nothing about what actually gets installed changes — this only removes the noise.
+
+## Update — October 27, 2026
 
 **Added: three new Convergence Plane modes — "depth_percentile," "clip_shot," and "sod_track."** Convergence Plane decides where the "screen depth" sits — the point that looks like it's exactly at the screen surface, with everything else popping toward or receding from it. Until now there were three choices: a fixed value, or one of two AI auto-pickers (sod_v1, face_detect). Three more are now available, all real and fully working, selectable from the same dropdown in the app and on the command line:
 - **depth_percentile** — no AI model at all. It uses the Convergence Bias value against the WHOLE frame's own depth range instead of one AI-picked subject, so it's free (no extra processing cost) and works on any content.

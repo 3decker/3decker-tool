@@ -65,6 +65,12 @@ call :pip_retry --upgrade pip
 if %ERRORLEVEL% neq 0 goto :on_error
 call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-torch-%TORCH_VARIANT%.txt"
 if %ERRORLEVEL% neq 0 goto :on_error
+@rem ADR-401: pre-empt the ADR-397/398 mmengine/windows_capture opencv-python
+@rem conflict BEFORE it can happen, instead of only cleaning it up afterward --
+@rem see ensure_opencv_python_stub.py's own module docs for why this is safe.
+@rem Never fatal: worst case this is a no-op and the ADR-397/398 safety net
+@rem below still catches it exactly as before.
+python "%NUNIF_DIR%\windows_package\ensure_opencv_python_stub.py"
 call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements.txt"
 call :pip_retry --upgrade -r "%NUNIF_DIR%\requirements-gui.txt"
 @rem ADR-397/398: requirements.txt pins opencv-contrib-python (needed by

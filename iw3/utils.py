@@ -4483,9 +4483,21 @@ def add_preprocess_vf(vf_org, args) -> str:
 # --------------------------------------------------------------------------
 class _ConvergenceSceneLogState():
     """Lives at args.state["_convergence_scene_log"]. Reset once per fresh
-    movie (reset_convergence_scene_log()) and written once at the end of that
-    movie (finish_convergence_scene_log()) -- buffered, not incremental, so an
-    interrupted run never leaves a malformed file.
+    movie (reset_convergence_scene_log()) and the COMPLETE, final version is
+    always written once at the end of that movie (finish_convergence_scene_log()).
+
+    ADR-405: real user question -- a cancelled/crashed run previously left NO
+    log at all, not even for scenes that had already fully finished, because
+    nothing was ever written to disk until the very end. When `live_path` is
+    set (reset_convergence_scene_log() resolved it -- see that function), this
+    now ALSO rewrites the real file after every scene that closes, atomically
+    (tmp-then-os.replace(), same technique finish_convergence_scene_log()
+    already uses) -- so an interrupted run still leaves a real, correct log of
+    every scene that finished before it stopped, just missing whatever scene
+    was still in progress. Deliberately still not per-FRAME: a scene is already
+    a natural, infrequent checkpoint (seconds to minutes apart), and writing a
+    few-KB text file that rarely is negligible next to the real per-frame
+    encode work -- there is no real cost reason to batch this further.
 
     `pending` holds (value, cut_after) tuples in INPUT-frame order, pushed by
     apply_divergence() right after computing `convergence` (mirroring the
@@ -4504,6 +4516,13 @@ class _ConvergenceSceneLogState():
         self._scene_frames = 0
         self._scene_sum = 0.0
         self._scene_total_frames = 0
+        # ADR-405: set by reset_convergence_scene_log() when it could resolve a
+        # real path up front -- None (the original, end-of-movie-only behavior)
+        # whenever it couldn't (e.g. --convergence-scene-log is off, so there was
+        # no reason to even try).
+        self.live_path = None
+        self.live_output_filename = None
+        self.live_fps = None
 
     def record(self, value, cut_after):
         """Buffers one OUTPUT frame's convergence value, closing the scene
@@ -4518,6 +4537,7 @@ class _ConvergenceSceneLogState():
         self._scene_total_frames += 1
         if cut_after:
             self.flush()
+            self.write_live()
 
     def flush(self):
         if self._scene_open and self._scene_frames > 0:
@@ -4528,16 +4548,60 @@ class _ConvergenceSceneLogState():
         self._scene_frames = 0
         self._scene_sum = 0.0
 
+    def write_live(self):
+        """ADR-405: rewrites the real log file right now, with whatever scenes
+        have closed so far -- a no-op whenever live_path wasn't resolved (see
+        the class docstring). Never raises -- a failed live write must never
+        interrupt a real, multi-hour conversion; finish_convergence_scene_log()
+        still gets the real, authoritative last word at the end regardless."""
+        if not self.live_path or not self.scene_records:
+            return
+        try:
+            text = _format_convergence_scene_log(self, self.live_output_filename, self.live_fps,
+                                                 in_progress=True)
+            tmp = f"{self.live_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.live_path)
+        except Exception as e:                                           # noqa: BLE001
+            print(f"[convergence-log] could not write live progress "
+                  f"({type(e).__name__}: {e})", file=sys.stderr)
 
-def reset_convergence_scene_log(args):
+
+def reset_convergence_scene_log(args, input_path=None, output_path=None, fps=None):
     """Called once per fresh movie, from process_video()/process_config_video()'s
     own existing per-movie convergence-model reset points -- mirrors
     autodiv.py's reset_scene_log(). A batch/directory run thus naturally gets
     one separate log per movie (ADR-279's own per-movie granularity), never
-    one combined log."""
+    one combined log.
+
+    ADR-405: `input_path`/`output_path` (both callers already have these
+    available at this exact point -- see each call site), when given, resolve
+    the real log path up front so scene-by-scene progress can be written as the
+    movie is converted, not only once at the very end (see
+    _ConvergenceSceneLogState's own docstring). `fps`: pass the already-resolved
+    fps directly when the caller already has one (process_config_video's
+    config.fps) -- otherwise it's resolved here from `input_path`, same
+    fallback finish_convergence_scene_log() already uses. All three stay
+    optional and default to None -- a caller that omits them (or a resolution
+    failure below) simply keeps today's original end-of-movie-only behavior,
+    unchanged."""
     state = getattr(args, "state", None)
-    if isinstance(state, dict):
-        state["_convergence_scene_log"] = _ConvergenceSceneLogState()
+    if not isinstance(state, dict):
+        return
+    log_state = _ConvergenceSceneLogState()
+    if (getattr(args, "convergence_scene_log", False)
+            and input_path is not None and output_path is not None):
+        try:
+            real_output, log_path = _convergence_scene_log_paths(args, input_path, output_path)
+            log_state.live_path = log_path
+            log_state.live_output_filename = real_output
+            log_state.live_fps = fps if fps is not None else _convergence_scene_log_fps(args, input_path)
+        except Exception as e:                                           # noqa: BLE001
+            print(f"[convergence-log] could not resolve a live log path "
+                  f"({type(e).__name__}: {e}) -- will still write the complete "
+                  f"log once the movie finishes.", file=sys.stderr)
+    state["_convergence_scene_log"] = log_state
 
 
 def _convergence_scene_log_fps(args, input_path):
@@ -4579,13 +4643,24 @@ def _format_hms(sec):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def _format_convergence_scene_log(st, output_filename, fps):
+def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
+    """`in_progress`: ADR-405 -- True for a live, mid-conversion write (see
+    _ConvergenceSceneLogState.write_live()), where st.scene_records only holds
+    whatever scenes have closed SO FAR, not the whole movie yet. Changes only
+    the labelling (so the file is never misleadingly captioned as a complete,
+    whole-movie result while the job is still actually running) -- the scene
+    rows themselves are formatted identically either way, and
+    finish_convergence_scene_log() always overwrites this with the real,
+    complete version (in_progress=False, the default) once the movie finishes."""
     mode, convergence_value, smoothing, scene_hold, cut_smooth = st.meta or ("sod_v1", 0.5, 0.9, False, 0)
     header = (f"Convergence Plane: {mode} mode, convergence {convergence_value:g}, "
               f"smoothing {smoothing:g}, scene hold {'on' if scene_hold else 'off'}")
     if scene_hold and cut_smooth:
         header += f", cut smooth {cut_smooth}"
-    lines = [f"Convergence Value log -- {path.basename(str(output_filename))}", header]
+    title = f"Convergence Value log -- {path.basename(str(output_filename))}"
+    if in_progress:
+        title += " (IN PROGRESS -- conversion still running)"
+    lines = [title, header]
     if not fps:
         lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
     lines.append("")
@@ -4599,7 +4674,11 @@ def _format_convergence_scene_log(st, output_filename, fps):
         weighted_sum += mean * frames
     lines.append("")
     overall = weighted_sum / total_frames if total_frames else 0.0
-    lines.append(f"Average Convergence for whole movie (time-weighted): {overall:.2f}")
+    if in_progress:
+        lines.append(f"Average Convergence so far (time-weighted, {len(st.scene_records)} scene(s), "
+                     f"conversion still running): {overall:.2f}")
+    else:
+        lines.append(f"Average Convergence for whole movie (time-weighted): {overall:.2f}")
     return "\n".join(lines) + "\n"
 
 
@@ -7190,7 +7269,9 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     # "Log Convergence Value per Scene": fresh buffer for THIS movie, mirroring the
     # convergence model's own per-movie reset just below (and autodiv.py's own
     # reset_scene_log()) -- a batch/directory run gets one separate log per movie.
-    reset_convergence_scene_log(args)
+    # ADR-405: input_path/output_path passed here too, so it can write real
+    # progress live as this movie converts, not only once at the very end.
+    reset_convergence_scene_log(args, input_path=original_input_filename, output_path=output_path)
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -7807,7 +7888,11 @@ def process_config_video(config, args, side_model):
         side_model.reset()
     if args.state["convergence_model"] is not None:
         args.state["convergence_model"].reset(enable_ema=True)
-    reset_convergence_scene_log(args)
+    # ADR-405: same real input_path/output_path/fps the matching
+    # finish_convergence_scene_log() call below already uses, so it can write
+    # real progress live as this movie converts, not only once at the very end.
+    reset_convergence_scene_log(args, input_path=args.input, output_path=args.output,
+                                fps=float(getattr(config, "fps", 0)) or None)
 
     if is_output_dir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -8201,7 +8286,10 @@ def create_parser(required_true=True):
                               "log). ADR-402: gets real per-scene boundaries even with --scene-detect off "
                               "-- it scans for scene cuts on its own just for this log, without turning on "
                               "Scene Detection's other effect on the main conversion (EMA/Flicker "
-                              "Reduction's own reset-at-cuts behavior). Same idea as "
+                              "Reduction's own reset-at-cuts behavior). ADR-405: writes live, not just at "
+                              "the end -- the real file updates after every scene that finishes (marked "
+                              "IN PROGRESS until the movie completes), so a cancelled/crashed run still "
+                              "leaves a real log of whatever finished before it stopped. Same idea as "
                               "--auto-divergence-scene-log (nt_auto3d's own 3D Strength scene log), for "
                               "video jobs only (no effect on single images, which have no \"scene\")."))
     parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 3.0)],

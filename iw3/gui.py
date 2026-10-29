@@ -1748,6 +1748,10 @@ class MainFrame(wx.Frame):
               "watching the video.\n"
               "How it's different from the checkbox above: nothing is written into the picture itself, "
               "just a plain text file you can open afterward.\n"
+              "Writes live, not just at the end: the real file updates itself after every scene that "
+              "finishes, clearly marked \"IN PROGRESS\" until the movie actually completes -- so cancelling "
+              "or a crash partway through still leaves a real, readable log of every scene that finished "
+              "before then, instead of nothing at all.\n"
               "Only does anything for the auto convergence modes -- constant never varies, so there is "
               "nothing per-scene to log.\n"
               "Gets real per-scene boundaries on its own: it scans for scene cuts just for this log, even "
@@ -34906,6 +34910,15 @@ def _self_test_convergence_scene_log_accumulation():
        run, confirming one separate log file per movie, an atomic tmp+replace write
        (no leftover .tmp), the flag off writing nothing, and zero recorded scenes
        writing nothing either.
+    4. ADR-405: real user question -- a cancelled/crashed run previously left NO
+       log at all, even for scenes that had already finished. With input_path/
+       output_path now passed to reset_convergence_scene_log(), the real file
+       already exists and is readable AFTER EACH scene closes, mid-run, before
+       finish_convergence_scene_log() ever runs -- clearly labelled "IN PROGRESS"
+       and "so far", never looking like a complete, finished result. The final
+       finish_convergence_scene_log() call still overwrites it with the real,
+       complete version (no "IN PROGRESS"/"so far" wording) once the movie
+       actually finishes.
     """
     import types
     import tempfile
@@ -35073,6 +35086,62 @@ def _self_test_convergence_scene_log_accumulation():
             U.reset_convergence_scene_log(args_empty)
             U.finish_convergence_scene_log(args_empty, "movie4.mp4", tmp_empty, fps=1.0)
             assert os.listdir(tmp_empty) == [], "zero recorded scenes must write nothing"
+
+        # Part 4 (ADR-405): passing input_path/output_path makes the log write
+        # itself LIVE, after every scene that closes -- real file on disk,
+        # readable mid-run, before finish_convergence_scene_log() ever runs.
+        with tempfile.TemporaryDirectory() as tmp_live:
+            args_live = parser.parse_args([
+                "-i", "movie5.mp4", "-o", tmp_live,
+                "--convergence-mode", "sod_v1", "--convergence-scene-log",
+            ])
+            args_live.video_extension = ".mkv"
+            args_live.state = {}
+            U.reset_convergence_scene_log(args_live, input_path="movie5.mp4", output_path=tmp_live, fps=1.0)
+            st_live = args_live.state["_convergence_scene_log"]
+            st_live.meta = ("sod_v1", 0.5, 0.9, False, 0)
+
+            name5 = U.make_output_filename("movie5.mp4", args_live, video=True)
+            log5 = _p.join(tmp_live, _p.splitext(name5)[0] + "_convergence_log.txt")
+            assert not _p.exists(log5), "nothing should exist before any scene has even closed"
+
+            st_live.record(0.3, True)   # scene 1 closes -> must write live, right now
+            assert _p.isfile(log5), "the log must already exist after just the first scene closed"
+            text_after_scene1 = open(log5, encoding="utf-8").read()
+            assert "IN PROGRESS" in text_after_scene1, text_after_scene1
+            assert "Scene 1" in text_after_scene1 and "Scene 2" not in text_after_scene1, text_after_scene1
+            assert "Average Convergence so far" in text_after_scene1, text_after_scene1
+            assert "Average Convergence for whole movie" not in text_after_scene1, text_after_scene1
+            assert not _p.exists(log5 + ".tmp"), "the live write must be atomic too -- no leftover .tmp"
+
+            st_live.record(0.9, True)  # scene 2 closes -> live file updates again
+            text_after_scene2 = open(log5, encoding="utf-8").read()
+            assert "Scene 2" in text_after_scene2, text_after_scene2
+
+            # The movie "finishes" -- the real, final write must replace the live
+            # one, dropping every "IN PROGRESS"/"so far" wording.
+            U.finish_convergence_scene_log(args_live, "movie5.mp4", tmp_live, fps=1.0)
+            text_final = open(log5, encoding="utf-8").read()
+            assert "IN PROGRESS" not in text_final, text_final
+            assert "Average Convergence for whole movie (time-weighted): 0.60" in text_final, text_final
+
+            # A caller that omits input_path/output_path (any future caller that
+            # doesn't know them yet) keeps today's original end-of-movie-only
+            # behavior, unchanged -- no live file at all until finish runs.
+            args_no_live = parser.parse_args([
+                "-i", "movie6.mp4", "-o", tmp_live,
+                "--convergence-mode", "sod_v1", "--convergence-scene-log",
+            ])
+            args_no_live.video_extension = ".mkv"
+            args_no_live.state = {}
+            U.reset_convergence_scene_log(args_no_live)
+            st_no_live = args_no_live.state["_convergence_scene_log"]
+            st_no_live.meta = ("sod_v1", 0.5, 0.9, False, 0)
+            name6 = U.make_output_filename("movie6.mp4", args_no_live, video=True)
+            log6 = _p.join(tmp_live, _p.splitext(name6)[0] + "_convergence_log.txt")
+            st_no_live.record(0.4, True)
+            assert not _p.exists(log6), \
+                "without input_path/output_path, nothing must be written until finish runs"
 
     print("_self_test_convergence_scene_log_accumulation: PASS")
 

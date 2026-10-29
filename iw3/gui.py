@@ -10788,6 +10788,29 @@ class MainFrame(wx.Frame):
             self.cbo_sharpen_strength,
             self.cbo_pad,
             self.cbo_app_preset,
+            # ADR-404: real, decker-reported bug -- these EditableComboBox fields were
+            # simply never added to this hand-maintained list as each was built, so
+            # none of them were ever actually persisted: save_preset()/load_preset()
+            # only special-case EditableComboBox via THIS list (wx.lib.agw.persist has
+            # no built-in handler for it, unlike plain wx.TextCtrl/wx.ComboBox, which
+            # persistent_manager_register_all() already covers generically). Confirmed
+            # directly -- a before/after save-then-load round trip reproduced every one
+            # of these silently resetting to its hardcoded default, not just the two
+            # decker actually named ("Interpolate Frame"/txt_rife_hybrid_percent was
+            # one of them -- "Auto Range"/cbo_nt_div_min/max and the Convergence Plane
+            # fields he also named were NOT actually broken, confirmed by the same
+            # direct test).
+            self.cbo_overlap_frames_pre,
+            self.cbo_overlap_frames_post,
+            self.cbo_splat_blend_temperature,
+            self.txt_bluray_bitrate,
+            self.txt_mvc_bitrate,
+            self.txt_reinject_frame_count_tolerance,
+            self.txt_rife_dv_frame_count_tolerance,
+            self.txt_rife_hybrid_percent,
+            self.txt_rife_standalone_dv_tolerance,
+            self.txt_rife_standalone_hybrid_percent,
+            self.cbo_sharpen_strength_standalone,
         ]
         return editable_comboboxes
 
@@ -33202,6 +33225,56 @@ def _self_test_last_preset_auto_load():
     print("_self_test_last_preset_auto_load: PASS")
 
 
+def _self_test_editable_combobox_registration_complete():
+    """ADR-404: real decker-reported bug -- "the GUI doesn't remember all my
+    settings between restarts." Root cause, found by reading the code AND
+    reproducing it directly rather than guessing: get_editable_comboboxes() is a
+    HAND-MAINTAINED list, and wx.lib.agw.persist has no built-in handler for the
+    project's own EditableComboBox control (unlike plain wx.TextCtrl/wx.ComboBox,
+    which persistent_manager_register_all() already covers generically just by
+    walking every child window) -- so any EditableComboBox simply left off this
+    list is silently NEVER persisted at all, with no error of any kind. 11 real
+    fields had exactly this gap (decker only ever noticed "Interpolate Frame" --
+    txt_rife_hybrid_percent -- himself; the other 10 were found by diffing every
+    real `= EditableComboBox(` construction in this file against this list).
+
+    This test is deliberately NOT a hand-picked subset: it discovers every real
+    EditableComboBox attribute the same way that diff did (scanning this file's
+    own source for `self.<name> = EditableComboBox(`), then proves each one is
+    actually IN get_editable_comboboxes()'s returned list -- so a future field
+    added to the GUI but forgotten here fails this test immediately, rather than
+    silently losing its own setting on every restart the way these 11 did."""
+    import re as _re
+
+    with open(__file__, encoding="utf-8") as f:
+        source = f.read()
+    all_editable_combobox_attrs = set(_re.findall(r"self\.(\w+)\s*=\s*EditableComboBox\(", source))
+    assert len(all_editable_combobox_attrs) >= 11, \
+        f"sanity check -- expected to find at least the 11 known real fields, found {len(all_editable_combobox_attrs)}"
+
+    app = wx.App()
+    try:
+        frame = MainFrame()
+        try:
+            registered_attrs = set()
+            for control in frame.get_editable_comboboxes():
+                for attr in all_editable_combobox_attrs:
+                    if getattr(frame, attr, None) is control:
+                        registered_attrs.add(attr)
+                        break
+            missing = all_editable_combobox_attrs - registered_attrs
+            assert not missing, (
+                f"these EditableComboBox fields exist but are missing from "
+                f"get_editable_comboboxes() -- they will NEVER persist between restarts: "
+                f"{sorted(missing)}")
+        finally:
+            frame.Destroy()
+    finally:
+        app.Destroy()
+
+    print("_self_test_editable_combobox_registration_complete: PASS")
+
+
 def _self_test_preset_restore_alongside_enables_mvc_controls():
     """Real user report (Steve): saving a preset with 3D Blu-ray MVC Output set to
     Alongside SBS/TAB, then restarting 3DECKER, left every MVC sub-option greyed out
@@ -36170,6 +36243,7 @@ def _run_self_tests():
         _self_test_interleave_mvc_strips_frim_delimiter,
         _self_test_iso_to_bd_folder,
         _self_test_last_preset_auto_load,
+        _self_test_editable_combobox_registration_complete,
         _self_test_preset_restore_alongside_enables_mvc_controls,
         _self_test_sbs2mvc_fix_frame_rate,
         _self_test_sbs2mvc_folder_detection_ignores_stray_dots,

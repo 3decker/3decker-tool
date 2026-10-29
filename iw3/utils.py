@@ -496,12 +496,28 @@ def _run_mvc_with_progress(cmd, cwd, args, label_prefix="Converting to MVC: "):
 
 def _run_av_restore_with_progress(cmd, cwd, args):
     """iw3.av_restore_cli with live progress from its "IW3_AVRESTORE_PROGRESS <stage> <cur> <total>" lines
-    (ffmpeg's time= while reading, mkvmerge's percent while writing), shown as percent / elapsed / ETA."""
+    (ffmpeg's time= while reading, mkvmerge's percent while writing), shown as percent / elapsed / ETA.
+
+    ADR-403: unlike every sibling helper in this file (RIFE/MVC/waifu2x/the general helper above), this one
+    forwards the subprocess's own stderr LIVE, line by line, as it arrives -- not buffered and dumped only
+    once the whole subprocess has already exited (every sibling helper still does exactly that; left
+    unchanged there). Real, decker-reported reason this one function needs that and the others don't: this
+    is the one step that can legitimately run for up to an hour on some real movies (a huge multi-track
+    mkvmerge mux, or a stream-copy-fails-so-re-encode fallback), and av_restore_cli.py's own informative
+    prints -- which tracks/languages are actually being restored, roughly how much data is being muxed, a
+    slow fallback kicking in -- are exactly the detail that was missing WHILE it's running, not as one dump
+    once it's already finished."""
     if (getattr(args, "state", None) or {}).get("tqdm_fn") is None:
         return _run_captured_helper(cmd, check=True, cwd=cwd)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
-    err = []
-    drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
+    err_chunks = []
+
+    def _drain_stderr_live():
+        for raw in iter(proc.stderr.readline, b""):
+            err_chunks.append(raw)
+            _forward_helper_text(raw, cmd)
+
+    drain = threading.Thread(target=_drain_stderr_live, daemon=True)
     drain.start()
     bar, stage = None, None
     try:
@@ -527,8 +543,7 @@ def _run_av_restore_with_progress(cmd, cwd, args):
         drain.join(timeout=5)
         if bar is not None:
             bar.close(complete=proc.returncode == 0)
-    _forward_helper_text(b"".join(err), cmd)
-    result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err))
+    result = subprocess.CompletedProcess(cmd, proc.returncode, b"", b"".join(err_chunks))
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, result.stdout, result.stderr)
     return result

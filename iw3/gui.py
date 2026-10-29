@@ -32318,7 +32318,9 @@ def _self_test_rowan_model_registration():
 def _self_test_every_step_shows_progress():
     """Every step of a job now feeds the progress bar with what it can measure: frames / FPS / ETA where frames
     exist, GB / MB per second / ETA for file work (copy, extract, inject, mux), percent / ETA for the audio & subtitle
-    restore. Fake helper programs stand in for ffmpeg / dovi_tool / mkvmerge / waifu2x: no GPU, no movie."""
+    restore. Fake helper programs stand in for ffmpeg / dovi_tool / mkvmerge / waifu2x: no GPU, no movie. Also
+    ADR-403: audio & subtitle restore's own informative stderr lines are forwarded live, one at a time, not
+    buffered until the whole subprocess exits (unlike every sibling helper here, left unchanged)."""
     import types
     from . import utils as U
 
@@ -32397,6 +32399,32 @@ def _self_test_every_step_shows_progress():
             ("@PCT Restoring audio & subtitles: reading the audio & subtitles from the source", 1000, True),
             ("@PCT Restoring audio & subtitles: writing them into the video", 1000, True)], \
             [(b.kw["desc"], b.n, b.closed) for b in FakeBar.made]
+
+        # 3b. ADR-403: real user request ("give more details of the process") --
+        # av_restore_cli.py's own informative stderr lines must be forwarded LIVE,
+        # one at a time as they arrive, unlike every sibling helper in this file
+        # (which only forwards stderr once the whole subprocess has already exited).
+        # Proven here by counting separate _forward_helper_text calls for the two
+        # distinguishable stderr lines below, rather than one call with both joined
+        # together -- and confirming the final CompletedProcess.stderr still carries
+        # the full combined text either way (unchanged contract for callers that
+        # only look at it after a failure).
+        from unittest import mock
+        av2 = ("import sys,time\n"
+               "print('IW3_AVRESTORE_PROGRESS mux 10 100', flush=True)\n"
+               "sys.stderr.write('[av-restore] line one\\n'); sys.stderr.flush(); time.sleep(0.05)\n"
+               "sys.stderr.write('[av-restore] line two\\n'); sys.stderr.flush(); time.sleep(0.05)\n"
+               "print('IW3_AVRESTORE_PROGRESS mux 100 100', flush=True)\n")
+        calls = []
+        with mock.patch.object(U, "_forward_helper_text", side_effect=lambda data, cmd: calls.append(data)):
+            result = U._run_av_restore_with_progress([sys.executable, "-c", av2], ".", args)
+        assert result.returncode == 0
+        line_one_calls = [c for c in calls if isinstance(c, bytes) and b"line one" in c]
+        line_two_calls = [c for c in calls if isinstance(c, bytes) and b"line two" in c]
+        assert len(line_one_calls) == 1 and len(line_two_calls) == 1, calls
+        assert line_one_calls[0] != line_two_calls[0], \
+            "the two lines must be forwarded as SEPARATE calls, not joined into one end-of-run dump"
+        assert b"line one" in result.stderr and b"line two" in result.stderr, result.stderr
     finally:
         U._STAGE_ARGS["args"] = None
 

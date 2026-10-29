@@ -79,6 +79,39 @@ def _format_cmd(cmd):
     return " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd)
 
 
+# ADR-403 Amendment: real follow-up question -- decker directly asked whether an
+# ETA is possible for the pre-mux window (mkvmerge's own brief file analysis,
+# before it ever reports a real "Progress: NN%"). It genuinely isn't -- there is
+# no real progress SIGNAL during that window (nothing done/total to measure a
+# rate from), so any number shown there would be a GUESS wearing a measurement's
+# clothing, not an estimate. Rather than show nothing at all, this gives a wide,
+# explicitly-labeled guess from file size alone, bounded by two generic
+# throughput assumptions -- wide on purpose, since real disk speed varies
+# enormously (HDD vs. SSD, antivirus scanning, a network share), and a
+# narrow-looking number that turns out very wrong would mislead more than a
+# clearly-labeled range helps.
+_ROUGH_MUX_FAST_MBPS = 400   # a typical SATA SSD doing sequential read+write
+_ROUGH_MUX_SLOW_MBPS = 50    # a busy/slow disk -- an external HDD, a network share, AV scanning
+
+
+def _format_rough_minutes(seconds):
+    minutes = max(1, round(seconds / 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, rem_minutes = divmod(minutes, 60)
+    return f"{hours}h {rem_minutes}min" if rem_minutes else f"{hours}h"
+
+
+def _rough_mux_eta_range(num_bytes):
+    """A wide, explicitly-labeled GUESS at how long muxing num_bytes will take --
+    see the constants/comment above for why this can only ever be a guess, never a
+    real measurement, for the pre-percent window before mkvmerge reports real
+    progress. Returns a "LOW-HIGH" string, e.g. "1 min-8 min"."""
+    fast_sec = num_bytes / (_ROUGH_MUX_FAST_MBPS * 1024 ** 2)
+    slow_sec = num_bytes / (_ROUGH_MUX_SLOW_MBPS * 1024 ** 2)
+    return f"{_format_rough_minutes(fast_sec)}-{_format_rough_minutes(slow_sec)}"
+
+
 def create_parser():
     parser = argparse.ArgumentParser(
         prog="python -m iw3.av_restore_cli",
@@ -264,6 +297,16 @@ def _trim_all_av(ffmpeg_bin, source_path, start_time, end_time, work_dir, progre
         except Exception:
             pass
 
+    # ADR-403: real user request -- "give more details of the process". A stream-copy
+    # failure here (this source's audio/subtitle codec can't just be sliced/repackaged
+    # as-is at this trim point) means the fallback below has to actually RE-ENCODE
+    # every audio/subtitle track instead of a near-instant byte copy -- genuinely much
+    # slower, and a real, plausible reason a specific movie takes far longer than
+    # others at this step. Said plainly, as it's happening, rather than silently.
+    print("[av-restore] could not trim --source's audio/subtitle tracks with a fast stream copy -- "
+          "falling back to a slower re-encode (this specific source's audio/subtitle codec needs it; "
+          "most sources don't hit this path).", file=sys.stderr)
+
     reencode_cmd = _build_cmd(use_copy=False)
     cmds_tried.append(_format_cmd(reencode_cmd))
     try:
@@ -305,16 +348,53 @@ _COMMON_LANGUAGE_NAMES = {
 }
 
 
+def _language_display_name(lang):
+    """Readable language name for `lang` (whatever the source track's own language
+    metadata says -- 2 or 3 letter, or empty/unset), e.g. "English" for "eng".
+    Returns None when nothing usable is known -- callers each pick their own
+    fallback text for that case (_dual_eye_track_name's "Subtitle (3D)" is a
+    different fallback than ADR-403's own "Unknown language" below, so this
+    deliberately doesn't bake either one in)."""
+    code = _iso639_1_to_2(lang) if lang else ""
+    if not code:
+        return None
+    return _COMMON_LANGUAGE_NAMES.get(code, code.upper())
+
+
 def _dual_eye_track_name(lang):
     """ADR-255: readable mkvmerge --track-name for a repositioned subtitle track,
     e.g. "English (3D)" -- so it's distinguishable at a glance from a flat/original
-    track in a player's own subtitle menu. `lang` is whatever the source track's own
-    language metadata says (2 or 3 letter, or empty/unset)."""
-    code = _iso639_1_to_2(lang) if lang else ""
-    if not code:
-        return "Subtitle (3D)"
-    name = _COMMON_LANGUAGE_NAMES.get(code, code.upper())
-    return f"{name} (3D)"
+    track in a player's own subtitle menu."""
+    name = _language_display_name(lang)
+    return f"{name} (3D)" if name else "Subtitle (3D)"
+
+
+def _describe_tracks(source_path):
+    """ADR-403: real user request -- "give more details of the process", starting
+    with which language is actually being restored, not just a bare count. Returns
+    (audio_desc, subtitle_desc), each a comma-separated "Name (codec)" list (e.g.
+    "English (dts), Spanish (ac3)"), or "" when that track type is empty or the
+    source couldn't be inspected for some reason (never raises -- this is purely an
+    informational message, not a gate; _count_av_tracks already did the real
+    existence/gating check before this is ever called)."""
+    try:
+        container = av.open(source_path, mode="r", metadata_errors="ignore")
+        try:
+            def _parts(streams):
+                out = []
+                for s in streams:
+                    lang = (s.metadata or {}).get("language", "")
+                    name = _language_display_name(lang) or "Unknown language"
+                    codec = s.codec_context.name if s.codec_context else "unknown"
+                    out.append(f"{name} ({codec})")
+                return out
+            audio_desc = ", ".join(_parts(container.streams.audio))
+            subtitle_desc = ", ".join(_parts(container.streams.subtitles))
+        finally:
+            container.close()
+        return audio_desc, subtitle_desc
+    except Exception:
+        return "", ""
 
 
 def _dual_eye_reposition_subs(mux_source_path, work_dir, ffmpeg_bin, resolved_format, width, height, font_size):
@@ -421,8 +501,17 @@ def run(args):
               "alongside ffmpeg, or on PATH.", file=sys.stderr)
         return 1
 
-    print(f"[av-restore] --source has {audio_count} audio track(s) and {subtitle_count} "
-          f"subtitle track(s) -- restoring all of them", file=sys.stderr)
+    # ADR-403: real user request -- "which language is being processed" -- the most
+    # honest answer this tool's architecture can give, since ffmpeg/mkvmerge each
+    # process every track in ONE combined pass (there's no real per-track "now
+    # doing X" moment to report mid-run), is to say clearly, up front, exactly
+    # which tracks are about to be restored.
+    audio_desc, subtitle_desc = _describe_tracks(source_path)
+    audio_detail = f" [{audio_desc}]" if audio_desc else ""
+    subtitle_detail = f" [{subtitle_desc}]" if subtitle_desc else ""
+    print(f"[av-restore] --source has {audio_count} audio track(s){audio_detail} and "
+          f"{subtitle_count} subtitle track(s){subtitle_detail} -- restoring all of them",
+          file=sys.stderr)
 
     out_dir = path.dirname(path.abspath(output_path)) or "."
     os.makedirs(out_dir, exist_ok=True)
@@ -523,6 +612,28 @@ def run(args):
             # subtitle_mux_cli.py's own --dual-eye-subtitles track.
             cmd += ["--track-name", f"0:{_dual_eye_track_name(lang)}"]
             cmd.append(ass_path)
+
+        # ADR-403: real user request -- "give more details of the process". mkvmerge's
+        # own mux is a single combined pass over everything being written (--input's
+        # video untouched + the restored audio/subtitles), so its own "Progress: NN%"
+        # can sit at 0% for a while before the first tick (file analysis) on a large or
+        # many-track source -- this gives a sense of SCALE up front, before that gap,
+        # rather than leaving the user looking at a stuck 0% with no explanation.
+        try:
+            mux_bytes = path.getsize(input_path) + path.getsize(mux_source_path)
+            for ass_path, _lang in positioned_files:
+                mux_bytes += path.getsize(ass_path)
+            rough_eta = _rough_mux_eta_range(mux_bytes)
+            print(f"[av-restore] muxing ~{mux_bytes / (1024 ** 3):.1f} GB combined (video + restored "
+                  f"audio/subtitles) into the final file -- this step is disk-bound, so it can take a "
+                  f"while on large or many-track sources even though nothing is being re-encoded. Very "
+                  f"roughly {rough_eta} depending on your disk speed -- this is a GUESS from file size "
+                  f"alone, not a real measurement (there's no real progress to measure yet until "
+                  f"mkvmerge actually starts writing).",
+                  file=sys.stderr)
+        except OSError:
+            pass  # purely informational -- never block the real mux over a failed size check
+
         print(f"[av-restore] running: {_format_cmd(cmd)}", file=sys.stderr)
 
         try:
@@ -660,6 +771,96 @@ def _self_test_av_track_counting():
     print("_self_test_av_track_counting: PASS")
 
 
+def _self_test_describe_tracks():
+    """ADR-403: real user request -- "which language is being processed". Mocked
+    test of _describe_tracks/_language_display_name -- no real file/av decode
+    needed. Confirms: known language codes resolve to their real names, an unknown
+    code falls back to its own uppercased code (never silently dropped), a track
+    with no language metadata at all falls back to "Unknown language" (distinct
+    from _dual_eye_track_name's own "Subtitle (3D)" fallback -- same underlying
+    helper, two different callers, two different fallback strings), empty track
+    lists produce an empty string (not "Unknown language" with nothing after it),
+    and a source av.open() can't even inspect returns ("", "") rather than raising."""
+    from unittest.mock import patch, MagicMock
+
+    def _stream(lang, codec_name):
+        s = MagicMock()
+        s.metadata = {"language": lang} if lang else {}
+        s.codec_context = MagicMock()
+        s.codec_context.name = codec_name
+        return s
+
+    with patch("os.path.exists", return_value=True), patch.object(av, "open") as mock_open:
+        mock_container = MagicMock()
+        mock_container.streams.audio = [_stream("eng", "dts"), _stream("spa", "ac3"),
+                                        _stream("", "aac"), _stream("xyz", "flac")]
+        mock_container.streams.subtitles = [_stream("eng", "subrip")]
+        mock_open.return_value = mock_container
+        audio_desc, subtitle_desc = _describe_tracks("movie.mkv")
+        assert audio_desc == "English (dts), Spanish (ac3), Unknown language (aac), XYZ (flac)", audio_desc
+        assert subtitle_desc == "English (subrip)", subtitle_desc
+
+    # no subtitle tracks at all -> "" (not "Unknown language" with nothing to pair it with)
+    with patch("os.path.exists", return_value=True), patch.object(av, "open") as mock_open:
+        mock_container = MagicMock()
+        mock_container.streams.audio = [_stream("eng", "aac")]
+        mock_container.streams.subtitles = []
+        mock_open.return_value = mock_container
+        audio_desc, subtitle_desc = _describe_tracks("audio_only.mkv")
+        assert audio_desc == "English (aac)", audio_desc
+        assert subtitle_desc == "", subtitle_desc
+
+    # av.open() itself fails -> ("", ""), never raises (purely informational)
+    with patch.object(av, "open", side_effect=RuntimeError("could not decode")):
+        audio_desc, subtitle_desc = _describe_tracks("broken.mkv")
+        assert (audio_desc, subtitle_desc) == ("", ""), (audio_desc, subtitle_desc)
+
+    # _dual_eye_track_name's own fallback is unaffected by the refactor into
+    # _language_display_name -- same real-code/unknown-code/no-code behavior as before.
+    assert _dual_eye_track_name("eng") == "English (3D)"
+    assert _dual_eye_track_name("xyz") == "XYZ (3D)"
+    assert _dual_eye_track_name("") == "Subtitle (3D)"
+    assert _dual_eye_track_name(None) == "Subtitle (3D)"
+
+    print("_self_test_describe_tracks: PASS")
+
+
+def _self_test_rough_mux_eta_range():
+    """ADR-403 Amendment: decker's direct follow-up -- "so there is no way to show
+    an ETA for that?" -- confirms _rough_mux_eta_range's own math and formatting,
+    pure arithmetic, no real file/subprocess needed: the fast-assumption bound is
+    always <= the slow-assumption bound (never inverted), a tiny size still rounds
+    up to at least "1 min" on both ends (never "0 min", which would misleadingly
+    read as "basically instant"), and _format_rough_minutes crosses over to the
+    "Xh Ymin" form correctly at and past 60 minutes."""
+    GB = 1024 ** 3
+
+    # 400 MB/s fast bound vs. 50 MB/s slow bound -- an 8x spread, so for any real
+    # size the slow-side minute count must be >= the fast-side one.
+    for size in (1 * GB, 10 * GB, 50 * GB, 100 * GB):
+        result = _rough_mux_eta_range(size)
+        fast_str, slow_str = result.split("-", 1)
+        fast_minutes = int(fast_str.split()[0]) if "min" in fast_str and "h" not in fast_str else None
+        slow_minutes = int(slow_str.split()[0]) if "min" in slow_str and "h" not in slow_str else None
+        if fast_minutes is not None and slow_minutes is not None:
+            assert fast_minutes <= slow_minutes, (size, result)
+
+    # a tiny size never rounds down to "0 min" on either bound (would misleadingly
+    # read as "basically instant").
+    tiny_result = _rough_mux_eta_range(1024)  # 1 KB
+    assert "0 min" not in tiny_result, tiny_result
+    assert tiny_result == "1 min-1 min", tiny_result
+
+    # _format_rough_minutes: under 60 -> "N min"; at/over 60 -> "Xh Ymin" / "Xh"
+    assert _format_rough_minutes(30) == "1 min", _format_rough_minutes(30)
+    assert _format_rough_minutes(59 * 60) == "59 min", _format_rough_minutes(59 * 60)
+    assert _format_rough_minutes(60 * 60) == "1h", _format_rough_minutes(60 * 60)
+    assert _format_rough_minutes(75 * 60) == "1h 15min", _format_rough_minutes(75 * 60)
+    assert _format_rough_minutes(125 * 60) == "2h 5min", _format_rough_minutes(125 * 60)
+
+    print("_self_test_rough_mux_eta_range: PASS")
+
+
 def _self_test_run_gating():
     """Synthetic/mocked test of run()'s pre-mkvmerge gates (non-mkv input,
     output==input, source with neither track type) -- proves each refuses before
@@ -795,6 +996,8 @@ def _self_test_dual_eye_subtitles_real_ffmpeg():
 def _run_self_tests():
     _self_test_trim_cmd_construction()
     _self_test_av_track_counting()
+    _self_test_describe_tracks()
+    _self_test_rough_mux_eta_range()
     _self_test_run_gating()
     _self_test_dual_eye_subtitles_real_ffmpeg()
     print("All av_restore_cli self-tests PASSED")

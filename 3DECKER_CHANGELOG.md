@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — October 29, 2026
 
+**Improved: "Restore Audio & Subtitles" now tells you a lot more about what it's doing while it runs — useful since this step can take close to an hour on some movies.** It now lists exactly which audio and subtitle tracks (with their language) are being restored before it starts, gives you a sense of scale ("muxing ~X GB combined") plus a rough, clearly-labeled time estimate for it (e.g. "very roughly 2 min–17 min, depending on your disk speed — this is a guess from file size alone, not a real measurement"), and clearly flags it when a specific movie's audio needs a slower re-encode instead of a quick copy — which is a real reason some movies take noticeably longer than others at this step. All of this now shows up live, in the Output panel and job log, while it's running — previously, this step's own status messages only appeared all at once after it had already finished.
+
 **Fixed: "Log Convergence Value per Scene" only ever gave a real scene-by-scene breakdown if Scene Detection was also turned on.** With Scene Detection off, the log fell back to one single average for the entire movie, because it had no other way to know where one scene ended and the next began. Turning Scene Detection on just for the log wasn't a great trade either, since it also changes how Flicker Reduction settles after a cut — a real side effect on the actual conversion you might not want. Now the log quietly figures out the real scene cuts on its own, purely for its own bookkeeping, without switching on Scene Detection or touching anything else about how the video gets converted — so you get a real per-scene log either way.
 
 ## Update — October 28, 2026

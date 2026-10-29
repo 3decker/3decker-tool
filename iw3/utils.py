@@ -1071,6 +1071,69 @@ def _ensure_hybrid_scene_cut_times(scene_source_path, args):
     return sorted(p / scan_fps for p in segment_pts)
 
 
+def _ensure_convergence_log_scene_pts(video_path, args, scene_cache_max_fps):
+    """ADR-402: real user request -- "Log Convergence Value per Scene" previously only
+    ever got real per-scene boundaries when --scene-detect (or --scene-detect-only) was
+    ALSO on for the main conversion, because it simply reused process_video_full's own
+    `segment_pts` (which is an empty set whenever Scene Detection is off -- see the
+    `else: segment_pts = set()` branch above). That forced an unwanted coupling: a user
+    who wants the log but does NOT want Scene Detection's other real effect (it also
+    changes Flicker Reduction/EMA's own reset-at-cuts behavior) had no way to get one
+    without the other.
+
+    Same fix shape as _ensure_hybrid_scene_cut_times just above (Hybrid Frame Rate hit
+    this identical problem first): scans independently -- reusing the exact same
+    on-disk scene-boundary cache Scene Detection/Scene Batch/Hybrid Frame Rate all
+    already share, so a prior run of ANY of those against this same source is a free
+    cache hit here, and this scan is in turn a free cache hit for them later -- instead
+    of ever touching process_video_full's own `segment_pts`/EMA reset wiring. Unlike
+    _ensure_hybrid_scene_cut_times (which returns seconds, for RIFE's separate output
+    timeline), this returns the raw pts SET directly, the same unit bind_single_frame_
+    callback/bind_batch_frame_callback/bind_vda_frame_callback already compare input
+    frame pts against for the real `segment_pts` (`pts in segment_pts`) -- so the
+    caller can build a second, independent reset-flag list the identical way.
+
+    Only ever called when the log is actually on and Scene Detection is actually off
+    (see process_video_full) -- when Scene Detection is already on, the real
+    `segment_pts` already IS this data, and process_video_full reuses it directly
+    instead of calling this. Returns an empty set (the log falls back to one lump
+    whole-movie "scene", unchanged from before this ADR) on any failure -- a bad scan
+    must never crash or block a real conversion."""
+    if not video_path or not path.isfile(video_path):
+        return set()
+    state = getattr(args, "state", None) or {}
+    try:
+        segment_pts = try_load_scene_cache(video_path, args, max_fps=scene_cache_max_fps)
+        if segment_pts is None:
+            print("[iw3] Convergence Scene Log: no existing scene-boundary scan found for "
+                  "this source -- running one now (the same AI pass Scene Detection itself "
+                  "uses; cached afterward, so this only happens once per source).",
+                  file=sys.stderr)
+            with TorchHubDir(HUB_MODEL_DIR):
+                segment_pts = SBD.detect_boundary(
+                    video_path,
+                    max_fps=args.max_fps,
+                    device=state.get("device", "cpu"),
+                    hwaccel=getattr(args, "hwaccel", None),
+                    disable_software_fallback=getattr(args, "disable_software_fallback", False),
+                    start_time=args.start_time,
+                    end_time=args.end_time,
+                    stop_event=state.get("stop_event"),
+                    suspend_event=state.get("suspend_event"),
+                    tqdm_fn=state.get("tqdm_fn"),
+                    tqdm_title=f"{path.basename(video_path)}: Convergence Scene Log scan",
+                )
+            if state.get("stop_event") is not None and state["stop_event"].is_set():
+                return set()
+            save_scene_cache(video_path, segment_pts, args, max_fps=scene_cache_max_fps)
+    except Exception as e:
+        print(f"[iw3] Convergence Scene Log: scene-boundary scan failed "
+              f"({e.__class__.__name__}: {e}) -- logging one scene for the whole movie "
+              f"instead.", file=sys.stderr)
+        return set()
+    return segment_pts or set()
+
+
 def compute_standalone_hybrid_exclude_ranges(video_path, gpu_id=0, hwaccel=None,
                                               disable_software_fallback=False,
                                               rife_hybrid_percent=50,
@@ -4559,7 +4622,7 @@ def finish_convergence_scene_log(args, input_path, output_path, fps=None):
               f"({type(e).__name__}: {e})", file=sys.stderr)
 
 
-def apply_divergence(depth, im, args, side_model, reset_pts=None):
+def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=None):
     batch = True
     if depth.ndim != 4:
         # CHW
@@ -4603,8 +4666,17 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
     # reasoning as the overlay push just above -- push this call's own per-INPUT-frame
     # (value, cut_after) pairs now, drain exactly as many as actually come back out
     # (see the drain site further down, right next to the overlay's own drain) so the
-    # scene boundaries line up with what was fed in (reset_pts' own timing) while the
-    # logged values match what was actually produced for OUTPUT frames.
+    # scene boundaries line up with what was fed in while the logged values match what
+    # was actually produced for OUTPUT frames.
+    # ADR-402: `cut_after` comes from `log_reset_pts` when the caller supplies one
+    # (process_video_full always does now), NOT `reset_pts` -- the two are only the
+    # same list when Scene Detection is on. When it's off, `reset_pts` is all-False
+    # (by design: EMA/scene_hold must only ever follow the REAL `segment_pts`), but
+    # `log_reset_pts` still carries the real, independently-scanned scene cuts (see
+    # _ensure_convergence_log_scene_pts), so the LOG gets true per-scene rows without
+    # this changing the actual conversion's own cut-reset behavior at all. Falls back
+    # to `reset_pts` for any caller that never passes `log_reset_pts` (unchanged,
+    # original behavior).
     convergence_scene_log_active = getattr(args, "convergence_scene_log", False) and torch.is_tensor(convergence)
     if convergence_scene_log_active:
         scene_log_state = args.state.setdefault("_convergence_scene_log", _ConvergenceSceneLogState())
@@ -4615,7 +4687,12 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None):
             bool(getattr(args, "convergence_scene_hold", False)),
             int(getattr(args, "convergence_cut_smooth", 0) or 0),
         )
-        rp_for_log = reset_pts if reset_pts is not None else [False] * convergence.shape[0]
+        if log_reset_pts is not None:
+            rp_for_log = log_reset_pts
+        elif reset_pts is not None:
+            rp_for_log = reset_pts
+        else:
+            rp_for_log = [False] * convergence.shape[0]
         scene_log_state.pending.extend(zip(convergence.flatten().tolist(), rp_for_log))
 
     # Depth pop effects -- all three (Foreground/Midground/Background Pop) are
@@ -5055,7 +5132,7 @@ def process_images(files, output_dir, args, depth_model, side_model, title=None)
 # video callbacks
 
 def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene_ema_settings=None,
-                               scene_ema_report=None):
+                               scene_ema_report=None, log_segment_pts=None):
     src_queue = []
     frame_cpu_offload = depth_model.get_ema_buffer_size() > 1
 
@@ -5063,6 +5140,10 @@ def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene
         for depth in depths:
             x, pts = src_queue.pop(0)
             reset_pts = [pts in segment_pts]
+            # ADR-402: real, independently-scanned scene cuts for the Convergence Scene
+            # Log -- see _ensure_convergence_log_scene_pts. None when the log is off or
+            # Scene Detection is already on (log_segment_pts is segment_pts itself then).
+            log_reset_pts = [pts in log_segment_pts] if log_segment_pts is not None else None
             if isinstance(x, VU.OffloadFrame):
                 x = x.load(device=args.state["device"])
             if args.debug_depth:
@@ -5071,7 +5152,8 @@ def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene
                 left_eye, right_eye = apply_rgbd(x, depth, mapper=args.mapper)
                 out = postprocess_image(left_eye, right_eye, args)
             else:
-                left_eye, right_eye = apply_divergence(depth, x, args, side_model, reset_pts=reset_pts)
+                left_eye, right_eye = apply_divergence(depth, x, args, side_model, reset_pts=reset_pts,
+                                                        log_reset_pts=log_reset_pts)
                 if left_eye is not None:
                     if left_eye.ndim == 3:
                         out = postprocess_image(left_eye, right_eye, args)
@@ -5149,7 +5231,7 @@ def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene
 
 
 def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_ema_settings=None,
-                              scene_ema_report=None):
+                              scene_ema_report=None, log_segment_pts=None):
     depth_lock = threading.RLock()
     sbs_lock = threading.RLock()
     enqueue_ticket_lock = TicketLock()
@@ -5185,6 +5267,9 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_
                 else:
                     x_srcs, pts = src_queue.pop(0)
                 reset_pts = [t in segment_pts for t in pts]
+                # ADR-402: see bind_single_frame_callback's own comment -- same idea,
+                # a second independent reset-flag list for the Convergence Scene Log only.
+                log_reset_pts = [t in log_segment_pts for t in pts] if log_segment_pts is not None else None
 
                 with sbs_lock:  # TODO: unclear whether this is actually needed
                     if args.rgbd or args.half_rgbd:
@@ -5204,9 +5289,11 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_
                             # enqueue_ticket_lock here too is the reverse order and is a real deadlock
                             # (confirmed via py-spy: see docs/ai/AI_DECISIONS.md ADR-067).
                             with depth_lock:
-                                left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts)
+                                left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts,
+                                                                         log_reset_pts=log_reset_pts)
                         else:
-                            left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts)
+                            left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts,
+                                                                     log_reset_pts=log_reset_pts)
 
                 for i in range(left_eyes.shape[0]):
                     yield postprocess_image(left_eyes[i], right_eyes[i], args)
@@ -5296,7 +5383,7 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_
 
 
 def bind_vda_frame_callback(depth_model, side_model, segment_pts, args, scene_ema_settings=None,
-                            scene_ema_report=None):
+                            scene_ema_report=None, log_segment_pts=None):
     src_queue = []
     batch_queue = []
     pts_queue = []
@@ -5318,11 +5405,15 @@ def bind_vda_frame_callback(depth_model, side_model, segment_pts, args, scene_em
                 depths = torch.stack(depths)
                 x_pts = [src_queue.pop(0) for _ in range(len(depths))]
                 reset_pts = [pts in segment_pts for _, pts in x_pts]
+                # ADR-402: see bind_single_frame_callback's own comment -- same idea,
+                # a second independent reset-flag list for the Convergence Scene Log only.
+                log_reset_pts = [pts in log_segment_pts for _, pts in x_pts] if log_segment_pts is not None else None
                 x_srcs = torch.stack([x.load(device=args.state["device"]) for x, _ in x_pts])
                 if args.rgbd or args.half_rgbd:
                     left_eyes, right_eyes = apply_rgbd(x_srcs, depths, mapper=args.mapper)
                 else:
-                    left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts)
+                    left_eyes, right_eyes = apply_divergence(depths, x_srcs, args, side_model, reset_pts=reset_pts,
+                                                              log_reset_pts=log_reset_pts)
                 if left_eyes is not None:
                     for i in range(left_eyes.shape[0]):
                         yield postprocess_image(left_eyes[i], right_eyes[i], args)
@@ -6015,6 +6106,25 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     if args.scene_detect_only:
         return
 
+    # ADR-402: "Log Convergence Value per Scene" previously could only ever get real
+    # per-scene boundaries by reusing the real `segment_pts` above -- which, whenever
+    # Scene Detection is off (the branch just above), is an empty set, so the log fell
+    # back to one lump whole-movie average instead of real scenes. When Scene
+    # Detection is already on, `segment_pts` already IS this data, so it's reused
+    # as-is here (no second scan). When it's off, an independent scan supplies the
+    # log's own boundaries WITHOUT touching `segment_pts` itself -- so EMA/scene-hold
+    # resets at cuts (which deliberately only follow the real `segment_pts`) behave
+    # exactly as if this ADR did not exist.
+    if args.scene_detect:
+        # (args.scene_detect_only already returned above -- this point is only ever
+        # reached with it False.)
+        log_segment_pts = segment_pts
+    elif (getattr(args, "convergence_scene_log", False)
+            and getattr(args, "convergence_mode", "constant") != "constant"):
+        log_segment_pts = _ensure_convergence_log_scene_pts(input_filename, args, scene_cache_max_fps)
+    else:
+        log_segment_pts = set()
+
     # --scene-batch-auto-ema on the regular (non---scene-batch) path: segment_pts is
     # now the COMPLETE, upfront list of every cut in the whole processed range, so
     # every scene's real duration can be computed before frame processing starts (see
@@ -6242,6 +6352,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     args=args,
                     scene_ema_settings=scene_ema_boundary_settings,
                     scene_ema_report=scene_ema_report_by_pts,
+                    log_segment_pts=log_segment_pts,
                 ),
                 vf=video_filter,
                 stop_event=args.state["stop_event"],
@@ -6267,6 +6378,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                     args=args,
                     scene_ema_settings=scene_ema_boundary_settings,
                     scene_ema_report=scene_ema_report_by_pts,
+                    log_segment_pts=log_segment_pts,
                 ),
                 vf=video_filter,
                 stop_event=args.state["stop_event"],
@@ -6290,6 +6402,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             args=args,
             scene_ema_settings=scene_ema_boundary_settings,
             scene_ema_report=scene_ema_report_by_pts,
+            log_segment_pts=log_segment_pts,
         )
         frame_callback = VU.FrameCallbackPool(
             frame_callback=frame_callback,
@@ -8068,8 +8181,12 @@ def create_parser(required_true=True):
     parser.add_argument("--convergence-scene-log", action="store_true",
                         help=("Writes a text file next to the finished video listing the Convergence Plane "
                               "value used for each scene, plus one overall average for the whole movie -- "
-                              "auto convergence modes only (sod_v1/face_detect; constant never varies, so "
-                              "there's nothing per-scene to log). Same idea as "
+                              "auto convergence modes only (sod_v1/face_detect/clip_shot/sod_track/"
+                              "depth_percentile; constant never varies, so there's nothing per-scene to "
+                              "log). ADR-402: gets real per-scene boundaries even with --scene-detect off "
+                              "-- it scans for scene cuts on its own just for this log, without turning on "
+                              "Scene Detection's other effect on the main conversion (EMA/Flicker "
+                              "Reduction's own reset-at-cuts behavior). Same idea as "
                               "--auto-divergence-scene-log (nt_auto3d's own 3D Strength scene log), for "
                               "video jobs only (no effect on single images, which have no \"scene\")."))
     parser.add_argument("--max-negative-parallax", type=float, default=1.0, choices=[Range(0.0, 3.0)],

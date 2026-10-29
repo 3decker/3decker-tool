@@ -1744,16 +1744,18 @@ class MainFrame(wx.Frame):
         self.chk_convergence_scene_log.SetToolTip(
             T("What it's for: writes a text file next to the finished video listing the Convergence Plane "
               "value used for each scene, plus one overall average for the whole movie -- so you can "
-              "review what sod_v1 / Face Detect decided without watching the video.\n"
+              "review what sod_v1 / Face Detect / clip_shot / sod_track / depth_percentile decided without "
+              "watching the video.\n"
               "How it's different from the checkbox above: nothing is written into the picture itself, "
               "just a plain text file you can open afterward.\n"
-              "Only does anything for sod_v1 / Face Detect -- constant never varies, so there is nothing "
-              "per-scene to log.\n"
-              "Depends on the same real cut signal Hold Steady Per Scene above uses: if Scene Detection "
-              "(or Automated Scene Batch) is OFF, there's no real per-scene cut information at all, so the "
-              "whole movie gets logged as ONE single 'scene' spanning its entire runtime, with one "
-              "time-weighted average value -- not a bug, just nothing to split it on. Turn on Scene "
-              "Detection too if you want an actual shot-by-shot breakdown instead of one combined average.\n"
+              "Only does anything for the auto convergence modes -- constant never varies, so there is "
+              "nothing per-scene to log.\n"
+              "Gets real per-scene boundaries on its own: it scans for scene cuts just for this log, even "
+              "if Scene Detection (and Automated Scene Batch) are OFF for the main conversion -- so it "
+              "never changes Hold Steady Per Scene's own EMA reset-at-cuts behavior, which deliberately "
+              "only ever follows Scene Detection's real setting. The one-time scan this costs is shared "
+              "with Scene Detection/Scene Batch/Hybrid Frame Rate's own scan (whichever ran first against "
+              "this source wins; the rest get a free cache hit).\n"
               "Recommended: on if you want a record of what the Convergence Plane chose; off otherwise."))
 
         self.lbl_max_negative_parallax = wx.StaticText(self.grp_stereo, label=T("Pop-Out Limit / Boost"))
@@ -30114,6 +30116,75 @@ def _self_test_ensure_hybrid_scene_cut_times():
     print("_self_test_ensure_hybrid_scene_cut_times: PASS")
 
 
+def _self_test_ensure_convergence_log_scene_pts():
+    """ADR-402: "Log Convergence Value per Scene"'s own independent scene-boundary
+    lookup (utils._ensure_convergence_log_scene_pts) -- same shape as
+    _ensure_hybrid_scene_cut_times just above (Hybrid Frame Rate hit this identical
+    "needs real scene cuts without forcing --scene-detect on" problem first), but
+    simpler: returns the raw pts SET directly (the same unit bind_single_frame_
+    callback/bind_batch_frame_callback/bind_vda_frame_callback already compare
+    against for the real `segment_pts`), never seconds -- there is no separate
+    output timeline to convert for here, unlike RIFE's. Confirms: (a) an existing
+    cache is reused for free, SBD.detect_boundary never called; (b) no cache -> a
+    real scan runs, gets saved to that SAME cache (so Scene Detection or Hybrid
+    Frame Rate later gets a free hit, and vice versa), and the raw result is
+    returned unconverted; (c) no real source path at all -> empty set, no calls,
+    no crash; (d) the scan itself raising -> empty set, never crashes a real
+    conversion."""
+    import tempfile
+    import types
+    from unittest import mock
+    from . import utils as U
+
+    base = types.SimpleNamespace(
+        max_fps=None, start_time=None, end_time=None, hwaccel=None,
+        disable_software_fallback=False, scene_cache_file=None, scene_cache_dir=None,
+        state={"device": "cpu", "stop_event": None, "suspend_event": None, "tqdm_fn": None})
+    MAX_FPS = 30  # arbitrary fixed value -- only needs to be consistent within this test
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "movie.mkv")
+        with open(src, "wb") as f:
+            f.write(b"x" * 1000)
+
+        # (a) cache hit -> reused for free, no scan.
+        with mock.patch.object(U, "try_load_scene_cache", return_value={10, 20}), \
+             mock.patch.object(U.SBD, "detect_boundary") as mock_scan, \
+             mock.patch.object(U, "save_scene_cache") as mock_save:
+            result = U._ensure_convergence_log_scene_pts(src, base, MAX_FPS)
+        mock_scan.assert_not_called()
+        mock_save.assert_not_called()
+        assert result == {10, 20}, result
+
+        # (b) cache miss -> scans, saves (to that SAME cache -- Scene Detection/
+        # Hybrid Frame Rate get a free hit later, and vice versa), returns the
+        # scan's own result raw (no seconds conversion, unlike Hybrid's version).
+        with mock.patch.object(U, "try_load_scene_cache", return_value=None), \
+             mock.patch.object(U.SBD, "detect_boundary", return_value={5, 15}) as mock_scan, \
+             mock.patch.object(U, "save_scene_cache") as mock_save:
+            result2 = U._ensure_convergence_log_scene_pts(src, base, MAX_FPS)
+        mock_scan.assert_called_once()
+        mock_save.assert_called_once()
+        saved_args = mock_save.call_args[0]
+        assert saved_args[0] == src and saved_args[1] == {5, 15}, saved_args
+        assert result2 == {5, 15}, result2
+
+        # (c) no real source path -> empty set, nothing attempted at all.
+        with mock.patch.object(U, "try_load_scene_cache") as mock_load, \
+             mock.patch.object(U.SBD, "detect_boundary") as mock_scan:
+            assert U._ensure_convergence_log_scene_pts(None, base, MAX_FPS) == set()
+            assert U._ensure_convergence_log_scene_pts(path.join(tmp, "missing.mkv"), base, MAX_FPS) == set()
+        mock_load.assert_not_called()
+        mock_scan.assert_not_called()
+
+        # (d) the scan itself raising -> empty set, never crashes.
+        with mock.patch.object(U, "try_load_scene_cache", return_value=None), \
+             mock.patch.object(U.SBD, "detect_boundary", side_effect=RuntimeError("decode failed")):
+            assert U._ensure_convergence_log_scene_pts(src, base, MAX_FPS) == set()
+
+    print("_self_test_ensure_convergence_log_scene_pts: PASS")
+
+
 def _self_test_rife_hybrid_framerate_plumbing():
     """ADR-384 "Hybrid Frame Rate": tests utils._run_rife_interpolation's own
     plumbing for this feature -- iw3.rife_hybrid's own motion-scan/decision logic
@@ -34724,7 +34795,11 @@ def _self_test_convergence_scene_log_accumulation():
     2. apply_divergence()'s own push/drain wiring (NULL method, 1:1 input:output):
        constant mode never accumulates even with the flag on, auto mode only
        accumulates when the flag is actually on, and a reset_pts cut closes a
-       scene exactly like SceneHoldTracker.mark_cut()'s own timing.
+       scene exactly like SceneHoldTracker.mark_cut()'s own timing. Also ADR-402:
+       a caller-supplied log_reset_pts (process_video_full's own independent scan,
+       used when Scene Detection is off) is what actually closes a scene in the
+       log, while the convergence model itself is still called with the ORIGINAL
+       reset_pts, unchanged -- real decoupling, not just "it still works."
     3. finish_convergence_scene_log() (the real file-writing hook process_video()/
        process_config_video() call once per movie) for TWO separate movies in one
        run, confirming one separate log file per movie, an atomic tmp+replace write
@@ -34798,6 +34873,28 @@ def _self_test_convergence_scene_log_accumulation():
     scene_log_state.flush()
     start, end, frames, mean = scene_log_state.scene_records[-1]
     assert (start, end, frames) == (1, 2, 1) and abs(mean - 0.6) < 1e-5, "frame 1 stays open until flushed"
+
+    # ADR-402: a caller-supplied log_reset_pts (process_video_full's own independent
+    # scene scan, used when Scene Detection is off) must be what actually closes
+    # scenes in the LOG -- and the convergence model itself must still be called with
+    # the ORIGINAL reset_pts unchanged, proving EMA/scene_hold never follows the log's
+    # own independent scan.
+    seen_reset_pts = []
+
+    def auto_model_spy(rgb, d, reset_pts=None):
+        seen_reset_pts.append(list(reset_pts))
+        return torch.tensor([[[[0.2]]], [[[0.6]]]])
+
+    args_decoupled = make_args(auto_model_spy, scene_log=True)
+    U.apply_divergence(depth.clone(), im.clone(), args_decoupled, None,
+                       reset_pts=[False, False], log_reset_pts=[True, False])
+    assert seen_reset_pts == [[False, False]], \
+        "the convergence model must still see the real reset_pts, never log_reset_pts"
+    decoupled_log_state = args_decoupled.state["_convergence_scene_log"]
+    assert len(decoupled_log_state.scene_records) == 1
+    start, end, frames, mean = decoupled_log_state.scene_records[0]
+    assert (start, end, frames) == (0, 1, 1) and abs(mean - 0.2) < 1e-5, \
+        "log_reset_pts, not reset_pts, must be what closes the scene in the log"
 
     # constant mode (convergence_model=None) -> convergence is a plain float, never a
     # tensor, so nothing is pushed/accumulated even with the flag on.
@@ -36098,6 +36195,7 @@ def _run_self_tests():
         _self_test_rife_scene_cut_times_plumbing,
         _self_test_rife_disk_space_check,
         _self_test_ensure_hybrid_scene_cut_times,
+        _self_test_ensure_convergence_log_scene_pts,
         _self_test_rife_hybrid_framerate_plumbing,
         _self_test_compute_standalone_hybrid_exclude_ranges,
         _self_test_rife_hybrid_framerate_gui,

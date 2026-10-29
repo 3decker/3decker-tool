@@ -728,9 +728,17 @@ def _patch_utils(U):
         return
     orig = U.apply_divergence
 
-    def apply_divergence(depth, im, args, side_model, reset_pts=None):
+    def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=None):
+        # ADR-402 (core iw3): log_reset_pts is a second, independent reset-flag list
+        # for iw3's own "Log Convergence Value per Scene" feature only -- unrelated to
+        # Auto 3D Strength, but it must still be forwarded and split in lockstep with
+        # reset_pts below, or the scene log's cut flags would silently misalign onto
+        # the wrong sub-batch whenever Auto 3D Strength's own per-divergence-value
+        # batch splitting kicks in (real bug: without this, iw3's own `orig()` call
+        # below would just raise a TypeError the instant this kwarg was introduced,
+        # since this wrapper's signature previously had no such parameter at all).
         if not _enabled(args) or not torch.is_tensor(depth) or not torch.is_tensor(im):
-            return orig(depth, im, args, side_model, reset_pts=reset_pts)
+            return orig(depth, im, args, side_model, reset_pts=reset_pts, log_reset_pts=log_reset_pts)
         with _lock:
             st = _state(args)
             batch = depth.ndim == 4
@@ -738,10 +746,10 @@ def _patch_utils(U):
             divs = st.divergences(i4, d4, args, reset_pts, same_obj=depth)
         overlay = _overlay_on(args) and not st.repeat
 
-        def run(d, x, value, count, rp):
+        def run(d, x, value, count, rp, lrp):
             a = copy.copy(args)                # args.state is shared, as it should be
             a.divergence = value
-            left, right = orig(d, x, a, side_model, reset_pts=rp)
+            left, right = orig(d, x, a, side_model, reset_pts=rp, log_reset_pts=lrp)
             if overlay:
                 st.pending.extend([value] * count)
                 if left is not None:
@@ -751,7 +759,7 @@ def _patch_utils(U):
             return left, right
 
         if not batch:
-            return run(depth, im, divs[0], 1, reset_pts)
+            return run(depth, im, divs[0], 1, reset_pts, log_reset_pts)
         lefts, rights = [], []
         i, n = 0, len(divs)
         while i < n:
@@ -759,9 +767,10 @@ def _patch_utils(U):
             while j < n and divs[j] == divs[i]:
                 j += 1
             rp = None if reset_pts is None else list(reset_pts[i:j])
+            lrp = None if log_reset_pts is None else list(log_reset_pts[i:j])
             if i == 0 and j == n:
-                return run(depth, im, divs[i], n, rp)
-            left, right = run(depth[i:j], im[i:j], divs[i], j - i, rp)
+                return run(depth, im, divs[i], n, rp, lrp)
+            left, right = run(depth[i:j], im[i:j], divs[i], j - i, rp, lrp)
             lefts.append(left)
             rights.append(right)
             i = j

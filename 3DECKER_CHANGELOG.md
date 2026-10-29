@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — October 28, 2026
+## Latest Update — October 29, 2026
+
+**Fixed: "Log Convergence Value per Scene" only ever gave a real scene-by-scene breakdown if Scene Detection was also turned on.** With Scene Detection off, the log fell back to one single average for the entire movie, because it had no other way to know where one scene ended and the next began. Turning Scene Detection on just for the log wasn't a great trade either, since it also changes how Flicker Reduction settles after a cut — a real side effect on the actual conversion you might not want. Now the log quietly figures out the real scene cuts on its own, purely for its own bookkeeping, without switching on Scene Detection or touching anything else about how the video gets converted — so you get a real per-scene log either way.
+
+## Update — October 28, 2026
 
 **Fixed: updating could show repeated, scary-looking "Access is denied" / "Download failed" messages during the Python package step — even though the update always actually finished correctly.** Two unrelated features (one of the AI depth models, and the Windows screen-capture feature) each separately try to pull in a plain version of the same video library this app already has the correct version of installed — something already guarded against (see October 27 below) so it could never actually break anything, but the guard worked by letting the failed attempt happen and then fixing it up afterward, which is why it kept showing up every single update. It's now headed off before it can even start, so that step no longer tries, fails, retries, and downloads ~44MB for nothing, twice per update. Nothing about what actually gets installed changes — this only removes the noise.
 

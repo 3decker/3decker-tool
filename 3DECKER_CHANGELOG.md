@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — October 29, 2026
+## Latest Update — November 2, 2026
+
+**Fixed: running two conversions at once could max out the whole graphics card the moment either one reached the Frame Interpolation (RIFE) step — a real VRAM leak, not just heavy settings.** If a conversion used an inpainting stereo method (like MLBW with inpainting) on video, a behind-the-scenes buffer of a few recent frames — kept for smoothness between frames — wasn't being released along with everything else right before Frame Interpolation/Upscaling started, the way it's supposed to be. On its own that's a few hundred MB to around 1GB per job, but combined with a second job doing the same thing at the same time, it was enough to push a high-end card to its limit and slow both jobs to a crawl. This is now released properly, so VRAM usage during Frame Interpolation should match what it uses when run by itself, as expected — even with Dual-Pass Depth Blend's inpainting methods or multiple jobs running together. Takes effect the next time you start a conversion; already-running jobs aren't affected by this fix.
+
+**Fixed: several more of the same kind of VRAM-not-released issue, found by checking every feature with the same design.** After fixing the one above, every other feature that keeps its own short-term memory between frames was checked the same way. Found and fixed the same problem in: the Video Depth Anything models (VDA_S/B/L and their Metric versions — likely the biggest of this batch, since this model naturally keeps a window of several recent frames in memory), the streaming Video Depth Anything models (VDA_Stream_*), the separate Depth Anti-Aliasing refinement step, and the small running-average memory used by several Convergence Plane auto-modes (depth_percentile, face_detect, sod_track, clip_shot, and sod_v1's Subject Lock) — that last group is small enough (a few KB) that it was never going to be the cause of a maxed-out card on its own, but it's the same bug, so it's fixed too for correctness. None of this applies to the two jobs already running tonight.
+
+## Update — October 29, 2026
 
 **Improved: "Log Convergence Value per Scene" now writes itself live as the movie converts, instead of waiting until the whole thing finishes.** The file updates after every scene that completes, clearly marked "IN PROGRESS" until the movie is actually done — so if you cancel a job, or it crashes partway through, you still get a real log of every scene that finished before that happened, instead of nothing at all like before.
 

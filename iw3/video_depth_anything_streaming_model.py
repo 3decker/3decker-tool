@@ -4,7 +4,8 @@ import torch
 from torchvision.transforms import functional as TF
 from nunif.device import create_device, autocast, device_is_mps, device_is_xpu # noqa
 from nunif.models.utils import compile_model
-from .base_depth_model import BaseDepthModel, HUB_MODEL_DIR
+from .base_depth_model import BaseDepthModel, HUB_MODEL_DIR, move_nested_tensors
+from nunif.models.data_parallel import DeviceSwitchInference
 from .video_depth_anything_model import (
     batch_preprocess, postprocess, EXTRA_CHECKPOINT_URLS as _VDA_EXTRA_CHECKPOINT_URLS,
 )
@@ -128,6 +129,27 @@ class VideoDepthAnythingStreamingModel(BaseDepthModel):
     def reset_state(self):
         self.model.reset_state()
         self._flip_state = _fresh_stream_state()
+
+    def move_to(self, device):
+        # ADR-407: frame_cache_list holds this model's real per-frame cached hidden-
+        # state tensors (its actual streaming "memory") as a plain attribute on the
+        # underlying torch.hub model -- super().move_to() only moves self.model's
+        # registered weights, never this, so it was being left on the GPU on every
+        # --pause-frees-vram pause and every pre-RIFE/waifu2x release. Same bug
+        # class as ADR-406 (video-inpaint FrameQueue), just in this streaming VDA
+        # variant. self._flip_state is a separate saved snapshot (id, frame_id_list,
+        # frame_cache_list) used to swap in TTA's mirrored stream, and needs moving
+        # independently since it isn't live on self.model while the main stream is
+        # active -- frame_id_list entries are plain ints, harmless to pass through.
+        super().move_to(device)
+        if self.model is not None and not isinstance(self.model, DeviceSwitchInference):
+            self.model.frame_cache_list = move_nested_tensors(self.model.frame_cache_list, device)
+        self._flip_state = (
+            self._flip_state[0],
+            self._flip_state[1],
+            move_nested_tensors(self._flip_state[2], device),
+        )
+        return self
 
     def infer(self, x, enable_amp=True, edge_dilation=0, depth_aa=False, tta=False, **kwargs):
         if not torch.is_tensor(x):

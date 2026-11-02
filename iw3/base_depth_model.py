@@ -16,6 +16,27 @@ from .depth_scaler import EMAMinMaxScaler, TemporalStabilizer
 from .hub_dir import HUB_MODEL_DIR
 
 
+def move_nested_tensors(obj, device):
+    """Recursively moves every real tensor found inside obj (a tensor itself, or any
+    nesting of list/tuple holding tensors/None/other values) to `device`, returning
+    the same shape of container with tensors replaced in place of moving. For video
+    depth models (VideoDepthAnythingModel/VideoDepthAnythingStreamingModel) that keep
+    their own frame-to-frame state (cur_list/pre_input/overlap_input/
+    depth_list_aligned/ref_align, frame_cache_list, ...) as plain attributes on the
+    underlying torch.hub model rather than registered nn.Parameter/buffers -- so
+    nn.Module.to()/_apply() (what move_to()'s plain `self.model.to(device)` relies
+    on) never reaches them, exactly the same gap ADR-406 found and fixed for the
+    video-inpaint FrameQueue buffer (iw3/base_inpaint.py). Used by each such model's
+    own move_to() override instead of patching the vendored torch.hub source."""
+    if torch.is_tensor(obj):
+        return obj.to(device)
+    if isinstance(obj, list):
+        return [move_nested_tensors(item, device) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(move_nested_tensors(item, device) for item in obj)
+    return obj
+
+
 class _CompileContext():
     def __init__(self, base_model):
         self.base_model = base_model
@@ -165,6 +186,16 @@ class BaseDepthModel(metaclass=ABCMeta):
             if self.model_backup is not None:
                 self.model_backup = self.model_backup.to(device)
         self.scaler.to(device)
+        # ADR-407: "Depth AA" (DepthAA) is a separate, small refinement net that
+        # DepthAnythingModel/DepthAnythingV3MonoModel/VideoDepthAnythingStreamingModel
+        # each load straight to the GPU as self.depth_aa in their own load_model() --
+        # not part of self.model, so it was never covered here, meaning it stayed on
+        # the GPU through every --pause-frees-vram pause and every pre-RIFE/waifu2x
+        # release. Handled once here, generically, since any subclass may set it
+        # (getattr default covers the ones that never do).
+        depth_aa = getattr(self, "depth_aa", None)
+        if depth_aa is not None:
+            self.depth_aa = depth_aa.to(device)
         return self
 
     def compile(self):

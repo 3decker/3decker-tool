@@ -41,6 +41,18 @@ class DepthPercentileEstimator():
         self.model = None
         self.device = None
 
+    def to(self, device):
+        """No neural net here (self.model is always None -- this mode is the plain,
+        no-AI depth_percentile math), but the running convergence EMA is still a
+        real tensor on whatever device the depth values it was computed from were
+        on. ADR-407: previously _release_pause_vram() (iw3/utils.py) skipped this
+        estimator entirely whenever .model was None, so this one small tensor was
+        never moved even though every other convergence mode's analogous state
+        now is."""
+        if torch.is_tensor(self.convergence_ema):
+            self.convergence_ema = self.convergence_ema.to(device)
+        return self
+
     def reset(self, enable_ema=None, decay=None, scene_hold=None, cut_smooth=None, **_ignored):
         if enable_ema is not None:
             self.enable_ema = enable_ema

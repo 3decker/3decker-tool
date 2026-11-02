@@ -103,6 +103,17 @@ class SodTrackEstimator():
         self.tracker = SceneHoldTracker(decay, cut_smooth)
         self._track_state = None  # per-batch-slot list: {"tracker", "box", "frames_since_reinit"}
 
+    def to(self, device):
+        """Moves .model and the running convergence EMA to `device`; _track_state
+        (cv2 tracker objects, plain int/tuple bookkeeping) is CPU-only already, so
+        there's nothing else here to move (ADR-407, see ConvergenceEstimator.to()
+        for the fuller version of this same bug class)."""
+        if self.model is not None:
+            self.model = self.model.to(device)
+        if torch.is_tensor(self.convergence_ema):
+            self.convergence_ema = self.convergence_ema.to(device)
+        return self
+
     def reset(self, enable_ema=None, decay=None, scene_hold=None, cut_smooth=None, **_ignored):
         if enable_ema is not None:
             self.enable_ema = enable_ema

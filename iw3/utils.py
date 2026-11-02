@@ -9066,8 +9066,14 @@ def _release_pause_vram(args):
     if side_model is not None and not isinstance(side_model, DeviceSwitchInference) and hasattr(side_model, "to"):
         side_model.to("cpu")
     convergence_model = state.get("convergence_model")
-    if convergence_model is not None and getattr(convergence_model, "model", None) is not None:
-        convergence_model.model = convergence_model.model.to("cpu")
+    if convergence_model is not None and hasattr(convergence_model, "to"):
+        # ADR-407: every real convergence-model class (ConvergenceEstimator,
+        # SodTrackEstimator, ClipShotEstimator, DepthPercentileEstimator,
+        # FaceConvergenceEstimator) now has its own to() covering .model (when it
+        # has one) plus whatever small extra GPU-resident state it keeps -- calling
+        # it here, rather than reaching into .model directly as before, is what
+        # actually moves that extra state instead of silently skipping it.
+        convergence_model.to("cpu")
     gc_collect()
 
 
@@ -9085,8 +9091,8 @@ def _reload_pause_vram(args):
     if side_model is not None and not isinstance(side_model, DeviceSwitchInference) and hasattr(side_model, "to"):
         side_model.to(device)
     convergence_model = state.get("convergence_model")
-    if convergence_model is not None and getattr(convergence_model, "model", None) is not None:
-        convergence_model.model = convergence_model.model.to(convergence_model.device)
+    if convergence_model is not None and hasattr(convergence_model, "to"):
+        convergence_model.to(getattr(convergence_model, "device", device) or device)
 
 
 class _PauseVramSuspendEvent():

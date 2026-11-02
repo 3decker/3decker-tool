@@ -78,6 +78,31 @@ class ConvergenceEstimator():
         self.convergence_ema = None
         self._lock_state = None
 
+    def to(self, device):
+        """Moves this estimator's model plus its own extra GPU-resident state (the
+        Subject Lock mask history, the running convergence EMA) to `device`, without
+        changing self.device (the real configured device, used to move incoming
+        frames back during normal inference) -- same non-destructive pattern as
+        BaseDepthModel.move_to()/EMAMinMaxScaler.to(). Previously
+        _release_pause_vram() (iw3/utils.py) only ever moved .model directly, so
+        these two small attributes stayed on the GPU through every --pause-frees-vram
+        pause and every pre-RIFE/waifu2x release (ADR-407 -- same bug class as
+        ADR-406's video-inpaint FrameQueue, just much smaller in practice)."""
+        if self.model is not None:
+            self.model = self.model.to(device)
+        if self._lock_state is not None:
+            self._lock_state = [
+                None if s is None else {
+                    **s,
+                    "held": s["held"].to(device),
+                    "challenger": s["challenger"].to(device) if s["challenger"] is not None else None,
+                }
+                for s in self._lock_state
+            ]
+        if torch.is_tensor(self.convergence_ema):
+            self.convergence_ema = self.convergence_ema.to(device)
+        return self
+
     @staticmethod
     def _quantile_position(d, pos, device, dtype):
         if d.numel() == 0:

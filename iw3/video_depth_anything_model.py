@@ -6,8 +6,9 @@ from torchvision.transforms import functional as TF
 from nunif.device import create_device, autocast, device_is_mps, device_is_xpu # noqa
 from nunif.models.utils import compile_model
 from nunif.modules.reflection_pad2d import reflection_pad2d_naive
+from nunif.models.data_parallel import DeviceSwitchInference
 from .dilation import dilate_edge, edge_dilation_is_enabled
-from . base_depth_model import BaseDepthModel, HUB_MODEL_DIR
+from . base_depth_model import BaseDepthModel, HUB_MODEL_DIR, move_nested_tensors
 from . depth_anything_model import batch_preprocess as batch_preprocess_da
 from .models import DepthAA
 
@@ -200,6 +201,28 @@ class VideoDepthAnythingModel(BaseDepthModel):
 
     def reset_tta_state(self):
         self._flip_state = _fresh_online_state()
+
+    def move_to(self, device):
+        # ADR-407: cur_list/pre_input/overlap_input/depth_list_aligned/ref_align
+        # hold this model's real frame-to-frame window state (actual input frames
+        # and depth outputs, not just small bookkeeping) as plain attributes on the
+        # underlying torch.hub model -- super().move_to() only moves self.model's
+        # registered weights, never these, so they were being left on the GPU on
+        # every --pause-frees-vram pause and every pre-RIFE/waifu2x release. Same
+        # bug class as ADR-406 (video-inpaint FrameQueue), just in VDA_L/VDA_B/
+        # VDA_Metric_* instead. self._flip_state is a separate saved snapshot of
+        # the same five attributes (used to swap in TTA's mirrored stream) and
+        # needs moving independently since it isn't live on self.model while TTA's
+        # main stream is active.
+        super().move_to(device)
+        if self.model is not None and not isinstance(self.model, DeviceSwitchInference):
+            self.model.cur_list = move_nested_tensors(self.model.cur_list, device)
+            self.model.pre_input = move_nested_tensors(self.model.pre_input, device)
+            self.model.overlap_input = move_nested_tensors(self.model.overlap_input, device)
+            self.model.depth_list_aligned = move_nested_tensors(self.model.depth_list_aligned, device)
+            self.model.ref_align = move_nested_tensors(self.model.ref_align, device)
+        self._flip_state = move_nested_tensors(self._flip_state, device)
+        return self
 
     def load_model(self, model_type, resolution=None, device=None):
         _ensure_checkpoint(model_type)

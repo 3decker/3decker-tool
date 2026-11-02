@@ -392,6 +392,26 @@ class BaseVideoInpaint(InpaintComponent):
     def reset(self) -> None:
         self.frame_queue = None
 
+    def _apply(self, fn, recurse=True):
+        # frame_queue holds raw GPU tensors (not nn.Parameter/buffer), so the
+        # default nn.Module traversal that `.to()` relies on -- including when
+        # a PARENT module's .to() recurses into this one via _apply(), which
+        # never calls this class's own .to() -- never touches it. Without
+        # this override, side_model.to("cpu") in _release_pause_vram()
+        # (iw3/utils.py) leaves this buffer's full-resolution left/right eye
+        # + mask frames (up to model_seq frames) stuck on the GPU, which is
+        # the real cause of VRAM not being released before RIFE/waifu2x when
+        # a video-mode inpaint stereo method (e.g. mlbw_l2_inpaint) is in use.
+        super()._apply(fn, recurse=recurse)
+        if self.frame_queue is not None:
+            self.frame_queue.left_eye = fn(self.frame_queue.left_eye)
+            self.frame_queue.right_eye = fn(self.frame_queue.right_eye)
+            if self.frame_queue.left_mask is not None:
+                self.frame_queue.left_mask = fn(self.frame_queue.left_mask)
+            if self.frame_queue.right_mask is not None:
+                self.frame_queue.right_mask = fn(self.frame_queue.right_mask)
+        return self
+
     def create_frame_queue(self, x, depth, synthetic_view) -> FrameQueue:
         return FrameQueue(
             synthetic_view=synthetic_view,

@@ -249,6 +249,22 @@ class ClipShotEstimator():
                 self.anchor_close = None
                 self.anchor_wide = None
 
+    def to(self, device):
+        """Moves .model plus the two fixed CLIP anchor embeddings and the running
+        convergence EMA to `device` -- ADR-407, same bug class as ADR-406's
+        video-inpaint FrameQueue: _release_pause_vram() (iw3/utils.py) only ever
+        moved .model directly, leaving these small attributes stuck on the GPU
+        through every --pause-frees-vram pause and every pre-RIFE/waifu2x release."""
+        if self.model is not None:
+            self.model = self.model.to(device)
+        if torch.is_tensor(self.anchor_close):
+            self.anchor_close = self.anchor_close.to(device)
+        if torch.is_tensor(self.anchor_wide):
+            self.anchor_wide = self.anchor_wide.to(device)
+        if torch.is_tensor(self.convergence_ema):
+            self.convergence_ema = self.convergence_ema.to(device)
+        return self
+
     def reset(self, enable_ema=None, decay=None, scene_hold=None, cut_smooth=None, **_ignored):
         if enable_ema is not None:
             self.enable_ema = enable_ema

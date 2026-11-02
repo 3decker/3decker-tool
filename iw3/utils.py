@@ -9072,11 +9072,27 @@ def _release_pause_vram(args):
     Dual-Pass Depth Blend's own primary/secondary swap of args.state["depth_model"],
     which this never fights with: only one is ever resident at a time either way."""
     state = args.state
+    compiling = getattr(args, "compile", False)
     depth_model = state.get("depth_model")
     if depth_model is not None and depth_model.loaded():
+        if compiling:
+            # ADR-409: real, reproduced residual -- depth_model.compile_context()/
+            # try_compile_context() (iw3/utils.py) wrap the ENTIRE conversion in one
+            # compile()/clear_compiled_model() pair, so a torch.compile'd model stays
+            # compiled straight through every release/reload cycle in between, not
+            # just the final one at the very end. move_to("cpu") only ever moved the
+            # model's own weight tensors -- it never touched the SEPARATE memory
+            # torch.compile's own compiled kernels/guards hold, which .to() has no way
+            # to reach and only clear_compiled_model() (dropping the compiled wrapper
+            # entirely) plus the gc_collect() below can actually free. Confirmed live:
+            # ~4.6-5.3GB stayed resident through RIFE on two real jobs even after
+            # ADR-406/407's own release fixes, both using --compile.
+            depth_model.clear_compiled_model()
         depth_model.move_to("cpu")
     side_model = state.get("side_model")
     if side_model is not None and not isinstance(side_model, DeviceSwitchInference) and hasattr(side_model, "to"):
+        if compiling and hasattr(side_model, "clear_compiled_model"):
+            side_model.clear_compiled_model()
         side_model.to("cpu")
     convergence_model = state.get("convergence_model")
     if convergence_model is not None and hasattr(convergence_model, "to"):
@@ -9097,12 +9113,21 @@ def _reload_pause_vram(args):
     reload) before processing continues."""
     state = args.state
     device = state.get("device")
+    compiling = getattr(args, "compile", False)
     depth_model = state.get("depth_model")
     if depth_model is not None and depth_model.loaded():
         depth_model.move_to(depth_model.device)
+        if compiling:
+            # ADR-409: re-compile after moving back, mirroring compile()'s own
+            # no-op guard (it only compiles when model_backup is None, i.e. not
+            # already compiled) -- so this is a cheap no-op if release never
+            # actually cleared it (e.g. args.compile was off for this run).
+            depth_model.compile()
     side_model = state.get("side_model")
     if side_model is not None and not isinstance(side_model, DeviceSwitchInference) and hasattr(side_model, "to"):
         side_model.to(device)
+        if compiling and hasattr(side_model, "compile"):
+            side_model.compile()
     convergence_model = state.get("convergence_model")
     if convergence_model is not None and hasattr(convergence_model, "to"):
         convergence_model.to(getattr(convergence_model, "device", device) or device)
@@ -9780,7 +9805,15 @@ def _job_log_scope(args, log_path, input_display, output_display):
         yield
         _log_write(f"\n---- iw3 job finished {datetime.now().isoformat(timespec='seconds')} ----\n")
     except BaseException as e:
-        _log_write(f"\n---- iw3 job FAILED: {e!r} ----\n")
+        # ADR-410: real, reproduced gap -- this only ever wrote the bare exception repr
+        # (e.g. "AssertionError()"), never the traceback, so the job log -- the one place
+        # a user actually looks after a crash -- gave no way to tell where or why it failed.
+        # Full traceback is written here explicitly rather than relying on sys.stderr's
+        # redirect above to have captured it, since running under pythonw.exe means the
+        # ORIGINAL sys.stderr this redirect tees through can itself be None (ADR-287), and
+        # an exception's own traceback is not necessarily printed to stderr by whatever
+        # catches it further up the call stack (e.g. wx.lib.delayedresult's worker wrapper).
+        _log_write(f"\n---- iw3 job FAILED: {e!r} ----\n{traceback.format_exc()}\n")
         raise
     finally:
         sys.stdout, sys.stderr = orig_stdout, orig_stderr

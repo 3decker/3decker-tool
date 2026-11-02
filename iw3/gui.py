@@ -588,6 +588,43 @@ class RunUpdateDialog(wx.Dialog):
         self.btn_close.Enable()
 
 
+def _is_self_locked_update_failure(log_text):
+    """Detects one specific, real update failure mode (real user report, 2026-11-02):
+    "Install Update Now" launches update-3decker.bat/update-nagadomi.bat as a
+    subprocess of THIS SAME running 3DECKER process. Both scripts force-reinstall
+    opencv-contrib-python (ADR-397/398/401), which has to overwrite cv2.pyd on disk --
+    but this running process already has that exact file loaded in memory, and
+    Windows refuses to let any process replace a file another process currently has
+    loaded. pip fails with "OSError: [WinError 5] Access is denied" on a .pyd path,
+    the retry loop exhausts, and the whole update aborts -- AFTER the git source pull
+    already succeeded, leaving source code newer than the installed packages, a
+    plausible reason the next startup fails. Detected by scanning the live log text
+    the dialog already captured, rather than changing the batch scripts, since the
+    real fix here (telling the user how to recover) belongs in the GUI that already
+    has that text in hand."""
+    return "Access is denied" in log_text and ".pyd" in log_text
+
+
+def _self_locked_update_failure_message():
+    # Called fresh at display time (not a module-level constant) so it always
+    # reflects the currently active language, matching every other T() call in
+    # this file.
+    return (
+        T("This update failed because 3DECKER itself was still running and already had a file "
+          "open that the update needed to replace (part of OpenCV, the image library 3DECKER "
+          "uses) -- Windows won't let anything overwrite a file that's currently open in a "
+          "running program.")
+        + "\n\n" +
+        T("Some of the update (the program's source code) already applied before this happened, "
+          "so the program's code and its installed packages may now be out of sync -- this can "
+          "stop 3DECKER from starting.")
+        + "\n\n" +
+        T("To finish safely: close 3DECKER completely (check Task Manager for any leftover "
+          "python.exe/pythonw.exe too), then go to your 3DECKER installation folder and "
+          "double-click update.bat directly -- NOT from inside this app -- and let it finish.")
+    )
+
+
 class UpdateAvailableDialog(wx.Dialog):
     """Result popup for a real "updates_available" check (ADR-108), replacing the
     plain wx.MessageBox previously used for that one status -- shown from both the
@@ -14042,9 +14079,14 @@ class MainFrame(wx.Frame):
             self.SetStatusText(T("3DECKER update installed successfully"))
         else:
             self.SetStatusText(T("Update failed -- see the log window"))
-            wx.MessageBox(T("update-3decker.bat exited with an error -- see the log window for the "
-                             "exact reason."),
-                          T("Install 3DECKER Update"), wx.OK | wx.ICON_ERROR)
+            log_text = dlg.txt_log.GetValue() if dlg is not None else ""
+            if _is_self_locked_update_failure(log_text):
+                wx.MessageBox(_self_locked_update_failure_message(),
+                              T("Install 3DECKER Update"), wx.OK | wx.ICON_ERROR)
+            else:
+                wx.MessageBox(T("update-3decker.bat exited with an error -- see the log window for the "
+                                 "exact reason."),
+                              T("Install 3DECKER Update"), wx.OK | wx.ICON_ERROR)
 
     def on_click_install_3decker_update(self, event=None):
         if self.processing or self.updating:
@@ -14128,9 +14170,14 @@ class MainFrame(wx.Frame):
             self.SetStatusText(T("Nagadomi update installed successfully"))
         else:
             self.SetStatusText(T("Update failed -- see the log window"))
-            wx.MessageBox(T("update-nagadomi.bat exited with an error -- see the log window for the "
-                             "exact reason."),
-                          T("Install Nagadomi Update"), wx.OK | wx.ICON_ERROR)
+            log_text = dlg.txt_log.GetValue() if dlg is not None else ""
+            if _is_self_locked_update_failure(log_text):
+                wx.MessageBox(_self_locked_update_failure_message(),
+                              T("Install Nagadomi Update"), wx.OK | wx.ICON_ERROR)
+            else:
+                wx.MessageBox(T("update-nagadomi.bat exited with an error -- see the log window for the "
+                                 "exact reason."),
+                              T("Install Nagadomi Update"), wx.OK | wx.ICON_ERROR)
 
     def on_click_install_nagadomi_update(self, event=None):
         if self.processing or self.updating:
@@ -23843,6 +23890,102 @@ def _self_test_install_nagadomi_update_button():
         app.Destroy()
 
     print("_self_test_install_nagadomi_update_button: PASS")
+
+
+def _self_test_install_update_detects_self_locked_pyd_failure():
+    """Regression test for a real user-reported crash (2026-11-02, found via Steve's
+    update log): "Install Update Now" runs update-3decker.bat/update-nagadomi.bat as a
+    subprocess of THIS SAME running 3DECKER process, and that script force-reinstalls
+    opencv-contrib-python -- which has to overwrite cv2.pyd, a file this very process
+    already has loaded, so Windows refuses with "OSError: [WinError 5] Access is
+    denied" and the whole update aborts partway through. Confirms (a)
+    _is_self_locked_update_failure() recognizes that exact pip error shape and ignores
+    unrelated failures, and (b) both exit handlers show the specific recovery message
+    (close 3DECKER, run update.bat directly) instead of the old generic "see the log
+    window" message, but ONLY when the log actually shows this failure -- an unrelated
+    error must still get the generic message, not a misleading one."""
+    import types
+    import iw3.gui as gui_mod
+
+    real_pip_error = (
+        "Installing collected packages: opencv-contrib-python\n"
+        "ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied: "
+        "'C:\\\\Users\\\\steve\\\\AppData\\\\Local\\\\nunif-3decker\\\\python\\\\Lib\\\\site-packages\\\\"
+        "cv2\\\\cv2.pyd'\n"
+    )
+    unrelated_error = "git: fatal: unable to access 'https://github.com/...': Could not resolve host\n"
+
+    assert gui_mod._is_self_locked_update_failure(real_pip_error), \
+        "must recognize the real cv2.pyd Access-is-denied shape"
+    assert not gui_mod._is_self_locked_update_failure(unrelated_error), \
+        "must not flag an unrelated failure as the self-locked case"
+    assert not gui_mod._is_self_locked_update_failure(""), "empty log must not false-positive"
+
+    class _FakeResult:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    class _FakeDlg:
+        def __init__(self, log_text):
+            self.finished = False
+            self.btn_close = types.SimpleNamespace(Enable=lambda: None, IsEnabled=lambda: False)
+            self._log_text = log_text
+            self.txt_log = types.SimpleNamespace(GetValue=lambda: self._log_text)
+
+        def mark_finished(self):
+            self.finished = True
+
+        def append(self, text):
+            pass
+
+    app = wx.App()
+    frame = None
+    orig_message_box = gui_mod.wx.MessageBox
+    try:
+        frame = gui_mod.MainFrame()
+
+        message_box_calls = []
+
+        def _fake_message_box(message, caption="", style=0):
+            message_box_calls.append((message, caption, style))
+        gui_mod.wx.MessageBox = _fake_message_box
+
+        # The self-locked failure must produce the specific recovery message, for
+        # BOTH the 3DECKER and Nagadomi install paths.
+        frame.dlg_install_3decker_update = _FakeDlg(real_pip_error)
+        message_box_calls.clear()
+        frame.on_exit_install_3decker_update_worker(_FakeResult(1))
+        assert len(message_box_calls) == 1
+        assert message_box_calls[0][0] == gui_mod._self_locked_update_failure_message(), \
+            "self-locked cv2.pyd failure must show the specific recovery message"
+
+        frame.dlg_install_nagadomi_update = _FakeDlg(real_pip_error)
+        message_box_calls.clear()
+        frame.on_exit_install_nagadomi_update_worker(_FakeResult(1))
+        assert len(message_box_calls) == 1
+        assert message_box_calls[0][0] == gui_mod._self_locked_update_failure_message(), \
+            "self-locked cv2.pyd failure must show the specific recovery message (Nagadomi path too)"
+
+        # An unrelated failure must still get the old generic message, not the
+        # misleading cv2-specific one.
+        frame.dlg_install_3decker_update = _FakeDlg(unrelated_error)
+        message_box_calls.clear()
+        frame.on_exit_install_3decker_update_worker(_FakeResult(1))
+        assert len(message_box_calls) == 1
+        assert message_box_calls[0][0] != gui_mod._self_locked_update_failure_message(), \
+            "an unrelated failure must not get the cv2-specific recovery message"
+        assert "update-3decker.bat exited with an error" in message_box_calls[0][0]
+    finally:
+        gui_mod.wx.MessageBox = orig_message_box
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        app.Destroy()
+
+    print("_self_test_install_update_detects_self_locked_pyd_failure: PASS")
 
 
 def _self_test_update_available_dialog_wiring():
@@ -36239,6 +36382,7 @@ def _run_self_tests():
         _self_test_git_checkpoint_no_identity_configured,
         _self_test_install_3decker_update_button,
         _self_test_install_nagadomi_update_button,
+        _self_test_install_update_detects_self_locked_pyd_failure,
         _self_test_update_available_dialog_wiring,
         _self_test_whats_new_changelog_dialog,
         _self_test_find_other_resume_checkpoints_detects_mismatch,

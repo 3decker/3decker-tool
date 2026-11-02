@@ -3476,12 +3476,25 @@ _HW_ENCODER_NO_HIGHBIT_TRANSLATION = {
     "yuv422p10le": "yuv422p",
     "yuv444p10le": "yuv444p",
 }
+# ADR-408: real, reproduced crash -- "Unknown pixel format requested: yuv420p10le"
+# from hevc_nvenc, on a real 10-bit Dolby Vision source going through Limit Bitrate's
+# own re-encode. NVENC/QSV never accept ffmpeg's plain planar "yuv420pNle" names, only
+# their own semi-planar equivalents -- configure_video_codec() in
+# nunif/utils/video/color_transform.py already carries this exact mapping (ADR-236)
+# for the main encode path, but _run_bitrate_cap() builds its ffmpeg command by hand
+# and never goes through that function, so this clamp was the only translation it had
+# -- and it stopped short of the most common case (plain 8/10-bit 4:2:0).
+_HW_ENCODER_NATIVE_PIX_FMT = {
+    "yuv420p": "nv12",
+    "yuv420p10le": "p010le",
+}
 
 
 def _clamp_pix_fmt_for_codec(pix_fmt, video_codec):
     if video_codec in _HW_ENCODER_NO_12BIT:
         pix_fmt = _12BIT_TO_10BIT_PIX_FMT.get(pix_fmt, pix_fmt)
         pix_fmt = _HW_ENCODER_NO_HIGHBIT_TRANSLATION.get(pix_fmt, pix_fmt)
+        pix_fmt = _HW_ENCODER_NATIVE_PIX_FMT.get(pix_fmt, pix_fmt)
     return pix_fmt
 
 

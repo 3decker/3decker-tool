@@ -49,10 +49,17 @@ def capping_tmp_path(output_path):
 
 def build_cap_args(codec, limit_mbps, crf, gpu, pix_fmt):
     """The args-like object _run_bitrate_cap() reads, built the same way the conversion builds it."""
-    pix_fmt = iw3_utils._clamp_pix_fmt_for_codec(pix_fmt, codec)
     if codec == "h264_nvenc":
-        # H.264 NVENC is 8-bit only: drop the "10le" from a 10-bit source's pixel format.
+        # H.264 NVENC is 8-bit only: drop the "10le" from a 10-bit source's pixel format
+        # FIRST, while it is still ffmpeg's plain planar name (e.g. "yuv420p10le" ->
+        # "yuv420p") -- ADR-408: this used to run AFTER _clamp_pix_fmt_for_codec() below,
+        # which broke the moment that function learned to translate "yuv420p10le" into
+        # NVENC's real semi-planar name "p010le" -- stripping "10le" from THAT string
+        # mangles it into "p0", not a real pixel format at all. Stripping first and
+        # clamping second lets the clamp's own yuv420p->nv12 translation still apply
+        # correctly to the now-8-bit result.
         pix_fmt = pix_fmt.replace("10le", "")
+    pix_fmt = iw3_utils._clamp_pix_fmt_for_codec(pix_fmt, codec)
     return types.SimpleNamespace(limit_bitrate=True, video_codec=codec, video_bitrate=f"{limit_mbps:g}M",
                                  crf=crf, pix_fmt=pix_fmt, gpu=[gpu], state={})
 
@@ -229,7 +236,9 @@ def _self_test_over_limit_caps_the_copy_not_the_original():
         video_path, args, dv_source, rife_manifest = calls[0]
         assert video_path == output, "the cap must run on the copy"
         assert args.limit_bitrate is True and args.video_codec == "hevc_nvenc"
-        assert args.video_bitrate == "80M" and args.crf == 18 and args.pix_fmt == "yuv420p10le"
+        # ADR-408: hevc_nvenc needs NVENC's own "p010le" name for 10-bit, not ffmpeg's plain
+        # planar "yuv420p10le" -- see _self_test_pix_fmt_per_codec()'s own docstring note.
+        assert args.video_bitrate == "80M" and args.crf == 18 and args.pix_fmt == "p010le"
         assert args.gpu == [0]
         assert dv_source is None and rife_manifest is None
         assert _read_bytes(output) == b"re-encoded"
@@ -365,11 +374,16 @@ def _self_test_unreadable_peak_refused():
 
 
 def _self_test_pix_fmt_per_codec():
+    # ADR-408: NVENC never accepts ffmpeg's plain planar 10-bit name directly -- it needs
+    # the semi-planar "p010le" (same translation configure_video_codec() already does for
+    # the main encode path, ADR-236). This used to assert the UNtranslated "yuv420p10le",
+    # which is the exact crash that reached decker for real on a 10-bit DV source.
     args = build_cap_args("hevc_nvenc", 80, 15, 0, "yuv420p10le")
-    assert args.pix_fmt == "yuv420p10le", args.pix_fmt
+    assert args.pix_fmt == "p010le", args.pix_fmt
     assert args.video_bitrate == "80M" and args.gpu == [0] and args.limit_bitrate is True
-    # H.264 NVENC is 8-bit only, so a 10-bit source is written as 8-bit
-    assert build_cap_args("h264_nvenc", 80, 15, 0, "yuv420p10le").pix_fmt == "yuv420p"
+    # H.264 NVENC is 8-bit only, so a 10-bit source is written as 8-bit -- and that 8-bit
+    # result still needs NVENC's own native name, not ffmpeg's plain "yuv420p".
+    assert build_cap_args("h264_nvenc", 80, 15, 0, "yuv420p10le").pix_fmt == "nv12"
     assert build_cap_args("h264_nvenc", 80, 15, 0, "yuv444p10le").pix_fmt == "yuv444p"
     print("_self_test_pix_fmt_per_codec: PASS")
 

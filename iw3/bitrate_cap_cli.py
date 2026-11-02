@@ -72,7 +72,14 @@ def _source_pix_fmt(input_path):
             capture_output=True, text=True, check=True)
     except (OSError, subprocess.CalledProcessError) as e:
         raise BitrateCapError(f"could not read the input's pixel format: {e}")
-    return proc.stdout.strip() or DEFAULT_PIX_FMT
+    # ADR-408 follow-up: real, reproduced bug -- "-of csv=p=0" trails its single field with a
+    # comma (confirmed live: ffprobe actually returns "yuv420p10le,\r\n", not "yuv420p10le\r\n").
+    # .strip() only removes whitespace, so the comma survived into every downstream pix_fmt
+    # comparison/dict-lookup -- including this same ADR's own _clamp_pix_fmt_for_codec() fix,
+    # whose dict keys never match a trailing comma and so silently fall through unchanged. This
+    # was the actual blocker the whole time; the dict fix was necessary but never got the chance
+    # to run.
+    return proc.stdout.strip().rstrip(",") or DEFAULT_PIX_FMT
 
 
 def _remove_quietly(file_path):
@@ -373,6 +380,22 @@ def _self_test_unreadable_peak_refused():
     print("_self_test_unreadable_peak_refused: PASS")
 
 
+def _self_test_source_pix_fmt_strips_trailing_comma():
+    # ADR-408 follow-up: real, reproduced bug -- ffprobe's "-of csv=p=0" actually returns
+    # "yuv420p10le,\r\n" (confirmed live against a real file), not the clean "yuv420p10le".
+    # .strip() alone leaves the comma, which then silently defeats every exact dict-match
+    # pix_fmt translation downstream -- this was the actual blocker behind the real crash,
+    # even after _clamp_pix_fmt_for_codec() itself was fixed.
+    from unittest import mock
+    with mock.patch("subprocess.run") as m:
+        m.return_value.stdout = "yuv420p10le,\r\n"
+        assert _source_pix_fmt("fake.mkv") == "yuv420p10le"
+    with mock.patch("subprocess.run") as m:
+        m.return_value.stdout = ""
+        assert _source_pix_fmt("fake.mkv") == DEFAULT_PIX_FMT
+    print("_self_test_source_pix_fmt_strips_trailing_comma: PASS")
+
+
 def _self_test_pix_fmt_per_codec():
     # ADR-408: NVENC never accepts ffmpeg's plain planar 10-bit name directly -- it needs
     # the semi-planar "p010le" (same translation configure_video_codec() already does for
@@ -389,6 +412,7 @@ def _self_test_pix_fmt_per_codec():
 
 
 def _run_self_tests():
+    _self_test_source_pix_fmt_strips_trailing_comma()
     _self_test_pix_fmt_per_codec()
     _self_test_copy_and_original_untouched_under_limit()
     _self_test_over_limit_caps_the_copy_not_the_original()

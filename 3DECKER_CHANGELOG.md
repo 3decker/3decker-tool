@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 2, 2026
+## Latest Update — November 3, 2026
+
+**Improved: Face Detect convergence mode runs noticeably faster on high-resolution video, with no change in accuracy.** It was detecting faces at the video's own full resolution every single frame — on a 4K source, around 30% slower than Shot Type (clip_shot), even though both modes are meant to be a similar cost. Faces don't need 4K detail to find, so it now shrinks the frame first (the same trick already used elsewhere for subject tracking), while still reading the actual depth at full detail once a face is found. Small/distant faces are still found just as reliably as before — the minimum face size it looks for was adjusted to match, so nothing that used to be detected silently stops being detected.
+
+## Update — November 2, 2026
 
 **Fixed: running two conversions at once could max out the whole graphics card the moment either one reached the Frame Interpolation (RIFE) step — a real VRAM leak, not just heavy settings.** If a conversion used an inpainting stereo method (like MLBW with inpainting) on video, a behind-the-scenes buffer of a few recent frames — kept for smoothness between frames — wasn't being released along with everything else right before Frame Interpolation/Upscaling started, the way it's supposed to be. On its own that's a few hundred MB to around 1GB per job, but combined with a second job doing the same thing at the same time, it was enough to push a high-end card to its limit and slow both jobs to a crawl. This is now released properly, so VRAM usage during Frame Interpolation should match what it uses when run by itself, as expected — even with Dual-Pass Depth Blend's inpainting methods or multiple jobs running together. Takes effect the next time you start a conversion; already-running jobs aren't affected by this fix.
 

@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from .convergence_tracker import SceneHoldTracker
 
@@ -29,6 +30,16 @@ class FaceConvergenceEstimator():
     Uses OpenCV Haar cascade — no model downloads required.
     Falls back to center-weighted depth when no faces are found in a frame.
     """
+
+    # ADR-412: real reported perf gap -- face_detect ran at 3.67fps vs clip_shot's
+    # 5.27fps on the same 4K job. Root cause: detectMultiScale() ran on the FULL
+    # native-resolution frame every single frame (unlike clip_shot, which is
+    # GPU-resident and always shrinks to 224x224 first) -- Haar cascade cost scales
+    # steeply with image area from its own multi-scale sliding-window search. Same
+    # fix/reasoning as SodTrackEstimator's own ADR-395 (_TRACK_MAX_DIM): faces don't
+    # need native 4K detail to find, just enough pixels to resolve one. Never upscales
+    # (a sub-480p source detects at its own native size, unchanged).
+    _DETECT_MAX_DIM = 480
 
     def __init__(self, enable_ema=False, decay=0.9, scene_hold=False, cut_smooth=0):
         if not _CV2_AVAILABLE:
@@ -83,6 +94,26 @@ class FaceConvergenceEstimator():
         self.convergence_ema = None
 
     @staticmethod
+    def _detect_scale_factor(H, W):
+        """ADR-412: mirrors SodTrackEstimator._track_scale_factor (ADR-395) exactly --
+        see this class's own _DETECT_MAX_DIM docstring for why."""
+        longest = max(H, W)
+        return min(1.0, FaceConvergenceEstimator._DETECT_MAX_DIM / longest) if longest > 0 else 1.0
+
+    @staticmethod
+    def _to_gray_np(rgb_single, scale=1.0):
+        """ADR-412: downscales ON GPU (cheap) before the CPU transfer -- same ADR-395
+        pattern as SodTrackEstimator._frame_to_bgr -- so both the PCIe transfer and
+        cv2's own per-frame work shrink with `scale`, not just the detection cost."""
+        if scale < 1.0:
+            new_h = max(1, round(rgb_single.shape[-2] * scale))
+            new_w = max(1, round(rgb_single.shape[-1] * scale))
+            rgb_single = F.interpolate(rgb_single.unsqueeze(0), size=(new_h, new_w),
+                                       mode="bilinear", align_corners=False)[0]
+        frame = (rgb_single.permute(1, 2, 0).cpu().float() * 255).clamp(0, 255).byte().numpy()
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+    @staticmethod
     def _center_weighted_depth(depth):
         """Fallback: Gaussian-weighted depth average biased toward the center of the frame."""
         H, W = depth.shape[-2], depth.shape[-1]
@@ -93,18 +124,30 @@ class FaceConvergenceEstimator():
         d = depth.view(H, W)
         return (d * weights).sum() / weights.sum()
 
-    def _detect_face_depth(self, gray_np, depth_single):
-        """Return median depth inside detected face bounding boxes, or None if no faces."""
+    def _detect_face_depth(self, gray_np, depth_single, scale=1.0):
+        """Return median depth inside detected face bounding boxes, or None if no faces.
+        `gray_np` may be downscaled by `scale` (ADR-412) -- detected boxes, and minSize,
+        are scaled to/from depth_single's own full resolution so detection sensitivity
+        to small/distant faces stays proportionally the same as it was at native
+        resolution, not silently raised by the downscale."""
         H, W = depth_single.shape[-2], depth_single.shape[-1]
-        faces = _face_cascade.detectMultiScale(gray_np, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        # ADR-412: scale minSize down with the frame so a face that would have cleared
+        # the old full-resolution 30px floor still clears it here, proportionally --
+        # floored at 20px since a Haar cascade needs a few real pixels per feature to
+        # work at all, a face that small would be unreliable to detect regardless.
+        min_size = max(20, round(30 * scale))
+        faces = _face_cascade.detectMultiScale(gray_np, scaleFactor=1.1, minNeighbors=5,
+                                               minSize=(min_size, min_size))
 
         if len(faces) == 0:
             return None
 
         mask = torch.zeros(H, W, device=depth_single.device, dtype=torch.bool)
         for (x, y, w, h) in faces:
-            x1, y1 = max(0, x), max(0, y)
-            x2, y2 = min(W, x + w), min(H, y + h)
+            if scale < 1.0:
+                x, y, w, h = x / scale, y / scale, w / scale, h / scale
+            x1, y1 = max(0, int(round(x))), max(0, int(round(y)))
+            x2, y2 = min(W, int(round(x + w))), min(H, int(round(y + h)))
             if x2 > x1 and y2 > y1:
                 mask[y1:y2, x1:x2] = True
 
@@ -119,11 +162,13 @@ class FaceConvergenceEstimator():
         results = []
 
         for i in range(B):
-            # Convert [0,1] float CHW tensor → uint8 grayscale numpy for Haar cascade
-            frame_rgb = (rgb[i].permute(1, 2, 0).cpu().float() * 255).clamp(0, 255).byte().numpy()
-            gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+            # ADR-412: downscale before the CPU transfer + Haar cascade (see
+            # _DETECT_MAX_DIM's own docstring) -- was previously always full resolution.
+            H, W = depth.shape[-2], depth.shape[-1]
+            scale = self._detect_scale_factor(H, W)
+            gray = self._to_gray_np(rgb[i], scale)
 
-            face_d = self._detect_face_depth(gray, depth[i])
+            face_d = self._detect_face_depth(gray, depth[i], scale)
 
             if face_d is not None:
                 p = face_d.to(depth.device).reshape(1, 1, 1).clamp(0, 1)

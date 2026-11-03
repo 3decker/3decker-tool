@@ -205,7 +205,7 @@ Write-Step "Torch variant"
 # much further below) and pointed at the real, now-guaranteed-to-exist path.
 if (-not $TorchVariant) {
     # Auto-detect via the shared detect_torch_variant.ps1 -- the SAME script the
-    # update.bat/update-3decker.bat/update-nagadomi.bat entry points call, so a
+    # update.bat/update-3decker.bat entry points call, so a
     # fresh install (this script) and an existing install being updated (those)
     # can never drift apart on which GPU generation needs which build. See that
     # script's own header comment for the real bug this centralization fixes.

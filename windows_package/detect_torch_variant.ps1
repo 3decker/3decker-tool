@@ -5,8 +5,8 @@
 # Real bug this exists to prevent (2026-09-22): this exact detection logic
 # originally lived ONLY inline in setup.ps1 (fresh installs), so it correctly
 # picked cu126 for an older GPU (e.g. a GTX 1060, Pascal, compute capability
-# 6.1) on a first-time install -- but update.bat/update-3decker.bat/
-# update-nagadomi.bat (the path an EXISTING install actually takes) had no such
+# 6.1) on a first-time install -- but update.bat/update-3decker.bat
+# (the path an EXISTING install actually takes) had no such
 # logic at all and just blindly reinstalled the plain, hardcoded
 # requirements-torch.txt (pinned to cu130) on every update, regardless of GPU.
 # A real user's working GTX 1060 install broke this way: cu130-tagged PyTorch

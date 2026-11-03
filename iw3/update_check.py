@@ -31,12 +31,18 @@ MAX_LISTED_COMMITS = 20
 THIS_FORK_REPO_URL = "https://github.com/3decker/3decker-tool.git"
 THIS_FORK_BRANCH = "my-customizations"
 
-# The original upstream project, hardcoded -- used the same way, by
-# check_for_nagadomi_updates() and gui.py's _find_nagadomi_update_bat()/
-# on_click_install_nagadomi_update (ADR-111). Kept in sync with the identical
-# literal strings in windows_package/update-nagadomi.bat.
-NAGADOMI_REPO_URL = "https://github.com/nagadomi/nunif.git"
-NAGADOMI_BRANCH = "master"
+# ADR-414: there used to be a Nagadomi-specific counterpart here (checking/
+# installing updates from the original upstream nunif project directly inside the
+# app). Removed -- 3DECKER and upstream nagadomi/nunif have diverged far enough
+# (hundreds of commits each way, including a full rewrite of core video-depth
+# plumbing 3DECKER's own customizations are built on) that a clean merge is no
+# longer realistically possible; the in-app install action's "--ff-only, else
+# reset --hard" fallback was confirmed to silently discard all of 3DECKER's own
+# commits in practice, and did exactly that on a real user's install. Reviewing
+# upstream nagadomi changes now happens manually/externally (read-only `git fetch`
+# + diff, never merge/reset against this branch), with anything worth keeping
+# hand-ported into 3DECKER's own code and shipped through the normal update path
+# above once tested. See docs/ai/AI_DECISIONS.md.
 
 
 def _find_git():
@@ -147,13 +153,13 @@ def check_for_updates(repo_root=None, git_bin=None):
 
 
 def _check_against(repo_root, git_bin, remote_url, branch, upstream_label):
-    """Shared fetch-and-compare core for check_for_3decker_updates()/
-    check_for_nagadomi_updates() (ADR-111) -- unlike check_for_updates() above, this
-    targets an explicit, hardcoded `remote_url`/`branch`, never the current branch's
-    configured upstream tracking ref (`@{u}`). Fetches straight from the URL into
-    FETCH_HEAD (`git fetch <url> <branch>`) -- no named remote needs to exist first,
-    the same technique windows_package/update-3decker.bat's/update-nagadomi.bat's own
-    pull steps already use. `upstream_label` is a short, human-readable string (e.g.
+    """Shared fetch-and-compare core for check_for_3decker_updates() (ADR-111) --
+    unlike check_for_updates() above, this targets an explicit, hardcoded
+    `remote_url`/`branch`, never the current branch's configured upstream tracking
+    ref (`@{u}`). Fetches straight from the URL into FETCH_HEAD (`git fetch <url>
+    <branch>`) -- no named remote needs to exist first, the same technique
+    windows_package/update-3decker.bat's own pull step already uses.
+    `upstream_label` is a short, human-readable string (e.g.
     "3decker-tool/my-customizations") used only for display, since there's no real
     remote-tracking ref name to show the way check_for_updates() has.
 
@@ -219,13 +225,6 @@ def check_for_3decker_updates(repo_root=None, git_bin=None):
     windows_package/update-3decker.bat's own pull step). See _check_against()."""
     return _check_against(repo_root, git_bin, THIS_FORK_REPO_URL, THIS_FORK_BRANCH,
                           f"3decker-tool/{THIS_FORK_BRANCH}")
-
-
-def check_for_nagadomi_updates(repo_root=None, git_bin=None):
-    """Always checks the original upstream nunif project, hardcoded -- the
-    Nagadomi-specific counterpart to check_for_3decker_updates() (ADR-111)."""
-    return _check_against(repo_root, git_bin, NAGADOMI_REPO_URL, NAGADOMI_BRANCH,
-                          f"nagadomi/nunif/{NAGADOMI_BRANCH}")
 
 
 def format_result_message(result):
@@ -399,12 +398,11 @@ def _test_check_for_updates():
 
 
 def _test_check_against_hardcoded_targets():
-    """Regression test for check_for_3decker_updates()/check_for_nagadomi_updates()
-    (ADR-111): each must target ITS OWN hardcoded remote/branch via a direct
-    `git fetch <url> <branch>` -- never derived from `@{u}`/whatever the local branch
-    happens to track, and never crossed with each other. Same synthetic/mocked
-    convention as _test_check_for_updates (CS-TEST-001): no real git repo, network,
-    or GPU needed."""
+    """Regression test for check_for_3decker_updates() (ADR-111, ADR-414): must
+    target its own hardcoded remote/branch via a direct `git fetch <url> <branch>` --
+    never derived from `@{u}`/whatever the local branch happens to track. Same
+    synthetic/mocked convention as _test_check_for_updates (CS-TEST-001): no real git
+    repo, network, or GPU needed."""
     import types
     from unittest.mock import patch
 
@@ -435,29 +433,11 @@ def _test_check_against_hardcoded_targets():
     msg = format_result_message(result)
     assert "3DECKER's own updates" in msg, msg
 
-    # Nagadomi check must fetch from nagadomi's own URL/branch specifically, and must
-    # never touch the 3DECKER URL -- confirmed by the script only containing the
-    # nagadomi key; any accidental cross-wiring would raise "unexpected git command".
-    script_nagadomi = {
-        ("rev-parse", "--abbrev-ref", "HEAD"): "my-customizations\n",
-        ("fetch", NAGADOMI_REPO_URL, NAGADOMI_BRANCH): "",
-        ("rev-list", "--count", "HEAD..FETCH_HEAD"): "1\n",
-        ("log", "--oneline", "HEAD..FETCH_HEAD"): "def4560 Upstream fix\n",
-    }
-    with patch("subprocess.run", side_effect=fake_run_factory(script_nagadomi)):
-        result = check_for_nagadomi_updates(repo_root="dummy_repo", git_bin="git")
-    assert result["status"] == "updates_available", result
-    assert result["remote_url"] == NAGADOMI_REPO_URL, result
-    assert result["subjects"] == ["Upstream fix"], result
-    msg = format_result_message(result)
-    assert "NOT from this fork's own customizations" in msg, msg
-    assert "3DECKER's own updates" not in msg, msg
-
-    # Up-to-date case for the hardcoded-nagadomi path.
-    script_up_to_date = dict(script_nagadomi)
+    # Up-to-date case for the hardcoded 3DECKER path.
+    script_up_to_date = dict(script_3decker)
     script_up_to_date[("rev-list", "--count", "HEAD..FETCH_HEAD")] = "0\n"
     with patch("subprocess.run", side_effect=fake_run_factory(script_up_to_date)):
-        result = check_for_nagadomi_updates(repo_root="dummy_repo", git_bin="git")
+        result = check_for_3decker_updates(repo_root="dummy_repo", git_bin="git")
     assert result["status"] == "up_to_date", result
     assert "Already up to date" in format_result_message(result)
 

@@ -919,6 +919,12 @@ class MainFrame(wx.Frame):
     def get_depth_models(self, small_only):
         if small_only:
             depth_models = ["Any_S", "Any_V2_S", "Any_V2_N_S", "Distill_Any_S", "VDA_Stream_S", "VDA_Stream_Metric_S"]
+            # ADR-415: Ultimate DAV2, ported from nagadomi/nunif upstream (Oct 2026) --
+            # UL/S only (not B) here, matching nagadomi's own small-model-list choice.
+            if DepthAnythingModel.has_checkpoint_file("Ultimate_DAV2_UL"):
+                depth_models.append("Ultimate_DAV2_UL")
+            if DepthAnythingModel.has_checkpoint_file("Ultimate_DAV2_S"):
+                depth_models.append("Ultimate_DAV2_S")
         else:
             depth_models = [
                 "ZoeD_N", "ZoeD_K", "ZoeD_NK",
@@ -943,6 +949,14 @@ class MainFrame(wx.Frame):
                 depth_models.append("Distill_Any_B")
             if DepthAnythingModel.has_checkpoint_file("Distill_Any_L"):
                 depth_models.append("Distill_Any_L")
+
+            # ADR-415: Ultimate DAV2, ported from nagadomi/nunif upstream (Oct 2026)
+            if DepthAnythingModel.has_checkpoint_file("Ultimate_DAV2_UL"):
+                depth_models.append("Ultimate_DAV2_UL")
+            if DepthAnythingModel.has_checkpoint_file("Ultimate_DAV2_S"):
+                depth_models.append("Ultimate_DAV2_S")
+            if DepthAnythingModel.has_checkpoint_file("Ultimate_DAV2_B"):
+                depth_models.append("Ultimate_DAV2_B")
 
             depth_models += ["Any_V3_Mono", "Any_V3_Mono_01"]
 

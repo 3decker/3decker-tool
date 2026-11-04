@@ -795,14 +795,23 @@ def _patch_utils(U):
                     st.reset_scene_log()
             result = fn(*a, **kw)
             # "Log 3D Strength per Scene": write the just-finished movie's log right
-            # here, using the SAME _RunState that was just reset above for it -- the
-            # next call's reset() (above) is what clears it for the NEXT movie, so a
-            # batch/directory run naturally gets one real per-movie log, not one
-            # combined log, exactly mirroring how iw3's own job log already works
-            # per-movie (ADR-279). Only on a normal return -- a job that raised gets
-            # no "just finished" log.
-            if st is not None and scene_log_kind is not None:
-                _finish_scene_log(st, args, scene_log_kind, a)
+            # here. Re-fetch the RunState from args.state now, instead of reusing the
+            # `st` captured above -- on a movie's FIRST run in this process,
+            # args.state["nt_autodiv"] doesn't exist yet at that point (it's only
+            # created lazily by _state(), called from apply_divergence() during the
+            # real conversion inside fn() above), so the pre-fetch above is always
+            # None the first time, and the log silently never got written even
+            # though the tracker was fully populated by the time fn() returned.
+            # Re-reading it here fixes that for a normal single-movie job, not just
+            # a second-or-later movie in the same batch. The next call's
+            # reset_scene_log() (above) is still what clears it for the NEXT movie,
+            # so a batch/directory run still gets one real per-movie log, not one
+            # combined log, mirroring iw3's own job log (ADR-279). Only on a normal
+            # return -- a job that raised gets no "just finished" log.
+            if scene_log_kind is not None and args is not None and _enabled(args):
+                st = args.state.get("nt_autodiv")
+                if st is not None:
+                    _finish_scene_log(st, args, scene_log_kind, a)
             return result
         wrapper._nt_autodiv = True
         wrapper.__wrapped__ = fn

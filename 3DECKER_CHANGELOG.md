@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 3, 2026
+## Latest Update — November 4, 2026
+
+**Fixed: "Log 3D Strength per Scene" could be checked on and still never produce a file, with no error shown.** This log (a text file saved next to your finished video, listing the 3D Strength used scene-by-scene) was being skipped on a normal single-movie conversion — the most common case there is — because of a timing mix-up in when the save step looked for the data it needed: it checked too early, before that data had actually been built up during the conversion, saw nothing, and quietly gave up without telling you. Convergence's own separate per-scene log was never affected by this and kept working the whole time. Fixed now — the save step checks at the right moment instead. Takes effect on your next conversion.
+
+## Update — November 3, 2026
 
 **Changed: "Free GPU memory while paused/idle" is now ON by default.** Previously, cancelling or finishing a job (or clicking Suspend) left every loaded model sitting on the graphics card, holding onto several GB of VRAM until you started another job or closed the app entirely — on purpose, so the next job would start instantly. Most people would rather see that memory actually released, so that's now the default: VRAM drops back down right after Cancel/Finish/Suspend, and the next job just takes a few extra seconds to reload. If you'd rather keep the old fast-restart behavior, just uncheck the box — nothing else changes.
 

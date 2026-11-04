@@ -1108,12 +1108,15 @@ def _ensure_convergence_log_scene_pts(video_path, args, scene_cache_max_fps):
     frame pts against for the real `segment_pts` (`pts in segment_pts`) -- so the
     caller can build a second, independent reset-flag list the identical way.
 
-    Only ever called when the log is actually on and Scene Detection is actually off
-    (see process_video_full) -- when Scene Detection is already on, the real
-    `segment_pts` already IS this data, and process_video_full reuses it directly
-    instead of calling this. Returns an empty set (the log falls back to one lump
-    whole-movie "scene", unchanged from before this ADR) on any failure -- a bad scan
-    must never crash or block a real conversion."""
+    Only ever called when at least one of the two scene logs that can use it is
+    actually on and Scene Detection is actually off (see process_video_full) --
+    when Scene Detection is already on, the real `segment_pts` already IS this data,
+    and process_video_full reuses it directly instead of calling this. ADR-417:
+    the result is shared between Convergence's "Log Convergence Value per Scene"
+    and nt_auto3d's "Log 3D Strength per Scene" -- whichever asked for it, the other
+    gets the same free cache hit if it's also on. Returns an empty set (the log
+    falls back to one lump whole-movie "scene", unchanged from before this ADR) on
+    any failure -- a bad scan must never crash or block a real conversion."""
     if not video_path or not path.isfile(video_path):
         return set()
     state = getattr(args, "state", None) or {}
@@ -6222,12 +6225,22 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     # log's own boundaries WITHOUT touching `segment_pts` itself -- so EMA/scene-hold
     # resets at cuts (which deliberately only follow the real `segment_pts`) behave
     # exactly as if this ADR did not exist.
+    # ADR-417: also fires for `--auto-divergence-scene-log` (nt_auto3d's own
+    # "Log 3D Strength per Scene"), not just Convergence's log -- same real request,
+    # same fix shape: a user who never turns on Scene Detection for the actual
+    # conversion (own_cuts mode, see nt_auto3d/nt_autostrength/autodiv.py) still gets
+    # the same single real scan's boundaries for BOTH text logs, decoupled from
+    # own_cuts/the real per-frame 3D-strength decisions exactly the same way this
+    # already decoupled Convergence's own log from EMA/scene-hold resets. Whichever
+    # of the two scene-log settings is on triggers the (cached, shared) scan --
+    # either or both can ask for it, the scan itself never runs twice.
     if args.scene_detect:
         # (args.scene_detect_only already returned above -- this point is only ever
         # reached with it False.)
         log_segment_pts = segment_pts
-    elif (getattr(args, "convergence_scene_log", False)
-            and getattr(args, "convergence_mode", "constant") != "constant"):
+    elif ((getattr(args, "convergence_scene_log", False)
+            and getattr(args, "convergence_mode", "constant") != "constant")
+            or getattr(args, "auto_divergence_scene_log", False)):
         log_segment_pts = _ensure_convergence_log_scene_pts(input_filename, args, scene_cache_max_fps)
     else:
         log_segment_pts = set()

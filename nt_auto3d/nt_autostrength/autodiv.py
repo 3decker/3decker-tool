@@ -474,10 +474,13 @@ class _RunState:
 
     def _scene_record(self, divs, cuts):
         """Buffers this batch's frames into the scene log, starting a new scene at
-        each real cut. Uses the SAME `cut` flags Tracker.run() itself just computed
-        (exposed via tracker.last_cuts) rather than re-deriving cut detection a
-        second time -- one source of truth for "is this a new scene", shared with the
-        strength tracking itself.
+        each real cut. `cuts` is either tracker.last_cuts (the live own_cuts/
+        CLIP-similarity guess Tracker.run() itself just computed for the ACTUAL
+        3D-strength decisions -- the original, still-default behavior) or, when the
+        caller supplies real independently-scanned boundaries (ADR-417, see
+        divergences()'s log_reset_pts), those instead -- either way, `cuts` is
+        whichever single source of truth the caller decided "is this a new scene"
+        with for this call, not re-derived here.
 
         The per-scene value logged is a frame-count-weighted MEAN of the actual
         strength applied across that scene's frames. In `cuts` mode this is just the
@@ -494,7 +497,7 @@ class _RunState:
             self._scene_sum += float(d)
             self._scene_total_frames += 1
 
-    def divergences(self, im, depth, args, reset_pts, same_obj=None):
+    def divergences(self, im, depth, args, reset_pts, same_obj=None, log_reset_pts=None):
         # iw3 warps the alpha channel with a second call on the SAME depth
         # tensor; that call must get the same strengths and must not advance
         # anything. Identified by object identity -- NOT by comparing values:
@@ -523,7 +526,18 @@ class _RunState:
         self.last_depth, self.last_divs = obj, divs
         if getattr(args, "auto_divergence_scene_log", False):
             self.scene_log_meta = (self.tracker.mode, lo, hi, typical)
-            self._scene_record(divs, self.tracker.last_cuts)
+            # ADR-417: when the caller supplies log_reset_pts (iw3 core's own
+            # independently-scanned REAL scene cuts -- see _ensure_convergence_log_
+            # scene_pts in iw3/utils.py), group the log by those instead of
+            # tracker.last_cuts (the live CLIP-similarity own_cuts guess used for the
+            # ACTUAL 3D-strength decisions above, unaffected by this). With Scene
+            # Detection off, this is what makes "Log 3D Strength per Scene" report
+            # real detected cuts -- matching Convergence's own scene log -- without
+            # changing how the 3D strength itself is actually chosen at all. Falls
+            # back to the original own_cuts-based grouping for any caller that never
+            # passes log_reset_pts (unchanged, original behavior).
+            cuts_for_log = log_reset_pts if log_reset_pts is not None else self.tracker.last_cuts
+            self._scene_record(divs, cuts_for_log)
         log = os.environ.get("NT_AUTODIV_LOG")
         if log:
             try:
@@ -743,7 +757,14 @@ def _patch_utils(U):
             st = _state(args)
             batch = depth.ndim == 4
             d4, i4 = (depth, im) if batch else (depth.unsqueeze(0), im.unsqueeze(0))
-            divs = st.divergences(i4, d4, args, reset_pts, same_obj=depth)
+            # ADR-417: forward log_reset_pts (iw3 core's independently-scanned real
+            # scene cuts, same source Convergence's own scene log uses -- see
+            # _ensure_convergence_log_scene_pts in iw3/utils.py) so "Log 3D Strength
+            # per Scene" can group by REAL cuts even with Scene Detection off, without
+            # this changing own_cuts/the actual live 3D-strength decisions below at
+            # all -- those still intentionally run on the CLIP-similarity fallback
+            # whenever Scene Detection is off, exactly as before.
+            divs = st.divergences(i4, d4, args, reset_pts, same_obj=depth, log_reset_pts=log_reset_pts)
         overlay = _overlay_on(args) and not st.repeat
 
         def run(d, x, value, count, rp, lrp):

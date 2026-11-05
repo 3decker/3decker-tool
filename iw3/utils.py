@@ -3667,6 +3667,8 @@ def make_output_filename(input_filename, args, video=False):
                 lock_switch = getattr(args, "convergence_lock_switch", DEFAULT_SWITCH)
                 convergence_smoothing += (f"_lockW{to_deciaml(lock_wide, 100, 2)}"
                                           f"C{to_deciaml(lock_closeup, 100, 2)}_{lock_switch}")
+            if args.convergence_mode == "clip_shot" and getattr(args, "clip_shot_symmetric", False):
+                convergence_smoothing += "_sym"
             if getattr(args, "convergence_overlay", False):
                 convergence_smoothing += "_dbg"
             if getattr(args, "convergence_scene_log", False):
@@ -4084,6 +4086,8 @@ def _build_iw3_comment_metadata(args, video=True):
             if (getattr(args, "convergence_lock_switch", DEFAULT_SWITCH) == "snap_ramp"
                     and getattr(args, "convergence_cut_smooth", 0)):
                 comment_parts.append(f"iw3_convergence_cut_smooth={args.convergence_cut_smooth}")
+        if args.convergence_mode == "clip_shot" and getattr(args, "clip_shot_symmetric", False):
+            comment_parts.append("iw3_clip_shot_symmetric=1")
         if getattr(args, "convergence_overlay", False):
             comment_parts.append("iw3_convergence_overlay=1")
         if getattr(args, "convergence_scene_log", False):
@@ -8347,6 +8351,10 @@ def create_parser(required_true=True):
                         help="--convergence-mode shot_lock only: snap (instant jump at the shot-type "
                              "change), snap_ramp (same jump, eased over --convergence-cut-smooth frames), "
                              "blend (no hard switch -- continuously interpolates by the raw CLIP score)")
+    parser.add_argument("--clip-shot-symmetric", action="store_true",
+                        help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
+                             "recede) by the same amount close-ups get pushed down, instead of staying "
+                             "neutral on wide shots (the default, unchanged behavior)")
     parser.add_argument("--convergence-smoothing", type=float, default=0.9,
                         help=("How quickly auto convergence modes (sod_v1/face_detect) react to change. "
                               "Plain per-frame EMA decay by default; with --convergence-scene-hold, instead "
@@ -9320,7 +9328,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             args.convergence, device_id=args.gpu[0],
             decay=getattr(args, "convergence_smoothing", 0.9),
             scene_hold=getattr(args, "convergence_scene_hold", False),
-            cut_smooth=getattr(args, "convergence_cut_smooth", 0))
+            cut_smooth=getattr(args, "convergence_cut_smooth", 0),
+            symmetric_bias=getattr(args, "clip_shot_symmetric", False))
     elif args.convergence_mode == "sod_track":
         try:
             convergence_model = SodTrackEstimator(

@@ -1801,6 +1801,22 @@ class MainFrame(wx.Frame):
               "dependent."))
         self.cbo_convergence_lock_switch.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_lock_switch)
 
+        self.chk_clip_shot_symmetric = wx.CheckBox(
+            self.grp_stereo, label=T("Also Push Wide Shots Up (clip_shot)"), name="chk_clip_shot_symmetric")
+        self.chk_clip_shot_symmetric.SetValue(False)
+        self.chk_clip_shot_symmetric.SetToolTip(
+            T("Only affects clip_shot Convergence Plane mode. By default, clip_shot only ever pushes DOWN "
+              "(toward more pop-out) on close-ups, by up to 0.25, and stays completely neutral on wide "
+              "shots. Turning this on makes wide shots also push UP (toward more recede) by that same "
+              "amount, so both extremes move away from a neutral midpoint instead of only one of them.\n"
+              "Off (default): neutral at closeness=0 (wide), -0.25 at closeness=1 (extreme close-up).\n"
+              "On: +0.25 at closeness=0 (wide), neutral at closeness=0.5 (a true medium shot), -0.25 at "
+              "closeness=1 (extreme close-up) -- the neutral point itself shifts from \"wide\" to "
+              "\"medium,\" a real behavior change, which is why this is off by default rather than "
+              "altering clip_shot's existing behavior for everyone.\n"
+              "Recommended: off unless you specifically want wide shots to recede more, not just close-ups "
+              "to pop more."))
+
         self.chk_convergence_overlay = wx.CheckBox(
             self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
         self.chk_convergence_overlay.SetValue(False)
@@ -3481,6 +3497,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_closeup, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_switch, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_switch, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_convergence_scene_log, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -11266,6 +11283,7 @@ class MainFrame(wx.Frame):
                   self.lbl_convergence_lock_closeup, self.cbo_convergence_lock_closeup,
                   self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch):
             c.Enable(mode == "shot_lock")
+        self.chk_clip_shot_symmetric.Enable(mode == "clip_shot")
         self.update_convergence_cut_smooth()
         self.update_convergence_subject_lock()
         self.update_sod_track_update_interval()
@@ -12283,6 +12301,7 @@ class MainFrame(wx.Frame):
             convergence_lock_wide=float(self.cbo_convergence_lock_wide.GetValue()),
             convergence_lock_closeup=float(self.cbo_convergence_lock_closeup.GetValue()),
             convergence_lock_switch=self.cbo_convergence_lock_switch.GetValue(),
+            clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
             # the add-on is actually installed (create_parser() is only patched with them when it is; the
@@ -13583,6 +13602,7 @@ class MainFrame(wx.Frame):
                            getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE))
         _apply_combo_value(self.cbo_convergence_lock_switch,
                            getattr(args, "convergence_lock_switch", DEFAULT_SHOT_LOCK_SWITCH))
+        self.chk_clip_shot_symmetric.SetValue(bool(getattr(args, "clip_shot_symmetric", False)))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
         self.chk_convergence_scene_log.SetValue(bool(getattr(args, "convergence_scene_log", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
@@ -34740,6 +34760,68 @@ def _self_test_shot_lock_gui_and_cli():
     print("_self_test_shot_lock_gui_and_cli: PASS")
 
 
+def _self_test_clip_shot_symmetric_gui_and_cli():
+    """ADR-424: "Also Push Wide Shots Up" must enable only for clip_shot mode, default
+    off (unchanged clip_shot behavior), round-trip through CLI/restore, and tag the
+    metadata/filename only when both the mode is clip_shot AND the checkbox is on."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.chk_clip_shot_symmetric.IsEnabled(), "must be disabled on constant"
+        assert not frame.chk_clip_shot_symmetric.GetValue(), "must default to off"
+
+        frame.cbo_convergence_mode.SetValue("sod_v1")
+        frame.update_convergence_mode()
+        assert not frame.chk_clip_shot_symmetric.IsEnabled(), "must stay disabled -- clip_shot-only"
+
+        frame.cbo_convergence_mode.SetValue("clip_shot")
+        frame.update_convergence_mode()
+        assert frame.chk_clip_shot_symmetric.IsEnabled(), "must enable once mode is clip_shot"
+
+        frame.chk_clip_shot_symmetric.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.clip_shot_symmetric is True
+        assert "--clip-shot-symmetric" in frame.get_cli_command()
+
+        frame.chk_clip_shot_symmetric.SetValue(False)
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_clip_shot_symmetric.GetValue() is True, "restore must bring the checkbox back"
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.chk_clip_shot_symmetric.IsEnabled(), "must disable again back on constant"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                            "--convergence-mode", "clip_shot", "--clip-shot-symmetric"])
+    on.video_extension = ".mkv"
+    assert "iw3_clip_shot_symmetric=1" in U._build_iw3_comment_metadata(on, video=True)
+    assert "_sym" in U.make_output_filename("movie.mp4", on, video=True)
+
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                             "--convergence-mode", "clip_shot"])
+    off.video_extension = ".mkv"
+    assert "clip_shot_symmetric" not in U._build_iw3_comment_metadata(off, video=True)
+
+    # the flag must do nothing (no tag at all) under a DIFFERENT mode even if raw-set
+    other_mode = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                    "--convergence-mode", "sod_v1", "--clip-shot-symmetric"])
+    other_mode.video_extension = ".mkv"
+    assert "clip_shot_symmetric" not in U._build_iw3_comment_metadata(other_mode, video=True)
+
+    print("_self_test_clip_shot_symmetric_gui_and_cli: PASS")
+
+
 def _self_test_convergence_overlay():
     """ADR-233: real user request -- a debug overlay for Convergence Plane, mirroring Auto 3D
     Strength's own "Show strength on video (debug)". Tests iw3.frame_overlay.stamp_values()
@@ -36402,6 +36484,7 @@ def _run_self_tests():
         _self_test_sod_track_update_interval_gui_and_cli,
         _self_test_convergence_new_modes_gui,
         _self_test_shot_lock_gui_and_cli,
+        _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,
         _self_test_default_output_dir_name_is_3decker,

@@ -4780,7 +4780,17 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         pass
 
     if args.state["convergence_model"] is not None:
-        convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts)
+        if getattr(args, "convergence_mode", "constant") == "shot_lock":
+            # ADR-422: shot_lock needs the REAL, independently-scanned scene
+            # boundaries for its own actual per-scene lock-and-hold decision, not
+            # just for an optional log -- see ShotLockEstimator's own docstring and
+            # the log_segment_pts gate above (ADR-422) that ensures log_reset_pts is
+            # populated for this mode even with both scene-log checkboxes off. No
+            # other convergence mode reads this parameter.
+            convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts,
+                                                           log_reset_pts=log_reset_pts)
+        else:
+            convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts)
         mapper_fn = get_mapper(args.mapper)
         convergence = mapper_fn(convergence)
         depth = mapper_fn(depth)
@@ -6270,13 +6280,20 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     # already decoupled Convergence's own log from EMA/scene-hold resets. Whichever
     # of the two scene-log settings is on triggers the (cached, shared) scan --
     # either or both can ask for it, the scan itself never runs twice.
+    # ADR-422: also fires for `--convergence-mode shot_lock` unconditionally (not
+    # gated on either scene-log checkbox) -- unlike Convergence's log/Auto 3D
+    # Strength's log, shot_lock needs these real boundaries for its own actual
+    # per-scene lock-and-hold behavior, not just for an optional text file. See
+    # ShotLockEstimator's own docstring for why a per-frame AI signal alone (no
+    # real boundary) made this mode visibly "jump around" instead of staying locked.
     if args.scene_detect:
         # (args.scene_detect_only already returned above -- this point is only ever
         # reached with it False.)
         log_segment_pts = segment_pts
     elif ((getattr(args, "convergence_scene_log", False)
             and getattr(args, "convergence_mode", "constant") != "constant")
-            or getattr(args, "auto_divergence_scene_log", False)):
+            or getattr(args, "auto_divergence_scene_log", False)
+            or getattr(args, "convergence_mode", "constant") == "shot_lock"):
         log_segment_pts = _ensure_convergence_log_scene_pts(input_filename, args, scene_cache_max_fps)
     else:
         log_segment_pts = set()

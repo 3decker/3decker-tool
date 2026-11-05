@@ -20,11 +20,26 @@ instance.
 
 Three switch styles between the two locked values (ADR-420, real user choice from
 the three options -- all three built so the user can compare them on real footage,
-not just one guessed as "best"). The "shot type changes" trigger for snap/snap_ramp
-is the CLIP classification itself flipping, checked fresh every frame -- NOT
-`reset_pts` (see ADR-421): this mode needs no real scene boundary at all, unlike
-every other auto convergence mode.
-  snap       instant jump the moment the shot type changes -- simplest, can look
+not just one guessed as "best").
+
+Where snap/snap_ramp get their "shot changed" signal (ADR-421 -> ADR-422): ADR-421
+first tried triggering a switch off the CLIP classification itself flipping, frame
+to frame, since decker runs with Scene Detection permanently off and `reset_pts` is
+therefore always all-False (see that ADR's own note). That worked for the original
+bug (never snapping at all), but traded it for a worse one on real footage: CLIP's
+per-frame score can wobble near the 0.5 line WITHIN one unbroken shot, and every
+wobble was treated as a fresh cut -- "it jumps around" mid-shot, the opposite of
+"locked." ADR-422: this mode now takes `log_reset_pts`, the SAME real,
+independently-scanned scene boundaries Convergence's own scene log and Auto 3D
+Strength's scene log already use (ADR-402/417) and which exist regardless of
+Scene Detection -- so a real cut (not per-frame AI noise) is what triggers a
+switch. Within a real scene, the first `SceneHoldTracker.settle` frames average
+the CONTINUOUS closeness score (not the discrete wide/close pick) to decide which
+side of 0.5 the shot really lands on, then that decision is LOCKED for the rest
+of the scene -- immune to any further per-frame wobble until the next real cut.
+`log_reset_pts=None` (a caller that never threads it through, e.g. process_image)
+falls back to ADR-421's classification-flip trigger unchanged.
+  snap       instant jump the moment a real cut happens -- simplest, can look
              like a visible pop at a hard cut.
   snap_ramp  same instant classification, but eases into the new value over
              --convergence-cut-smooth frames instead of popping in one frame --
@@ -68,7 +83,15 @@ class ShotLockEstimator():
         # below instead, since it has no cut/classification concept at all.
         self.tracker = SceneHoldTracker(decay, self.cut_smooth if self.switch == "snap_ramp" else 0)
         self.blend_ema = None
-        self._last_raw = None  # ADR-421: last frame's classified value, see __call__
+        self._last_raw = None  # ADR-421 fallback path: last frame's classified value
+        # ADR-422: per-real-scene settle-then-lock state (only used when the caller
+        # supplies log_reset_pts). _pending_scene_reset mirrors SceneHoldTracker's own
+        # cut_pending -- True means the FIRST frame seen so far starts a fresh scene
+        # (also true for the very first frame of the whole movie).
+        self._pending_scene_reset = True
+        self._scene_running_c = None
+        self._scene_n = 0
+        self._scene_locked_value = None
 
     def to(self, device):
         """Mirrors ClipShotEstimator.to()/ADR-407 -- moves the composed CLIP model
@@ -87,10 +110,21 @@ class ShotLockEstimator():
         self.tracker.reset()
         self.blend_ema = None
         self._last_raw = None
+        self._pending_scene_reset = True
+        self._scene_running_c = None
+        self._scene_n = 0
+        self._scene_locked_value = None
 
-    def __call__(self, rgb, depth, reset_pts=None):
+    def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None):
         B = depth.shape[0]
         reset_pts = reset_pts if reset_pts is not None else [False] * B
+        # ADR-422: log_reset_pts (when supplied) is the real, independently-scanned
+        # scene-boundary signal -- see module docstring. `has_real_cuts` must be
+        # checked BEFORE defaulting the list below, so "never supplied at all" (use
+        # the ADR-421 classification-flip fallback) stays distinguishable from
+        # "supplied, but no cut on this particular frame."
+        has_real_cuts = log_reset_pts is not None
+        log_reset_pts = log_reset_pts if has_real_cuts else [False] * B
         closeness = self._clip._closeness(rgb, depth)  # 0 = wide .. 1 = close-up
 
         results = []
@@ -105,20 +139,51 @@ class ShotLockEstimator():
                 value = self.blend_ema
                 if reset_pts[i]:
                     self.blend_ema = None
+            elif has_real_cuts:
+                # ADR-422: settle-then-lock within a REAL scene (see module docstring).
+                # While still deciding this scene's value, the PREVIOUS scene's already-
+                # locked value is held completely frozen -- the tracker is deliberately
+                # NOT fed the still-wobbling raw classification during this window (an
+                # earlier version of this fix did, and it corrupted the tracker's own
+                # running average into a blended, non-discrete number). Only once the
+                # decision is final does exactly one transition (snap or ramp) happen,
+                # via a single explicit mark_cut().
+                if self._pending_scene_reset:
+                    self._scene_running_c = None
+                    self._scene_n = 0
+                    self._scene_locked_value = None
+                    self._pending_scene_reset = False
+                if self._scene_locked_value is not None:
+                    value = self.tracker.update(self._scene_locked_value)  # idempotent hold
+                else:
+                    self._scene_running_c = (c if self._scene_running_c is None
+                                             else self._scene_running_c
+                                             + (c - self._scene_running_c) / (self._scene_n + 1))
+                    self._scene_n += 1
+                    if self._scene_n >= self.tracker.settle:
+                        self._scene_locked_value = (self.closeup_value if self._scene_running_c >= 0.5
+                                                    else self.wide_value)
+                        self.tracker.mark_cut()  # the one clean transition into the final decision
+                        value = self.tracker.update(self._scene_locked_value)
+                    elif self.tracker.out is not None:
+                        value = self.tracker.out  # hold the previous scene's value unchanged
+                    else:
+                        # very first scene of the whole movie, still deciding -- no
+                        # previous value exists to hold, so use this frame's own
+                        # single-frame best guess (same limitation every other auto
+                        # mode already has at the very start of a video).
+                        value = self.closeup_value if c >= 0.5 else self.wide_value
+                if log_reset_pts[i]:
+                    # iw3 convention: this is the LAST frame of its scene -- the reset
+                    # takes effect starting next frame (mirrors SceneHoldTracker's own
+                    # cut_pending and every other reset_pts/log_reset_pts use in iw3).
+                    self._pending_scene_reset = True
+                if reset_pts[i]:
+                    self.tracker.mark_cut()
             else:
+                # ADR-421 fallback: no real scene-boundary signal supplied at all for
+                # this call -- snap off the classification itself changing instead.
                 raw = self.closeup_value if c >= 0.5 else self.wide_value
-                # ADR-421: real bug -- decker runs with Scene Detection permanently off
-                # for stereo generation, so `reset_pts` below is always all-False (by
-                # design, same as every other auto convergence mode -- see ADR-402) and
-                # SceneHoldTracker's snap-at-a-cut mechanism was NEVER firing after the
-                # very first frame. snap/snap_ramp degraded into the same slow
-                # settle-then-drift behavior sod_v1/clip_shot fall back to WITHOUT Scene
-                # Detection -- which defeats the entire point of this mode (guaranteed to
-                # land on exactly wide_value or closeup_value). Unlike those modes,
-                # shot_lock doesn't need a real scene boundary at all: the wide/close-up
-                # CLASSIFICATION changing IS the only signal this mode cares about, and
-                # it's already computed fresh every frame -- so treat a classification
-                # flip as its own cut, independent of Scene Detection/reset_pts.
                 if self._last_raw is not None and raw != self._last_raw:
                     self.tracker.mark_cut()
                 self._last_raw = raw

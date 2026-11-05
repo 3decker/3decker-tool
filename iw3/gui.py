@@ -9285,9 +9285,18 @@ class MainFrame(wx.Frame):
             self.load_preset(last_preset_name)
         else:
             self.load_preset()
-        # ADR-428: starts only after the initial restore above, so the first tick never
-        # re-saves over anything before this session's own changes exist.
-        self.autosave_timer.Start(15000)
+        # ADR-428/430: starts only after the initial restore above, so the first tick
+        # never re-saves over anything before this session's own changes exist.
+        # ADR-430: 15 seconds (ADR-428's original interval) turned out to be far too
+        # aggressive -- save_preset()'s underlying wx.lib.agw.persist SaveAndUnregister()
+        # call is genuinely slow on this GUI's large control count (measured 2.6-5+
+        # real seconds per call on dev hardware), and it runs on the main GUI thread, so
+        # every tick froze the whole app for that long -- exactly the real "freezes for
+        # about 2 sec while choosing settings" report. 90 seconds keeps the same
+        # real crash/force-kill protection ADR-428 was built for (losing at most the
+        # last ~90s of changes instead of everything since the last clean close) while
+        # making that unavoidable freeze six times rarer.
+        self.autosave_timer.Start(90000)
         # ADR-249: real user request -- load_preset() above restores every registered
         # control's value from last session's saved iw3-gui.cfg, and these Standalone
         # Tools log boxes get swept into that same generic mechanism with no exception

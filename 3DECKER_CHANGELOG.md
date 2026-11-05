@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 4, 2026
+## Latest Update — November 5, 2026
+
+**Added: shot_lock can now detect "mid shots" too, with its own value, plus a scene log that counts how many of each shot type it found.** Previously shot_lock only ever chose between two values (Wide / Close-Up). It now also recognizes shots that are genuinely neither — a new "Mid Shot Value" setting (default 0.475, halfway between Wide and Close-Up) — using the same AI judgment it already had, just reading its wide-to-close-up scale in three bands instead of two. "Log Convergence Value per Scene" now also tags each scene row `[Wide]` / `[Mid]` / `[Close-Up]` and adds a one-line total at the bottom, e.g. "Shot classification: 12 wide, 4 mid, 9 close-up (of 25 scenes)" — only for shot_lock, every other Convergence mode's log is unchanged.
+
+## Update — November 4, 2026
 
 **Fixed: "Log 3D Strength per Scene" could be checked on and still never produce a file, with no error shown.** This log (a text file saved next to your finished video, listing the 3D Strength used scene-by-scene) was being skipped on a normal single-movie conversion — the most common case there is — because of a timing mix-up in when the save step looked for the data it needed: it checked too early, before that data had actually been built up during the conversion, saw nothing, and quietly gave up without telling you. Convergence's own separate per-scene log was never affected by this and kept working the whole time. Fixed now — the save step checks at the right moment instead. Takes effect on your next conversion.
 
@@ -30,6 +34,8 @@ it matters.
 **Fixed: shot_lock's "snap" and "snap easing" styles could jump around mid-shot instead of staying steady for the whole scene.** The fix above made it react so eagerly that a shot sitting right on the edge between "wide" and "close-up" could flicker back and forth several times within one continuous shot. Fixed properly this time: shot_lock now waits for a real scene change, takes a brief moment to confidently decide which of your two values that new scene should use, then locks to it and holds completely steady until the next real scene change — exactly "changes once per scene, stays steady" as asked. Takes effect on your next conversion.
 
 **Added: clip_shot Convergence mode can now push wide shots up too, not just close-ups down — and how strong that push is is now adjustable.** Previously clip_shot only ever pushed the screen plane toward more pop-out on close-ups, and left wide shots completely untouched, by a fixed amount you couldn't change. A new "Also Push Wide Shots Up (clip_shot)" checkbox, off by default so nothing changes unless you turn it on, makes wide shots push the screen plane the other way (toward more recede) by the same amount — and a new "Bias Strength" setting (default 0.25, matching the old fixed behavior) now controls how strong that push is in both directions at once.
+
+**Added: every setting — including Input and Output — now saves itself automatically every 15 seconds while the app is open, not just when you close it normally.** Before this, your settings were only remembered if you closed the app the normal way; a crash or force-closing it (Task Manager, a power loss) during a long conversion lost everything you'd changed since the last time you closed it cleanly. Now it's always saving quietly in the background, so reopening the app after any kind of exit brings back what you actually had set up.
 
 **Fixed: "Cut Transition Smoothing (frames)" wouldn't let you type anything over 30.** That limit was leftover from before shot_lock existed, which can benefit from longer, gentler transitions since it jumps between two full values instead of smaller automatic adjustments. Raised to 120.
 

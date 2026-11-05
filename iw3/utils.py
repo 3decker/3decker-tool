@@ -55,7 +55,8 @@ from .face_convergence_estimator import FaceConvergenceEstimator
 from .depth_percentile_estimator import DepthPercentileEstimator
 from .clip_shot_estimator import ClipShotEstimator
 from .sod_track_estimator import SodTrackEstimator
-from .shot_lock_estimator import ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH
+from .shot_lock_estimator import (ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE,
+                                  DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH)
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
@@ -3663,9 +3664,11 @@ def make_output_filename(input_filename, args, video=False):
                 # is unused/meaningless for this mode -- the two real locked values and
                 # the switch style go here instead, same convention as sod_v1's subjlock.
                 lock_wide = getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE)
+                lock_mid = getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE)
                 lock_closeup = getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE)
                 lock_switch = getattr(args, "convergence_lock_switch", DEFAULT_SWITCH)
                 convergence_smoothing += (f"_lockW{to_deciaml(lock_wide, 100, 2)}"
+                                          f"M{to_deciaml(lock_mid, 100, 2)}"
                                           f"C{to_deciaml(lock_closeup, 100, 2)}_{lock_switch}")
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
@@ -4083,6 +4086,8 @@ def _build_iw3_comment_metadata(args, video=True):
             # only inside the scene_hold branch.
             comment_parts.append(
                 f"iw3_convergence_lock_wide={getattr(args, 'convergence_lock_wide', DEFAULT_WIDE_VALUE)}")
+            comment_parts.append(
+                f"iw3_convergence_lock_mid={getattr(args, 'convergence_lock_mid', DEFAULT_MID_VALUE)}")
             comment_parts.append(
                 f"iw3_convergence_lock_closeup={getattr(args, 'convergence_lock_closeup', DEFAULT_CLOSEUP_VALUE)}")
             comment_parts.append(
@@ -4707,6 +4712,17 @@ def _format_hms(sec):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def _classify_shot_lock_mean(mean, lock_values):
+    """ADR-429: which of shot_lock's 3 locked target values a scene's logged
+    mean convergence actually landed closest to -- nearest-value match, so this
+    also gives a sensible answer for `blend` switch mode (which never lands on
+    an exact target), not just snap/snap_ramp (which normally do)."""
+    wide, mid, closeup = lock_values
+    label, _ = min((("Wide", wide), ("Mid", mid), ("Close-Up", closeup)),
+                   key=lambda kv: abs(kv[1] - mean))
+    return label
+
+
 def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
     """`in_progress`: ADR-405 -- True for a live, mid-conversion write (see
     _ConvergenceSceneLogState.write_live()), where st.scene_records only holds
@@ -4716,7 +4732,11 @@ def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
     rows themselves are formatted identically either way, and
     finish_convergence_scene_log() always overwrites this with the real,
     complete version (in_progress=False, the default) once the movie finishes."""
-    mode, convergence_value, smoothing, scene_hold, cut_smooth = st.meta or ("sod_v1", 0.5, 0.9, False, 0)
+    # ADR-429 added a 6th element (lock_values) -- tolerate an older/test-built 5-tuple
+    # without it rather than requiring every call site to be updated.
+    meta = st.meta or ("sod_v1", 0.5, 0.9, False, 0, None)
+    mode, convergence_value, smoothing, scene_hold, cut_smooth = meta[:5]
+    lock_values = meta[5] if len(meta) > 5 else None
     header = (f"Convergence Plane: {mode} mode, convergence {convergence_value:g}, "
               f"smoothing {smoothing:g}, scene hold {'on' if scene_hold else 'off'}")
     if scene_hold and cut_smooth:
@@ -4730,10 +4750,18 @@ def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
     lines.append("")
     total_frames = 0
     weighted_sum = 0.0
+    # ADR-429: shot_lock only -- how many scenes landed closest to each of the 3
+    # locked values, reported as a summary tally below.
+    shot_counts = {"Wide": 0, "Mid": 0, "Close-Up": 0}
     for i, (start, end, frames, mean) in enumerate(st.scene_records, 1):
         span = (f"{_format_hms(start / fps)} - {_format_hms(end / fps)}" if fps
                else f"frame {start} - {end}")
-        lines.append(f"Scene {i}   {span}   ({frames} frames)   Convergence: {mean:.2f}")
+        line = f"Scene {i}   {span}   ({frames} frames)   Convergence: {mean:.2f}"
+        if lock_values is not None:
+            label = _classify_shot_lock_mean(mean, lock_values)
+            shot_counts[label] += 1
+            line += f"   [{label}]"
+        lines.append(line)
         total_frames += frames
         weighted_sum += mean * frames
     lines.append("")
@@ -4743,6 +4771,11 @@ def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
                      f"conversion still running): {overall:.2f}")
     else:
         lines.append(f"Average Convergence for whole movie (time-weighted): {overall:.2f}")
+    if lock_values is not None and st.scene_records:
+        so_far = " so far" if in_progress else ""
+        lines.append(
+            f"Shot classification{so_far}: {shot_counts['Wide']} wide, {shot_counts['Mid']} mid, "
+            f"{shot_counts['Close-Up']} close-up (of {len(st.scene_records)} scene(s))")
     return "\n".join(lines) + "\n"
 
 
@@ -4862,12 +4895,22 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
     convergence_scene_log_active = getattr(args, "convergence_scene_log", False) and torch.is_tensor(convergence)
     if convergence_scene_log_active:
         scene_log_state = args.state.setdefault("_convergence_scene_log", _ConvergenceSceneLogState())
+        convergence_mode_for_log = getattr(args, "convergence_mode", "constant")
         scene_log_state.meta = (
-            getattr(args, "convergence_mode", "constant"),
+            convergence_mode_for_log,
             float(args.convergence),
             float(getattr(args, "convergence_smoothing", 0.9) or 0.0),
             bool(getattr(args, "convergence_scene_hold", False)),
             int(getattr(args, "convergence_cut_smooth", 0) or 0),
+            # ADR-429: shot_lock's own 3 locked target values, so the log can tell
+            # which one each scene actually landed closest to and tally a wide/mid/
+            # close-up count -- None for every other mode (nothing to classify against).
+            (
+                (float(getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE)),
+                 float(getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE)),
+                 float(getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE)))
+                if convergence_mode_for_log == "shot_lock" else None
+            ),
         )
         if log_reset_pts is not None:
             rp_for_log = log_reset_pts
@@ -8346,11 +8389,15 @@ def create_parser(required_true=True):
                               "sod_track: sod_v1's saliency model picks a subject once per shot, then a real "
                               "cv2 appearance tracker follows it continuously (see ADR-390 for how this "
                               "differs from --convergence-subject-lock). shot_lock: ADR-420 -- CLIP judges "
-                              "wide vs close-up and uses exactly one of --convergence-lock-wide/-closeup, "
-                              "bypassing the per-scene depth histogram entirely."))
+                              "wide vs mid vs close-up (ADR-429) and uses exactly one of "
+                              "--convergence-lock-wide/-mid/-closeup, bypassing the per-scene depth "
+                              "histogram entirely."))
     parser.add_argument("--convergence-lock-wide", type=float, default=DEFAULT_WIDE_VALUE,
                         help="--convergence-mode shot_lock only: the convergence value used on wide/"
                              "medium-wide shots")
+    parser.add_argument("--convergence-lock-mid", type=float, default=DEFAULT_MID_VALUE,
+                        help="ADR-429: --convergence-mode shot_lock only: the convergence value used on "
+                             "medium shots -- neither clearly wide nor clearly close-up")
     parser.add_argument("--convergence-lock-closeup", type=float, default=DEFAULT_CLOSEUP_VALUE,
                         help="--convergence-mode shot_lock only: the convergence value used on close-up/"
                              "short shots")
@@ -9362,6 +9409,7 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
     elif args.convergence_mode == "shot_lock":
         convergence_model = ShotLockEstimator(
             wide_value=getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE),
+            mid_value=getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE),
             closeup_value=getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE),
             device_id=args.gpu[0],
             switch=getattr(args, "convergence_lock_switch", DEFAULT_SWITCH),

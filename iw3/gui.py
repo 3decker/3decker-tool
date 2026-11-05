@@ -87,7 +87,8 @@ from .moge_model import MODEL_TYPE as MOGE_MODELS
 from . import export_config
 from .inpaint_utils import INPAINT_MODELS
 from .shot_lock_estimator import (
-    DEFAULT_WIDE_VALUE, DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH)
+    DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE, DEFAULT_CLOSEUP_VALUE,
+    DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH)
 
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
@@ -1214,6 +1215,15 @@ class MainFrame(wx.Frame):
         self.stage_start_time = 0
         self.job_start_time = 0
         self.stage_pulse_timer = wx.Timer(self)
+        # ADR-428: real user report -- settings/Input/Output were only ever saved on a
+        # clean window close (on_close() -> save_preset()), so a crash or a forced kill
+        # (very real risk during a multi-hour GPU job, this project's own history has
+        # several of those) lost everything changed since the last clean close. This
+        # timer periodically re-runs that EXACT same, already-proven save_preset() call
+        # (same CONFIG_PATH, same full control registration, Input/Output included --
+        # see save_preset()'s own docstring/code for why those aren't blanked for the
+        # bare/no-name case) instead of only at close. See on_autosave_timer().
+        self.autosave_timer = wx.Timer(self)
         self.depth_model = None
         self.depth_model_type = None
         self.depth_model_device_id = None
@@ -1788,6 +1798,20 @@ class MainFrame(wx.Frame):
               "Recommended: try your own footage and judge by eye -- 0.20 is a real value one user "
               "settled on after comparing sod_v1 against clip_shot scene-by-scene."))
 
+        self.lbl_convergence_lock_mid = wx.StaticText(
+            self.grp_stereo, label=T("Mid Shot Value"))
+        self.cbo_convergence_lock_mid = EditableComboBox(
+            self.grp_stereo, choices=["0.6", "0.5", "0.47", "0.4"], name="cbo_convergence_lock_mid")
+        self.cbo_convergence_lock_mid.SetValue(f"{DEFAULT_MID_VALUE:.2f}")
+        self.cbo_convergence_lock_mid.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode. The Convergence Plane value locked in "
+              "for shots that are neither clearly wide nor clearly close-up -- a medium shot.\n"
+              "How it decides: CLIP (the same AI that judges wide vs. close-up) scores every shot on a "
+              "sliding 0 (wide) to 1 (close-up) scale. Below 1/3 counts as wide, above 2/3 counts as "
+              "close-up, and the middle third -- genuinely neither -- uses this value instead.\n"
+              "Recommended: roughly halfway between Wide Shot Value and Close-Up Value (the default, "
+              "0.475, is exactly halfway between 0.75 and 0.20) -- try your own footage and judge by eye."))
+
         self.lbl_convergence_lock_switch = wx.StaticText(
             self.grp_stereo, label=T("Switch Style"))
         self.cbo_convergence_lock_switch = wx.ComboBox(
@@ -1802,9 +1826,9 @@ class MainFrame(wx.Frame):
               "snap_ramp (recommended): the same instant decision, but eases into the new value over "
               "Cut Transition Smoothing (frames) below instead of popping in one frame. Leaving that at "
               "0 makes this behave exactly like plain snap -- you need to raise it for an actual ramp.\n"
-              "blend: no hard switch at all -- continuously slides between the two values based on how "
-              "wide/close-up CLIP judges the shot. Never jarring, but a shot that's not clearly wide or "
-              "close-up won't land on exactly either of your two values.\n"
+              "blend: no hard switch at all -- continuously slides between Wide Shot Value, Mid Shot "
+              "Value, and Close-Up Value based on how wide/close-up CLIP judges the shot. Never jarring, "
+              "but a shot that's not clearly one of the three won't land on exactly any of your values.\n"
               "Recommended: snap_ramp with Cut Transition Smoothing around 6-12 frames as a starting "
               "point -- try all three on your own footage, since which looks best is genuinely content-"
               "dependent."))
@@ -3520,6 +3544,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_wide, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_closeup, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_closeup, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_mid, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_mid, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_switch, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_switch, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -9198,6 +9224,7 @@ class MainFrame(wx.Frame):
         self.Bind(EVT_TQDM, self.on_tqdm)
         self.Bind(EVT_IW3_STAGE, self.on_stage_change)
         self.Bind(wx.EVT_TIMER, self.on_stage_pulse_timer, self.stage_pulse_timer)
+        self.Bind(wx.EVT_TIMER, self.on_autosave_timer, self.autosave_timer)
         self.Bind(wx.EVT_CLOSE, self.on_close)
         # ADR-240: see _on_idle_remember_scroll_positions()'s own docstring for why this
         # exists -- a collapsible pane's own native Collapse()/Expand() resets its
@@ -9258,6 +9285,9 @@ class MainFrame(wx.Frame):
             self.load_preset(last_preset_name)
         else:
             self.load_preset()
+        # ADR-428: starts only after the initial restore above, so the first tick never
+        # re-saves over anything before this session's own changes exist.
+        self.autosave_timer.Start(15000)
         # ADR-249: real user request -- load_preset() above restores every registered
         # control's value from last session's saved iw3-gui.cfg, and these Standalone
         # Tools log boxes get swept into that same generic mechanism with no exception
@@ -10882,6 +10912,7 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_subject_lock,
             self.cbo_sod_track_update_interval,
             self.cbo_convergence_lock_wide,
+            self.cbo_convergence_lock_mid,
             self.cbo_convergence_lock_closeup,
             self.cbo_clip_shot_bias_strength,
             self.cbo_face_protect,
@@ -10981,6 +11012,7 @@ class MainFrame(wx.Frame):
                 return
             # else: fall through and close immediately, accepting the data loss
 
+        self.autosave_timer.Stop()
         self.save_preset()
         self.save_window_geometry()
         event.Skip()
@@ -11308,6 +11340,7 @@ class MainFrame(wx.Frame):
             # disabled rather than left on and silently doing nothing.
             self.chk_convergence_scene_hold.Enable(mode != "shot_lock")
         for c in (self.lbl_convergence_lock_wide, self.cbo_convergence_lock_wide,
+                  self.lbl_convergence_lock_mid, self.cbo_convergence_lock_mid,
                   self.lbl_convergence_lock_closeup, self.cbo_convergence_lock_closeup,
                   self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch):
             c.Enable(mode == "shot_lock")
@@ -11931,6 +11964,9 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_convergence_lock_closeup.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Close-Up Value"), 0.0, 1.0)
             return None
+        if not validate_number(self.cbo_convergence_lock_mid.GetValue(), 0.0, 1.0, allow_empty=False):
+            self.show_validation_error_message(T("Mid Shot Value"), 0.0, 1.0)
+            return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
@@ -12332,6 +12368,7 @@ class MainFrame(wx.Frame):
             convergence_overlay=self.chk_convergence_overlay.GetValue(),
             convergence_scene_log=self.chk_convergence_scene_log.GetValue(),
             convergence_lock_wide=float(self.cbo_convergence_lock_wide.GetValue()),
+            convergence_lock_mid=float(self.cbo_convergence_lock_mid.GetValue()),
             convergence_lock_closeup=float(self.cbo_convergence_lock_closeup.GetValue()),
             convergence_lock_switch=self.cbo_convergence_lock_switch.GetValue(),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
@@ -12960,6 +12997,23 @@ class MainFrame(wx.Frame):
 
     def on_stage_pulse_timer(self, event):
         self._refresh_stage_status_text()
+
+    def on_autosave_timer(self, event):
+        """ADR-428: periodic safety net on top of the normal save-on-close -- reuses
+        save_preset()'s exact, already-proven logic (same CONFIG_PATH, same full
+        control registration, Input/Output included) so a crash or a forced kill
+        during a long job never loses more than this timer's own interval worth of
+        changes. Deliberately NOT gated on self.processing -- a crash during an
+        active conversion is exactly the real-world case this exists for, and
+        save_preset() only snapshots GUI widget values, it never touches the running
+        job itself. Any failure (a locked/unwritable config file, for instance) is
+        swallowed -- an autosave must never interrupt the user or a running job the
+        way a raised exception inside a wx timer callback can."""
+        try:
+            self.save_preset()
+        except Exception as e:                                       # noqa: BLE001
+            print(f"[iw3] autosave failed ({type(e).__name__}: {e}) -- will retry next tick",
+                  file=sys.stderr)
 
     def _refresh_stage_status_text(self):
         running_for = self._format_duration(time() - self.stage_start_time)
@@ -13633,6 +13687,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_subject_lock, getattr(args, "convergence_subject_lock", 0))
         _apply_combo_value(self.cbo_sod_track_update_interval, getattr(args, "sod_track_update_interval", 1))
         _apply_combo_value(self.cbo_convergence_lock_wide, getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE))
+        _apply_combo_value(self.cbo_convergence_lock_mid, getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE))
         _apply_combo_value(self.cbo_convergence_lock_closeup,
                            getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE))
         _apply_combo_value(self.cbo_convergence_lock_switch,
@@ -31913,6 +31968,64 @@ def _self_test_pop_panes_collapse_independently():
     print("_self_test_pop_panes_collapse_independently: PASS")
 
 
+def _self_test_autosave_timer():
+    """ADR-428: real user report -- settings (including Input/Output) only ever saved
+    on a clean window close, so a crash or forced kill during a long job lost
+    everything changed since the last clean close. Confirms the new periodic
+    autosave timer: starts automatically after the initial startup restore, a timer
+    tick calls the real save_preset() (writing CONFIG_PATH), and a fresh window
+    restores exactly what that tick saved -- Input/Output path included, not just an
+    arbitrary setting. Uses a temp CONFIG_PATH throughout (mock.patch, same
+    established pattern as LAST_PRESET_CONFIG_PATH/PRESET_DIR elsewhere in this
+    file) -- never touches the user's own real saved settings."""
+    import wx
+    import tempfile
+    from unittest import mock
+
+    tmp_cfg = path.join(tempfile.gettempdir(), "iw3_gui_autosave_self_test.cfg")
+    if path.exists(tmp_cfg):
+        os.remove(tmp_cfg)
+
+    app = wx.App()
+    frame = None
+    frame2 = None
+    try:
+        with mock.patch(f"{__name__}.CONFIG_PATH", tmp_cfg):
+            frame = MainFrame()
+            assert frame.autosave_timer.IsRunning(), "autosave timer must start automatically at startup"
+
+            frame.pnl_file.set_input_path("C:\\fake\\input\\movie.mkv")
+            frame.pnl_file.set_output_path("C:\\fake\\output")
+            frame.cbo_divergence.SetValue("3.33")
+
+            frame.on_autosave_timer(None)  # simulate a tick firing, without waiting the real interval
+            assert path.exists(tmp_cfg), "a timer tick must actually write the config file"
+
+            frame.Destroy()
+            frame = None
+
+            frame2 = MainFrame()
+            assert frame2.pnl_file.input_path == "C:\\fake\\input\\movie.mkv", \
+                "Input path must survive a periodic autosave, not just a clean close"
+            assert frame2.pnl_file.output_path == "C:\\fake\\output", \
+                "Output path must survive a periodic autosave, not just a clean close"
+            assert frame2.cbo_divergence.GetValue() == "3.33"
+
+            # on_close() must stop the timer before its own final save (no race with
+            # the window tearing down)
+            frame2.autosave_timer.Stop()
+            assert not frame2.autosave_timer.IsRunning()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        if frame2 is not None:
+            frame2.Destroy()
+        if path.exists(tmp_cfg):
+            os.remove(tmp_cfg)
+        app.Destroy()
+    print("_self_test_autosave_timer: PASS")
+
+
 def _self_test_nt_auto_divergence_controls():
     """ADR-213: 3DECKER's own native "Auto 3D Strength" controls (Rowan's nt_auto3d add-on's own
     GUI-injection is disabled -- it doesn't fit this fork's stereo panel layout, see iw3/__init__.py).
@@ -34755,6 +34868,7 @@ def _self_test_shot_lock_gui_and_cli():
         frame.cbo_convergence_mode.SetValue("shot_lock")
         frame.update_convergence_mode()
         assert frame.cbo_convergence_lock_wide.IsEnabled()
+        assert frame.cbo_convergence_lock_mid.IsEnabled()
         assert frame.cbo_convergence_lock_closeup.IsEnabled()
         assert frame.cbo_convergence_lock_switch.IsEnabled()
         assert not frame.chk_convergence_scene_hold.IsEnabled(), \
@@ -34771,6 +34885,7 @@ def _self_test_shot_lock_gui_and_cli():
             "Cut Transition Smoothing must enable for snap_ramp even with Hold Steady Per Scene off"
 
         frame.cbo_convergence_lock_wide.SetValue("0.8")
+        frame.cbo_convergence_lock_mid.SetValue("0.48")
         frame.cbo_convergence_lock_closeup.SetValue("0.15")
         frame.cbo_convergence_lock_switch.SetValue("blend")  # non-default, so it must show in the CLI command
         frame.on_changed_cbo_convergence_lock_switch(wx.CommandEvent())
@@ -34778,10 +34893,12 @@ def _self_test_shot_lock_gui_and_cli():
         args = frame.parse_args(skip_set_state=True)
         assert args.convergence_mode == "shot_lock"
         assert args.convergence_lock_wide == 0.8
+        assert args.convergence_lock_mid == 0.48
         assert args.convergence_lock_closeup == 0.15
         assert args.convergence_lock_switch == "blend"
         cmd = frame.get_cli_command()
         assert "--convergence-lock-wide" in cmd and "--convergence-lock-closeup" in cmd
+        assert "--convergence-lock-mid" in cmd
         assert "blend" in cmd
 
         frame.cbo_convergence_lock_wide.SetValue("0.75")
@@ -34800,17 +34917,19 @@ def _self_test_shot_lock_gui_and_cli():
     parser = U.create_parser(required_true=False)
     args = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
                               "--convergence-mode", "shot_lock",
-                              "--convergence-lock-wide", "0.8", "--convergence-lock-closeup", "0.15",
+                              "--convergence-lock-wide", "0.8", "--convergence-lock-mid", "0.48",
+                              "--convergence-lock-closeup", "0.15",
                               "--convergence-lock-switch", "snap_ramp", "--convergence-cut-smooth", "8"])
     args.video_extension = ".mkv"
     meta = U._build_iw3_comment_metadata(args, video=True)
     assert "iw3_convergence_lock_wide=0.8" in meta
+    assert "iw3_convergence_lock_mid=0.48" in meta
     assert "iw3_convergence_lock_closeup=0.15" in meta
     assert "iw3_convergence_lock_switch=snap_ramp" in meta
     assert "iw3_convergence_cut_smooth=8" in meta
 
     name = U.make_output_filename("movie.mp4", args, video=True)
-    assert "acshotlock" in name and "lockW80C15_snap_ramp" in name, name
+    assert "acshotlock" in name and "lockW80M48C15_snap_ramp" in name, name
 
     print("_self_test_shot_lock_gui_and_cli: PASS")
 
@@ -36493,6 +36612,7 @@ def _run_self_tests():
         _self_test_inpaint_download_errors,
         _self_test_rowan_model_registration,
         _self_test_face_protect,
+        _self_test_autosave_timer,
         _self_test_nt_auto_divergence_controls,
         _self_test_auto_divergence_metadata_tags,
         _self_test_auto_divergence_cut_smooth,

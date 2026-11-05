@@ -49,10 +49,21 @@ falls back to ADR-421's classification-flip trigger unchanged.
              identical to plain `snap` -- the ramp only exists once that value is
              set above 0.
   blend      no hard classification at all -- continuously interpolates between
-             the two values by the raw closeness score (0 = wide_value, 1 =
-             closeup_value), smoothed by --convergence-smoothing's plain EMA.
-             Never jarring, but a shot that's not clearly wide or close-up won't
-             land on exactly either target value.
+             the three values by the raw closeness score (wide_value at
+             closeness=0, mid_value at closeness=0.5, closeup_value at
+             closeness=1), smoothed by --convergence-smoothing's plain EMA.
+             Never jarring, but a shot that's not clearly wide, medium, or
+             close-up won't land on exactly any target value.
+
+ADR-429: real follow-up question -- "is the AI able to detect mid shots too?"
+The CLIP closeness score was always a continuous 0(wide)..1(close-up) spectrum,
+just read with a single cut point at 0.5 for the original 2-way pick. Rather than
+teaching CLIP a brand new third "medium shot" visual pattern (unlike close-up's
+"one big centered subject" or wide's "busy/distant scene", "medium" has no single
+fixed look -- a synthetic calibration image for it would be a much shakier anchor
+than the other two), this just reads the SAME existing spectrum in three equal
+zones instead of two: below 1/3 is wide, above 2/3 is close-up, and the middle
+third -- genuinely neither -- is the new mid_value. See _classify()/_blend_value().
 """
 import torch
 
@@ -62,14 +73,20 @@ from .convergence_tracker import SceneHoldTracker
 SWITCH_MODES = ("snap", "snap_ramp", "blend")
 DEFAULT_SWITCH = "snap_ramp"
 DEFAULT_WIDE_VALUE = 0.75
+DEFAULT_MID_VALUE = 0.475
 DEFAULT_CLOSEUP_VALUE = 0.20
+# ADR-429: the two cut points splitting the continuous 0(wide)..1(close-up)
+# closeness score into three equal zones -- see module docstring.
+MID_LOW = 1.0 / 3.0
+MID_HIGH = 2.0 / 3.0
 
 
 class ShotLockEstimator():
     def __init__(self, wide_value, closeup_value, device_id, switch=DEFAULT_SWITCH,
-                 decay=0.9, cut_smooth=0):
+                 decay=0.9, cut_smooth=0, mid_value=None):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
+        self.mid_value = float(DEFAULT_MID_VALUE if mid_value is None else mid_value)
         self.switch = switch if switch in SWITCH_MODES else DEFAULT_SWITCH
         self.decay = decay
         self.cut_smooth = int(cut_smooth or 0)
@@ -115,6 +132,26 @@ class ShotLockEstimator():
         self._scene_n = 0
         self._scene_locked_value = None
 
+    def _classify(self, c):
+        """ADR-429: 3-way pick along the same close/wide spectrum the original
+        2-way pick already used (see module docstring) -- below MID_LOW is wide,
+        above MID_HIGH is close-up, the middle third is mid_value."""
+        if c < MID_LOW:
+            return self.wide_value
+        if c > MID_HIGH:
+            return self.closeup_value
+        return self.mid_value
+
+    def _blend_value(self, c):
+        """ADR-429: continuous 3-point version of the same spectrum, for `blend`
+        switch mode only -- wide_value at c=0, mid_value at c=0.5, closeup_value
+        at c=1, straight-line interpolated between each adjacent pair."""
+        if c <= 0.5:
+            t = c / 0.5
+            return self.wide_value + t * (self.mid_value - self.wide_value)
+        t = (c - 0.5) / 0.5
+        return self.mid_value + t * (self.closeup_value - self.mid_value)
+
     def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None):
         B = depth.shape[0]
         reset_pts = reset_pts if reset_pts is not None else [False] * B
@@ -131,7 +168,7 @@ class ShotLockEstimator():
         for i in range(B):
             c = closeness[i].item()
             if self.switch == "blend":
-                raw = self.wide_value + c * (self.closeup_value - self.wide_value)
+                raw = self._blend_value(c)
                 if self.blend_ema is None:
                     self.blend_ema = raw
                 else:
@@ -156,13 +193,14 @@ class ShotLockEstimator():
                 if self._scene_locked_value is not None:
                     value = self.tracker.update(self._scene_locked_value)  # idempotent hold
                 else:
+                    # averaging the continuous score over `settle` frames, then (ADR-429)
+                    # reading it against the 3-zone split in _classify() to decide once.
                     self._scene_running_c = (c if self._scene_running_c is None
                                              else self._scene_running_c
                                              + (c - self._scene_running_c) / (self._scene_n + 1))
                     self._scene_n += 1
                     if self._scene_n >= self.tracker.settle:
-                        self._scene_locked_value = (self.closeup_value if self._scene_running_c >= 0.5
-                                                    else self.wide_value)
+                        self._scene_locked_value = self._classify(self._scene_running_c)
                         self.tracker.mark_cut()  # the one clean transition into the final decision
                         value = self.tracker.update(self._scene_locked_value)
                     elif self.tracker.out is not None:
@@ -172,7 +210,7 @@ class ShotLockEstimator():
                         # previous value exists to hold, so use this frame's own
                         # single-frame best guess (same limitation every other auto
                         # mode already has at the very start of a video).
-                        value = self.closeup_value if c >= 0.5 else self.wide_value
+                        value = self._classify(c)
                 if log_reset_pts[i]:
                     # iw3 convention: this is the LAST frame of its scene -- the reset
                     # takes effect starting next frame (mirrors SceneHoldTracker's own
@@ -183,7 +221,7 @@ class ShotLockEstimator():
             else:
                 # ADR-421 fallback: no real scene-boundary signal supplied at all for
                 # this call -- snap off the classification itself changing instead.
-                raw = self.closeup_value if c >= 0.5 else self.wide_value
+                raw = self._classify(c)
                 if self._last_raw is not None and raw != self._last_raw:
                     self.tracker.mark_cut()
                 self._last_raw = raw

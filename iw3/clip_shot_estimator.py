@@ -211,35 +211,41 @@ class ClipShotEstimator():
     """
 
     # Default (symmetric_bias=False), unchanged since ADR-389:
-    # effective_pos = clamp(convergence_bias - closeness * _BIAS_STRENGTH, 0, 1):
+    # effective_pos = clamp(convergence_bias - closeness * bias_strength, 0, 1):
     # closeness=0 (wide, or CLIP unavailable) -> effective_pos == convergence_bias,
     # unchanged/neutral. closeness=1 (extreme close-up) -> effective_pos shifted toward
-    # 0 by 0.25, biasing toward more foreground pop. 0.25 is a deliberately moderate,
-    # documented constant -- not exposed as a new CLI flag (CS-PROJECT-001: Convergence
-    # Bias is already the right control for "how strong," this just decides how much of
-    # it close-ups get automatically on top of whatever the user already set).
+    # 0 by bias_strength, biasing toward more foreground pop.
     #
     # ADR-424 (symmetric_bias=True, opt-in): real follow-up request -- the default
     # above only ever pushes DOWN on close-ups and stays neutral on wide shots; this
     # makes wide shots push UP (toward recede) by the same amount, so BOTH extremes
     # move away from a neutral midpoint instead of only one of them:
-    # effective_pos = clamp(convergence_bias + (0.5 - closeness) * 2 * _BIAS_STRENGTH, 0, 1).
+    # effective_pos = clamp(convergence_bias + (0.5 - closeness) * 2 * bias_strength, 0, 1).
     # closeness=0.5 (a medium shot, neither wide nor close) -> unchanged/neutral (not
     # closeness=0 as in the default formula -- a real behavior change, which is exactly
     # why this is a separate opt-in rather than altering the existing default).
-    # closeness=0 (wide) -> +0.25. closeness=1 (close-up) -> -0.25. Same _BIAS_STRENGTH,
-    # same cap, just applied in both directions around 0.5 instead of one direction
-    # from 0.
-    _BIAS_STRENGTH = 0.25
+    # closeness=0 (wide) -> +bias_strength. closeness=1 (close-up) -> -bias_strength.
+    # Same constant, same cap, just applied in both directions around 0.5 instead of
+    # one direction from 0 -- so adjusting it moves BOTH ends together, always.
+    #
+    # ADR-425: 0.25 was originally a fixed, undocumented-as-a-setting constant
+    # (CS-PROJECT-001: "Convergence Bias is already the right control for 'how
+    # strong'") -- real follow-up request made it a real, adjustable instance value
+    # instead, once symmetric_bias gave it a second direction worth tuning too.
+    # DEFAULT_BIAS_STRENGTH is still the default/fallback when the caller (or an
+    # older saved preset/command line) doesn't specify one.
+    DEFAULT_BIAS_STRENGTH = 0.25
 
     def __init__(self, convergence, device_id, enable_ema=False, decay=0.9, scene_hold=False, cut_smooth=0,
-                 symmetric_bias=False):
+                 symmetric_bias=False, bias_strength=None):
         self.convergence = convergence
         self.enable_ema = enable_ema
         self.decay = decay
         self.scene_hold = scene_hold
         self.cut_smooth = cut_smooth
         self.symmetric_bias = bool(symmetric_bias)
+        self.bias_strength = (self.DEFAULT_BIAS_STRENGTH if bias_strength is None
+                              else float(bias_strength))
         self.convergence_ema = None
         self.tracker = SceneHoldTracker(decay, cut_smooth)
         self.device = create_device(device_id)
@@ -318,9 +324,9 @@ class ClipShotEstimator():
         results = []
         for i in range(B):
             if self.symmetric_bias:
-                eff_pos = self.convergence + (0.5 - closeness[i].item()) * 2 * self._BIAS_STRENGTH
+                eff_pos = self.convergence + (0.5 - closeness[i].item()) * 2 * self.bias_strength
             else:
-                eff_pos = self.convergence - closeness[i].item() * self._BIAS_STRENGTH
+                eff_pos = self.convergence - closeness[i].item() * self.bias_strength
             eff_pos = max(0.0, min(1.0, eff_pos))
             d = depth[i].flatten()
             p = ConvergenceEstimator._quantile_position(

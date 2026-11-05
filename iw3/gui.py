@@ -1534,6 +1534,15 @@ class MainFrame(wx.Frame):
               "been tested against deliberately fast-cut content like trailers -- try it and judge by eye "
               "rather than assuming a bigger number is better.\n"
               "Recommended: 0 unless you've actually seen a jarring jump at a cut."))
+        self.chk_nt_auto_div_invert = wx.CheckBox(
+            self.grp_stereo, label=T("Invert (wide = more, close-up = less)"), name="chk_nt_auto_div_invert")
+        self.chk_nt_auto_div_invert.SetToolTip(
+            T("What it's for: reverses which end of the shot gets more 3D Strength.\n"
+              "Off (default): wide shots/landscapes get the LEAST, close-ups get the MOST -- mimics how a "
+              "real stereo camera behaves.\n"
+              "On: wide shots/landscapes get the MOST, close-ups get the LEAST.\n"
+              "Auto Range (min, max) above keeps the same meaning either way -- only which shot type each "
+              "end applies to flips."))
         self.chk_nt_auto_div_overlay = wx.CheckBox(self.grp_stereo, label=T("Show strength on video (debug)"),
                                                    name="chk_nt_auto_div_overlay")
         self.chk_nt_auto_div_overlay.SetToolTip(
@@ -1816,6 +1825,21 @@ class MainFrame(wx.Frame):
               "altering clip_shot's existing behavior for everyone.\n"
               "Recommended: off unless you specifically want wide shots to recede more, not just close-ups "
               "to pop more."))
+
+        self.lbl_clip_shot_bias_strength = wx.StaticText(self.grp_stereo, label=T("Bias Strength"))
+        self.cbo_clip_shot_bias_strength = EditableComboBox(
+            self.grp_stereo, choices=["0.1", "0.15", "0.2", "0.25", "0.3", "0.4"],
+            name="cbo_clip_shot_bias_strength")
+        self.cbo_clip_shot_bias_strength.SetValue("0.25")
+        self.cbo_clip_shot_bias_strength.SetToolTip(
+            T("Only affects clip_shot Convergence Plane mode. How far closeness is allowed to bias the "
+              "Convergence position away from your Convergence Bias value -- 0.25 (default) was previously "
+              "a fixed, unchangeable number.\n"
+              "Affects BOTH directions equally: the close-up push-down always, and (only with \"Also Push "
+              "Wide Shots Up\" above turned on) the wide push-up too -- there is only one number, not a "
+              "separate one for each side.\n"
+              "Recommended: 0.25 (the original default) unless you have a specific reason to want a "
+              "stronger or gentler automatic nudge."))
 
         self.chk_convergence_overlay = wx.CheckBox(
             self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
@@ -3473,6 +3497,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_nt_auto_div_stab, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_nt_cut_smooth, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_nt_cut_smooth, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_nt_auto_div_invert, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_scene_log, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -3498,6 +3523,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_convergence_lock_switch, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_switch, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_clip_shot_bias_strength, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_clip_shot_bias_strength, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_convergence_scene_log, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -10856,6 +10883,7 @@ class MainFrame(wx.Frame):
             self.cbo_sod_track_update_interval,
             self.cbo_convergence_lock_wide,
             self.cbo_convergence_lock_closeup,
+            self.cbo_clip_shot_bias_strength,
             self.cbo_face_protect,
             self.cbo_resolution,
             self.cbo_stereo_width,
@@ -11284,6 +11312,8 @@ class MainFrame(wx.Frame):
                   self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch):
             c.Enable(mode == "shot_lock")
         self.chk_clip_shot_symmetric.Enable(mode == "clip_shot")
+        self.lbl_clip_shot_bias_strength.Enable(mode == "clip_shot")
+        self.cbo_clip_shot_bias_strength.Enable(mode == "clip_shot")
         self.update_convergence_cut_smooth()
         self.update_convergence_subject_lock()
         self.update_sod_track_update_interval()
@@ -11548,8 +11578,8 @@ class MainFrame(wx.Frame):
         on = self.chk_nt_auto_div.GetValue()
         for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
                   self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
-                  self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay,
-                  self.chk_nt_auto_div_scene_log):
+                  self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_invert,
+                  self.chk_nt_auto_div_overlay, self.chk_nt_auto_div_scene_log):
             c.Enable(on)
         self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
 
@@ -11900,6 +11930,9 @@ class MainFrame(wx.Frame):
             return None
         if not validate_number(self.cbo_convergence_lock_closeup.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Close-Up Value"), 0.0, 1.0)
+            return None
+        if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
+            self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
         if not validate_number(self.cbo_nt_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
@@ -12302,6 +12335,7 @@ class MainFrame(wx.Frame):
             convergence_lock_closeup=float(self.cbo_convergence_lock_closeup.GetValue()),
             convergence_lock_switch=self.cbo_convergence_lock_switch.GetValue(),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
+            clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
             # the add-on is actually installed (create_parser() is only patched with them when it is; the
@@ -12313,6 +12347,7 @@ class MainFrame(wx.Frame):
             divergence_max=float(self.cbo_nt_div_max.GetValue()),
             auto_divergence_stability=self.cbo_nt_auto_div_stab.GetValue().replace(" ", "-"),
             auto_divergence_cut_smooth=int(self.cbo_nt_cut_smooth.GetValue()),
+            auto_divergence_invert=self.chk_nt_auto_div_invert.GetValue(),
             auto_divergence_overlay=self.chk_nt_auto_div_overlay.GetValue(),
             auto_divergence_scene_log=self.chk_nt_auto_div_scene_log.GetValue(),
             face_protect_strength=float(self.cbo_face_protect.GetValue()),
@@ -13603,6 +13638,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_lock_switch,
                            getattr(args, "convergence_lock_switch", DEFAULT_SHOT_LOCK_SWITCH))
         self.chk_clip_shot_symmetric.SetValue(bool(getattr(args, "clip_shot_symmetric", False)))
+        _apply_combo_value(self.cbo_clip_shot_bias_strength, getattr(args, "clip_shot_bias_strength", 0.25))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
         self.chk_convergence_scene_log.SetValue(bool(getattr(args, "convergence_scene_log", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
@@ -13615,6 +13651,7 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_nt_auto_div_stab,
                            getattr(args, "auto_divergence_stability", "medium").replace("-", " "))
         _apply_combo_value(self.cbo_nt_cut_smooth, getattr(args, "auto_divergence_cut_smooth", 0))
+        self.chk_nt_auto_div_invert.SetValue(bool(getattr(args, "auto_divergence_invert", False)))
         self.chk_nt_auto_div_overlay.SetValue(bool(getattr(args, "auto_divergence_overlay", False)))
         self.chk_nt_auto_div_scene_log.SetValue(bool(getattr(args, "auto_divergence_scene_log", False)))
         _apply_combo_value(self.cbo_face_protect, getattr(args, "face_protect_strength", 0.0))
@@ -31888,8 +31925,8 @@ def _self_test_nt_auto_divergence_controls():
         frame = MainFrame()
         siblings = (frame.cbo_nt_auto_div_mode, frame.lbl_nt_div_range, frame.cbo_nt_div_min,
                    frame.cbo_nt_div_max, frame.lbl_nt_auto_div_stab, frame.cbo_nt_auto_div_stab,
-                   frame.lbl_nt_cut_smooth, frame.cbo_nt_cut_smooth, frame.chk_nt_auto_div_overlay,
-                   frame.chk_nt_auto_div_scene_log)
+                   frame.lbl_nt_cut_smooth, frame.cbo_nt_cut_smooth, frame.chk_nt_auto_div_invert,
+                   frame.chk_nt_auto_div_overlay, frame.chk_nt_auto_div_scene_log)
         assert not frame.chk_nt_auto_div.GetValue() and all(not c.IsEnabled() for c in siblings)
         assert frame.lbl_divergence.GetLabelText() == "3D Strength"
         assert frame.cbo_nt_cut_smooth.GetValue() == "0", "must default to off"
@@ -31904,6 +31941,7 @@ def _self_test_nt_auto_divergence_controls():
         frame.cbo_nt_auto_div_mode.SetValue("cuts")
         frame.cbo_nt_auto_div_stab.SetValue("very high")
         frame.cbo_nt_cut_smooth.SetValue("6")
+        frame.chk_nt_auto_div_invert.SetValue(True)
         frame.chk_nt_auto_div_overlay.SetValue(True)
         frame.chk_nt_auto_div_scene_log.SetValue(True)
         args = frame.parse_args(skip_set_state=True)
@@ -31911,13 +31949,16 @@ def _self_test_nt_auto_divergence_controls():
         assert args.divergence_min == 3.0 and args.divergence_max == 12.0
         assert args.auto_divergence_stability == "very-high" and args.auto_divergence_overlay is True
         assert args.auto_divergence_cut_smooth == 6
+        assert args.auto_divergence_invert is True
         assert args.auto_divergence_scene_log is True
         assert "--auto-divergence" in frame.get_cli_command(), "must show up in Copy Command like any real setting"
+        assert "--auto-divergence-invert" in frame.get_cli_command()
 
         frame.apply_parsed_args_to_gui(args)
         assert frame.chk_nt_auto_div.GetValue() and frame.cbo_nt_div_min.GetValue() == "3.0"
         assert frame.cbo_nt_auto_div_stab.GetValue() == "very high", "restore must undo the dash CLI uses"
         assert frame.cbo_nt_cut_smooth.GetValue() == "6"
+        assert frame.chk_nt_auto_div_invert.GetValue() is True, "invert checkbox must round-trip too"
         assert frame.chk_nt_auto_div_scene_log.GetValue() is True, "scene-log checkbox must round-trip too"
 
         frame.chk_nt_auto_div.SetValue(False)
@@ -31957,6 +31998,16 @@ def _self_test_auto_divergence_metadata_tags():
     assert "iw3_auto_divergence_stability=very-high" in comment
     assert "iw3_auto_divergence_cut_smooth=6" in comment
     assert "iw3_auto_divergence_overlay=1" in comment
+
+    inv = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename",
+        "--auto-divergence", "--auto-divergence-mode", "cuts",
+        "--divergence-min", "3.0", "--divergence-max", "12.0", "--auto-divergence-invert",
+    ])
+    inv.video_extension = ".mkv"
+    assert "_inv" in U.make_output_filename("a.mp4", inv, video=True)
+    assert "iw3_auto_divergence_invert" not in U._build_iw3_comment_metadata(inv, video=True), \
+        "ADR-419's CLI flag has no dedicated comment-metadata tag -- the filename tag is the only record"
 
     # cut-smooth is inert (and untagged) in smooth mode -- it never jumps at all
     smooth_mode = parser.parse_args([
@@ -34174,13 +34225,16 @@ def _self_test_clip_shot_estimator():
         path_result = CS._ensure_clip_visual_weights(progress=False)
     assert path_result == "", "a failed download must return '' instead of raising"
 
-    def make_est():
+    def make_est(symmetric_bias=False, bias_strength=None):
         est = CS.ClipShotEstimator.__new__(CS.ClipShotEstimator)
         est.convergence = 0.6
         est.enable_ema = False
         est.decay = 0.9
         est.scene_hold = False
         est.cut_smooth = 0
+        est.symmetric_bias = symmetric_bias
+        est.bias_strength = (CS.ClipShotEstimator.DEFAULT_BIAS_STRENGTH if bias_strength is None
+                             else bias_strength)
         est.convergence_ema = None
         est.tracker = CS.SceneHoldTracker(0.9)
         est.model = None
@@ -34201,12 +34255,13 @@ def _self_test_clip_shot_estimator():
         assert abs(z_fallback[i].item() - expected.item()) < 1e-6
 
     # bias formula: closeness=1.0 must shift the effective position DOWN by exactly
-    # _BIAS_STRENGTH (more foreground pop); closeness=0.0 must stay neutral.
+    # the default bias strength (more foreground pop); closeness=0.0 must stay neutral.
     est_bias = make_est()
     with mock.patch.object(CS.ClipShotEstimator, "_closeness", return_value=torch.tensor([1.0, 0.0])):
         z_bias = est_bias(rgb, depth)
     expected_close = CE.ConvergenceEstimator._quantile_position(
-        depth[0].flatten(), 0.6 - CS.ClipShotEstimator._BIAS_STRENGTH, depth.device, depth.dtype).clamp(0, 1)
+        depth[0].flatten(), 0.6 - CS.ClipShotEstimator.DEFAULT_BIAS_STRENGTH, depth.device,
+        depth.dtype).clamp(0, 1)
     expected_wide = CE.ConvergenceEstimator._quantile_position(
         depth[1].flatten(), 0.6, depth.device, depth.dtype).clamp(0, 1)
     assert abs(z_bias[0].item() - expected_close.item()) < 1e-6, "closeness=1.0 must bias toward more pop-out"
@@ -34761,9 +34816,10 @@ def _self_test_shot_lock_gui_and_cli():
 
 
 def _self_test_clip_shot_symmetric_gui_and_cli():
-    """ADR-424: "Also Push Wide Shots Up" must enable only for clip_shot mode, default
-    off (unchanged clip_shot behavior), round-trip through CLI/restore, and tag the
-    metadata/filename only when both the mode is clip_shot AND the checkbox is on."""
+    """ADR-424/425: "Also Push Wide Shots Up" and "Bias Strength" must enable only for
+    clip_shot mode, default off/0.25 (unchanged clip_shot behavior), round-trip
+    through CLI/restore, and tag the metadata/filename only when both the mode is
+    clip_shot AND the value is actually non-default."""
     import wx
     from . import utils as U
 
@@ -34775,27 +34831,37 @@ def _self_test_clip_shot_symmetric_gui_and_cli():
         frame.update_convergence_mode()
         assert not frame.chk_clip_shot_symmetric.IsEnabled(), "must be disabled on constant"
         assert not frame.chk_clip_shot_symmetric.GetValue(), "must default to off"
+        assert not frame.cbo_clip_shot_bias_strength.IsEnabled(), "must be disabled on constant"
+        assert frame.cbo_clip_shot_bias_strength.GetValue() == "0.25", "must default to 0.25"
 
         frame.cbo_convergence_mode.SetValue("sod_v1")
         frame.update_convergence_mode()
         assert not frame.chk_clip_shot_symmetric.IsEnabled(), "must stay disabled -- clip_shot-only"
+        assert not frame.cbo_clip_shot_bias_strength.IsEnabled(), "must stay disabled -- clip_shot-only"
 
         frame.cbo_convergence_mode.SetValue("clip_shot")
         frame.update_convergence_mode()
         assert frame.chk_clip_shot_symmetric.IsEnabled(), "must enable once mode is clip_shot"
+        assert frame.cbo_clip_shot_bias_strength.IsEnabled(), "must enable once mode is clip_shot"
 
         frame.chk_clip_shot_symmetric.SetValue(True)
+        frame.cbo_clip_shot_bias_strength.SetValue("0.4")
         args = frame.parse_args(skip_set_state=True)
         assert args.clip_shot_symmetric is True
+        assert args.clip_shot_bias_strength == 0.4
         assert "--clip-shot-symmetric" in frame.get_cli_command()
+        assert "--clip-shot-bias-strength" in frame.get_cli_command()
 
         frame.chk_clip_shot_symmetric.SetValue(False)
+        frame.cbo_clip_shot_bias_strength.SetValue("0.25")
         frame.apply_parsed_args_to_gui(args)
         assert frame.chk_clip_shot_symmetric.GetValue() is True, "restore must bring the checkbox back"
+        assert frame.cbo_clip_shot_bias_strength.GetValue() == "0.4", "restore must bring the value back"
 
         frame.cbo_convergence_mode.SetValue("constant")
         frame.update_convergence_mode()
         assert not frame.chk_clip_shot_symmetric.IsEnabled(), "must disable again back on constant"
+        assert not frame.cbo_clip_shot_bias_strength.IsEnabled(), "must disable again back on constant"
     finally:
         if frame is not None:
             frame.Destroy()
@@ -34803,21 +34869,29 @@ def _self_test_clip_shot_symmetric_gui_and_cli():
 
     parser = U.create_parser(required_true=False)
     on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
-                            "--convergence-mode", "clip_shot", "--clip-shot-symmetric"])
+                            "--convergence-mode", "clip_shot", "--clip-shot-symmetric",
+                            "--clip-shot-bias-strength", "0.4"])
     on.video_extension = ".mkv"
     assert "iw3_clip_shot_symmetric=1" in U._build_iw3_comment_metadata(on, video=True)
-    assert "_sym" in U.make_output_filename("movie.mp4", on, video=True)
+    assert "iw3_clip_shot_bias_strength=0.4" in U._build_iw3_comment_metadata(on, video=True)
+    name = U.make_output_filename("movie.mp4", on, video=True)
+    assert "_sym" in name and "_bias40" in name, name
 
     off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
                              "--convergence-mode", "clip_shot"])
     off.video_extension = ".mkv"
-    assert "clip_shot_symmetric" not in U._build_iw3_comment_metadata(off, video=True)
+    off_comment = U._build_iw3_comment_metadata(off, video=True)
+    assert "clip_shot_symmetric" not in off_comment and "clip_shot_bias_strength" not in off_comment
+    assert "_bias" not in U.make_output_filename("movie.mp4", off, video=True), \
+        "default bias strength (0.25) must not be tagged"
 
-    # the flag must do nothing (no tag at all) under a DIFFERENT mode even if raw-set
+    # the flags must do nothing (no tag at all) under a DIFFERENT mode even if raw-set
     other_mode = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
-                                    "--convergence-mode", "sod_v1", "--clip-shot-symmetric"])
+                                    "--convergence-mode", "sod_v1", "--clip-shot-symmetric",
+                                    "--clip-shot-bias-strength", "0.4"])
     other_mode.video_extension = ".mkv"
-    assert "clip_shot_symmetric" not in U._build_iw3_comment_metadata(other_mode, video=True)
+    other_comment = U._build_iw3_comment_metadata(other_mode, video=True)
+    assert "clip_shot_symmetric" not in other_comment and "clip_shot_bias_strength" not in other_comment
 
     print("_self_test_clip_shot_symmetric_gui_and_cli: PASS")
 

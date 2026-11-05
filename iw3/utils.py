@@ -3667,8 +3667,12 @@ def make_output_filename(input_filename, args, video=False):
                 lock_mid = getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE)
                 lock_closeup = getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE)
                 lock_switch = getattr(args, "convergence_lock_switch", DEFAULT_SWITCH)
+                # ADR-434: no "M..." segment at all when the Mid Shot Value box was left
+                # empty (disabled) -- its absence is itself the signal a renamed file
+                # needs, same "only shown when meaningful" convention as every other tag.
+                mid_tag = f"M{to_deciaml(lock_mid, 100, 2)}" if lock_mid is not None else ""
                 convergence_smoothing += (f"_lockW{to_deciaml(lock_wide, 100, 2)}"
-                                          f"M{to_deciaml(lock_mid, 100, 2)}"
+                                          f"{mid_tag}"
                                           f"C{to_deciaml(lock_closeup, 100, 2)}_{lock_switch}")
                 # ADR-431: snap_ramp's own ramp genuinely uses --convergence-cut-smooth
                 # independently of --convergence-scene-hold (shot_lock never enables that
@@ -4099,8 +4103,12 @@ def _build_iw3_comment_metadata(args, video=True):
             # only inside the scene_hold branch.
             comment_parts.append(
                 f"iw3_convergence_lock_wide={getattr(args, 'convergence_lock_wide', DEFAULT_WIDE_VALUE)}")
-            comment_parts.append(
-                f"iw3_convergence_lock_mid={getattr(args, 'convergence_lock_mid', DEFAULT_MID_VALUE)}")
+            # ADR-434: omitted entirely (not written as "None"/"") when the Mid Shot
+            # Value box was left empty (disabled) -- matches every other optional tag's
+            # "only present when meaningful" convention.
+            lock_mid_val = getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE)
+            if lock_mid_val is not None:
+                comment_parts.append(f"iw3_convergence_lock_mid={lock_mid_val}")
             comment_parts.append(
                 f"iw3_convergence_lock_closeup={getattr(args, 'convergence_lock_closeup', DEFAULT_CLOSEUP_VALUE)}")
             comment_parts.append(
@@ -4726,13 +4734,19 @@ def _format_hms(sec):
 
 
 def _classify_shot_lock_mean(mean, lock_values):
-    """ADR-429: which of shot_lock's 3 locked target values a scene's logged
+    """ADR-429: which of shot_lock's locked target values a scene's logged
     mean convergence actually landed closest to -- nearest-value match, so this
     also gives a sensible answer for `blend` switch mode (which never lands on
-    an exact target), not just snap/snap_ramp (which normally do)."""
+    an exact target), not just snap/snap_ramp (which normally do). ADR-434: mid
+    may be None (the Mid Shot Value box left empty, disabling that 3rd target
+    entirely) -- excluded from the candidates so a scene can only ever be
+    classified Wide or Close-Up in that case, matching _classify()'s own
+    disabled-mid 2-way split."""
     wide, mid, closeup = lock_values
-    label, _ = min((("Wide", wide), ("Mid", mid), ("Close-Up", closeup)),
-                   key=lambda kv: abs(kv[1] - mean))
+    candidates = [("Wide", wide), ("Close-Up", closeup)]
+    if mid is not None:
+        candidates.append(("Mid", mid))
+    label, _ = min(candidates, key=lambda kv: abs(kv[1] - mean))
     return label
 
 
@@ -4786,8 +4800,11 @@ def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
         lines.append(f"Average Convergence for whole movie (time-weighted): {overall:.2f}")
     if lock_values is not None and st.scene_records:
         so_far = " so far" if in_progress else ""
+        # ADR-434: no "0 mid" clutter when the Mid Shot Value box was left empty
+        # (disabled) -- _classify_shot_lock_mean() never returns "Mid" in that case.
+        mid_part = f"{shot_counts['Mid']} mid, " if lock_values[1] is not None else ""
         lines.append(
-            f"Shot classification{so_far}: {shot_counts['Wide']} wide, {shot_counts['Mid']} mid, "
+            f"Shot classification{so_far}: {shot_counts['Wide']} wide, {mid_part}"
             f"{shot_counts['Close-Up']} close-up (of {len(st.scene_records)} scene(s))")
     return "\n".join(lines) + "\n"
 
@@ -4915,12 +4932,16 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             float(getattr(args, "convergence_smoothing", 0.9) or 0.0),
             bool(getattr(args, "convergence_scene_hold", False)),
             int(getattr(args, "convergence_cut_smooth", 0) or 0),
-            # ADR-429: shot_lock's own 3 locked target values, so the log can tell
+            # ADR-429: shot_lock's own locked target values, so the log can tell
             # which one each scene actually landed closest to and tally a wide/mid/
-            # close-up count -- None for every other mode (nothing to classify against).
+            # close-up count -- None for every other mode (nothing to classify
+            # against). ADR-434: the mid slot is itself None when the Mid Shot
+            # Value box was left empty (disabled) -- _classify_shot_lock_mean()
+            # already handles that.
             (
                 (float(getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE)),
-                 float(getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE)),
+                 (lambda m: float(m) if m is not None else None)(
+                     getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE)),
                  float(getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE)))
                 if convergence_mode_for_log == "shot_lock" else None
             ),
@@ -8333,6 +8354,21 @@ def _parse_rife_hybrid_percent(value):
     return float(value)
 
 
+def _parse_optional_mid(value):
+    """argparse type= for --convergence-lock-mid, ADR-434: a plain float, or
+    "none"/empty (case-insensitive) to disable shot_lock's Mid Shot Value tier
+    entirely -- same spirit as _parse_rife_hybrid_percent's own string literal
+    above. None already flows correctly from here through getattr() at every
+    call site (ShotLockEstimator, the filename/metadata tags, the scene log) --
+    they only ever substitute DEFAULT_MID_VALUE when the attribute is MISSING,
+    never when it's present and explicitly None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
 def create_parser(required_true=True):
     class Range(object):
         def __init__(self, start, end):
@@ -8408,9 +8444,11 @@ def create_parser(required_true=True):
     parser.add_argument("--convergence-lock-wide", type=float, default=DEFAULT_WIDE_VALUE,
                         help="--convergence-mode shot_lock only: the convergence value used on wide/"
                              "medium-wide shots")
-    parser.add_argument("--convergence-lock-mid", type=float, default=DEFAULT_MID_VALUE,
+    parser.add_argument("--convergence-lock-mid", type=_parse_optional_mid, default=DEFAULT_MID_VALUE,
                         help="ADR-429: --convergence-mode shot_lock only: the convergence value used on "
-                             "medium shots -- neither clearly wide nor clearly close-up")
+                             "medium shots -- neither clearly wide nor clearly close-up. ADR-434: pass "
+                             "\"none\" (what the GUI's Mid Shot Value box sends when left empty) to disable "
+                             "the middle tier entirely -- a plain 2-way wide/close-up split at 0.5 instead")
     parser.add_argument("--convergence-lock-closeup", type=float, default=DEFAULT_CLOSEUP_VALUE,
                         help="--convergence-mode shot_lock only: the convergence value used on close-up/"
                              "short shots")

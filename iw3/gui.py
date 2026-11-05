@@ -1809,6 +1809,8 @@ class MainFrame(wx.Frame):
               "How it decides: CLIP (the same AI that judges wide vs. close-up) scores every shot on a "
               "sliding 0 (wide) to 1 (close-up) scale. Below 1/3 counts as wide, above 2/3 counts as "
               "close-up, and the middle third -- genuinely neither -- uses this value instead.\n"
+              "Leave this box empty to turn the middle tier off entirely -- every shot then gets a plain "
+              "wide-or-close-up decision at the halfway point, with nothing landing in between.\n"
               "Recommended: roughly halfway between Wide Shot Value and Close-Up Value (the default, "
               "0.475, is exactly halfway between 0.75 and 0.20) -- try your own footage and judge by eye."))
 
@@ -11970,7 +11972,11 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_convergence_lock_closeup.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Close-Up Value"), 0.0, 1.0)
             return None
-        if not validate_number(self.cbo_convergence_lock_mid.GetValue(), 0.0, 1.0, allow_empty=False):
+        # ADR-434: Mid Shot Value is the one exception on this screen allowed to be
+        # empty -- that's the real request ("I don't want to use a Mid Shot value,
+        # can I leave it empty?"), and parse_args() below turns the empty box into
+        # a real convergence_lock_mid=None that disables the whole middle tier.
+        if not validate_number(self.cbo_convergence_lock_mid.GetValue(), 0.0, 1.0, allow_empty=True):
             self.show_validation_error_message(T("Mid Shot Value"), 0.0, 1.0)
             return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
@@ -12374,7 +12380,9 @@ class MainFrame(wx.Frame):
             convergence_overlay=self.chk_convergence_overlay.GetValue(),
             convergence_scene_log=self.chk_convergence_scene_log.GetValue(),
             convergence_lock_wide=float(self.cbo_convergence_lock_wide.GetValue()),
-            convergence_lock_mid=float(self.cbo_convergence_lock_mid.GetValue()),
+            # ADR-434: an empty box means "disabled" -- None, not a parsed float.
+            convergence_lock_mid=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_convergence_lock_mid.GetValue()),
             convergence_lock_closeup=float(self.cbo_convergence_lock_closeup.GetValue()),
             convergence_lock_switch=self.cbo_convergence_lock_switch.GetValue(),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
@@ -13693,7 +13701,13 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_subject_lock, getattr(args, "convergence_subject_lock", 0))
         _apply_combo_value(self.cbo_sod_track_update_interval, getattr(args, "sod_track_update_interval", 1))
         _apply_combo_value(self.cbo_convergence_lock_wide, getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE))
-        _apply_combo_value(self.cbo_convergence_lock_mid, getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE))
+        # ADR-434: None (disabled) must restore to an empty box, not the literal text
+        # "None" _apply_combo_value's plain str() would otherwise produce.
+        _lock_mid_restore = getattr(args, "convergence_lock_mid", DEFAULT_MID_VALUE)
+        if _lock_mid_restore is None:
+            self.cbo_convergence_lock_mid.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_convergence_lock_mid, _lock_mid_restore)
         _apply_combo_value(self.cbo_convergence_lock_closeup,
                            getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE))
         _apply_combo_value(self.cbo_convergence_lock_switch,
@@ -34891,6 +34905,93 @@ def _self_test_shot_lock_gui_and_cli():
     print("_self_test_shot_lock_gui_and_cli: PASS")
 
 
+def _self_test_shot_lock_mid_disabled():
+    """ADR-434: real user request -- "what about if I don't want to use a Mid
+    Shot value, can I leave it empty?" Leaving the Mid Shot Value box empty must
+    validate (not error), parse to convergence_lock_mid=None, round-trip through
+    the CLI command and restore, and make every downstream consumer (the
+    estimator's own classify/blend math, the output filename tag, the embedded
+    metadata comment, and the scene log's shot-classification tally) fall back
+    to a plain 2-way wide/close-up split with no middle value at all."""
+    import wx
+    from . import utils as U
+    from .shot_lock_estimator import ShotLockEstimator
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+
+        frame.cbo_convergence_lock_wide.SetValue("0.65")
+        frame.cbo_convergence_lock_mid.SetValue("")  # the real request: leave it empty
+        frame.cbo_convergence_lock_closeup.SetValue("0.20")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_mid is None, \
+            f"empty Mid Shot Value box must parse to None, got {args.convergence_lock_mid!r}"
+
+        cmd = frame.get_cli_command()
+        assert "--convergence-lock-mid" in cmd, cmd
+
+        # Round-trip the real command line back through the parser (not just
+        # checking string content) -- confirms the None really survives a save/
+        # restore of a command line, not just this one in-memory args object.
+        parser = U.create_parser(required_true=False)
+        reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                      "--convergence-mode", "shot_lock",
+                                      "--convergence-lock-wide", "0.65",
+                                      "--convergence-lock-mid", "none",
+                                      "--convergence-lock-closeup", "0.20"])
+        assert reparsed.convergence_lock_mid is None
+
+        # Restoring a None value must blank the box, not type the literal word "None".
+        frame.cbo_convergence_lock_mid.SetValue("0.45")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_convergence_lock_mid.GetValue() == "", \
+            f"restoring a disabled Mid Shot Value must leave the box empty, got {frame.cbo_convergence_lock_mid.GetValue()!r}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # The estimator itself: with mid disabled, _classify()/_blend_value() must fall
+    # back to a plain 2-way split at 0.5 -- nothing from the 1/3..2/3 "middle third"
+    # concept should still apply. Built via object.__new__(), bypassing __init__
+    # entirely -- a real ShotLockEstimator() loads/downloads a CLIP model via its
+    # composed ClipShotEstimator, which this pure-math check has no need for.
+    est = object.__new__(ShotLockEstimator)
+    est.wide_value, est.closeup_value, est.mid_value = 0.65, 0.20, None
+    assert est._classify(0.40) == 0.65, "just below 0.5 must still count as wide with mid disabled"
+    assert est._classify(0.60) == 0.20, "just above 0.5 must still count as close-up with mid disabled"
+    assert abs(est._blend_value(0.5) - 0.425) < 1e-9, \
+        "blend halfway between wide/close-up with no mid anchor must be their plain midpoint"
+
+    # The filename/metadata tags must omit Mid entirely (no "M..." segment, no
+    # iw3_convergence_lock_mid= line) rather than writing "None"/"none".
+    parser = U.create_parser(required_true=False)
+    args_disabled = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                       "--convergence-mode", "shot_lock",
+                                       "--convergence-lock-wide", "0.65",
+                                       "--convergence-lock-mid", "none",
+                                       "--convergence-lock-closeup", "0.20",
+                                       "--convergence-lock-switch", "snap"])
+    args_disabled.video_extension = ".mkv"
+    name = U.make_output_filename("movie.mp4", args_disabled, video=True)
+    assert "lockW65C20_snap" in name and "M" not in name.split("lockW65")[1].split("_snap")[0], name
+    meta = U._build_iw3_comment_metadata(args_disabled, video=True)
+    assert "iw3_convergence_lock_mid" not in meta, meta
+    assert "iw3_convergence_lock_wide=0.65" in meta and "iw3_convergence_lock_closeup=0.2" in meta
+
+    # The scene log's shot-classification tally: no scene may ever land in a "Mid"
+    # bucket that no longer exists, and the summary line must drop "0 mid" clutter.
+    assert U._classify_shot_lock_mean(0.50, (0.65, None, 0.20)) in ("Wide", "Close-Up")
+    assert U._classify_shot_lock_mean(0.10, (0.65, None, 0.20)) == "Close-Up"
+    assert U._classify_shot_lock_mean(0.60, (0.65, None, 0.20)) == "Wide"
+
+    print("_self_test_shot_lock_mid_disabled: PASS")
+
+
 def _self_test_clip_shot_symmetric_gui_and_cli():
     """ADR-424/425: "Also Push Wide Shots Up" and "Bias Strength" must enable only for
     clip_shot mode, default off/0.25 (unchanged clip_shot behavior), round-trip
@@ -36635,6 +36736,7 @@ def _run_self_tests():
         _self_test_sod_track_update_interval_gui_and_cli,
         _self_test_convergence_new_modes_gui,
         _self_test_shot_lock_gui_and_cli,
+        _self_test_shot_lock_mid_disabled,
         _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

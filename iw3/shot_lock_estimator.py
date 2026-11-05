@@ -64,6 +64,15 @@ fixed look -- a synthetic calibration image for it would be a much shakier ancho
 than the other two), this just reads the SAME existing spectrum in three equal
 zones instead of two: below 1/3 is wide, above 2/3 is close-up, and the middle
 third -- genuinely neither -- is the new mid_value. See _classify()/_blend_value().
+
+ADR-434: real follow-up request -- "what about if I don't want to use a Mid Shot
+value, can I make it empty instead?" `mid_value=None` now means "disabled", not
+"use the default" (the GUI's text box being literally empty is how it asks for
+this; a real default is still filled in for any CLI/preset caller that never
+passes the field at all, same as before -- only an EXPLICIT None, which only the
+empty-box case produces, reaches here). With it disabled, _classify()/_blend_value()
+fall straight back to ADR-420's original 2-way split at the 0.5 midpoint -- no
+middle third, no middle target value, exactly the pre-ADR-429 behavior.
 """
 import torch
 
@@ -86,7 +95,12 @@ class ShotLockEstimator():
                  decay=0.9, cut_smooth=0, mid_value=None):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
-        self.mid_value = float(DEFAULT_MID_VALUE if mid_value is None else mid_value)
+        # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
+        # empty) -- a 2-way split at 0.5, no middle target at all. A caller that
+        # wants the real default and never passes this field at all gets
+        # DEFAULT_MID_VALUE from its own default= (create_parser()/the model
+        # factory), never reaching this None branch.
+        self.mid_value = None if mid_value is None else float(mid_value)
         self.switch = switch if switch in SWITCH_MODES else DEFAULT_SWITCH
         self.decay = decay
         self.cut_smooth = int(cut_smooth or 0)
@@ -135,7 +149,10 @@ class ShotLockEstimator():
     def _classify(self, c):
         """ADR-429: 3-way pick along the same close/wide spectrum the original
         2-way pick already used (see module docstring) -- below MID_LOW is wide,
-        above MID_HIGH is close-up, the middle third is mid_value."""
+        above MID_HIGH is close-up, the middle third is mid_value. ADR-434: with
+        mid_value disabled (None), falls back to the original 2-way split at 0.5."""
+        if self.mid_value is None:
+            return self.wide_value if c < 0.5 else self.closeup_value
         if c < MID_LOW:
             return self.wide_value
         if c > MID_HIGH:
@@ -145,7 +162,11 @@ class ShotLockEstimator():
     def _blend_value(self, c):
         """ADR-429: continuous 3-point version of the same spectrum, for `blend`
         switch mode only -- wide_value at c=0, mid_value at c=0.5, closeup_value
-        at c=1, straight-line interpolated between each adjacent pair."""
+        at c=1, straight-line interpolated between each adjacent pair. ADR-434:
+        with mid_value disabled (None), straight-line interpolated directly from
+        wide_value (c=0) to closeup_value (c=1), no middle anchor point."""
+        if self.mid_value is None:
+            return self.wide_value + c * (self.closeup_value - self.wide_value)
         if c <= 0.5:
             t = c / 0.5
             return self.wide_value + t * (self.mid_value - self.wide_value)

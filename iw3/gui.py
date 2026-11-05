@@ -34939,6 +34939,18 @@ def _self_test_shot_lock_gui_and_cli():
 
     name = U.make_output_filename("movie.mp4", args, video=True)
     assert "acshotlock" in name and "lockW80M48C15_snap_ramp" in name, name
+    # ADR-431: the Cut Transition Smoothing value snap_ramp actually used must show in
+    # the filename too -- it was previously gated behind convergence_scene_hold, which
+    # shot_lock never sets, so it silently never appeared even when real.
+    assert "_cutsm8" in name, name
+
+    # Confirm the tag is absent when there's nothing to show (snap/blend never use
+    # cut_smooth at all, and a 0 value means "no ramp" either way).
+    args_snap = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                   "--convergence-mode", "shot_lock",
+                                   "--convergence-lock-switch", "snap", "--convergence-cut-smooth", "8"])
+    args_snap.video_extension = ".mkv"
+    assert "_cutsm8" not in U.make_output_filename("movie.mp4", args_snap, video=True)
 
     print("_self_test_shot_lock_gui_and_cli: PASS")
 

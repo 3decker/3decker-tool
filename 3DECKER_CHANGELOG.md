@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — November 5, 2026
 
+**Fixed: shot_lock's output filename never showed the Cut Transition Smoothing number it actually used.** It was accidentally tied to a different, unrelated checkbox shot_lock doesn't use, so two test runs that only differed by that one setting looked identical in their filenames. Now shows correctly (e.g. `_cutsm36`) whenever Switch Style is snap_ramp and that value is above 0.
+
 **Fixed: the GUI could freeze for a couple of seconds while you were picking settings.** Caused by yesterday's new auto-save feature — it was saving every 15 seconds, and on this app's large number of settings, each save genuinely takes a few real seconds to finish, freezing the window while it does. Now it saves every 90 seconds instead of every 15, so that unavoidable pause happens far less often. Still far better protected than before auto-save existed (losing at most the last minute and a half of changes on a crash, instead of everything since you last closed the app normally).
 
 **Added: shot_lock can now detect "mid shots" too, with its own value, plus a scene log that counts how many of each shot type it found.** Previously shot_lock only ever chose between two values (Wide / Close-Up). It now also recognizes shots that are genuinely neither — a new "Mid Shot Value" setting (default 0.475, halfway between Wide and Close-Up) — using the same AI judgment it already had, just reading its wide-to-close-up scale in three bands instead of two. "Log Convergence Value per Scene" now also tags each scene row `[Wide]` / `[Mid]` / `[Close-Up]` and adds a one-line total at the bottom, e.g. "Shot classification: 12 wide, 4 mid, 9 close-up (of 25 scenes)" — only for shot_lock, every other Convergence mode's log is unchanged.

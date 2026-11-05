@@ -3670,6 +3670,19 @@ def make_output_filename(input_filename, args, video=False):
                 convergence_smoothing += (f"_lockW{to_deciaml(lock_wide, 100, 2)}"
                                           f"M{to_deciaml(lock_mid, 100, 2)}"
                                           f"C{to_deciaml(lock_closeup, 100, 2)}_{lock_switch}")
+                # ADR-431: snap_ramp's own ramp genuinely uses --convergence-cut-smooth
+                # independently of --convergence-scene-hold (shot_lock never enables that
+                # checkbox at all -- see update_convergence_mode()), but the tag above
+                # (line ~3655) is gated behind convergence_scene_hold, so it never showed
+                # up here even when snap_ramp's ramp was really using a nonzero value --
+                # real finding while comparing two shot_lock test runs' logs, where the
+                # Cut Transition Smoothing actually in effect couldn't be told apart from
+                # the filename at all. Already correctly scoped like this for the
+                # metadata comment (see below) -- just missing from the filename until now.
+                if lock_switch == "snap_ramp":
+                    shot_lock_cut_smooth = int(getattr(args, "convergence_cut_smooth", 0) or 0)
+                    if shot_lock_cut_smooth > 0:
+                        convergence_smoothing += f"_cutsm{shot_lock_cut_smooth}"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"

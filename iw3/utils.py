@@ -4780,6 +4780,7 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         pass
 
     if args.state["convergence_model"] is not None:
+        mapper_fn = get_mapper(args.mapper)
         if getattr(args, "convergence_mode", "constant") == "shot_lock":
             # ADR-422: shot_lock needs the REAL, independently-scanned scene
             # boundaries for its own actual per-scene lock-and-hold decision, not
@@ -4789,11 +4790,24 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             # other convergence mode reads this parameter.
             convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts,
                                                            log_reset_pts=log_reset_pts)
+            depth = mapper_fn(depth)
+            # ADR-423: real confirmed bug -- unlike sod_v1/face_detect/depth_percentile/
+            # clip_shot/sod_track (whose convergence value comes from
+            # ConvergenceEstimator._quantile_position(), a position WITHIN the depth
+            # model's own raw distribution, so it legitimately needs the same
+            # depth-remapping curve applied to stay consistent with `depth` below),
+            # shot_lock's wide_value/closeup_value are literal screen-plane positions
+            # (0 = pops out .. 1 = behind screen) -- exactly like "constant" mode's
+            # plain `args.convergence`, which is used completely unmapped two branches
+            # down. Running shot_lock's value through the SAME nonlinear mapper as
+            # depth was silently shifting it away from the literal number the user set
+            # -- confirmed live: the same logged value looked clearly different from
+            # the identical number entered directly in "constant" mode. Convergence is
+            # intentionally left un-mapped here, matching "constant"'s own behavior.
         else:
             convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts)
-        mapper_fn = get_mapper(args.mapper)
-        convergence = mapper_fn(convergence)
-        depth = mapper_fn(depth)
+            convergence = mapper_fn(convergence)
+            depth = mapper_fn(depth)
     else:
         convergence = args.convergence
         depth = get_mapper(args.mapper)(depth)

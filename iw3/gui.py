@@ -28867,7 +28867,7 @@ def _self_test_post_conversion_vram_release():
         calls = []
         args, depth_model = make_args(waifu2x_upscale, rife_interpolate)
 
-        def post_steps(video_path, a, dv_source=None, scene_source_path=None):
+        def post_steps(video_path, a, dv_source=None, scene_source_path=None, restore_source_path=None):
             calls.append("post_steps")
             if raise_in_post_steps:
                 raise RuntimeError("boom")
@@ -31434,7 +31434,7 @@ def _self_test_process_video_with_job_log_per_movie():
     from unittest.mock import patch
     from . import utils as U
 
-    def fake_process_video(video_file, output_target, args, depth_model, side_model):
+    def fake_process_video(video_file, output_target, args, depth_model, side_model, restore_source_path=None):
         print(f"fake processing: {video_file}", file=sys.stderr)
         return None
 
@@ -34246,6 +34246,7 @@ def _self_test_sod_track_estimator():
     est.decay = 0.9
     est.scene_hold = False
     est.cut_smooth = 0
+    est.track_update_interval = 1  # ADR-400: real __init__ sets this; this bypasses __init__
     est.convergence_ema = None
     est.tracker = ST.SceneHoldTracker(0.9)
     est._track_state = None
@@ -34266,7 +34267,15 @@ def _self_test_sod_track_estimator():
         # first call: no state at all -- must reinitialize via the real SOD model
         z0 = est(rgb, depth, reset_pts=[False])
         assert est._track_state[0]["frames_since_reinit"] == 0
-        assert fake_tracker.inited_with == (0, 0, 4, 8)
+        # ADR-399's _clamp_track_box enforces a minimum tracked-box size
+        # (_TRACK_MIN_BOX_DIM=20) in the frame CSRT actually tracks -- this 8x8
+        # synthetic frame is smaller than that minimum in both dimensions, so the
+        # raw detected box (0, 0, 4, 8) is clamped up to the full frame before
+        # being handed to tracker.init(). The UN-clamped box is still what's stored
+        # for depth sampling (checked via expected0 below), exactly as documented.
+        assert fake_tracker.inited_with == (0, 0, 8, 8)
+        assert est._track_state[0]["box"] == (0, 0, 4, 8), \
+            "the stored box used for depth sampling must stay the raw, UN-clamped SOD detection"
         expected0 = ST.ConvergenceEstimator._quantile_position(
             depth[0, :, 0:8, 0:4].flatten(), 0.5, depth.device, depth.dtype).clamp(0, 1)
         assert abs(z0.item() - expected0.item()) < 1e-6

@@ -1516,7 +1516,7 @@ class MainFrame(wx.Frame):
               "high / very high: settles more slowly and barely moves within a shot.\n"
               "Recommended: medium."))
         self.lbl_nt_cut_smooth = wx.StaticText(self.grp_stereo, label=T("Cut Transition Smoothing (frames)"))
-        self.cbo_nt_cut_smooth = EditableComboBox(self.grp_stereo, choices=["0", "3", "6", "12", "24"],
+        self.cbo_nt_cut_smooth = EditableComboBox(self.grp_stereo, choices=["0", "3", "6", "12", "24", "48"],
                                                   name="cbo_nt_cut_smooth")
         self.cbo_nt_cut_smooth.SetValue("0")
         self.cbo_nt_cut_smooth.SetToolTip(
@@ -1697,7 +1697,7 @@ class MainFrame(wx.Frame):
         self.lbl_convergence_cut_smooth = wx.StaticText(
             self.grp_stereo, label=T("Cut Transition Smoothing (frames)"))
         self.cbo_convergence_cut_smooth = EditableComboBox(
-            self.grp_stereo, choices=["0", "3", "6", "12", "24"], name="cbo_convergence_cut_smooth")
+            self.grp_stereo, choices=["0", "3", "6", "12", "24", "48"], name="cbo_convergence_cut_smooth")
         self.cbo_convergence_cut_smooth.SetValue("0")
         self.cbo_convergence_cut_smooth.SetToolTip(
             T("Only affects Hold Steady Per Scene above (and only when it actually receives a cut, i.e. "
@@ -11916,8 +11916,8 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_convergence_smoothing.GetValue(), 0.0, 0.999):
             self.show_validation_error_message(T("Convergence Smoothing"), 0.0, 0.999)
             return None
-        if not validate_number(self.cbo_convergence_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
-            self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
+        if not validate_number(self.cbo_convergence_cut_smooth.GetValue(), 0, 120, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 120)
             return None
         if not validate_number(self.cbo_convergence_subject_lock.GetValue(), 0, 30, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Subject Lock (frames)"), 0, 30)
@@ -11934,8 +11934,8 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
-        if not validate_number(self.cbo_nt_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
-            self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
+        if not validate_number(self.cbo_nt_cut_smooth.GetValue(), 0, 120, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 120)
             return None
         if not validate_number(self.cbo_pad.GetValue(), 0.0, 10.0, allow_empty=True):
             self.show_validation_error_message(T("Padding"), 0.0, 10.0)

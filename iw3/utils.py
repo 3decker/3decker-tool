@@ -55,6 +55,7 @@ from .face_convergence_estimator import FaceConvergenceEstimator
 from .depth_percentile_estimator import DepthPercentileEstimator
 from .clip_shot_estimator import ClipShotEstimator
 from .sod_track_estimator import SodTrackEstimator
+from .shot_lock_estimator import ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
@@ -3638,7 +3639,15 @@ def make_output_filename(input_filename, args, video=False):
         else:
             edge_dilation = args.edge_dilation
         if args.convergence_mode != "constant":
-            convergence_name = "ac"
+            # ADR-418: the generic "ac" tag alone can't distinguish WHICH AI mode
+            # (sod_track vs clip_shot vs depth_percentile vs face_detect vs sod_v1)
+            # produced a file -- a real user incident ran all four back-to-back with
+            # otherwise-identical settings and they silently overwrote each other's
+            # output .mkv/log files because the filename (and the metadata string the
+            # truncation-safety hash below is computed from) came out byte-for-byte
+            # identical every time. Naming the mode directly (not an invented
+            # abbreviation) makes every run's filename unique and self-explaining.
+            convergence_name = "ac" + args.convergence_mode.replace("_", "")
             convergence_smoothing = f"cs{to_deciaml(getattr(args, 'convergence_smoothing', 0.9), 100, 2)}"
             if getattr(args, "convergence_scene_hold", False):
                 convergence_smoothing += "_scenehold"
@@ -3649,6 +3658,15 @@ def make_output_filename(input_filename, args, video=False):
                 convergence_subject_lock = int(getattr(args, "convergence_subject_lock", 0) or 0)
                 if convergence_subject_lock > 0:
                     convergence_smoothing += f"_subjlock{convergence_subject_lock}"
+            if args.convergence_mode == "shot_lock":
+                # ADR-420: the leading value right after "acshotlock" (args.convergence)
+                # is unused/meaningless for this mode -- the two real locked values and
+                # the switch style go here instead, same convention as sod_v1's subjlock.
+                lock_wide = getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE)
+                lock_closeup = getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE)
+                lock_switch = getattr(args, "convergence_lock_switch", DEFAULT_SWITCH)
+                convergence_smoothing += (f"_lockW{to_deciaml(lock_wide, 100, 2)}"
+                                          f"C{to_deciaml(lock_closeup, 100, 2)}_{lock_switch}")
             if getattr(args, "convergence_overlay", False):
                 convergence_smoothing += "_dbg"
             if getattr(args, "convergence_scene_log", False):
@@ -3871,6 +3889,10 @@ def make_output_filename(input_filename, args, video=False):
             auto_div_cut_smooth = int(getattr(args, "auto_divergence_cut_smooth", 0) or 0)
             if auto_div_cut_smooth > 0 and auto_div_mode != "smooth":
                 auto3d_tag += f"_cutsm{auto_div_cut_smooth}"
+            if getattr(args, "auto_divergence_invert", False):
+                # ADR-419: wide=most/close-up=least instead of the normal direction --
+                # named explicitly so a reversed run never looks like a normal one.
+                auto3d_tag += "_inv"
             if getattr(args, "auto_divergence_overlay", False):
                 auto3d_tag += "dbg"
         else:
@@ -4048,6 +4070,20 @@ def _build_iw3_comment_metadata(args, video=True):
         if (args.convergence_mode == "sod_track"
                 and getattr(args, "sod_track_update_interval", 1) != 1):
             comment_parts.append(f"iw3_sod_track_update_interval={args.sod_track_update_interval}")
+        if args.convergence_mode == "shot_lock":
+            # ADR-420: shot_lock uses convergence_cut_smooth for its own "snap_ramp"
+            # switch style independently of convergence_scene_hold above (which it
+            # doesn't use at all), so it's logged here unconditionally rather than
+            # only inside the scene_hold branch.
+            comment_parts.append(
+                f"iw3_convergence_lock_wide={getattr(args, 'convergence_lock_wide', DEFAULT_WIDE_VALUE)}")
+            comment_parts.append(
+                f"iw3_convergence_lock_closeup={getattr(args, 'convergence_lock_closeup', DEFAULT_CLOSEUP_VALUE)}")
+            comment_parts.append(
+                f"iw3_convergence_lock_switch={getattr(args, 'convergence_lock_switch', DEFAULT_SWITCH)}")
+            if (getattr(args, "convergence_lock_switch", DEFAULT_SWITCH) == "snap_ramp"
+                    and getattr(args, "convergence_cut_smooth", 0)):
+                comment_parts.append(f"iw3_convergence_cut_smooth={args.convergence_cut_smooth}")
         if getattr(args, "convergence_overlay", False):
             comment_parts.append("iw3_convergence_overlay=1")
         if getattr(args, "convergence_scene_log", False):
@@ -8257,7 +8293,8 @@ def create_parser(required_true=True):
     parser.add_argument("--convergence", "-c", type=float, default=0.5,
                         help=("(normalized) distance of convergence plane(screen position). 0-1 is reasonable value"))
     parser.add_argument("--convergence-mode", type=str,
-                        choices=["constant", "sod_v1", "face_detect", "depth_percentile", "clip_shot", "sod_track"],
+                        choices=["constant", "sod_v1", "face_detect", "depth_percentile", "clip_shot",
+                                 "sod_track", "shot_lock"],
                         default="constant",
                         help=("auto convergence mode. constant: fixed value. sod_v1: AI saliency model picks "
                               "the subject every frame. face_detect: centers on detected faces. "
@@ -8265,7 +8302,20 @@ def create_parser(required_true=True):
                               "clip_shot: depth_percentile biased by a CLIP close-up/wide-shot judgment. "
                               "sod_track: sod_v1's saliency model picks a subject once per shot, then a real "
                               "cv2 appearance tracker follows it continuously (see ADR-390 for how this "
-                              "differs from --convergence-subject-lock)."))
+                              "differs from --convergence-subject-lock). shot_lock: ADR-420 -- CLIP judges "
+                              "wide vs close-up and uses exactly one of --convergence-lock-wide/-closeup, "
+                              "bypassing the per-scene depth histogram entirely."))
+    parser.add_argument("--convergence-lock-wide", type=float, default=DEFAULT_WIDE_VALUE,
+                        help="--convergence-mode shot_lock only: the convergence value used on wide/"
+                             "medium-wide shots")
+    parser.add_argument("--convergence-lock-closeup", type=float, default=DEFAULT_CLOSEUP_VALUE,
+                        help="--convergence-mode shot_lock only: the convergence value used on close-up/"
+                             "short shots")
+    parser.add_argument("--convergence-lock-switch", type=str,
+                        choices=["snap", "snap_ramp", "blend"], default=DEFAULT_SWITCH,
+                        help="--convergence-mode shot_lock only: snap (instant jump at the shot-type "
+                             "change), snap_ramp (same jump, eased over --convergence-cut-smooth frames), "
+                             "blend (no hard switch -- continuously interpolates by the raw CLIP score)")
     parser.add_argument("--convergence-smoothing", type=float, default=0.9,
                         help=("How quickly auto convergence modes (sod_v1/face_detect) react to change. "
                               "Plain per-frame EMA decay by default; with --convergence-scene-hold, instead "
@@ -9256,6 +9306,14 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
                 f"pip install opencv-contrib-python==4.10.0.84\n"
                 f"Error: {type(e).__name__}: {e}"
             ) from e
+    elif args.convergence_mode == "shot_lock":
+        convergence_model = ShotLockEstimator(
+            wide_value=getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE),
+            closeup_value=getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE),
+            device_id=args.gpu[0],
+            switch=getattr(args, "convergence_lock_switch", DEFAULT_SWITCH),
+            decay=getattr(args, "convergence_smoothing", 0.9),
+            cut_smooth=getattr(args, "convergence_cut_smooth", 0))
 
     if args.export_disparity:
         args.export = True

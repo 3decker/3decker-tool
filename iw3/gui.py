@@ -86,6 +86,8 @@ from .metric3d_model import MODEL_FILES as METRIC3D_MODELS
 from .moge_model import MODEL_TYPE as MOGE_MODELS
 from . import export_config
 from .inpaint_utils import INPAINT_MODELS
+from .shot_lock_estimator import (
+    DEFAULT_WIDE_VALUE, DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH)
 
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
@@ -1555,7 +1557,8 @@ class MainFrame(wx.Frame):
         self.lbl_convergence = wx.StaticText(self.grp_stereo, label=T("Convergence Plane"))
         self.cbo_convergence_mode = wx.ComboBox(
             self.grp_stereo,
-            choices=["constant", "sod_v1", "face_detect", "depth_percentile", "clip_shot", "sod_track"],
+            choices=["constant", "sod_v1", "face_detect", "depth_percentile", "clip_shot", "sod_track",
+                     "shot_lock"],
             name="cbo_convergence_mode")
         self.cbo_convergence_mode.SetEditable(False)
         self.cbo_convergence_mode.SetSelection(0)
@@ -1581,6 +1584,10 @@ class MainFrame(wx.Frame):
               "in video editing software) follows that subject's actual appearance continuously -- "
               "different from Subject Lock below, which only affects HOW OFTEN sod_v1 is allowed to switch "
               "which freshly re-detected region it's using, not genuine frame-to-frame tracking.\n"
+              "shot_lock: skips the per-scene depth math entirely -- a CLIP AI model judges wide vs. "
+              "close-up and locks the screen depth to exactly one of two values you set below (Wide "
+              "Shot Value / Close-Up Value), with your choice of how it switches between them (Switch "
+              "Style below).\n"
               "Con of sod_v1/face_detect/sod_track/clip_shot: every time the convergence point moves — even "
               "smoothed — your eyes have to physically readjust their focus angle to keep the image "
               "comfortable to view. By default, sod_v1 re-evaluates every frame and can drift even WITHIN a "
@@ -1749,6 +1756,50 @@ class MainFrame(wx.Frame):
               "of every frame.\n"
               "Recommended: 1 (default) unless you specifically want more speed and your content doesn't "
               "have fast-moving subjects within a single shot -- try 2 first and judge by eye."))
+
+        self.lbl_convergence_lock_wide = wx.StaticText(
+            self.grp_stereo, label=T("Wide Shot Value"))
+        self.cbo_convergence_lock_wide = EditableComboBox(
+            self.grp_stereo, choices=["0.9", "0.75", "0.6", "0.5"], name="cbo_convergence_lock_wide")
+        self.cbo_convergence_lock_wide.SetValue(f"{DEFAULT_WIDE_VALUE:.2f}")
+        self.cbo_convergence_lock_wide.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode. The Convergence Plane value locked in "
+              "for every wide/medium-wide shot, regardless of that scene's own depth content.\n"
+              "Recommended: try your own footage and judge by eye -- 0.75 is a real value one user "
+              "settled on after comparing sod_v1 against clip_shot scene-by-scene."))
+
+        self.lbl_convergence_lock_closeup = wx.StaticText(
+            self.grp_stereo, label=T("Close-Up Value"))
+        self.cbo_convergence_lock_closeup = EditableComboBox(
+            self.grp_stereo, choices=["0.4", "0.3", "0.2", "0.1"], name="cbo_convergence_lock_closeup")
+        self.cbo_convergence_lock_closeup.SetValue(f"{DEFAULT_CLOSEUP_VALUE:.2f}")
+        self.cbo_convergence_lock_closeup.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode. The Convergence Plane value locked in "
+              "for every close-up/short shot, regardless of that scene's own depth content.\n"
+              "Recommended: try your own footage and judge by eye -- 0.20 is a real value one user "
+              "settled on after comparing sod_v1 against clip_shot scene-by-scene."))
+
+        self.lbl_convergence_lock_switch = wx.StaticText(
+            self.grp_stereo, label=T("Switch Style"))
+        self.cbo_convergence_lock_switch = wx.ComboBox(
+            self.grp_stereo, choices=["snap", "snap_ramp", "blend"], name="cbo_convergence_lock_switch")
+        self.cbo_convergence_lock_switch.SetEditable(False)
+        self.cbo_convergence_lock_switch.SetStringSelection(DEFAULT_SHOT_LOCK_SWITCH)
+        self.cbo_convergence_lock_switch.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode. How it moves between Wide Shot Value and "
+              "Close-Up Value when the shot type changes.\n"
+              "snap: jumps straight to the new value the instant the shot type changes -- simplest, but "
+              "can look like a visible pop right at a hard cut.\n"
+              "snap_ramp (recommended): the same instant decision, but eases into the new value over "
+              "Cut Transition Smoothing (frames) below instead of popping in one frame. Leaving that at "
+              "0 makes this behave exactly like plain snap -- you need to raise it for an actual ramp.\n"
+              "blend: no hard switch at all -- continuously slides between the two values based on how "
+              "wide/close-up CLIP judges the shot. Never jarring, but a shot that's not clearly wide or "
+              "close-up won't land on exactly either of your two values.\n"
+              "Recommended: snap_ramp with Cut Transition Smoothing around 6-12 frames as a starting "
+              "point -- try all three on your own footage, since which looks best is genuinely content-"
+              "dependent."))
+        self.cbo_convergence_lock_switch.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_lock_switch)
 
         self.chk_convergence_overlay = wx.CheckBox(
             self.grp_stereo, label=T("Show Convergence on Video (debug)"), name="chk_convergence_overlay")
@@ -3424,6 +3475,12 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_subject_lock, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_sod_track_update_interval, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_sod_track_update_interval, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_wide, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_wide, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_closeup, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_closeup, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_switch, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_switch, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_overlay, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_convergence_scene_log, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_max_negative_parallax, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -10780,6 +10837,8 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_cut_smooth,
             self.cbo_convergence_subject_lock,
             self.cbo_sod_track_update_interval,
+            self.cbo_convergence_lock_wide,
+            self.cbo_convergence_lock_closeup,
             self.cbo_face_protect,
             self.cbo_resolution,
             self.cbo_stereo_width,
@@ -11188,16 +11247,25 @@ class MainFrame(wx.Frame):
         self.update_edge_dilation()
 
     def update_convergence_mode(self):
-        if self.cbo_convergence_mode.GetValue() == "constant":
+        mode = self.cbo_convergence_mode.GetValue()
+        if mode == "constant":
             self.cbo_convergence_smoothing.Disable()
             self.chk_convergence_scene_hold.Disable()
             self.chk_convergence_overlay.Disable()
             self.chk_convergence_scene_log.Disable()
         else:
             self.cbo_convergence_smoothing.Enable()
-            self.chk_convergence_scene_hold.Enable()
             self.chk_convergence_overlay.Enable()
             self.chk_convergence_scene_log.Enable()
+            # shot_lock has its own Switch Style (snap/snap_ramp/blend) in place of the
+            # generic Hold Steady Per Scene -- that checkbox's own EMA/scene-hold logic
+            # is simply never read for this mode (see ShotLockEstimator), so it's kept
+            # disabled rather than left on and silently doing nothing.
+            self.chk_convergence_scene_hold.Enable(mode != "shot_lock")
+        for c in (self.lbl_convergence_lock_wide, self.cbo_convergence_lock_wide,
+                  self.lbl_convergence_lock_closeup, self.cbo_convergence_lock_closeup,
+                  self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch):
+            c.Enable(mode == "shot_lock")
         self.update_convergence_cut_smooth()
         self.update_convergence_subject_lock()
         self.update_sod_track_update_interval()
@@ -11205,10 +11273,18 @@ class MainFrame(wx.Frame):
     def on_changed_cbo_convergence_mode(self, event):
         self.update_convergence_mode()
 
+    def on_changed_cbo_convergence_lock_switch(self, event):
+        self.update_convergence_cut_smooth()
+
     def update_convergence_cut_smooth(self):
-        # Only meaningful once Hold Steady Per Scene can actually fire (mode != constant) AND is checked --
-        # it eases that mechanism's own cut-snap, so it's inert (and kept disabled) otherwise.
-        on = self.cbo_convergence_mode.GetValue() != "constant" and self.chk_convergence_scene_hold.GetValue()
+        # Meaningful in two unrelated cases: (1) Hold Steady Per Scene is checked (any AI
+        # mode except shot_lock, which never enables that checkbox at all -- see above), or
+        # (2) shot_lock mode with Switch Style set to snap_ramp, which reuses this same
+        # frame count for its own cut-to-cut ramp (see ShotLockEstimator) independently of
+        # Hold Steady Per Scene.
+        mode = self.cbo_convergence_mode.GetValue()
+        on = ((mode != "constant" and self.chk_convergence_scene_hold.GetValue())
+              or (mode == "shot_lock" and self.cbo_convergence_lock_switch.GetValue() == "snap_ramp"))
         self.lbl_convergence_cut_smooth.Enable(on)
         self.cbo_convergence_cut_smooth.Enable(on)
 
@@ -11801,6 +11877,12 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_sod_track_update_interval.GetValue(), 1, 10, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Tracking Update Interval"), 1, 10)
             return None
+        if not validate_number(self.cbo_convergence_lock_wide.GetValue(), 0.0, 1.0, allow_empty=False):
+            self.show_validation_error_message(T("Wide Shot Value"), 0.0, 1.0)
+            return None
+        if not validate_number(self.cbo_convergence_lock_closeup.GetValue(), 0.0, 1.0, allow_empty=False):
+            self.show_validation_error_message(T("Close-Up Value"), 0.0, 1.0)
+            return None
         if not validate_number(self.cbo_nt_cut_smooth.GetValue(), 0, 30, is_int=True, allow_empty=False):
             self.show_validation_error_message(T("Cut Transition Smoothing (frames)"), 0, 30)
             return None
@@ -12198,6 +12280,9 @@ class MainFrame(wx.Frame):
             sod_track_update_interval=int(self.cbo_sod_track_update_interval.GetValue()),
             convergence_overlay=self.chk_convergence_overlay.GetValue(),
             convergence_scene_log=self.chk_convergence_scene_log.GetValue(),
+            convergence_lock_wide=float(self.cbo_convergence_lock_wide.GetValue()),
+            convergence_lock_closeup=float(self.cbo_convergence_lock_closeup.GetValue()),
+            convergence_lock_switch=self.cbo_convergence_lock_switch.GetValue(),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
             # Rowan's Auto 3D Strength (nt_auto3d, ADR-213) -- these fields exist on args whether or not
             # the add-on is actually installed (create_parser() is only patched with them when it is; the
@@ -13493,6 +13578,11 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_convergence_cut_smooth, getattr(args, "convergence_cut_smooth", 0))
         _apply_combo_value(self.cbo_convergence_subject_lock, getattr(args, "convergence_subject_lock", 0))
         _apply_combo_value(self.cbo_sod_track_update_interval, getattr(args, "sod_track_update_interval", 1))
+        _apply_combo_value(self.cbo_convergence_lock_wide, getattr(args, "convergence_lock_wide", DEFAULT_WIDE_VALUE))
+        _apply_combo_value(self.cbo_convergence_lock_closeup,
+                           getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE))
+        _apply_combo_value(self.cbo_convergence_lock_switch,
+                           getattr(args, "convergence_lock_switch", DEFAULT_SHOT_LOCK_SWITCH))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
         self.chk_convergence_scene_log.SetValue(bool(getattr(args, "convergence_scene_log", False)))
         _apply_combo_value(self.cbo_max_negative_parallax, getattr(args, "max_negative_parallax", 1.0))
@@ -34554,6 +34644,93 @@ def _self_test_convergence_new_modes_gui():
     print("_self_test_convergence_new_modes_gui: PASS")
 
 
+def _self_test_shot_lock_gui_and_cli():
+    """ADR-420: shot_lock must be a real, selectable Convergence Plane choice; its
+    three dedicated controls (Wide Shot Value / Close-Up Value / Switch Style) must
+    enable ONLY for this mode; the generic Hold Steady Per Scene checkbox must stay
+    disabled for it (shot_lock has its own Switch Style instead -- it never reads
+    convergence_scene_hold at all); Cut Transition Smoothing must enable for
+    shot_lock specifically when (and only when) Switch Style is snap_ramp,
+    independently of Hold Steady Per Scene; and all three new fields must round-trip
+    through the CLI/job-log metadata and the output filename tag."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert "shot_lock" in list(frame.cbo_convergence_mode.GetItems())
+
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_lock_wide.IsEnabled()
+        assert not frame.cbo_convergence_lock_closeup.IsEnabled()
+        assert not frame.cbo_convergence_lock_switch.IsEnabled()
+
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        assert frame.cbo_convergence_lock_wide.IsEnabled()
+        assert frame.cbo_convergence_lock_closeup.IsEnabled()
+        assert frame.cbo_convergence_lock_switch.IsEnabled()
+        assert not frame.chk_convergence_scene_hold.IsEnabled(), \
+            "Hold Steady Per Scene must stay disabled for shot_lock -- it has its own Switch Style"
+
+        frame.cbo_convergence_lock_switch.SetValue("snap")
+        frame.on_changed_cbo_convergence_lock_switch(wx.CommandEvent())
+        assert not frame.cbo_convergence_cut_smooth.IsEnabled(), \
+            "Cut Transition Smoothing must stay off for plain snap"
+
+        frame.cbo_convergence_lock_switch.SetValue("snap_ramp")
+        frame.on_changed_cbo_convergence_lock_switch(wx.CommandEvent())
+        assert frame.cbo_convergence_cut_smooth.IsEnabled(), \
+            "Cut Transition Smoothing must enable for snap_ramp even with Hold Steady Per Scene off"
+
+        frame.cbo_convergence_lock_wide.SetValue("0.8")
+        frame.cbo_convergence_lock_closeup.SetValue("0.15")
+        frame.cbo_convergence_lock_switch.SetValue("blend")  # non-default, so it must show in the CLI command
+        frame.on_changed_cbo_convergence_lock_switch(wx.CommandEvent())
+        frame.cbo_convergence_cut_smooth.SetValue("8")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_mode == "shot_lock"
+        assert args.convergence_lock_wide == 0.8
+        assert args.convergence_lock_closeup == 0.15
+        assert args.convergence_lock_switch == "blend"
+        cmd = frame.get_cli_command()
+        assert "--convergence-lock-wide" in cmd and "--convergence-lock-closeup" in cmd
+        assert "blend" in cmd
+
+        frame.cbo_convergence_lock_wide.SetValue("0.75")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_convergence_lock_wide.GetValue() == "0.8", "restore must bring the value back"
+
+        frame.cbo_convergence_mode.SetValue("sod_v1")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_lock_wide.IsEnabled(), "must disable again off shot_lock"
+        assert frame.chk_convergence_scene_hold.IsEnabled(), "sod_v1 must re-enable Hold Steady Per Scene"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    args = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                              "--convergence-mode", "shot_lock",
+                              "--convergence-lock-wide", "0.8", "--convergence-lock-closeup", "0.15",
+                              "--convergence-lock-switch", "snap_ramp", "--convergence-cut-smooth", "8"])
+    args.video_extension = ".mkv"
+    meta = U._build_iw3_comment_metadata(args, video=True)
+    assert "iw3_convergence_lock_wide=0.8" in meta
+    assert "iw3_convergence_lock_closeup=0.15" in meta
+    assert "iw3_convergence_lock_switch=snap_ramp" in meta
+    assert "iw3_convergence_cut_smooth=8" in meta
+
+    name = U.make_output_filename("movie.mp4", args, video=True)
+    assert "acshotlock" in name and "lockW80C15_snap_ramp" in name, name
+
+    print("_self_test_shot_lock_gui_and_cli: PASS")
+
+
 def _self_test_convergence_overlay():
     """ADR-233: real user request -- a debug overlay for Convergence Plane, mirroring Auto 3D
     Strength's own "Show strength on video (debug)". Tests iw3.frame_overlay.stamp_values()
@@ -36215,6 +36392,7 @@ def _run_self_tests():
         _self_test_sod_track_update_interval,
         _self_test_sod_track_update_interval_gui_and_cli,
         _self_test_convergence_new_modes_gui,
+        _self_test_shot_lock_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,
         _self_test_default_output_dir_name_is_3decker,

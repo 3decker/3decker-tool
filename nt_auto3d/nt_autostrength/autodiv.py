@@ -511,6 +511,17 @@ class _RunState:
         self.repeat = False
         scores, embs = self.estimator(im, depth)
         scores = [float(s) for s in scores]
+        if getattr(args, "auto_divergence_invert", False):
+            # ADR-419: strength_curve() always treats closeness=0 (wide) as `lo` and
+            # closeness=1 (close-up) as `hi` -- it even sorts lo/hi itself so the two
+            # can never be swapped just by typing divergence_max < divergence_min
+            # (see strength_curve()'s own `lo, hi = min(lo, hi), max(lo, hi)`). The
+            # simplest correct way to reverse which end of the shot gets more is to
+            # invert the INPUT instead: feed it "wideness" (1 - closeness) rather
+            # than closeness. own_cuts/the cut tracker below still sees the real,
+            # un-inverted embeddings/scores sign for shot-change detection -- only
+            # the strength curve's input changes.
+            scores = [1.0 - s for s in scores]
         own_cuts = not getattr(args, "scene_detect", False)
         lo = float(getattr(args, "divergence_min", DEFAULT_MIN))
         hi = float(getattr(args, "divergence_max", DEFAULT_MAX))
@@ -884,6 +895,10 @@ def _patch_utils(U):
                        help="ease the strength change at a cut (cuts/hybrid) into a ramp over this "
                             "many frames instead of an instant jump; 0 (default) is the original, "
                             "unchanged instant jump")
+        g.add_argument("--auto-divergence-invert", action="store_true",
+                       help="ADR-419: reverse which end of the shot gets more -- wide shots "
+                            "and landscapes get the MOST 3D strength, close-ups get the LEAST, "
+                            "instead of the normal (real-camera-like) direction")
         g.add_argument("--auto-divergence-overlay", action="store_true",
                        help="debug: write the strength used into the top-left of every frame")
         g.add_argument("--auto-divergence-scene-log", action="store_true",
@@ -957,15 +972,24 @@ def _add_controls(self, T, EditableComboBox):
         "used for each scene, plus one overall average for the whole movie -- so\n"
         "you can see what Auto 3D Strength decided without watching the video.\n"
         "Unlike the checkbox above, nothing is written into the picture itself.")
+    self.chk_nt_auto_div_invert = wx.CheckBox(box, label=T("Invert (wide = more, close-up = less)"),
+                                              name="chk_nt_auto_div_invert")
+    self.chk_nt_auto_div_invert.SetToolTip(
+        "Reverses which end of the shot gets more 3D Strength.\n"
+        "Off (default): wide shots/landscapes get the LEAST, close-ups get the\n"
+        "MOST -- mimics how a real stereo camera behaves.\n"
+        "On: wide shots/landscapes get the MOST, close-ups get the LEAST.\n"
+        "Auto Range (min, max) above keeps the same meaning either way --\n"
+        "only which shot type each end applies to flips.")
 
-    # five rows directly under 3D Strength (and the warning line under it)
+    # six rows directly under 3D Strength (and the warning line under it)
     grid = self.cbo_divergence.GetContainingSizer()
     row = grid.GetItemPosition(self.cbo_divergence).GetRow() + 2
     items = [(it, it.GetPos()) for it in grid.GetChildren()]
     for it, pos in sorted(items, key=lambda t: -t[1].GetRow()):
         if pos.GetRow() >= row:
             target = it.GetWindow() or it.GetSizer()
-            grid.SetItemPosition(target, wx.GBPosition(pos.GetRow() + 5, pos.GetCol()))
+            grid.SetItemPosition(target, wx.GBPosition(pos.GetRow() + 6, pos.GetCol()))
     grid.Add(self.chk_nt_auto_div, (row, 0), flag=wx.ALIGN_CENTER_VERTICAL)
     grid.Add(self.cbo_nt_auto_div_mode, (row, 1), (1, 2), flag=wx.EXPAND)
     grid.Add(self.lbl_nt_div_range, (row + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -973,8 +997,9 @@ def _add_controls(self, T, EditableComboBox):
     grid.Add(self.cbo_nt_div_max, (row + 1, 2), flag=wx.EXPAND)
     grid.Add(self.lbl_nt_auto_div_stab, (row + 2, 0), flag=wx.ALIGN_CENTER_VERTICAL)
     grid.Add(self.cbo_nt_auto_div_stab, (row + 2, 1), (1, 2), flag=wx.EXPAND)
-    grid.Add(self.chk_nt_auto_div_overlay, (row + 3, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
-    grid.Add(self.chk_nt_auto_div_scene_log, (row + 4, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+    grid.Add(self.chk_nt_auto_div_invert, (row + 3, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+    grid.Add(self.chk_nt_auto_div_overlay, (row + 4, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+    grid.Add(self.chk_nt_auto_div_scene_log, (row + 5, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
     self._nt_T = T
     self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, lambda e: _update(self))
     self._nt_autodiv_ready = True
@@ -986,8 +1011,8 @@ def _update(self):
     on = self.chk_nt_auto_div.IsChecked()
     for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range,
               self.cbo_nt_div_min, self.cbo_nt_div_max, self.lbl_nt_auto_div_stab,
-              self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_overlay,
-              self.chk_nt_auto_div_scene_log):
+              self.cbo_nt_auto_div_stab, self.chk_nt_auto_div_invert,
+              self.chk_nt_auto_div_overlay, self.chk_nt_auto_div_scene_log):
         c.Enable(on)
     T = getattr(self, "_nt_T", lambda s: s)
     self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
@@ -1044,6 +1069,7 @@ def _patch_window_class(MF):
         args.auto_divergence_mode = self.cbo_nt_auto_div_mode.GetValue() or DEFAULT_MODE
         args.divergence_min = float(self.cbo_nt_div_min.GetValue())
         args.divergence_max = float(self.cbo_nt_div_max.GetValue())
+        args.auto_divergence_invert = bool(on) and self.chk_nt_auto_div_invert.IsChecked()
         args.auto_divergence_overlay = bool(on) and self.chk_nt_auto_div_overlay.IsChecked()
         args.auto_divergence_scene_log = bool(on) and self.chk_nt_auto_div_scene_log.IsChecked()
         args.auto_divergence_stability = (self.cbo_nt_auto_div_stab.GetValue()

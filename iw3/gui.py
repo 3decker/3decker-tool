@@ -9265,26 +9265,23 @@ class MainFrame(wx.Frame):
         self.btn_cancel.Disable()
         self.btn_suspend.Disable()
 
-        # Real user report (Steve, 2026-09-30): a bare self.load_preset() here always
-        # restored CONFIG_PATH -- the general, ad-hoc "whatever was last directly
-        # changed" settings file -- never whichever NAMED preset the user had actually
-        # been using, even though cbo_app_preset might still show that preset's name
-        # from before a restart. If settings had drifted from that preset since it was
-        # last loaded (a likely real cause of some of his own inconsistent test
-        # results), the user would see the old preset name but get the drifted
-        # settings, with no obvious sign anything was off. Now checks the last
-        # EXPLICITLY loaded/saved preset (LAST_PRESET_CONFIG_PATH, see its own comment)
-        # and re-applies it fresh via the real load_preset(name) path if it still
-        # exists, instead of the bare CONFIG_PATH restore -- loading a named preset
-        # already restores every registered control the same way a bare load would
-        # (save_preset()/load_preset() use the identical registration logic for both
-        # CONFIG_PATH and a named preset file), so this is a straight substitution,
-        # not an addition to the bare call.
-        last_preset_name = _load_last_preset_name(LAST_PRESET_CONFIG_PATH)
-        if last_preset_name and last_preset_name in self.list_preset():
-            self.load_preset(last_preset_name)
-        else:
-            self.load_preset()
+        # ADR-433: real user requirement -- "I want every setting and value... to
+        # remain on whatever value was at the time of closing the GUI." Startup used
+        # to auto-reapply whichever NAMED preset was last explicitly loaded/saved
+        # (ADR-278/Steve's own report, 2026-09-30) INSTEAD of the bare CONFIG_PATH --
+        # meaning any setting changed after loading a preset (without re-saving it)
+        # would silently revert to that preset's older, saved values on every restart,
+        # not stay as you left them. That directly fights the autosave timer's
+        # (ADR-428) whole purpose, and ADR-432's narrower Input/Output-only patch was
+        # just one symptom of this same general problem -- every OTHER setting had
+        # the identical bug, not just those two fields. Superseded here: startup now
+        # always does the plain bare restore, which the autosave timer and on_close()
+        # keep continuously accurate to the literal state at last close, for every
+        # control. Loading/saving a named preset DURING a session is completely
+        # unaffected -- the Load/Save/Delete Preset buttons still work exactly as
+        # before; only automatically re-applying one's OLD saved values at the next
+        # startup is gone.
+        self.load_preset()
         # ADR-428/430: starts only after the initial restore above, so the first tick
         # never re-saves over anything before this session's own changes exist.
         # ADR-430: 15 seconds (ADR-428's original interval) turned out to be far too
@@ -33262,82 +33259,27 @@ def _self_test_iso_to_bd_folder():
     print("_self_test_iso_to_bd_folder: PASS")
 
 
-def _self_test_last_preset_auto_load():
-    """Real user report (Steve, 2026-09-30): suspected some of his own inconsistent
-    testing came from forgetting to reload his named Preset after restarting 3DECKER --
-    a bare self.load_preset() at startup always restored CONFIG_PATH's own ad-hoc
-    settings, never whichever named preset the user had actually been using, even
-    though cbo_app_preset might still show that name from before the restart. Covers
-    both real behaviors this fix adds: (1) explicitly loading or saving a named preset
-    now remembers it for next startup (LAST_PRESET_CONFIG_PATH), (2) a real, fresh
-    MainFrame() with a real, still-existing tracked preset on disk re-applies that
-    preset's own real settings on construction, not just CONFIG_PATH's -- proven by a
-    real, distinguishing value (Divergence) that only the preset file itself carries,
-    confirmed present on the freshly-constructed frame without any explicit Load click.
-    Also covers the defensive fallback: a tracked name that no longer exists on disk
-    (deleted, or from a different/older install) must not crash startup, and must fall
-    back to the normal bare CONFIG_PATH restore instead."""
+def _self_test_last_preset_name_helpers():
+    """ADR-433: `_load_last_preset_name`/`_save_last_preset_name` (written on every
+    Load/Save/Delete Preset click) no longer drive startup's restore at all -- see
+    __init__'s own comment and MainFrame.load_preset() for why (real user
+    requirement: every setting must stay exactly as it was at last close, not
+    silently revert to a named preset's older saved values on the next restart).
+    This only confirms the plain helper functions themselves still round-trip
+    correctly, since on_click_btn_load_preset/on_click_btn_save_preset/
+    on_click_btn_delete_preset still call them (harmless bookkeeping, kept in case
+    a future opt-in feature wants it -- nothing currently reads the file back)."""
     import tempfile
-    from unittest import mock
 
     with tempfile.TemporaryDirectory() as tmp_config_dir:
         last_preset_path = path.join(tmp_config_dir, "last-preset.cfg")
-
-        # 1. Round-trip of the plain helper functions themselves.
         assert _load_last_preset_name(last_preset_path) == "", "must default to empty, not crash, when missing"
         _save_last_preset_name(last_preset_path, "MyRealPreset")
         assert _load_last_preset_name(last_preset_path) == "MyRealPreset"
         _save_last_preset_name(last_preset_path, "")
         assert _load_last_preset_name(last_preset_path) == ""
 
-        # 2. A real preset file that actually exists on disk, with one real,
-        # distinguishing value (Divergence) different from whatever CONFIG_PATH/
-        # defaults would give -- proof the auto-load path is really applying THIS
-        # file's own settings, not just leaving whatever the widget defaulted to.
-        app = None
-        frame = None
-        try:
-            app = wx.App()
-            probe_frame = MainFrame()
-            probe_frame.cbo_divergence.SetValue("13.5")
-            probe_frame.save_preset("SelfTestAutoLoadPreset")
-            probe_frame.Destroy()
-            app.Destroy()
-
-            # 2a. A real, fresh MainFrame(), with the tracked name pointing at that
-            # real preset, must come up already showing its real value -- with no
-            # explicit Load click of any kind.
-            with mock.patch(f"{__name__}.LAST_PRESET_CONFIG_PATH", last_preset_path):
-                _save_last_preset_name(last_preset_path, "SelfTestAutoLoadPreset")
-                app = wx.App()
-                frame = MainFrame()
-                assert frame.cbo_app_preset.GetValue() == "SelfTestAutoLoadPreset", \
-                    f"expected the tracked preset auto-applied, got {frame.cbo_app_preset.GetValue()!r}"
-                assert frame.cbo_divergence.GetValue() == "13.5", \
-                    f"expected the preset's own real Divergence value, got {frame.cbo_divergence.GetValue()!r}"
-                frame.Destroy()
-                app.Destroy()
-
-            # 2b. A tracked name that does not exist on disk (deleted, or copied from
-            # a different install) must not crash startup, and must fall back to the
-            # normal bare load -- confirmed by cbo_app_preset coming up empty (the
-            # bare CONFIG_PATH path's own real rule), not the missing name.
-            with mock.patch(f"{__name__}.LAST_PRESET_CONFIG_PATH", last_preset_path):
-                _save_last_preset_name(last_preset_path, "ThisPresetWasDeletedOrNeverExisted")
-                app = wx.App()
-                frame = MainFrame()
-                assert frame.cbo_app_preset.GetValue() == "", \
-                    f"a missing tracked preset must fall back to the bare load, got {frame.cbo_app_preset.GetValue()!r}"
-                frame.Destroy()
-                app.Destroy()
-        finally:
-            preset_file = path.join(PRESET_DIR, "SelfTestAutoLoadPreset.cfg")
-            if path.exists(preset_file):
-                os.remove(preset_file)
-            app = None
-            frame = None
-
-    print("_self_test_last_preset_auto_load: PASS")
+    print("_self_test_last_preset_name_helpers: PASS")
 
 
 def _self_test_editable_combobox_registration_complete():
@@ -33398,9 +33340,10 @@ def _self_test_preset_restore_alongside_enables_mvc_controls():
     cbo_mvc_mode choice goes through the persistence manager's own SetSelection(), which
     fires no change event, and update_controls() (the startup/preset-load refresh) never
     re-ran update_mvc_mode() -- so the greying was left at the widget's default (Off).
-    Reproduces the real restart path: save a real Alongside preset via save_preset(),
-    then construct a fresh MainFrame() that auto-applies it through LAST_PRESET_CONFIG_PATH,
-    and check every MVC sub-option is enabled. Uses a temp PRESET_DIR so no real preset
+    Reproduces the real restart path: save real Alongside settings into the BARE
+    CONFIG_PATH (ADR-433: startup always restores from here now, never a named preset
+    -- see MainFrame.__init__'s own comment), then construct a fresh MainFrame() and
+    check every MVC sub-option is enabled. Uses a temp CONFIG_PATH so no real config
     file is touched."""
     import tempfile
     from unittest import mock
@@ -33411,13 +33354,9 @@ def _self_test_preset_restore_alongside_enables_mvc_controls():
                        "lbl_mvc_fill_mode", "cbo_mvc_fill_mode")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        preset_dir = path.join(tmp_dir, "presets")
-        os.makedirs(preset_dir)
-        last_preset_path = path.join(tmp_dir, "last-preset.cfg")
-        preset_name = "SelfTestMvcAlongsideRestorePreset"
+        config_path = path.join(tmp_dir, "iw3-gui.cfg")
 
-        with mock.patch(f"{__name__}.PRESET_DIR", preset_dir), \
-                mock.patch(f"{__name__}.LAST_PRESET_CONFIG_PATH", last_preset_path):
+        with mock.patch(f"{__name__}.CONFIG_PATH", config_path):
             app = None
             frame = None
             try:
@@ -33427,21 +33366,18 @@ def _self_test_preset_restore_alongside_enables_mvc_controls():
                 probe_frame.update_mvc_mode()
                 probe_frame.cbo_mvc_output_type.SetSelection(0)  # iso
                 probe_frame.cbo_mvc_autocrop.SetSelection(1)  # real crop choice, so Fill Mode can be enabled
-                probe_frame.save_preset(preset_name)
+                probe_frame.save_preset()  # bare save -- same file startup restores from
                 probe_frame.Destroy()
                 app.Destroy()
 
-                _save_last_preset_name(last_preset_path, preset_name)
                 app = wx.App()
                 frame = MainFrame()
-                assert frame.cbo_app_preset.GetValue() == preset_name, \
-                    f"expected the saved preset auto-applied, got {frame.cbo_app_preset.GetValue()!r}"
                 assert frame._mvc_mode() == "alongside", \
                     f"expected restored MVC mode 'alongside', got {frame._mvc_mode()!r}"
                 for name in mvc_sub_options:
                     widget = getattr(frame, name)
                     assert widget.IsEnabled(), \
-                        f"{name} must be enabled after restoring an Alongside preset on startup"
+                        f"{name} must be enabled after restoring an Alongside config on startup"
             finally:
                 if frame is not None:
                     frame.Destroy()
@@ -36621,7 +36557,7 @@ def _run_self_tests():
         _self_test_interleave_mvc_trailing_nal,
         _self_test_interleave_mvc_strips_frim_delimiter,
         _self_test_iso_to_bd_folder,
-        _self_test_last_preset_auto_load,
+        _self_test_last_preset_name_helpers,
         _self_test_editable_combobox_registration_complete,
         _self_test_preset_restore_alongside_enables_mvc_controls,
         _self_test_sbs2mvc_fix_frame_rate,

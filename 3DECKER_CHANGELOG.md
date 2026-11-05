@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — November 5, 2026
 
+**Fixed: settings could still come back wrong after closing and reopening the app, if you'd loaded a named Preset at any point.** The app was quietly re-applying your last-used Preset's own saved values every time it started, instead of whatever you actually had set up when you closed it — so anything you changed after loading a Preset (without re-saving it) would silently revert on the next restart, which defeated the whole point of auto-save. Now startup always brings back the literal state everything was in when you closed the app, for every setting — Presets still work exactly the same when you load or save them yourself, they just no longer get silently re-applied behind your back on the next launch.
+
 **Fixed: shot_lock's output filename never showed the Cut Transition Smoothing number it actually used.** It was accidentally tied to a different, unrelated checkbox shot_lock doesn't use, so two test runs that only differed by that one setting looked identical in their filenames. Now shows correctly (e.g. `_cutsm36`) whenever Switch Style is snap_ramp and that value is above 0.
 
 **Fixed: the GUI could freeze for a couple of seconds while you were picking settings.** Caused by yesterday's new auto-save feature — it was saving every 15 seconds, and on this app's large number of settings, each save genuinely takes a few real seconds to finish, freezing the window while it does. Now it saves every 90 seconds instead of every 15, so that unavoidable pause happens far less often. Still far better protected than before auto-save existed (losing at most the last minute and a half of changes on a crash, instead of everything since you last closed the app normally).

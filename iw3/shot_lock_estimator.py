@@ -18,9 +18,9 @@ doesn't use. Only `_closeness()` is called; `ClipShotEstimator.__call__()`
 (the depth_percentile bias it's built for) is never invoked on this helper
 instance.
 
-Three switch styles between the two locked values (ADR-420, real user choice from
-the three options -- all three built so the user can compare them on real footage,
-not just one guessed as "best").
+Switch styles between the two locked values (ADR-420, real user choice from the
+options below -- each built so the user can compare them on real footage, not
+just one guessed as "best"). ADR-435 added a 4th (`ease`), see that ADR entry.
 
 Where snap/snap_ramp get their "shot changed" signal (ADR-421 -> ADR-422): ADR-421
 first tried triggering a switch off the CLIP classification itself flipping, frame
@@ -54,6 +54,18 @@ falls back to ADR-421's classification-flip trigger unchanged.
              closeness=1), smoothed by --convergence-smoothing's plain EMA.
              Never jarring, but a shot that's not clearly wide, medium, or
              close-up won't land on exactly any target value.
+  ease       ADR-435 -- same settle-then-lock DECISION as snap/snap_ramp (every
+             scene still lands on exactly one of the locked values, never an
+             in-between number), but transitions between scenes with a
+             continuously-decaying chase (--convergence-smoothing's own decay,
+             see _ease_toward()) instead of cut_smooth's fixed-length, constant-
+             speed ramp. Real follow-up request: snap_ramp's ramp still read as
+             a visible, mechanical "snap" even eased -- constant speed with a
+             hard start and a hard stop. A decaying chase starts fast and tapers
+             off the closer it gets, with no fixed end point, which is the same
+             shape depth_percentile/clip_shot's own EMA smoothing already uses
+             and reads as invisible by comparison. --convergence-cut-smooth has
+             no effect in this mode (there's no fixed-length ramp to size).
 
 ADR-429: real follow-up question -- "is the AI able to detect mid shots too?"
 The CLIP closeness score was always a continuous 0(wide)..1(close-up) spectrum,
@@ -73,13 +85,24 @@ passes the field at all, same as before -- only an EXPLICIT None, which only the
 empty-box case produces, reaches here). With it disabled, _classify()/_blend_value()
 fall straight back to ADR-420's original 2-way split at the 0.5 midpoint -- no
 middle third, no middle target value, exactly the pre-ADR-429 behavior.
+
+ADR-435: real follow-up request -- "I want only those 2 [locked] values used
+for the entire scene... what I don't want is that snappy visible change on
+each scene -- just want it invisible like using other Convergence Plane
+[modes], but using shot_lock." `blend` was already smooth, but it isn't a
+per-scene DECISION at all -- it continuously re-interpolates every frame from
+the raw closeness score, so a shot that's not decisively wide or close-up can
+rest on an in-between number, not one of the 2 (or 3) locked values. The new
+`ease` switch keeps the exact same locked, per-scene decision snap/snap_ramp
+already make -- only HOW it moves between two different locked decisions
+changes. See _ease_toward() and the module-level switch-style table above.
 """
 import torch
 
 from .clip_shot_estimator import ClipShotEstimator
 from .convergence_tracker import SceneHoldTracker
 
-SWITCH_MODES = ("snap", "snap_ramp", "blend")
+SWITCH_MODES = ("snap", "snap_ramp", "blend", "ease")
 DEFAULT_SWITCH = "snap_ramp"
 DEFAULT_WIDE_VALUE = 0.75
 DEFAULT_MID_VALUE = 0.475
@@ -114,6 +137,7 @@ class ShotLockEstimator():
         # below instead, since it has no cut/classification concept at all.
         self.tracker = SceneHoldTracker(decay, self.cut_smooth if self.switch == "snap_ramp" else 0)
         self.blend_ema = None
+        self.ease_value = None  # ADR-435: `ease` switch only -- see _ease_toward()
         self._last_raw = None  # ADR-421 fallback path: last frame's classified value
         # ADR-422: per-real-scene settle-then-lock state (only used when the caller
         # supplies log_reset_pts). _pending_scene_reset mirrors SceneHoldTracker's own
@@ -140,6 +164,7 @@ class ShotLockEstimator():
         self.tracker.set_cut_smooth(self.cut_smooth if self.switch == "snap_ramp" else 0)
         self.tracker.reset()
         self.blend_ema = None
+        self.ease_value = None
         self._last_raw = None
         self._pending_scene_reset = True
         self._scene_running_c = None
@@ -172,6 +197,30 @@ class ShotLockEstimator():
             return self.wide_value + t * (self.mid_value - self.wide_value)
         t = (c - 0.5) / 0.5
         return self.mid_value + t * (self.closeup_value - self.mid_value)
+
+    def _ease_toward(self, target):
+        """ADR-435: `ease` switch only -- continuously-decaying chase toward the
+        currently locked `target`, reusing --convergence-smoothing's own decay
+        (same shape as `blend`'s own EMA above, just chasing the discrete LOCKED
+        per-scene value instead of a continuously re-interpolated one). No fixed
+        end point and no hard stop, unlike cut_smooth's linear ramp -- moves fast
+        while far from target and tapers off the closer it gets, which is what
+        reads as smooth/invisible rather than mechanical."""
+        if self.ease_value is None:
+            self.ease_value = target
+        else:
+            self.ease_value += (target - self.ease_value) * (1.0 - self.decay)
+        return self.ease_value
+
+    def _advance_locked(self, locked_value):
+        """ADR-435: the one step snap/snap_ramp/ease actually differ on -- how the
+        output value moves toward a just-decided/already-locked `locked_value`.
+        snap/snap_ramp use SceneHoldTracker.update() (instant jump, or a fixed-
+        length linear ramp); `ease` uses the continuously-decaying chase instead
+        (see _ease_toward())."""
+        if self.switch == "ease":
+            return self._ease_toward(locked_value)
+        return self.tracker.update(locked_value)
 
     def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None):
         B = depth.shape[0]
@@ -211,8 +260,12 @@ class ShotLockEstimator():
                     self._scene_n = 0
                     self._scene_locked_value = None
                     self._pending_scene_reset = False
+                # ADR-435: `ease` makes exactly the same locked decision as snap/
+                # snap_ramp below -- only the FINAL step (how the output value moves
+                # toward that decision) differs, so it shares this whole decision
+                # block rather than duplicating it. See _advance_locked().
                 if self._scene_locked_value is not None:
-                    value = self.tracker.update(self._scene_locked_value)  # idempotent hold
+                    value = self._advance_locked(self._scene_locked_value)  # idempotent hold
                 else:
                     # averaging the continuous score over `settle` frames, then (ADR-429)
                     # reading it against the 3-zone split in _classify() to decide once.
@@ -222,33 +275,41 @@ class ShotLockEstimator():
                     self._scene_n += 1
                     if self._scene_n >= self.tracker.settle:
                         self._scene_locked_value = self._classify(self._scene_running_c)
-                        self.tracker.mark_cut()  # the one clean transition into the final decision
-                        value = self.tracker.update(self._scene_locked_value)
-                    elif self.tracker.out is not None:
-                        value = self.tracker.out  # hold the previous scene's value unchanged
+                        if self.switch != "ease":
+                            self.tracker.mark_cut()  # the one clean transition into the decision
+                        value = self._advance_locked(self._scene_locked_value)
                     else:
-                        # very first scene of the whole movie, still deciding -- no
-                        # previous value exists to hold, so use this frame's own
-                        # single-frame best guess (same limitation every other auto
-                        # mode already has at the very start of a video).
-                        value = self._classify(c)
+                        held = self.ease_value if self.switch == "ease" else self.tracker.out
+                        if held is not None:
+                            value = held  # hold the previous scene's value unchanged
+                        else:
+                            # very first scene of the whole movie, still deciding -- no
+                            # previous value exists to hold, so use this frame's own
+                            # single-frame best guess (same limitation every other auto
+                            # mode already has at the very start of a video).
+                            value = self._classify(c)
                 if log_reset_pts[i]:
                     # iw3 convention: this is the LAST frame of its scene -- the reset
                     # takes effect starting next frame (mirrors SceneHoldTracker's own
                     # cut_pending and every other reset_pts/log_reset_pts use in iw3).
                     self._pending_scene_reset = True
-                if reset_pts[i]:
+                if reset_pts[i] and self.switch != "ease":
                     self.tracker.mark_cut()
             else:
                 # ADR-421 fallback: no real scene-boundary signal supplied at all for
                 # this call -- snap off the classification itself changing instead.
                 raw = self._classify(c)
-                if self._last_raw is not None and raw != self._last_raw:
-                    self.tracker.mark_cut()
-                self._last_raw = raw
-                value = self.tracker.update(raw)
-                if reset_pts[i]:
-                    self.tracker.mark_cut()
+                if self.switch == "ease":
+                    # No discrete snap/ramp state to reset here -- a classification
+                    # flip is just a new target the continuous chase moves toward.
+                    value = self._ease_toward(raw)
+                else:
+                    if self._last_raw is not None and raw != self._last_raw:
+                        self.tracker.mark_cut()
+                    self._last_raw = raw
+                    value = self.tracker.update(raw)
+                    if reset_pts[i]:
+                        self.tracker.mark_cut()
             results.append(value)
 
         v = torch.tensor(results, device=depth.device, dtype=depth.dtype).clamp(0, 1)

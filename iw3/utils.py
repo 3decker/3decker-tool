@@ -8453,10 +8453,13 @@ def create_parser(required_true=True):
                         help="--convergence-mode shot_lock only: the convergence value used on close-up/"
                              "short shots")
     parser.add_argument("--convergence-lock-switch", type=str,
-                        choices=["snap", "snap_ramp", "blend"], default=DEFAULT_SWITCH,
+                        choices=["snap", "snap_ramp", "blend", "ease"], default=DEFAULT_SWITCH,
                         help="--convergence-mode shot_lock only: snap (instant jump at the shot-type "
                              "change), snap_ramp (same jump, eased over --convergence-cut-smooth frames), "
-                             "blend (no hard switch -- continuously interpolates by the raw CLIP score)")
+                             "blend (no hard switch -- continuously interpolates by the raw CLIP score), "
+                             "ease (ADR-435: same locked decision as snap/snap_ramp, but glides there with "
+                             "a continuously-decaying chase using --convergence-smoothing's decay instead "
+                             "of a fixed-speed ramp -- --convergence-cut-smooth has no effect in this mode)")
     parser.add_argument("--clip-shot-symmetric", action="store_true",
                         help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
                              "recede) by the same amount close-ups get pushed down, instead of staying "

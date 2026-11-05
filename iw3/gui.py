@@ -1817,7 +1817,7 @@ class MainFrame(wx.Frame):
         self.lbl_convergence_lock_switch = wx.StaticText(
             self.grp_stereo, label=T("Switch Style"))
         self.cbo_convergence_lock_switch = wx.ComboBox(
-            self.grp_stereo, choices=["snap", "snap_ramp", "blend"], name="cbo_convergence_lock_switch")
+            self.grp_stereo, choices=["snap", "snap_ramp", "blend", "ease"], name="cbo_convergence_lock_switch")
         self.cbo_convergence_lock_switch.SetEditable(False)
         self.cbo_convergence_lock_switch.SetStringSelection(DEFAULT_SHOT_LOCK_SWITCH)
         self.cbo_convergence_lock_switch.SetToolTip(
@@ -1826,14 +1826,21 @@ class MainFrame(wx.Frame):
               "snap: jumps straight to the new value the instant the shot type changes -- simplest, but "
               "can look like a visible pop right at a hard cut.\n"
               "snap_ramp (recommended): the same instant decision, but eases into the new value over "
-              "Cut Transition Smoothing (frames) below instead of popping in one frame. Leaving that at "
-              "0 makes this behave exactly like plain snap -- you need to raise it for an actual ramp.\n"
+              "Cut Transition Smoothing (frames) below instead of popping in one frame. Still has a fixed "
+              "start and a fixed stop at constant speed, so it can still read as a visible, mechanical "
+              "transition rather than an invisible one, even with that box raised. Leaving it at 0 makes "
+              "this behave exactly like plain snap.\n"
               "blend: no hard switch at all -- continuously slides between Wide Shot Value, Mid Shot "
               "Value, and Close-Up Value based on how wide/close-up CLIP judges the shot. Never jarring, "
               "but a shot that's not clearly one of the three won't land on exactly any of your values.\n"
-              "Recommended: snap_ramp with Cut Transition Smoothing around 6-12 frames as a starting "
-              "point -- try all three on your own footage, since which looks best is genuinely content-"
-              "dependent."))
+              "ease: the SAME locked decision as snap/snap_ramp -- every shot still lands on exactly one "
+              "of your values, never in between -- but glides there with a smooth, continuously-tapering "
+              "chase (using Convergence Smoothing's own decay above) instead of a fixed-speed ramp. No "
+              "hard start/stop, so it reads as invisible the way depth_percentile/clip_shot's own "
+              "smoothing does. Cut Transition Smoothing has no effect in this mode.\n"
+              "Recommended: ease if you want the transition itself to be invisible; snap_ramp with Cut "
+              "Transition Smoothing around 6-12 frames if you don't mind a visible but gentler fade -- try "
+              "them on your own footage, since which looks best is genuinely content-dependent."))
         self.cbo_convergence_lock_switch.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_lock_switch)
 
         self.chk_clip_shot_symmetric = wx.CheckBox(
@@ -34992,6 +34999,77 @@ def _self_test_shot_lock_mid_disabled():
     print("_self_test_shot_lock_mid_disabled: PASS")
 
 
+def _self_test_shot_lock_ease_switch():
+    """ADR-435: real follow-up request -- "I want only those 2 [locked] values
+    used for the entire scene... what I don't want is that snappy visible
+    change on each scene -- just want it invisible." `ease` must be a real,
+    selectable Switch Style; Cut Transition Smoothing must stay disabled for it
+    (it has no fixed-length ramp to size); it must round-trip through
+    parse_args()/the CLI; and the actual chase math (_ease_toward) must move
+    monotonically toward the locked target with no overshoot and no fixed
+    stopping point, unlike cut_smooth's linear ramp."""
+    import wx
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert "ease" in list(frame.cbo_convergence_lock_switch.GetItems())
+
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        frame.cbo_convergence_lock_switch.SetValue("ease")
+        frame.on_changed_cbo_convergence_lock_switch(wx.CommandEvent())
+        assert not frame.cbo_convergence_cut_smooth.IsEnabled(), \
+            "Cut Transition Smoothing must stay off for ease -- it has no fixed-length ramp to size"
+
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_switch == "ease"
+        cmd = frame.get_cli_command()
+        assert "ease" in cmd, cmd
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                  "--convergence-mode", "shot_lock",
+                                  "--convergence-lock-switch", "ease"])
+    assert reparsed.convergence_lock_switch == "ease"
+
+    # The chase math itself, bypassing __init__ (no real CLIP model load/download
+    # needed for this pure-math check) -- built the same way
+    # _self_test_shot_lock_mid_disabled does.
+    est = object.__new__(ShotLockEstimator)
+    est.wide_value, est.closeup_value, est.mid_value = 0.60, 0.20, None
+    est.switch = "ease"
+    est.decay = 0.9
+    est.ease_value = None
+    est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)  # only .settle is read for ease
+
+    v1 = est._advance_locked(0.60)
+    assert v1 == 0.60, "the very first locked value has nothing to chase from -- must land on it directly"
+    prev = v1
+    # Now the scene changes to the other locked value -- must move TOWARD 0.20,
+    # monotonically, never overshooting past it, and never jump straight there.
+    # An EMA chase only approaches its target asymptotically (never exactly, by
+    # construction) -- so "close enough" here is a small tolerance, not zero.
+    for _ in range(50):
+        v = est._advance_locked(0.20)
+        assert 0.20 <= v <= prev + 1e-9, \
+            f"must move monotonically toward 0.20 without overshooting, got {v} after {prev}"
+        prev = v
+    assert prev < 0.21, f"must have settled close to 0.20 after 50 frames, got {prev}"
+    assert prev > 0.20, "an EMA chase never reaches its target EXACTLY -- a plain equal value here " \
+                        "would mean this accidentally became a hard snap instead of a continuous chase"
+
+    print("_self_test_shot_lock_ease_switch: PASS")
+
+
 def _self_test_clip_shot_symmetric_gui_and_cli():
     """ADR-424/425: "Also Push Wide Shots Up" and "Bias Strength" must enable only for
     clip_shot mode, default off/0.25 (unchanged clip_shot behavior), round-trip
@@ -36737,6 +36815,7 @@ def _run_self_tests():
         _self_test_convergence_new_modes_gui,
         _self_test_shot_lock_gui_and_cli,
         _self_test_shot_lock_mid_disabled,
+        _self_test_shot_lock_ease_switch,
         _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

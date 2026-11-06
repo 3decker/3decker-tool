@@ -1102,14 +1102,19 @@ def run_preview_peak_bitrate(args):
     return preview_peak_bitrate(args.input, args), args
 
 
-def run_nt_scan_strength(args):
-    """ADR-440: worker-thread body for "Scan 3D Strength" -- decodes the whole
-    input movie and works out what Auto 3D Strength would use per scene,
-    without running a real conversion at all (see nt_auto3d/nt_autostrength/
-    autodiv.py's own scan_strength() docstring for why the depth model/warp/
-    inpaint/encode are never needed for this). Returns (result_dict_or_None,
-    args) -- None means nothing was decoded (e.g. stopped immediately, or an
-    empty/corrupt file), not a crash."""
+def run_nt_scan_strength(args, fast=False):
+    """ADR-440/442: worker-thread body for "Scan 3D Strength" -- decodes the
+    whole input movie and works out what Auto 3D Strength would use per
+    scene, without running a real conversion at all (see nt_auto3d/
+    nt_autostrength/autodiv.py's own scan_strength() docstring for why the
+    depth model/warp/inpaint/encode are never needed for this). `fast` (the
+    GUI's own "Faster Scan" checkbox) opts into a smaller decode size and a
+    bigger frame batch -- real measured speed-up, at the cost of the exact
+    numbers shifting slightly from the faithful default (see
+    SCAN_DECODE_SHORT_SIDE's own note for why this stays opt-in, not a new
+    silent default). Returns (result_dict_or_None, args) -- None means
+    nothing was decoded (e.g. stopped immediately, or an empty/corrupt
+    file), not a crash."""
     from nt_autostrength import autodiv as AD
     result = AD.scan_strength(
         args.input, args,
@@ -1120,6 +1125,8 @@ def run_nt_scan_strength(args):
         stop_event=args.state["stop_event"],
         suspend_event=args.state["suspend_event"],
         tqdm_fn=args.state["tqdm_fn"],
+        batch_size=AD.SCAN_FAST_BATCH_SIZE if fast else AD.SCAN_BATCH_SIZE,
+        decode_scale=AD.SCAN_DECODE_SHORT_SIDE if fast else None,
     )
     return result, args
 
@@ -1611,6 +1618,23 @@ class MainFrame(wx.Frame):
               "here listing every distinct 3D Strength value found and how many scenes used it.\n"
               "Recommended: run this once on a new movie before your first real conversion, to judge "
               "whether your Auto Range/typical 3D Strength actually fit what this movie's scenes use."))
+        self.chk_nt_scan_fast = wx.CheckBox(self.grp_stereo, label=T("Faster Scan (approximate)"),
+                                            name="chk_nt_scan_fast")
+        self.chk_nt_scan_fast.SetValue(False)
+        self.chk_nt_scan_fast.SetToolTip(
+            T("ADR-442: only affects the Scan 3D Strength button above. What it does: decodes the video "
+              "at a smaller size and hands the AI model more frames at once, instead of the full "
+              "resolution one frame at a time.\n"
+              "Why: real measured speed-up on an RTX 5090 -- roughly twice as fast on a real 4K test "
+              "clip, since the AI model never looks at more than a small, already-downscaled square of "
+              "each frame anyway.\n"
+              "Con: a real, measured trade-off, not just a theoretical one -- the exact 3D Strength "
+              "numbers can shift very slightly (a few tenths) from what the default, full-resolution "
+              "scan reports, since the AI is judging a slightly smaller picture. The scenes found and "
+              "the overall shape of the result stayed the same in testing, just not byte-for-byte "
+              "identical.\n"
+              "Recommended: off (default) for the most faithful preview; turn on for a quicker first "
+              "look, especially on a long movie, when you don't need exact precision."))
         self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div)
         self.btn_nt_scan_strength.Bind(wx.EVT_BUTTON, self.on_click_btn_nt_scan_strength)
         self.update_nt_auto_divergence()
@@ -3701,6 +3725,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_scene_log, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_nt_scan_strength, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_nt_scan_fast, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_convergence, (i, 2), flag=wx.EXPAND)
@@ -14900,10 +14925,11 @@ class MainFrame(wx.Frame):
                           T("Scan 3D Strength"), wx.OK | wx.ICON_INFORMATION)
             return
 
+        fast = self.chk_nt_scan_fast.GetValue()
         self.btn_nt_scan_strength.Disable()
         self.btn_start.Disable()
         self.SetStatusText(T("Scanning 3D Strength..."))
-        startWorker(self.on_exit_nt_scan_strength_worker, run_nt_scan_strength, wargs=(args,))
+        startWorker(self.on_exit_nt_scan_strength_worker, run_nt_scan_strength, wargs=(args, fast))
 
     def on_exit_nt_scan_strength_worker(self, result):
         self.btn_nt_scan_strength.Enable()
@@ -32754,6 +32780,108 @@ def _self_test_scan_strength_core():
     print("_self_test_scan_strength_core: PASS")
 
 
+def _self_test_scan_strength_batching():
+    """ADR-441: real follow-up to ADR-440 -- live measurement on decker's own
+    RTX 5090 while a real scan was running found the GPU itself nowhere near
+    maxed out (compute ~55-60%, VRAM/power far from the card's limits), but
+    one CPU core pegged at ~85-90% -- the real constraint was calling into
+    Estimator/Tracker one decoded frame at a time, not GPU capacity.
+    `batch_size` must be a PURE efficiency change: fewer, larger calls into
+    _RunState.divergences(), never a different per-frame decision, and the
+    final PARTIAL batch (when the movie's frame count isn't a clean multiple
+    of batch_size) must still get flushed, not silently dropped. Verified by
+    swapping in a fake _RunState that just records the batch size of each
+    call it receives, fed by a fake VU.hook_frame handing scan_strength() a
+    known number of synthetic frames -- no real video, no CLIP, no GPU."""
+    import tempfile
+    from os import path as _p
+    import torch
+    import argparse
+    from nt_autostrength import autodiv as AD
+    import nunif.utils.video as VU
+
+    instances = []
+
+    class _FakeRunState:
+        def __init__(self, args):
+            self.scene_log_meta = ("hybrid", 2.0, 16.0, 6.0)
+            self.scene_records = []
+            self.calls = []
+            instances.append(self)
+
+        def divergences(self, im, depth, args, reset_pts=None, log_reset_pts=None, same_obj=None):
+            self.calls.append(im.shape[0])
+            assert depth.shape[0] == im.shape[0], "the depth placeholder must match the real batch size"
+            self.scene_records.append((0, im.shape[0], im.shape[0], 1.0))
+            return [1.0] * im.shape[0]
+
+        def _scene_flush(self):
+            pass
+
+    def fake_hook_frame(input_path, frame_callback, **kw):
+        # 19 synthetic frames, not evenly divisible by batch_size=8 -- the
+        # final partial batch (3 frames) must still reach divergences().
+        for _ in range(19):
+            frame_callback(torch.zeros(3, 4, 4))
+        frame_callback(None)  # hook_frame()'s own end-of-video flush signal
+
+    orig_run_state, orig_hook_frame, orig_to_tensor = AD._RunState, VU.hook_frame, VU.to_tensor
+    try:
+        AD._RunState = _FakeRunState
+        VU.hook_frame = fake_hook_frame
+        VU.to_tensor = lambda frame, device=None: frame
+        with tempfile.TemporaryDirectory() as tmp_out:
+            result = AD.scan_strength(
+                "fake.mkv", argparse.Namespace(state={}), device="cpu", batch_size=8,
+                output_log_path=_p.join(tmp_out, "fake_scan.txt"))
+            assert result is not None
+            assert _p.isfile(result["log_path"])
+    finally:
+        AD._RunState, VU.hook_frame, VU.to_tensor = orig_run_state, orig_hook_frame, orig_to_tensor
+
+    assert len(instances) == 1
+    assert instances[0].calls == [8, 8, 3], \
+        f"19 frames at batch_size=8 must flush as [8, 8, 3], got {instances[0].calls}"
+
+    print("_self_test_scan_strength_batching: PASS")
+
+
+def _self_test_scan_strength_fast_toggle():
+    """ADR-442: real follow-up to ADR-441 -- decker asked for both optimizations
+    (frame batching, decode-time downscaling) to ship as OPTIONAL, not a new
+    silent default, after I flagged that decode-time downscaling is a real,
+    measured (if small) change to the exact numbers. run_nt_scan_strength()'s
+    own `fast` flag (set from the GUI's "Faster Scan" checkbox) is what turns
+    both on together -- verified here by monkeypatching AD.scan_strength to
+    record what it was called with, for both the default (faithful) and fast
+    (approximate) paths. No real video, no CLIP, no GPU."""
+    from nt_autostrength import autodiv as AD
+
+    calls = []
+    orig_scan_strength = AD.scan_strength
+    try:
+        AD.scan_strength = lambda *a, **kw: (calls.append(kw), None)[1]
+
+        class _FakeArgs:
+            input = "movie.mkv"
+            max_fps = 30
+            hwaccel = None
+            state = {"device": "cpu", "stop_event": None, "suspend_event": None, "tqdm_fn": None}
+
+        run_nt_scan_strength(_FakeArgs())
+        run_nt_scan_strength(_FakeArgs(), fast=True)
+    finally:
+        AD.scan_strength = orig_scan_strength
+
+    default_kw, fast_kw = calls
+    assert default_kw["batch_size"] == AD.SCAN_BATCH_SIZE and default_kw["decode_scale"] is None, \
+        "default (unchecked) must stay the faithful, unchanged path -- " + str(default_kw)
+    assert fast_kw["batch_size"] == AD.SCAN_FAST_BATCH_SIZE and fast_kw["decode_scale"] == AD.SCAN_DECODE_SHORT_SIDE, \
+        "fast=True must opt into the bigger batch and the smaller decode size -- " + str(fast_kw)
+
+    print("_self_test_scan_strength_fast_toggle: PASS")
+
+
 def _self_test_scan_strength_button():
     """ADR-440: "Scan 3D Strength" button -- real, always-selectable regardless
     of whether the "Auto 3D Strength" checkbox itself is on, since the whole
@@ -32781,6 +32909,11 @@ def _self_test_scan_strength_button():
         frame.chk_nt_auto_div.SetValue(True)
         frame.update_nt_auto_divergence()
         assert frame.btn_nt_scan_strength.IsEnabled()
+
+        # ADR-442: "Faster Scan" defaults OFF -- the faithful, full-resolution
+        # scan stays the unchanged default; the approximate/faster mode is an
+        # explicit opt-in, never silently applied.
+        assert frame.chk_nt_scan_fast.GetValue() is False
     finally:
         if frame is not None:
             frame.Destroy()
@@ -37691,6 +37824,8 @@ def _run_self_tests():
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,
         _self_test_scan_strength_core,
+        _self_test_scan_strength_batching,
+        _self_test_scan_strength_fast_toggle,
         _self_test_scan_strength_button,
         _self_test_audio_subtitle_restore_dual_eye_flag,
         _self_test_restore_audio_uses_per_file_source_in_folder,

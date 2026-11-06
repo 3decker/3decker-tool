@@ -755,7 +755,52 @@ def _finish_scene_log(st, args, kind, call_args):
 # mirrors this project's own precedent for this exact class of feature
 # ("Preview Peak Bitrate", ADR-338): a real settings preview before
 # committing to a full conversion, GUI button only.
+#
+# ADR-441 follow-up: real live measurement on decker's own RTX 5090 while a
+# real scan was running -- GPU compute engine steady around 55-60%, VRAM and
+# power far from the card's own limits, but ONE CPU core pegged at ~85-90%.
+# The actual constraint was never the GPU -- scan_strength() was calling into
+# Estimator/Tracker ONE DECODED FRAME AT A TIME, so Python-level/CUDA-kernel-
+# launch overhead repeated once per frame instead of being spread over a
+# batch. SCAN_BATCH_SIZE below buffers that many decoded frames before each
+# real `st.divergences()` call, the same way a real conversion's own
+# --batch-size already does for the depth model -- fewer, larger GPU calls
+# instead of many tiny ones. Tracker.run()'s own per-frame loop (cut
+# detection, settle/drift, scene accumulation) already iterates a BATCH of
+# scores correctly regardless of how many frames arrive per call (unchanged
+# from the real per-frame conversion path, which already uses batches too) --
+# nothing about the actual decision-making logic changes, only how many
+# decoded frames accumulate before each GPU call.
+#
+# SCAN_DECODE_SHORT_SIDE: decker's own direct follow-up -- "is there other
+# optimization that can be done?" Estimator._views() only ever needs a
+# ClipVisual.size (224px) square crop -- it already downsamples whatever it's
+# given down to that with its own bicubic antialiased resize. Decoding a full
+# 4K frame just to immediately shrink it in Python wastes real decode/colour-
+# transform/device-copy time on detail CLIP never uses. Scaling the short
+# side down to this during decode itself (ffmpeg's own `vf` filter, the same
+# mechanism nunif.utils.shot_boundary_detection.detect_boundary() already
+# uses for its own "scan without the full frame" need) means every later
+# step -- the HDR-to-SDR tonemap LUT, the device copy, CLIP's own resize --
+# runs on a much smaller frame too. Assumes landscape source (`scale=-2:N`
+# fixes the HEIGHT, auto-computes width) -- true for every real movie this
+# tool scans; see scan_strength()'s own docstring for the one real tradeoff
+# this introduces. Comfortably above 224 so CLIP's own downsample inside
+# _views() is still a real shrink, not a blurry upscale.
+#
+# Real measured tradeoff when this IS turned on: the exact 3D Strength
+# numbers can shift a few tenths from a full-resolution scan (same scenes,
+# same overall shape, not byte-identical) -- real enough that decker asked
+# for this to ship as an OPTIONAL choice, not a silent new default. The
+# GUI's own "Faster Scan" checkbox is what turns both this AND
+# SCAN_FAST_BATCH_SIZE on together; scan_strength()'s own defaults (no
+# decode_scale, SCAN_BATCH_SIZE) stay the faithful, unchanged-by-default path.
 # --------------------------------------------------------------------------
+SCAN_BATCH_SIZE = 8
+SCAN_DECODE_SHORT_SIDE = 256
+SCAN_FAST_BATCH_SIZE = 32
+
+
 def _make_scan_args(args, device):
     """A shallow copy of the real args, scoped to just this scan: its own
     minimal `state` dict (only `device` -- never the real job's loaded depth/
@@ -805,13 +850,41 @@ def _write_scan_log(st, log_path, output_label, fps):
 
 def scan_strength(input_path, args, device="cpu", max_fps=None, hwaccel=None,
                   disable_software_fallback=False, stop_event=None, suspend_event=None,
-                  tqdm_fn=None, output_log_path=None):
+                  tqdm_fn=None, output_log_path=None, batch_size=SCAN_BATCH_SIZE,
+                  decode_scale=None):
     """Decodes `input_path` start to finish and works out the SAME per-scene
     3D Strength a real conversion with these settings would use (see the
     ADR-440 note above) -- without the depth model, the stereo warp,
     inpainting, or encoding. Stopped early via `stop_event` (e.g. the GUI's
     own Cancel) still writes whatever was decoded so far, rather than
     nothing.
+
+    `batch_size` (ADR-441): decoded frames are buffered and fed to Estimator/
+    Tracker `batch_size` at a time instead of one at a time -- fewer, larger
+    GPU calls, which is what actually sped this up on a real GPU (the
+    bottleneck was per-frame call overhead, not GPU compute capacity -- see
+    the ADR-441 note above _make_scan_args()). Purely an efficiency knob:
+    the SAME per-frame decisions come out regardless of this number, since
+    Tracker.run() already walks a whole batch frame-by-frame in order either
+    way -- only ever lower it if a particular GPU is VRAM-constrained.
+
+    `decode_scale` (ADR-442): None by default -- decodes at the source's real
+    resolution, closest to exactly what a real conversion itself would feed
+    Estimator. Pass SCAN_DECODE_SHORT_SIDE (or any other short-side pixel
+    count) to decode at that size instead (ffmpeg's own `vf` filter, see that
+    constant's own note) -- CLIP never looks at more than 224px anyway, so
+    decoding/colour-transforming/copying a full-resolution frame just to
+    immediately shrink it wastes real time. The GUI's own "Faster Scan"
+    checkbox is what turns this on -- OFF (this function's own default) for
+    the most faithful preview. The ONE real tradeoff when it IS turned on: a
+    real conversion's own Estimator call always sees the FULL-resolution
+    frame, so a scan's per-frame closeness score is computed from a slightly
+    different (smaller) image than a real run would use for that same frame
+    -- in practice this did not change a single scene's decision on real
+    test footage (CLIP's own internal resize already throws most of that
+    detail away regardless), but it is a real, deliberate difference worth
+    knowing about, not a guarantee of byte-identical output with a real
+    conversion.
 
     Returns None if nothing was decoded at all (e.g. stopped immediately, or
     an empty/corrupt file) -- otherwise a dict: log_path, scene_count,
@@ -822,20 +895,30 @@ def scan_strength(input_path, args, device="cpu", max_fps=None, hwaccel=None,
     device = torch.device(device) if isinstance(device, str) else device
     scan_args = _make_scan_args(args, device)
     st = _RunState(scan_args)
-    # Unused by Estimator.__call__() unless its CLIP model failed to load (see
-    # the class docstring) -- one placeholder tensor, reused every frame. Real
-    # per-call uniqueness for .divergences()'s own repeat-call dedup (see its
-    # `same_obj` parameter) comes from the fresh `object()` passed below
-    # instead, not from this tensor's identity.
-    depth_placeholder = torch.zeros(1, 1, 1, 1, device=device)
     resolved_fps = [None]
+    buffer = []
+
+    def _flush_buffer():
+        if not buffer:
+            return
+        x = torch.stack(buffer, dim=0)
+        # Unused by Estimator.__call__() unless its CLIP model failed to load
+        # (see the class docstring) -- a fresh, batch-shaped placeholder each
+        # flush. Real per-call uniqueness for .divergences()'s own repeat-call
+        # dedup (see its `same_obj` parameter) comes from the fresh `object()`
+        # passed below instead, not from this tensor's identity.
+        depth_placeholder = torch.zeros(x.shape[0], 1, 1, 1, device=device)
+        st.divergences(x, depth_placeholder, scan_args, reset_pts=None,
+                       log_reset_pts=None, same_obj=object())
+        buffer.clear()
 
     def frame_callback(frame):
         if frame is None:
+            _flush_buffer()  # hook_frame()'s own end-of-video flush signal
             return
-        x = VU.to_tensor(frame, device=device).unsqueeze(0)
-        st.divergences(x, depth_placeholder, scan_args, reset_pts=None,
-                       log_reset_pts=None, same_obj=object())
+        buffer.append(VU.to_tensor(frame, device=device))
+        if len(buffer) >= batch_size:
+            _flush_buffer()
 
     def config_callback(sw_format):
         fps = float(sw_format.get_fps())
@@ -844,10 +927,13 @@ def scan_strength(input_path, args, device="cpu", max_fps=None, hwaccel=None,
         resolved_fps[0] = fps if fps > 0 else None
         return VU.VideoOutputConfig(fps=resolved_fps[0])
 
+    # ADR-442: landscape-only assumption (fixes the HEIGHT) -- see
+    # SCAN_DECODE_SHORT_SIDE's own note above for why.
+    vf = f"scale=-2:{int(decode_scale)}" if decode_scale else ""
     VU.hook_frame(
         str(input_path), frame_callback, config_callback=config_callback,
         title=f"Scanning 3D Strength: {path.basename(str(input_path))}",
-        stop_event=stop_event, suspend_event=suspend_event, tqdm_fn=tqdm_fn,
+        vf=vf, stop_event=stop_event, suspend_event=suspend_event, tqdm_fn=tqdm_fn,
         hwaccel=hwaccel, disable_software_fallback=disable_software_fallback,
         device=device,
     )

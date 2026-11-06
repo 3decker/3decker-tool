@@ -570,15 +570,23 @@ class _RunState:
         self.pending = collections.deque()
         self.announced = False
         self.verbose = bool(os.environ.get("NT_INPAINT_VERBOSE"))
-        self.reset_scene_log()
+        self.reset_scene_log(args)
 
-    def reset_scene_log(self):
+    def reset_scene_log(self, args=None):
         """"Log 3D Strength per Scene" (--auto-divergence-scene-log): per-run buffer
-        of finished scenes, written once at the end of the movie (see _finish_scene_log
-        in fresh()) rather than incrementally, so an interrupted run never leaves a
-        malformed file. Reset here (called once per fresh run, alongside the Tracker's
-        own reset) rather than after writing, so a run that never reaches a clean
-        finish simply has nothing written for it."""
+        of finished scenes. The COMPLETE, final version is always written once at the
+        end of the movie (see _finish_scene_log in fresh()) regardless. Reset here
+        (called once per fresh run, alongside the Tracker's own reset) rather than
+        after writing, so a run that never reaches a clean finish simply has nothing
+        written for it by the end-of-movie write.
+
+        ADR-450: real follow-up request -- "can you make the auto strength log to be
+        written live like we get with convergence?" (core iw3's own Convergence scene
+        log has had this since ADR-405). `args`, when given, carries this movie's
+        (kind, call_args) stashed by fresh()'s wrapper BEFORE fn() runs -- resolving
+        live_path/live_output_filename/live_fps up front, the same way
+        reset_convergence_scene_log() does, so write_live() below has somewhere to
+        write to as soon as the first scene closes, not only at the very end."""
         self.scene_records = []    # [(start_frame, end_frame, frame_count, mean_strength), ...]
         self.scene_log_meta = None  # (mode, min, max, typical, invert, closeup, wide,
                                     #  wide_floor, wide_floor_cutoff) for the log header
@@ -587,6 +595,38 @@ class _RunState:
         self._scene_frames = 0
         self._scene_sum = 0.0
         self._scene_total_frames = 0
+        self.live_path = None
+        self.live_output_filename = None
+        self.live_fps = None
+        state = getattr(args, "state", None)
+        pending = state.get("_nt_autodiv_pending_log_info") if isinstance(state, dict) else None
+        if pending is not None and getattr(args, "auto_divergence_scene_log", False):
+            kind, call_args = pending
+            try:
+                self.live_output_filename, self.live_path, self.live_fps = (
+                    _resolve_scene_log_info(args, kind, call_args))
+            except Exception as e:                                       # noqa: BLE001
+                _say(f"could not resolve a live 3D Strength log path "
+                     f"({type(e).__name__}: {e}) -- will still write the complete "
+                     f"log once the movie finishes.")
+
+    def write_live(self):
+        """ADR-450: rewrites the real log file right now, with whatever scenes have
+        closed so far -- mirrors core iw3's own _ConvergenceSceneLogState.write_live()
+        (ADR-405) exactly, including the atomic tmp-then-os.replace() write and the
+        no-op when live_path wasn't resolved. Never raises -- a failed live write must
+        never interrupt a real, multi-hour conversion; _finish_scene_log() still gets
+        the real, authoritative last word at the end regardless."""
+        if not self.live_path or not self.scene_records:
+            return
+        try:
+            text = _format_scene_log(self, self.live_output_filename, self.live_fps, in_progress=True)
+            tmp = f"{self.live_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.live_path)
+        except Exception as e:                                           # noqa: BLE001
+            _say(f"could not write live 3D Strength log progress ({type(e).__name__}: {e})")
 
     def _scene_flush(self):
         """Closes the currently-open scene (if any) into scene_records. Called at
@@ -618,6 +658,7 @@ class _RunState:
         for cut, d in zip(cuts, divs):
             if cut and self._scene_open:
                 self._scene_flush()
+                self.write_live()  # ADR-450: a real scene just closed -- update the live log now
             if not self._scene_open:
                 self._scene_open = True
                 self._scene_start = self._scene_total_frames
@@ -805,6 +846,24 @@ def _resolve_video_fps(U, args, input_path):
     return fps if fps > 0 else None
 
 
+def _resolve_scene_log_info(args, kind, call_args):
+    """(real output filename, scene-log path, fps) for one movie, resolved from
+    the SAME (kind, call_args) fresh()'s wrapper already has at hand -- shared by
+    _finish_scene_log() (the final, authoritative write) and reset_scene_log()
+    (ADR-450's live write, resolved up front so it's ready before the first
+    scene even closes). Raises on failure; both callers catch it themselves."""
+    import iw3.utils as U
+    if kind == "process_video":
+        input_path, output_path = call_args[0], call_args[1]
+        fps = _resolve_video_fps(U, args, input_path)
+    else:  # process_config_video: config.fps is the real, already-resolved fps
+        config = call_args[0]
+        input_path, output_path = args.input, args.output
+        fps = float(getattr(config, "fps", 0)) or None
+    real_output, log_path = _scene_log_paths(U, args, input_path, output_path)
+    return real_output, log_path, fps
+
+
 def _scene_log_paths(U, args, input_path, output_path):
     """(real output filename, scene-log path) for one movie. Reuses iw3's own
     _resolve_single_file_log_path() (ADR-278/279) for the folder-vs-real-filename
@@ -827,21 +886,35 @@ def _format_time(sec):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def _format_scene_log(st, output_filename, fps):
+def _format_scene_log(st, output_filename, fps, in_progress=False):
+    # ADR-450: `in_progress` -- True for a live, mid-conversion write (see
+    # _RunState.write_live()), where st.scene_records only holds whatever scenes
+    # have closed SO FAR, not the whole movie yet. Mirrors core iw3's own
+    # _format_convergence_scene_log()'s own in_progress parameter (ADR-405) exactly
+    # -- changes only the labelling, never the scene rows themselves; _finish_scene_log()
+    # always overwrites this with the real, complete version (in_progress=False) once
+    # the movie finishes.
     mode, lo, hi, typical, invert, closeup, wide, wide_floor, wide_floor_cutoff = (
         st.scene_log_meta or (st.tracker.mode, 0.0, 0.0, 0.0, False, None, None, None, None))
     # ADR-448: same phrasing _say()'s own debug line already uses for these, so the
     # log header and the live console/progress line never say anything different.
     header = f"Auto 3D Strength: {mode} mode, range {lo:g}-{hi:g}, typical (3D Strength) {typical:g}"
-    if invert:
-        header += ", inverted (wide=more, close-up=less)"
+    # ADR-449: real follow-up request -- unlike closeup/wide/floor (where None
+    # genuinely means "not used, plain curve"), Invert is a real two-state
+    # setting, so saying nothing when it's off reads as ambiguous -- decker
+    # couldn't tell "Invert was off" apart from "this log predates the
+    # feature." Always stated explicitly either way, unlike the others below.
+    header += (", Invert: on (wide=more, close-up=less)" if invert else ", Invert: off")
     if closeup is not None:
         header += f", close-up pinned at {closeup:g}"
     if wide is not None:
         header += f", wide pinned at {wide:g}"
     if wide_floor is not None and wide_floor_cutoff is not None:
         header += f", floor {wide_floor:g} below {wide_floor_cutoff:g}"
-    lines = [f"3D Strength log -- {path.basename(str(output_filename))}", header]
+    title = f"3D Strength log -- {path.basename(str(output_filename))}"
+    if in_progress:
+        title += " (IN PROGRESS -- conversion still running)"
+    lines = [title, header]
     if not fps:
         lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
     lines.append("")
@@ -855,7 +928,11 @@ def _format_scene_log(st, output_filename, fps):
         weighted_sum += mean * frames
     lines.append("")
     overall = weighted_sum / total_frames if total_frames else 0.0
-    lines.append(f"Average 3D Strength for whole movie (time-weighted): {overall:.2f}")
+    if in_progress:
+        lines.append(f"Average 3D Strength so far (time-weighted, {len(st.scene_records)} scene(s), "
+                     f"conversion still running): {overall:.2f}")
+    else:
+        lines.append(f"Average 3D Strength for whole movie (time-weighted): {overall:.2f}")
     # ADR-446: real follow-up request -- decker kept asking for this exact
     # breakdown by hand after every real log/scan ("show me the different
     # strength values and how many scenes landed on each"); writing it
@@ -897,15 +974,7 @@ def _finish_scene_log(st, args, kind, call_args):
     if not st.scene_records:
         return
     try:
-        import iw3.utils as U
-        if kind == "process_video":
-            input_path, output_path = call_args[0], call_args[1]
-            fps = _resolve_video_fps(U, args, input_path)
-        else:  # process_config_video: config.fps is the real, already-resolved fps
-            config = call_args[0]
-            input_path, output_path = args.input, args.output
-            fps = float(getattr(config, "fps", 0)) or None
-        real_output, log_path = _scene_log_paths(U, args, input_path, output_path)
+        real_output, log_path, fps = _resolve_scene_log_info(args, kind, call_args)
         text = _format_scene_log(st, real_output, fps)
         tmp = f"{log_path}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1221,12 +1290,20 @@ def _patch_utils(U):
                 args = next((x for x in a if hasattr(x, "divergence") and hasattr(x, "state")), None)
             st = None
             if args is not None and _enabled(args):
+                # ADR-450: stash THIS movie's (kind, call_args) before fn() runs, so
+                # reset_scene_log() can resolve a live log path up front regardless of
+                # whether _RunState already existed (2nd+ movie in a batch, the explicit
+                # reset below) or gets created lazily for the first time INSIDE fn()
+                # (see the real comment on the re-fetch below for why that lazy case
+                # matters) -- either path reads the same freshly-stashed info.
+                if scene_log_kind is not None and isinstance(args.state, dict):
+                    args.state["_nt_autodiv_pending_log_info"] = (scene_log_kind, a)
                 st = args.state.get("nt_autodiv")
                 if st is not None:
                     st.tracker.reset()
                     st.last_depth = None
                     st.pending.clear()
-                    st.reset_scene_log()
+                    st.reset_scene_log(args)
             result = fn(*a, **kw)
             # "Log 3D Strength per Scene": write the just-finished movie's log right
             # here. Re-fetch the RunState from args.state now, instead of reusing the

@@ -39,6 +39,10 @@ it matters.
 
 **Improved: the 3D Strength log now records every Auto 3D Strength setting actually in use, not just the basics.** Previously the log header only showed the mode/range/typical values — now, whenever you have Invert, Close-Up Strength, Wide Strength, or the Floor/Cutoff pair turned on, the header spells out exactly what was used. No more needing to remember (or dig back through your settings) what produced a given log or scan.
 
+**Improved: the log now always says whether Invert was on or off, instead of staying silent when it's off.** Previously the log only mentioned Invert when it was checked, which made it impossible to tell "Invert was off for this run" apart from "this log is from before this feature existed." Now it always states it plainly either way.
+
+**Improved: "Log 3D Strength per Scene" now writes live, scene by scene, just like the Convergence scene log already does.** Previously this log only appeared once the whole movie finished — if a conversion was cancelled or crashed partway through, you got nothing at all, even for scenes that had already fully processed. Now the file updates after every real scene, so you can watch it fill in as the movie converts, and a cancelled run still leaves a real, correct log of everything that finished before it stopped.
+
 ## Update — November 5, 2026
 
 **Fixed: settings could still come back wrong after closing and reopening the app, if you'd loaded a named Preset at any point.** The app was quietly re-applying your last-used Preset's own saved values every time it started, instead of whatever you actually had set up when you closed it — so anything you changed after loading a Preset (without re-saving it) would silently revert on the next restart, which defeated the whole point of auto-save. Now startup always brings back the literal state everything was in when you closed the app, for every setting — Presets still work exactly the same when you load or save them yourself, they just no longer get silently re-applied behind your back on the next launch.

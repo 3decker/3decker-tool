@@ -33138,7 +33138,9 @@ def _self_test_auto_divergence_scene_log():
     text = AD._format_scene_log(st, "movie_SBS.mp4", fps=1.0)
     lines = text.splitlines()
     assert lines[0] == "3D Strength log -- movie_SBS.mp4"
-    assert lines[1] == "Auto 3D Strength: cuts mode, range 2-16, typical (3D Strength) 6"
+    # ADR-449: Invert is always stated explicitly either way, even when off.
+    assert lines[1] == "Auto 3D Strength: cuts mode, range 2-16, typical (3D Strength) 6, Invert: off", \
+        lines[1]
     assert "Scene 1   00:00:00 - 00:00:05   (5 frames)   3D Strength: 2.0" in lines
     assert "Scene 2   00:00:05 - 00:00:08   (3 frames)   3D Strength: 16.0" in lines
     assert "Scene 3   00:00:08 - 00:00:10   (2 frames)   3D Strength: 9.0" in lines
@@ -33214,6 +33216,89 @@ def _self_test_auto_divergence_scene_log():
     print("_self_test_auto_divergence_scene_log: PASS")
 
 
+def _self_test_auto_divergence_scene_log_live():
+    """ADR-450: real follow-up request -- "can you make the auto strength log
+    to be written live like we get with convergence?" (core iw3's own
+    Convergence scene log has had this since ADR-405: a real file on disk
+    after every scene closes, not only once the whole movie finishes, so a
+    cancelled/crashed run still leaves a real partial log). Verifies the
+    SAME real file exists and is correct mid-run (before _finish_scene_log
+    ever runs), is clearly marked "IN PROGRESS", and gets cleanly overwritten
+    by the real, complete, non-in-progress version at the end -- pure
+    Python, no GPU/CLIP/real movie needed."""
+    import tempfile
+    from os import path as _p
+    from nt_autostrength import autodiv as AD
+    from iw3 import utils as U
+
+    with tempfile.TemporaryDirectory() as tmp_out:
+        parser = U.create_parser(required_true=False)
+        input_name = "movie_live.mp4"
+        args = parser.parse_args([
+            "-i", input_name, "-o", tmp_out,
+            "--auto-divergence", "--auto-divergence-scene-log",
+            "--divergence-min", "2.0", "--divergence-max", "16.0",
+        ])
+        args.video_extension = ".mkv"
+        args.state = {"device": "cpu"}
+        call_args = (input_name, tmp_out)
+        # Mirrors exactly what fresh()'s wrapper stashes before fn() runs.
+        args.state["_nt_autodiv_pending_log_info"] = ("process_video", call_args)
+
+        st = AD._RunState.__new__(AD._RunState)   # skip __init__: no Estimator/CLIP needed
+        st.reset_scene_log(args)
+        assert st.live_path is not None, "a resolvable movie must get a real live_path"
+        st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0, False, None, None, None, None)
+
+        name = U.make_output_filename(input_name, args, video=True)
+        log_path = _p.join(tmp_out, _p.splitext(name)[0] + "_3d_strength_log.txt")
+        assert st.live_path == log_path, (st.live_path, log_path)
+        assert not _p.isfile(log_path), "nothing should exist on disk before any scene closes"
+
+        # First scene closes (a real cut) -- the real file must now exist, in progress.
+        st._scene_record([2.0, 2.0], [True, False])
+        st._scene_record([5.0], [True])   # the cut that actually closes scene 1
+        assert _p.isfile(log_path), "the live file must exist as soon as the first real scene closes"
+        text_after_1 = open(log_path, encoding="utf-8").read()
+        assert "(IN PROGRESS -- conversion still running)" in text_after_1
+        assert "Scene 1" in text_after_1 and "Scene 2" not in text_after_1, text_after_1
+        assert "Average 3D Strength so far" in text_after_1, text_after_1
+
+        # Second scene closes -- the SAME file must now show both scenes.
+        st._scene_record([9.0], [True])
+        text_after_2 = open(log_path, encoding="utf-8").read()
+        assert "Scene 1" in text_after_2 and "Scene 2" in text_after_2, text_after_2
+
+        # The movie finishes -- _finish_scene_log() overwrites the same file with the
+        # real, complete, no-longer-in-progress version (a 3rd scene, never live-written
+        # since nothing closed it yet, must still appear in this final write).
+        AD._finish_scene_log(st, args, "process_video", call_args)
+        final_text = open(log_path, encoding="utf-8").read()
+        assert "IN PROGRESS" not in final_text, final_text
+        assert "Average 3D Strength for whole movie (time-weighted)" in final_text, final_text
+        assert "Scene 1" in final_text and "Scene 2" in final_text and "Scene 3" in final_text, final_text
+
+        # A second movie's (kind, call_args) must get ITS OWN live path -- not leak
+        # the first movie's, and not require a brand-new _RunState to pick it up.
+        input_name2 = "movie_live_2.mp4"
+        args.state["_nt_autodiv_pending_log_info"] = ("process_video", (input_name2, tmp_out))
+        st.reset_scene_log(args)
+        name2 = U.make_output_filename(input_name2, args, video=True)
+        log_path2 = _p.join(tmp_out, _p.splitext(name2)[0] + "_3d_strength_log.txt")
+        assert st.live_path == log_path2 and st.live_path != log_path, \
+            (st.live_path, log_path, log_path2)
+
+        # The checkbox/flag off must resolve no live path at all -- nothing written.
+        args_off = parser.parse_args(["-i", "movie_off.mp4", "-o", tmp_out, "--auto-divergence"])
+        args_off.video_extension = ".mkv"
+        args_off.state = {"device": "cpu",
+                          "_nt_autodiv_pending_log_info": ("process_video", ("movie_off.mp4", tmp_out))}
+        off_st = AD._RunState.__new__(AD._RunState)
+        off_st.reset_scene_log(args_off)
+        assert off_st.live_path is None, "live path must stay unresolved when the flag is off"
+    print("_self_test_auto_divergence_scene_log_live: PASS")
+
+
 def _self_test_scene_log_value_tally():
     """ADR-446: real follow-up request -- after I manually tallied "which 3D
     Strength values were used and how many scenes landed on each" for a real
@@ -33257,13 +33342,20 @@ def _self_test_scene_log_header_settings():
     actually produced with (the header never recorded them), after several
     real back-and-forths where I had to ask "what settings did you use for
     this one?" The header now shows exactly what _say()'s own debug line
-    already shows live, so the log is self-describing. Pure Python, no GPU/
-    CLIP/real movie needed."""
+    already shows live, so the log is self-describing.
+
+    ADR-449: Invert specifically is now ALWAYS stated either way ("Invert:
+    on"/"Invert: off"), unlike closeup/wide/floor -- real follow-up request,
+    since Invert's None-equivalent (False) is a real, meaningful state (not
+    "not used, plain curve" the way None genuinely is for the others), so
+    saying nothing when it's off read as ambiguous: decker couldn't tell
+    "Invert was off" apart from "this log predates the feature."
+
+    Pure Python, no GPU/CLIP/real movie needed."""
     from nt_autostrength import autodiv as AD
 
-    # Nothing set beyond the basics -- header must look exactly like before
-    # this ADR, byte for byte (full backward compatibility for every log
-    # that doesn't use any of the optional settings).
+    # Nothing set beyond the basics -- Invert must still say "off" explicitly
+    # (ADR-449), everything else must stay silent (unused, not "off").
     st = AD._RunState.__new__(AD._RunState)
     st.reset_scene_log()
     st.scene_log_meta = ("cuts", 3.5, 5.0, 3.8, False, None, None, None, None)
@@ -33271,9 +33363,12 @@ def _self_test_scene_log_header_settings():
     st._scene_flush()
     text = AD._format_scene_log(st, "movie.mkv", fps=1.0)
     header = text.splitlines()[1]
-    assert header == "Auto 3D Strength: cuts mode, range 3.5-5, typical (3D Strength) 3.8", header
+    assert header == (
+        "Auto 3D Strength: cuts mode, range 3.5-5, typical (3D Strength) 3.8, Invert: off"
+    ), header
 
-    # Everything set at once -- same phrasing _say()'s own debug line uses.
+    # Everything set at once -- same phrasing _say()'s own debug line uses
+    # (Invert's own phrasing is this header's own, since _say() has none).
     st2 = AD._RunState.__new__(AD._RunState)
     st2.reset_scene_log()
     st2.scene_log_meta = ("cuts", 3.5, 5.0, 4.1, True, 4.7, 3.6, 3.5, 3.9)
@@ -33282,7 +33377,7 @@ def _self_test_scene_log_header_settings():
     header2 = AD._format_scene_log(st2, "movie.mkv", fps=1.0).splitlines()[1]
     assert header2 == (
         "Auto 3D Strength: cuts mode, range 3.5-5, typical (3D Strength) 4.1, "
-        "inverted (wide=more, close-up=less), close-up pinned at 4.7, "
+        "Invert: on (wide=more, close-up=less), close-up pinned at 4.7, "
         "wide pinned at 3.6, floor 3.5 below 3.9"
     ), header2
 
@@ -38422,6 +38517,7 @@ def _run_self_tests():
         _self_test_closeup_wide_invert_relabel,
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,
+        _self_test_auto_divergence_scene_log_live,
         _self_test_scene_log_value_tally,
         _self_test_scene_log_header_settings,
         _self_test_scan_strength_core,

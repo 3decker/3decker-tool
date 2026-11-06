@@ -1679,6 +1679,7 @@ class MainFrame(wx.Frame):
               "Recommended: off (default) for the most faithful preview; turn on for a quicker first "
               "look, especially on a long movie, when you don't need exact precision."))
         self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div)
+        self.chk_nt_auto_div_invert.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div_invert)
         self.btn_nt_scan_strength.Bind(wx.EVT_BUTTON, self.on_click_btn_nt_scan_strength)
         self.update_nt_auto_divergence()
         self.chk_stereo_show_advanced.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_stereo_show_advanced)
@@ -11930,9 +11931,30 @@ class MainFrame(wx.Frame):
                   self.chk_nt_auto_div_overlay, self.chk_nt_auto_div_scene_log):
             c.Enable(on)
         self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
+        self.update_nt_closeup_wide_labels()
 
     def on_changed_chk_nt_auto_div(self, event):
         self.update_nt_auto_divergence()
+
+    def update_nt_closeup_wide_labels(self):
+        """ADR-445: real follow-up request -- decker asked for a way to make
+        Close-Up Strength/Wide Strength "more intuitive and easier" to use
+        with Invert, after repeatedly having to work out by hand which box
+        actually shapes which real shot type once Invert flips it. The two
+        boxes' ON-SCREEN LABELS now swap the instant Invert is checked, so
+        whichever label is currently showing always names the REAL shot type
+        that box is shaping right now -- no mental translation needed, and no
+        change to the stored value, the CLI flag name, or the filename/
+        metadata tag underneath (those still say "closeup"/"wide" in the
+        original, Invert-independent sense; only the GUI's own display text
+        moves)."""
+        inv = self.chk_nt_auto_div_invert.GetValue()
+        self.lbl_nt_closeup.SetLabel(T("Wide Strength") if inv else T("Close-Up Strength"))
+        self.lbl_nt_wide.SetLabel(T("Close-Up Strength") if inv else T("Wide Strength"))
+        self.Layout()
+
+    def on_changed_chk_nt_auto_div_invert(self, event):
+        self.update_nt_closeup_wide_labels()
 
     def update_rife_interpolate(self):
         enabled = self.chk_rife_interpolate.GetValue()
@@ -32797,6 +32819,57 @@ def _self_test_auto_divergence_wide_curve():
     print("_self_test_auto_divergence_wide_curve: PASS")
 
 
+def _self_test_closeup_wide_invert_relabel():
+    """ADR-445: real follow-up request -- decker asked for a way to make
+    Close-Up Strength/Wide Strength "more intuitive and easier" with Invert,
+    "like having a toggle... so next time is easier." The two boxes' ON-
+    SCREEN LABELS now swap the instant Invert is checked, so whichever label
+    is showing always names the REAL shot type that box currently shapes --
+    confirmed by checking the labels directly, both via the checkbox's own
+    live toggle and via a full args restore (apply_parsed_args_to_gui)."""
+    import wx
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.chk_nt_auto_div.SetValue(True)
+        frame.update_nt_auto_divergence()
+
+        assert frame.lbl_nt_closeup.GetLabelText() == "Close-Up Strength", \
+            "Invert off (default) must show the plain, non-inverted labels"
+        assert frame.lbl_nt_wide.GetLabelText() == "Wide Strength"
+
+        frame.chk_nt_auto_div_invert.SetValue(True)
+        frame.on_changed_chk_nt_auto_div_invert(wx.CommandEvent())
+        assert frame.lbl_nt_closeup.GetLabelText() == "Wide Strength", \
+            "checking Invert must swap the Close-Up Strength box's label to say what it REALLY shapes now"
+        assert frame.lbl_nt_wide.GetLabelText() == "Close-Up Strength", \
+            "checking Invert must swap the Wide Strength box's label too"
+
+        frame.chk_nt_auto_div_invert.SetValue(False)
+        frame.on_changed_chk_nt_auto_div_invert(wx.CommandEvent())
+        assert frame.lbl_nt_closeup.GetLabelText() == "Close-Up Strength", "unchecking must swap them back"
+        assert frame.lbl_nt_wide.GetLabelText() == "Wide Strength"
+
+        # Restoring a real command line with Invert on must show the swapped
+        # labels immediately too, not just after a manual toggle.
+        from . import utils as U
+        parser = U.create_parser(required_true=False)
+        inverted_args = parser.parse_args([
+            "-i", "a.mp4", "-o", "o", "--auto-divergence", "--auto-divergence-invert",
+        ])
+        frame.apply_parsed_args_to_gui(inverted_args)
+        assert frame.lbl_nt_closeup.GetLabelText() == "Wide Strength", \
+            "restoring Invert=True from a command line must also show the swapped labels"
+        assert frame.lbl_nt_wide.GetLabelText() == "Close-Up Strength"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_closeup_wide_invert_relabel: PASS")
+
+
 def _self_test_auto_divergence_cut_smooth():
     """Real confirmed finding this session (fast-cut movie trailer): Auto 3D Strength's Tracker
     snaps the strength to the new scene's value the instant a cut fires -- very visible/jarring on
@@ -38068,6 +38141,7 @@ def _run_self_tests():
         _self_test_auto_divergence_metadata_tags,
         _self_test_auto_divergence_closeup_curve,
         _self_test_auto_divergence_wide_curve,
+        _self_test_closeup_wide_invert_relabel,
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,
         _self_test_scan_strength_core,

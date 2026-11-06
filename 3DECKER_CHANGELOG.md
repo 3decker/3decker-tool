@@ -31,6 +31,8 @@ it matters.
 
 **Added: a "Wide Strength" setting — the exact mirror of Close-Up Strength, for the other end.** Also under Show Advanced Settings, empty/off by default. Raising 3D Strength to get more punch out of your medium shots still nudges nearly all of your wide shots upward too — only the single most extreme one is ever fully protected on its own. This box locks the whole wide end in place instead, independently of everything above it. (Note: with Invert checked, Close-Up Strength and Wide Strength swap which real shot type they affect, same as Invert already does for everything else.)
 
+**Improved: "Close-Up Strength" and "Wide Strength" now relabel themselves automatically when you check Invert.** Previously you had to remember that Invert swaps which real shot type each box affects, which was easy to get backwards. Now the box names themselves flip the instant you check Invert — whichever label you're looking at always tells you what it's really doing to your footage right now, no mental math required.
+
 ## Update — November 5, 2026
 
 **Fixed: settings could still come back wrong after closing and reopening the app, if you'd loaded a named Preset at any point.** The app was quietly re-applying your last-used Preset's own saved values every time it started, instead of whatever you actually had set up when you closed it — so anything you changed after loading a Preset (without re-saving it) would silently revert on the next restart, which defeated the whole point of auto-save. Now startup always brings back the literal state everything was in when you closed the app, for every setting — Presets still work exactly the same when you load or save them yourself, they just no longer get silently re-applied behind your back on the next launch.

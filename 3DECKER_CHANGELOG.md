@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 5, 2026
+## Latest Update — November 6, 2026
+
+**Added: shot_lock's Convergence Plane can now follow the real 3D Strength number instead of the shot's visual framing.** New "Classify By" option, set it to "divergence" instead of the default "clip" and shot_lock stops looking at the picture entirely — it watches whatever 3D Strength (Auto 3D Strength) value is actually being used for each scene instead. Set a "Strength Threshold" (default 4.0, fully adjustable): any scene using a 3D Strength above that number automatically gets your "High Strength Value," any scene at or below it gets your "Low Strength Value" — using the same settle-then-lock-for-the-whole-scene behavior, Switch Style, and Cut Decision Speed you already have for the normal wide/close-up version. Mid Shot Value has no effect in this mode (there's no "medium shot" concept for a raw strength number) and greys out automatically. Only means something with Auto 3D Strength actually turned on.
+
+## Update — November 5, 2026
 
 **Fixed: settings could still come back wrong after closing and reopening the app, if you'd loaded a named Preset at any point.** The app was quietly re-applying your last-used Preset's own saved values every time it started, instead of whatever you actually had set up when you closed it — so anything you changed after loading a Preset (without re-saving it) would silently revert on the next restart, which defeated the whole point of auto-save. Now startup always brings back the literal state everything was in when you closed the app, for every setting — Presets still work exactly the same when you load or save them yourself, they just no longer get silently re-applied behind your back on the next launch.
 

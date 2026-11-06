@@ -56,7 +56,8 @@ from .depth_percentile_estimator import DepthPercentileEstimator
 from .clip_shot_estimator import ClipShotEstimator
 from .sod_track_estimator import SodTrackEstimator
 from .shot_lock_estimator import (ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE,
-                                  DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH)
+                                  DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH,
+                                  DEFAULT_SIGNAL, DEFAULT_STRENGTH_THRESHOLD)
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
@@ -3692,6 +3693,13 @@ def make_output_filename(input_filename, args, video=False):
                 lock_decide_speed = getattr(args, "convergence_lock_decide_speed", None)
                 if lock_decide_speed is not None:
                     convergence_smoothing += f"_decidespd{to_deciaml(lock_decide_speed, 100, 2)}"
+                # ADR-437: only shown when actually using the divergence signal --
+                # "clip" is the unchanged default, so nothing new to show for it.
+                lock_signal = getattr(args, "convergence_lock_signal", DEFAULT_SIGNAL)
+                if lock_signal == "divergence":
+                    lock_threshold = getattr(args, "convergence_lock_strength_threshold",
+                                             DEFAULT_STRENGTH_THRESHOLD)
+                    convergence_smoothing += f"_sigdiv{to_deciaml(lock_threshold, 100, 2)}"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4126,6 +4134,14 @@ def _build_iw3_comment_metadata(args, video=True):
             lock_decide_speed_val = getattr(args, "convergence_lock_decide_speed", None)
             if lock_decide_speed_val is not None:
                 comment_parts.append(f"iw3_convergence_lock_decide_speed={lock_decide_speed_val}")
+            # ADR-437: omitted entirely for the default "clip" signal -- the
+            # threshold is only meaningful alongside it.
+            lock_signal_val = getattr(args, "convergence_lock_signal", DEFAULT_SIGNAL)
+            if lock_signal_val == "divergence":
+                comment_parts.append(f"iw3_convergence_lock_signal={lock_signal_val}")
+                comment_parts.append(
+                    f"iw3_convergence_lock_strength_threshold="
+                    f"{getattr(args, 'convergence_lock_strength_threshold', DEFAULT_STRENGTH_THRESHOLD)}")
         if args.convergence_mode == "clip_shot":
             if getattr(args, "clip_shot_symmetric", False):
                 comment_parts.append("iw3_clip_shot_symmetric=1")
@@ -4873,8 +4889,15 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             # the log_segment_pts gate above (ADR-422) that ensures log_reset_pts is
             # populated for this mode even with both scene-log checkboxes off. No
             # other convergence mode reads this parameter.
+            # ADR-437: args.divergence here is already the REAL, non-stale value
+            # in effect for THIS call -- when Auto 3D Strength (nt_auto3d) is
+            # active, its own apply_divergence() wrapper sets it on this exact
+            # args object right before calling through to here; with that add-on
+            # off it's just the single static --divergence number. Harmless to
+            # pass even when shot_lock's own signal is "clip" (simply unused).
             convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts,
-                                                           log_reset_pts=log_reset_pts)
+                                                           log_reset_pts=log_reset_pts,
+                                                           divergence=getattr(args, "divergence", None))
             depth = mapper_fn(depth)
             # ADR-423: real confirmed bug -- unlike sod_v1/face_detect/depth_percentile/
             # clip_shot/sod_track (whose convergence value comes from
@@ -8494,6 +8517,21 @@ def create_parser(required_true=True):
                              "this setting existed. Lower it toward 0 to make the decision land close enough "
                              "to the cut to be masked by it, while keeping --convergence-smoothing high for "
                              "smooth behavior the rest of the time.")
+    parser.add_argument("--convergence-lock-signal", type=str,
+                        choices=["clip", "divergence"], default=DEFAULT_SIGNAL,
+                        help="ADR-437: --convergence-mode shot_lock only: what decides wide vs. close-up. "
+                             "clip (default): CLIP's own visual wide/close-up judgment, unchanged. "
+                             "divergence: the real per-scene Auto 3D Strength value in effect instead -- "
+                             "above --convergence-lock-strength-threshold locks --convergence-lock-wide, at "
+                             "or below locks --convergence-lock-closeup. Only means something with Auto 3D "
+                             "Strength actually enabled (otherwise --divergence is just one static number "
+                             "for the whole movie, so there's nothing to classify against).")
+    parser.add_argument("--convergence-lock-strength-threshold", type=float,
+                        default=DEFAULT_STRENGTH_THRESHOLD,
+                        help="ADR-437: --convergence-mode shot_lock only, --convergence-lock-signal "
+                             "divergence only: the cutoff line on the Auto 3D Strength scale. Above this "
+                             "locks --convergence-lock-wide for the scene; at or below locks "
+                             "--convergence-lock-closeup.")
     parser.add_argument("--clip-shot-symmetric", action="store_true",
                         help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
                              "recede) by the same amount close-ups get pushed down, instead of staying "
@@ -9503,7 +9541,10 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             switch=getattr(args, "convergence_lock_switch", DEFAULT_SWITCH),
             decay=getattr(args, "convergence_smoothing", 0.9),
             cut_smooth=getattr(args, "convergence_cut_smooth", 0),
-            decide_speed=getattr(args, "convergence_lock_decide_speed", None))
+            decide_speed=getattr(args, "convergence_lock_decide_speed", None),
+            signal=getattr(args, "convergence_lock_signal", DEFAULT_SIGNAL),
+            strength_threshold=getattr(args, "convergence_lock_strength_threshold",
+                                       DEFAULT_STRENGTH_THRESHOLD))
 
     if args.export_disparity:
         args.export = True

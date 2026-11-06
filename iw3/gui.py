@@ -88,7 +88,9 @@ from . import export_config
 from .inpaint_utils import INPAINT_MODELS
 from .shot_lock_estimator import (
     DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE, DEFAULT_CLOSEUP_VALUE,
-    DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH)
+    DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH,
+    DEFAULT_SIGNAL as DEFAULT_SHOT_LOCK_SIGNAL,
+    DEFAULT_STRENGTH_THRESHOLD)
 
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
@@ -1868,6 +1870,45 @@ class MainFrame(wx.Frame):
               "decision at the same time -- if you're fine with both being fast together, just lower "
               "Convergence Smoothing instead and skip this box entirely. If you do use it, try 0.0-0.3."))
 
+        self.lbl_convergence_lock_signal = wx.StaticText(
+            self.grp_stereo, label=T("Classify By"))
+        self.cbo_convergence_lock_signal = wx.ComboBox(
+            self.grp_stereo, choices=["clip", "divergence"], name="cbo_convergence_lock_signal")
+        self.cbo_convergence_lock_signal.SetEditable(False)
+        self.cbo_convergence_lock_signal.SetStringSelection(DEFAULT_SHOT_LOCK_SIGNAL)
+        self.cbo_convergence_lock_signal.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode. What decides which of your two locked "
+              "values a scene gets.\n"
+              "clip (default): CLIP, the same AI model that judges wide vs. close-up by what the shot "
+              "visually looks like.\n"
+              "divergence: the real 3D Strength (Auto 3D Strength) value already being used for that "
+              "scene instead -- above Strength Threshold below locks in Wide/High Strength Value, at or "
+              "below it locks in Close-Up/Low Strength Value. Why: real confirmed pattern -- high 3D "
+              "Strength scenes usually want HIGH Convergence for comfort, low 3D Strength scenes usually "
+              "want LOW Convergence so a close-up can pop. This only means something with Auto 3D "
+              "Strength actually turned on -- without it, 3D Strength is just one fixed number for the "
+              "whole movie, so there's nothing scene-to-scene to react to.\n"
+              "Mid Shot Value has no effect with divergence (there's no visual 'medium shot' concept on "
+              "a strength number) -- it's greyed out automatically.\n"
+              "Recommended: clip unless you specifically want Convergence to follow 3D Strength instead "
+              "of the shot's visual framing."))
+        self.cbo_convergence_lock_signal.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_lock_signal)
+
+        self.lbl_convergence_lock_strength_threshold = wx.StaticText(
+            self.grp_stereo, label=T("Strength Threshold"))
+        self.cbo_convergence_lock_strength_threshold = EditableComboBox(
+            self.grp_stereo, choices=["3.5", "4.0", "4.5", "5.0"],
+            name="cbo_convergence_lock_strength_threshold")
+        self.cbo_convergence_lock_strength_threshold.SetValue(f"{DEFAULT_STRENGTH_THRESHOLD:.2f}")
+        self.cbo_convergence_lock_strength_threshold.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence. The "
+              "cutoff line on the 3D Strength scale: scenes using a 3D Strength ABOVE this number lock in "
+              "Wide/High Strength Value; scenes AT OR BELOW it lock in Close-Up/Low Strength Value.\n"
+              "Recommended: pick a number that actually sits between the 3D Strength values your own "
+              "footage tends to use -- for example, if close-up scenes usually land around 3.8 and wider "
+              "scenes around 3.9 or higher, 3.85 would be a clean cutoff between them. Check your own "
+              "3D Strength log file to see the real numbers your footage uses."))
+
         self.chk_clip_shot_symmetric = wx.CheckBox(
             self.grp_stereo, label=T("Also Push Wide Shots Up (clip_shot)"), name="chk_clip_shot_symmetric")
         self.chk_clip_shot_symmetric.SetValue(False)
@@ -3584,6 +3625,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_switch, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_decide_speed, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_decide_speed, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_signal, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_signal, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_strength_threshold, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_strength_threshold, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_clip_shot_bias_strength, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_clip_shot_bias_strength, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -10957,6 +11002,7 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_mid,
             self.cbo_convergence_lock_closeup,
             self.cbo_convergence_lock_decide_speed,
+            self.cbo_convergence_lock_strength_threshold,
             self.cbo_clip_shot_bias_strength,
             self.cbo_face_protect,
             self.cbo_resolution,
@@ -11386,7 +11432,8 @@ class MainFrame(wx.Frame):
                   self.lbl_convergence_lock_mid, self.cbo_convergence_lock_mid,
                   self.lbl_convergence_lock_closeup, self.cbo_convergence_lock_closeup,
                   self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch,
-                  self.lbl_convergence_lock_decide_speed, self.cbo_convergence_lock_decide_speed):
+                  self.lbl_convergence_lock_decide_speed, self.cbo_convergence_lock_decide_speed,
+                  self.lbl_convergence_lock_signal, self.cbo_convergence_lock_signal):
             c.Enable(mode == "shot_lock")
         self.chk_clip_shot_symmetric.Enable(mode == "clip_shot")
         self.lbl_clip_shot_bias_strength.Enable(mode == "clip_shot")
@@ -11394,12 +11441,36 @@ class MainFrame(wx.Frame):
         self.update_convergence_cut_smooth()
         self.update_convergence_subject_lock()
         self.update_sod_track_update_interval()
+        self.update_shot_lock_signal()
 
     def on_changed_cbo_convergence_mode(self, event):
         self.update_convergence_mode()
 
     def on_changed_cbo_convergence_lock_switch(self, event):
         self.update_convergence_cut_smooth()
+
+    def on_changed_cbo_convergence_lock_signal(self, event):
+        self.update_shot_lock_signal()
+
+    def update_shot_lock_signal(self):
+        """ADR-437: --convergence-lock-signal divergence has no CLIP-visual concept
+        of a "medium shot" (Mid Shot Value), so that field is greyed out for it
+        regardless of Hold Steady/mode state above; also relabels Wide/Close-Up to
+        their divergence-signal names so the same two value boxes read correctly
+        under either signal, instead of showing a visual-framing label for a
+        3D-Strength-driven value."""
+        mode = self.cbo_convergence_mode.GetValue()
+        signal = self.cbo_convergence_lock_signal.GetValue()
+        is_divergence = mode == "shot_lock" and signal == "divergence"
+        self.lbl_convergence_lock_strength_threshold.Enable(is_divergence)
+        self.cbo_convergence_lock_strength_threshold.Enable(is_divergence)
+        self.lbl_convergence_lock_mid.Enable(mode == "shot_lock" and not is_divergence)
+        self.cbo_convergence_lock_mid.Enable(mode == "shot_lock" and not is_divergence)
+        self.lbl_convergence_lock_wide.SetLabel(
+            T("High Strength Value") if is_divergence else T("Wide Shot Value"))
+        self.lbl_convergence_lock_closeup.SetLabel(
+            T("Low Strength Value") if is_divergence else T("Close-Up Value"))
+        self.Layout()
 
     def update_convergence_cut_smooth(self):
         # Meaningful in two unrelated cases: (1) Hold Steady Per Scene is checked (any AI
@@ -12020,6 +12091,10 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_convergence_lock_decide_speed.GetValue(), 0.0, 0.95, allow_empty=True):
             self.show_validation_error_message(T("Cut Decision Speed"), 0.0, 0.95)
             return None
+        if not validate_number(self.cbo_convergence_lock_strength_threshold.GetValue(), 0.0, 100.0,
+                               allow_empty=False):
+            self.show_validation_error_message(T("Strength Threshold"), 0.0, 100.0)
+            return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
@@ -12429,6 +12504,8 @@ class MainFrame(wx.Frame):
             # ADR-436: an empty box means "inherit Convergence Smoothing" -- None.
             convergence_lock_decide_speed=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_convergence_lock_decide_speed.GetValue()),
+            convergence_lock_signal=self.cbo_convergence_lock_signal.GetValue(),
+            convergence_lock_strength_threshold=float(self.cbo_convergence_lock_strength_threshold.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
@@ -13763,6 +13840,11 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_decide_speed.SetValue("")
         else:
             _apply_combo_value(self.cbo_convergence_lock_decide_speed, _decide_speed_restore)
+        _apply_combo_value(self.cbo_convergence_lock_signal,
+                           getattr(args, "convergence_lock_signal", DEFAULT_SHOT_LOCK_SIGNAL))
+        _apply_combo_value(self.cbo_convergence_lock_strength_threshold,
+                           getattr(args, "convergence_lock_strength_threshold", DEFAULT_STRENGTH_THRESHOLD))
+        self.update_shot_lock_signal()
         self.chk_clip_shot_symmetric.SetValue(bool(getattr(args, "clip_shot_symmetric", False)))
         _apply_combo_value(self.cbo_clip_shot_bias_strength, getattr(args, "clip_shot_bias_strength", 0.25))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
@@ -35208,6 +35290,125 @@ def _self_test_shot_lock_decide_speed():
     print("_self_test_shot_lock_decide_speed: PASS")
 
 
+def _self_test_shot_lock_divergence_signal():
+    """ADR-437: real follow-up request -- "can we make convergence related to
+    what 3D Strength is being used? any 3D Strength 3.9 and over uses
+    Convergence 0.60, 3.8 and under uses 0.10," then "can we make that number
+    an option to change" (the threshold). --convergence-lock-signal divergence
+    must be a real, selectable choice; Strength Threshold must enable only for
+    it; Mid Shot Value must disable for it (no CLIP-visual "medium" concept on
+    a strength number); Wide/Close-Up must relabel to High/Low Strength Value;
+    it must round-trip through parse_args()/the CLI/create_parser(); and the
+    actual classification must lock onto the right value depending on whether
+    the real per-call divergence value is above or below the threshold."""
+    import torch
+    import wx
+    from . import utils as U
+    from .shot_lock_estimator import ShotLockEstimator
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert "divergence" in list(frame.cbo_convergence_lock_signal.GetItems())
+
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_lock_strength_threshold.IsEnabled(), \
+            "Strength Threshold must stay off for the default clip signal"
+        assert frame.lbl_convergence_lock_wide.GetLabel() == "Wide Shot Value"
+
+        frame.cbo_convergence_lock_signal.SetValue("divergence")
+        frame.on_changed_cbo_convergence_lock_signal(wx.CommandEvent())
+        assert frame.cbo_convergence_lock_strength_threshold.IsEnabled()
+        assert not frame.cbo_convergence_lock_mid.IsEnabled(), \
+            "Mid Shot Value has no effect under the divergence signal -- must grey out"
+        assert frame.lbl_convergence_lock_wide.GetLabel() == "High Strength Value"
+        assert frame.lbl_convergence_lock_closeup.GetLabel() == "Low Strength Value"
+
+        frame.cbo_convergence_lock_strength_threshold.SetValue("3.85")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_signal == "divergence"
+        assert args.convergence_lock_strength_threshold == 3.85
+        cmd = frame.get_cli_command()
+        assert "divergence" in cmd and "3.85" in cmd, cmd
+
+        # Switching back to clip must restore the original labels.
+        frame.cbo_convergence_lock_signal.SetValue("clip")
+        frame.on_changed_cbo_convergence_lock_signal(wx.CommandEvent())
+        assert frame.lbl_convergence_lock_wide.GetLabel() == "Wide Shot Value"
+        assert frame.cbo_convergence_lock_mid.IsEnabled()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                  "--convergence-mode", "shot_lock",
+                                  "--convergence-lock-signal", "divergence",
+                                  "--convergence-lock-strength-threshold", "3.85"])
+    assert reparsed.convergence_lock_signal == "divergence"
+    assert reparsed.convergence_lock_strength_threshold == 3.85
+
+    # Filename/metadata tags: present only for the non-default divergence signal.
+    args_clip = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock"])
+    args_clip.video_extension = ".mkv"
+    assert "sigdiv" not in U.make_output_filename("movie.mp4", args_clip, video=True)
+    assert "iw3_convergence_lock_signal" not in U._build_iw3_comment_metadata(args_clip, video=True)
+    args_div = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-signal", "divergence", "--convergence-lock-strength-threshold", "3.85"])
+    args_div.video_extension = ".mkv"
+    assert "sigdiv385" in U.make_output_filename("movie.mp4", args_div, video=True)
+    meta = U._build_iw3_comment_metadata(args_div, video=True)
+    assert "iw3_convergence_lock_signal=divergence" in meta
+    assert "iw3_convergence_lock_strength_threshold=3.85" in meta
+
+    # The actual classification math: built via object.__new__(), bypassing
+    # __init__ entirely (no CLIP model is even constructed for this signal --
+    # see __init__ -- so there is nothing to load/download either way).
+    est = object.__new__(ShotLockEstimator)
+    est.wide_value, est.closeup_value, est.mid_value = 0.60, 0.10, None
+    est.switch = "snap"
+    est.decay = 0.9
+    est.decide_speed = None
+    est.signal = "divergence"
+    est.strength_threshold = 3.85
+    est._clip = None
+    from .convergence_tracker import SceneHoldTracker
+    est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
+    est.blend_ema = None
+    est.ease_value = None
+    est._last_raw = None
+    est._pending_scene_reset = True
+    est._scene_running_c = None
+    est._scene_n = 0
+    est._scene_locked_value = None
+    est._recompute_decide_settle()
+
+    depth = torch.zeros(1, 1, 2, 2)
+    high_locked = None
+    for _ in range(30):
+        v = est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=3.9).item()
+        high_locked = v
+    assert abs(high_locked - 0.60) < 1e-5, \
+        f"3.9 (above 3.85) must lock the high-strength value, got {high_locked}"
+
+    # A real new scene (log_reset_pts marks the end of the previous one) with a
+    # divergence value AT OR BELOW the threshold must lock the low-strength value.
+    est._pending_scene_reset = True
+    low_locked = None
+    for _ in range(30):
+        v = est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=3.8).item()
+        low_locked = v
+    assert abs(low_locked - 0.10) < 1e-5, \
+        f"3.8 (at the threshold, not above it) must lock the low-strength value, got {low_locked}"
+
+    print("_self_test_shot_lock_divergence_signal: PASS")
+
+
 def _self_test_clip_shot_symmetric_gui_and_cli():
     """ADR-424/425: "Also Push Wide Shots Up" and "Bias Strength" must enable only for
     clip_shot mode, default off/0.25 (unchanged clip_shot behavior), round-trip
@@ -36955,6 +37156,7 @@ def _run_self_tests():
         _self_test_shot_lock_mid_disabled,
         _self_test_shot_lock_ease_switch,
         _self_test_shot_lock_decide_speed,
+        _self_test_shot_lock_divergence_signal,
         _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

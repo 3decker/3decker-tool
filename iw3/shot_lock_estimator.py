@@ -117,6 +117,36 @@ _recompute_decide_settle() below) instead of `self.tracker.settle`.
 glide speed, snap_ramp's drift/deadband). Left at its default (None), the
 decision keeps inheriting --convergence-smoothing exactly like before this
 setting existed -- zero behavior change for anyone who doesn't set it.
+
+ADR-437: real follow-up request -- "can we make convergence related to what
+3D Strength is being used? e.g. any scene with 3D Strength 3.9+ uses
+Convergence 0.60, and 3.8 and under uses 0.10." Direct continuation of the
+earlier-confirmed real pattern (high Auto 3D Strength on a scene wants HIGH
+Convergence for comfort, low Auto 3D Strength wants LOW Convergence so the
+close-up can pop) -- shot_lock already has the exact "classify a scene,
+lock one of two values in, transition however you like" machinery this
+needs; the only thing that changes is what gets classified. `signal="clip"`
+(default, unchanged) keeps reading CLIP's wide-vs-close-up visual judgment
+as before. `signal="divergence"` instead reads the REAL `args.divergence`
+value in effect at this exact call (apply_divergence() in utils.py) --
+when Auto 3D Strength (nt_auto3d) is active, that is its real, already-
+computed, non-stale per-scene strength value (nt_auto3d patches
+apply_divergence() itself and sets this per sub-batch right before calling
+through, so there's no ordering/staleness issue); with Auto 3D Strength off
+it's just the single static --divergence number for the whole movie, so
+there is nothing real to classify against (documented limitation, not a
+bug). `strength_threshold` (--convergence-lock-strength-threshold) is the
+single cutoff line: above it locks `wide_value` (relabeled "High Strength
+Value" in the GUI for this signal), at or below locks `closeup_value`
+("Low Strength Value"). Implemented as a pre-classification step that turns
+the real divergence value straight into a binary 0/1 "closeness" (see
+`__call__`) -- _classify()/_blend_value() need no changes at all, since a
+value that's always exactly 0 or 1 already falls outside ADR-429's 1/3..2/3
+middle third on its own; Mid Shot Value is simply disabled (greyed out) in
+the GUI for this signal rather than specially coded around, since it could
+never trigger anyway. The composed CLIP model (self._clip) is only built
+when signal="clip" -- no point loading/downloading it for a user who only
+ever wants the divergence signal.
 """
 import torch
 
@@ -132,11 +162,18 @@ DEFAULT_CLOSEUP_VALUE = 0.20
 # closeness score into three equal zones -- see module docstring.
 MID_LOW = 1.0 / 3.0
 MID_HIGH = 2.0 / 3.0
+# ADR-437: what decides wide-vs-close-up in the first place -- see module
+# docstring. "clip" (default, unchanged) reads the CLIP visual judgment;
+# "divergence" reads the real per-scene Auto 3D Strength value instead.
+SIGNAL_MODES = ("clip", "divergence")
+DEFAULT_SIGNAL = "clip"
+DEFAULT_STRENGTH_THRESHOLD = 4.0
 
 
 class ShotLockEstimator():
     def __init__(self, wide_value, closeup_value, device_id, switch=DEFAULT_SWITCH,
-                 decay=0.9, cut_smooth=0, mid_value=None, decide_speed=None):
+                 decay=0.9, cut_smooth=0, mid_value=None, decide_speed=None,
+                 signal=DEFAULT_SIGNAL, strength_threshold=DEFAULT_STRENGTH_THRESHOLD):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
@@ -151,12 +188,19 @@ class ShotLockEstimator():
         # ADR-436: None (default) means "inherit decay" -- see module docstring
         # and _recompute_decide_settle().
         self.decide_speed = None if decide_speed is None else float(decide_speed)
+        # ADR-437: what gets classified -- see module docstring.
+        self.signal = signal if signal in SIGNAL_MODES else DEFAULT_SIGNAL
+        self.strength_threshold = float(strength_threshold)
         # Composition, not inheritance -- see module docstring. convergence=0.5 and
         # the ema/scene_hold/cut_smooth args passed here are irrelevant: only
         # `_closeness()` is ever called on this instance, never `__call__()`.
-        self._clip = ClipShotEstimator(convergence=0.5, device_id=device_id,
-                                       enable_ema=False, decay=0.9,
-                                       scene_hold=False, cut_smooth=0)
+        # ADR-437: only built for signal="clip" -- a user who only ever wants the
+        # divergence signal shouldn't pay for loading/downloading a CLIP model
+        # that would never actually be used.
+        self._clip = (ClipShotEstimator(convergence=0.5, device_id=device_id,
+                                        enable_ema=False, decay=0.9,
+                                        scene_hold=False, cut_smooth=0)
+                      if self.signal == "clip" else None)
         # Only meaningful for snap/snap_ramp -- `blend` uses its own plain EMA
         # below instead, since it has no cut/classification concept at all.
         self.tracker = SceneHoldTracker(decay, self.cut_smooth if self.switch == "snap_ramp" else 0)
@@ -176,8 +220,11 @@ class ShotLockEstimator():
     def to(self, device):
         """Mirrors ClipShotEstimator.to()/ADR-407 -- moves the composed CLIP model
         (and its fixed anchor embeddings) along with every pause/resume, same as
-        every other convergence estimator that holds GPU state between frames."""
-        self._clip.to(device)
+        every other convergence estimator that holds GPU state between frames.
+        ADR-437: no-op when signal="divergence" -- there is no composed CLIP
+        model to move in that case (see __init__)."""
+        if self._clip is not None:
+            self._clip.to(device)
         return self
 
     def _recompute_decide_settle(self):
@@ -259,7 +306,7 @@ class ShotLockEstimator():
             return self._ease_toward(locked_value)
         return self.tracker.update(locked_value)
 
-    def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None):
+    def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None, divergence=None):
         B = depth.shape[0]
         reset_pts = reset_pts if reset_pts is not None else [False] * B
         # ADR-422: log_reset_pts (when supplied) is the real, independently-scanned
@@ -269,7 +316,19 @@ class ShotLockEstimator():
         # "supplied, but no cut on this particular frame."
         has_real_cuts = log_reset_pts is not None
         log_reset_pts = log_reset_pts if has_real_cuts else [False] * B
-        closeness = self._clip._closeness(rgb, depth)  # 0 = wide .. 1 = close-up
+        if self.signal == "divergence":
+            # ADR-437: the real Auto 3D Strength value in effect for this exact call
+            # (or the single static --divergence number when that add-on is off --
+            # see module docstring) reduced straight to a binary 0/1 "closeness,"
+            # the same shape _classify()/_blend_value() already expect -- no CLIP
+            # call at all for this signal. _classify()'s existing convention picks
+            # wide_value for c<0.5 and closeup_value for c>=0.5 -- so ABOVE the
+            # threshold (locks wide_value, relabeled "High Strength Value" in the
+            # GUI) must map to the LOW end of that scale (c=0.0), not the high end.
+            above = divergence is not None and float(divergence) > self.strength_threshold
+            closeness = torch.full((B,), 0.0 if above else 1.0, device=depth.device, dtype=depth.dtype)
+        else:
+            closeness = self._clip._closeness(rgb, depth)  # 0 = wide .. 1 = close-up
 
         results = []
         for i in range(B):

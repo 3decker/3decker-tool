@@ -85,7 +85,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-__all__ = ["install", "ensure_weights", "strength_curve", "MODES"]
+__all__ = ["install", "ensure_weights", "strength_curve", "MODES", "scan_strength"]
 
 HERE = path.dirname(path.abspath(__file__))
 ROOT = path.dirname(HERE)                               # <nunif>\nt_auto3d
@@ -736,6 +736,136 @@ def _finish_scene_log(st, args, kind, call_args):
         os.replace(tmp, log_path)
     except Exception as e:                                           # noqa: BLE001
         _say(f"could not write the 3D Strength scene log ({type(e).__name__}: {e})")
+
+
+# --------------------------------------------------------------------------
+# ADR-440: "Scan 3D Strength" (iw3/gui.py button) -- real user request: "is
+# there a way we can scan a movie to get the auto 3D strength values of the
+# whole movie before committing conversion?" The decision above never
+# actually needed the depth model, the stereo warp, inpainting, or encoding
+# -- Estimator.__call__() reads the plain decoded frame through its own small
+# CLIP model, falling back to depth_closeness(depth) only if that model
+# failed to load (see the class above). So the whole movie can be scanned for
+# a preview of the SAME per-scene log a real conversion with these settings
+# would produce, decoding frames only, in a fraction of the time a real
+# conversion takes. Deliberately always the WHOLE file, start to finish,
+# ignoring any Start/End Time set for an eventual real conversion -- the
+# point of scanning is to see the whole movie before deciding anything about
+# converting part of it. Deliberately GUI-only for now (no CLI flag) --
+# mirrors this project's own precedent for this exact class of feature
+# ("Preview Peak Bitrate", ADR-338): a real settings preview before
+# committing to a full conversion, GUI button only.
+# --------------------------------------------------------------------------
+def _make_scan_args(args, device):
+    """A shallow copy of the real args, scoped to just this scan: its own
+    minimal `state` dict (only `device` -- never the real job's loaded depth/
+    stereo models or stop/suspend events, so a scan can never touch or be
+    touched by an active real job's state) and `auto_divergence_scene_log`
+    forced on regardless of the real checkbox, since the scan's whole point
+    IS the per-scene breakdown. Every other Auto 3D Strength setting (mode,
+    min/max, stability, cut_smooth, invert, scene_detect) is read as-is from
+    the real args, so the scan reflects whatever is currently set, even if
+    the "Auto 3D Strength" checkbox itself is off."""
+    scan_args = copy.copy(args)
+    scan_args.state = {"device": device}
+    scan_args.auto_divergence_scene_log = True
+    return scan_args
+
+
+def _tally_scene_values(scene_records):
+    """[(value, how many scenes used it)], most-common first (ties broken by
+    the higher value) -- the same "how many scenes used each strength" count
+    a user would otherwise have to tally by hand from the scene log text."""
+    counts = collections.Counter(mean for _, _, _, mean in scene_records)
+    return sorted(counts.items(), key=lambda kv: (-kv[1], -kv[0]))
+
+
+def _scan_log_path(input_path):
+    """Next to the INPUT file, not the (possibly not-yet-decided) real output
+    -- the whole point of scanning is to decide settings before an output
+    even exists. The "_scan" suffix (vs. _finish_scene_log's own
+    "_3d_strength_log.txt") means neither file can ever be mistaken for the
+    other -- a scan's preview log and a real completed conversion's own log
+    always stay visually distinct, even sitting in the same folder."""
+    base, _ = path.splitext(str(input_path))
+    return base + "_3d_strength_scan.txt"
+
+
+def _write_scan_log(st, log_path, output_label, fps):
+    """Same tmp-file-then-replace pattern as _finish_scene_log() above, pulled
+    out on its own so a test can call it directly with a synthetic `st`,
+    without needing a real video decode."""
+    text = _format_scene_log(st, output_label, fps)
+    tmp = f"{log_path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, log_path)
+    return text
+
+
+def scan_strength(input_path, args, device="cpu", max_fps=None, hwaccel=None,
+                  disable_software_fallback=False, stop_event=None, suspend_event=None,
+                  tqdm_fn=None, output_log_path=None):
+    """Decodes `input_path` start to finish and works out the SAME per-scene
+    3D Strength a real conversion with these settings would use (see the
+    ADR-440 note above) -- without the depth model, the stereo warp,
+    inpainting, or encoding. Stopped early via `stop_event` (e.g. the GUI's
+    own Cancel) still writes whatever was decoded so far, rather than
+    nothing.
+
+    Returns None if nothing was decoded at all (e.g. stopped immediately, or
+    an empty/corrupt file) -- otherwise a dict: log_path, scene_count,
+    average (time-weighted, same number the log's own last line reports),
+    tally (see _tally_scene_values)."""
+    import nunif.utils.video as VU
+
+    device = torch.device(device) if isinstance(device, str) else device
+    scan_args = _make_scan_args(args, device)
+    st = _RunState(scan_args)
+    # Unused by Estimator.__call__() unless its CLIP model failed to load (see
+    # the class docstring) -- one placeholder tensor, reused every frame. Real
+    # per-call uniqueness for .divergences()'s own repeat-call dedup (see its
+    # `same_obj` parameter) comes from the fresh `object()` passed below
+    # instead, not from this tensor's identity.
+    depth_placeholder = torch.zeros(1, 1, 1, 1, device=device)
+    resolved_fps = [None]
+
+    def frame_callback(frame):
+        if frame is None:
+            return
+        x = VU.to_tensor(frame, device=device).unsqueeze(0)
+        st.divergences(x, depth_placeholder, scan_args, reset_pts=None,
+                       log_reset_pts=None, same_obj=object())
+
+    def config_callback(sw_format):
+        fps = float(sw_format.get_fps())
+        if max_fps and fps > max_fps:
+            fps = max_fps
+        resolved_fps[0] = fps if fps > 0 else None
+        return VU.VideoOutputConfig(fps=resolved_fps[0])
+
+    VU.hook_frame(
+        str(input_path), frame_callback, config_callback=config_callback,
+        title=f"Scanning 3D Strength: {path.basename(str(input_path))}",
+        stop_event=stop_event, suspend_event=suspend_event, tqdm_fn=tqdm_fn,
+        hwaccel=hwaccel, disable_software_fallback=disable_software_fallback,
+        device=device,
+    )
+    st._scene_flush()
+    if not st.scene_records:
+        return None
+
+    log_path = output_log_path or _scan_log_path(input_path)
+    _write_scan_log(st, log_path, path.basename(str(input_path)), resolved_fps[0])
+
+    total_frames = sum(frames for _, _, frames, _ in st.scene_records)
+    weighted_sum = sum(mean * frames for _, _, frames, mean in st.scene_records)
+    return {
+        "log_path": log_path,
+        "scene_count": len(st.scene_records),
+        "average": weighted_sum / total_frames if total_frames else 0.0,
+        "tally": _tally_scene_values(st.scene_records),
+    }
 
 
 # --------------------------------------------------------------------------

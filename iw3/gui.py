@@ -1102,6 +1102,28 @@ def run_preview_peak_bitrate(args):
     return preview_peak_bitrate(args.input, args), args
 
 
+def run_nt_scan_strength(args):
+    """ADR-440: worker-thread body for "Scan 3D Strength" -- decodes the whole
+    input movie and works out what Auto 3D Strength would use per scene,
+    without running a real conversion at all (see nt_auto3d/nt_autostrength/
+    autodiv.py's own scan_strength() docstring for why the depth model/warp/
+    inpaint/encode are never needed for this). Returns (result_dict_or_None,
+    args) -- None means nothing was decoded (e.g. stopped immediately, or an
+    empty/corrupt file), not a crash."""
+    from nt_autostrength import autodiv as AD
+    result = AD.scan_strength(
+        args.input, args,
+        device=args.state["device"],
+        max_fps=args.max_fps,
+        hwaccel=args.hwaccel,
+        disable_software_fallback=getattr(args, "disable_software_fallback", False),
+        stop_event=args.state["stop_event"],
+        suspend_event=args.state["suspend_event"],
+        tqdm_fn=args.state["tqdm_fn"],
+    )
+    return result, args
+
+
 class _StandaloneOutputBox(wx.TextCtrl):
     """ADR-356: the shared Standalone Tools output box (txt_standalone_log). Every
     AppendText() also goes to `mirror` (the main tab's Output panel), so live standalone
@@ -1571,7 +1593,26 @@ class MainFrame(wx.Frame):
               "How it's different from the checkbox above: nothing is written into the picture itself, "
               "just a plain text file you can open afterward.\n"
               "Recommended: on if you want a record of what Auto 3D Strength chose; off otherwise."))
+        self.btn_nt_scan_strength = wx.Button(self.grp_stereo, label=T("Scan 3D Strength..."),
+                                              name="btn_nt_scan_strength")
+        self.btn_nt_scan_strength.SetToolTip(
+            T("ADR-440: what it does: decodes the whole input video and reports the 3D Strength Auto "
+              "3D Strength WOULD use for every scene, without running an actual conversion -- no depth "
+              "model, no 3D warp, no inpainting, no encoding, so it finishes in a fraction of the time a "
+              "real conversion takes.\n"
+              "Why: lets you see what a movie's own scenes would get before spending the time on a full "
+              "conversion, and works even if the \"Auto 3D Strength\" checkbox above is currently off -- "
+              "it always uses whatever Mode / Auto Range / Auto Stability / Invert you have set, since "
+              "the whole point is to help decide those before committing.\n"
+              "Always scans the WHOLE file start to finish, regardless of any Start/End Time set above "
+              "for an eventual real conversion -- a separate, deliberate choice.\n"
+              "Result: a plain text file saved next to the INPUT video (named \"..._3d_strength_scan.txt\", "
+              "never overwriting a real conversion's own scene log), plus a quick summary shown right "
+              "here listing every distinct 3D Strength value found and how many scenes used it.\n"
+              "Recommended: run this once on a new movie before your first real conversion, to judge "
+              "whether your Auto Range/typical 3D Strength actually fit what this movie's scenes use."))
         self.chk_nt_auto_div.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div)
+        self.btn_nt_scan_strength.Bind(wx.EVT_BUTTON, self.on_click_btn_nt_scan_strength)
         self.update_nt_auto_divergence()
         self.chk_stereo_show_advanced.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_stereo_show_advanced)
 
@@ -3659,6 +3700,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_nt_auto_div_invert, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_scene_log, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.btn_nt_scan_strength, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_mode, (i, 1), flag=wx.EXPAND)
         layout.Add(self.cbo_convergence, (i, 2), flag=wx.EXPAND)
@@ -14826,6 +14868,69 @@ class MainFrame(wx.Frame):
         message = (f"{T('Expected peak')}: {peak:.1f} Mbps ({T('your limit')}: {limit:.0f} Mbps)\n\n"
                    f"{verdict}\n\n{caveat}")
         wx.MessageBox(message, T("Preview Peak Bitrate"), wx.OK | icon)
+
+    def on_click_btn_nt_scan_strength(self, event):
+        """ADR-440: real user request -- "is there a way we can scan a movie to
+        get the auto 3D strength values of the whole movie before committing
+        conversion?" Same "preview before committing" shape as Preview Peak
+        Bitrate above, just for Auto 3D Strength instead of the encoder."""
+        # CRITICAL, DO NOT REORDER: ensure_cuda_context() must run before parse_args() -- see
+        # ADR-218 and on_click_btn_start()'s own comment.
+        if not self._ensure_cuda_context_safe():
+            return
+        try:
+            from nt_autostrength import autodiv as AD  # noqa: F401
+        except Exception:
+            wx.MessageBox(T("Auto 3D Strength (nt_auto3d) is not installed, so there is nothing to scan."),
+                          T("Scan 3D Strength"), wx.OK | wx.ICON_INFORMATION)
+            return
+        try:
+            args = self.parse_args()
+        except ValueError as e:
+            wx.MessageBox(str(e), f"{T('Error')}: {e.__class__.__name__}", wx.OK | wx.ICON_ERROR)
+            return
+        if args is None:
+            return
+        if self.processing:
+            wx.MessageBox(T("Wait for the current conversion to finish before scanning."),
+                          T("Scan 3D Strength"), wx.OK | wx.ICON_INFORMATION)
+            return
+        if not is_video(args.input):
+            wx.MessageBox(T("Scan 3D Strength only supports a single video file"),
+                          T("Scan 3D Strength"), wx.OK | wx.ICON_INFORMATION)
+            return
+
+        self.btn_nt_scan_strength.Disable()
+        self.btn_start.Disable()
+        self.SetStatusText(T("Scanning 3D Strength..."))
+        startWorker(self.on_exit_nt_scan_strength_worker, run_nt_scan_strength, wargs=(args,))
+
+    def on_exit_nt_scan_strength_worker(self, result):
+        self.btn_nt_scan_strength.Enable()
+        self.update_start_button_state()
+        try:
+            scan_result, args = result.get()
+        except: # noqa
+            self.SetStatusText(T("Error"))
+            self._show_and_log_crash(*sys.exc_info())
+            return
+        self.SetStatusText(T("Ready"))
+        if scan_result is None:
+            wx.MessageBox(T("Nothing was decoded -- the file may be empty or corrupt, or the scan was "
+                            "stopped before any scene finished."),
+                          T("Scan 3D Strength"), wx.OK | wx.ICON_INFORMATION)
+            return
+
+        lines = [f"{T('Scenes found')}: {scan_result['scene_count']}",
+                 f"{T('Average 3D Strength (time-weighted)')}: {scan_result['average']:.2f}",
+                 "",
+                 T("3D Strength values used, most common first:")]
+        for value, count in scan_result["tally"]:
+            scene_word = T("scene") if count == 1 else T("scenes")
+            lines.append(f"  {value:.1f}  --  {count} {scene_word}")
+        lines.append("")
+        lines.append(f"{T('Full scene-by-scene log saved to')}:\n{scan_result['log_path']}")
+        wx.MessageBox("\n".join(lines), T("Scan 3D Strength -- Results"), wx.OK | wx.ICON_INFORMATION)
 
     def on_click_btn_analyze_source(self, event):
         """ADR-297: real, measured facts about the current Input video (resolution, codec,
@@ -32573,6 +32678,117 @@ def _self_test_auto_divergence_scene_log():
     print("_self_test_auto_divergence_scene_log: PASS")
 
 
+def _self_test_scan_strength_core():
+    """ADR-440: "Scan 3D Strength" -- real user request: "is there a way we can
+    scan a movie to get the auto 3D strength values of the whole movie before
+    committing conversion?" Covers every piece of scan_strength()
+    (`nt_auto3d/nt_autostrength/autodiv.py`) EXCEPT the real video decode
+    itself (VU.hook_frame) -- that part was verified separately against a
+    real short local clip, not here (this suite stays GPU/real-movie-free,
+    per docs/ai/TEST_MATRIX.md). Pure Python, no CLIP model, no GPU."""
+    import argparse
+    import tempfile
+    from os import path as _p
+    from nt_autostrength import autodiv as AD
+
+    # _make_scan_args: a real isolated copy, not a mutation of the caller's own
+    # args/state -- a scan must never touch or be touched by an active real job.
+    real_state = {"device": "cuda:0", "depth_model": "something real and heavy"}
+    real_args = argparse.Namespace(state=real_state, auto_divergence_scene_log=False,
+                                   divergence=3.0, auto_divergence_mode="hybrid")
+    scan_args = AD._make_scan_args(real_args, "cpu")
+    assert scan_args.state == {"device": "cpu"}, scan_args.state
+    assert scan_args.auto_divergence_scene_log is True
+    assert scan_args.divergence == 3.0 and scan_args.auto_divergence_mode == "hybrid", \
+        "every other Auto 3D Strength setting must carry over unchanged"
+    assert real_args.state is real_state and real_args.auto_divergence_scene_log is False, \
+        "the real args/state must be completely untouched by building scan_args"
+
+    # _tally_scene_values: most-common first, ties broken by the higher value.
+    scene_records = [(0, 5, 5, 2.0), (5, 8, 3, 16.0), (8, 10, 2, 9.0), (10, 15, 5, 2.0)]
+    assert AD._tally_scene_values(scene_records) == [(2.0, 2), (16.0, 1), (9.0, 1)], \
+        AD._tally_scene_values(scene_records)
+
+    # _scan_log_path: next to the INPUT, "_scan" suffix (never collides with a
+    # real completed conversion's own "..._3d_strength_log.txt").
+    scan_path = AD._scan_log_path("C:/movies/My Movie.mkv")
+    assert scan_path == "C:/movies/My Movie_3d_strength_scan.txt", scan_path
+
+    # _write_scan_log: real file, real content, matching _format_scene_log()
+    # exactly -- built the same way _self_test_auto_divergence_scene_log does
+    # (object.__new__ bypasses __init__, no Estimator/CLIP needed for this part).
+    with tempfile.TemporaryDirectory() as tmp_out:
+        st = AD._RunState.__new__(AD._RunState)
+        st.reset_scene_log()
+        st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+        st._scene_record([2.0, 2.0, 2.0, 2.0, 2.0, 16.0, 16.0, 16.0, 9.0, 9.0],
+                         [True] * 5 + [False] * 2 + [True] * 2 + [False])
+        st._scene_flush()
+        log_path = _p.join(tmp_out, "movie_3d_strength_scan.txt")
+        text = AD._write_scan_log(st, log_path, "movie.mkv", fps=1.0)
+        assert _p.isfile(log_path)
+        assert open(log_path, encoding="utf-8").read() == text
+        assert "Average 3D Strength for whole movie (time-weighted): 7.60" in text, text
+
+    # scan_strength() itself: the None-result path when nothing was decoded at
+    # all (st.scene_records stays empty) -- faked by monkeypatching VU.hook_frame
+    # to a no-op (never touches a real video) and AD.ensure_weights to skip the
+    # real CLIP model load (never touches the network/GPU) -- Estimator.__init__
+    # already has a real, graceful fallback for exactly this (self.model = None,
+    # see its own docstring), so this also doubles as coverage of that path.
+    import nunif.utils.video as VU
+    orig_hook_frame = VU.hook_frame
+    orig_ensure_weights = AD.ensure_weights
+    try:
+        VU.hook_frame = lambda *a, **kw: None
+        AD.ensure_weights = lambda *a, **kw: None
+        result = AD.scan_strength("movie.mkv", argparse.Namespace(
+            state={}, auto_divergence_mode="hybrid", auto_divergence_stability="medium",
+            auto_divergence_cut_smooth=0, auto_divergence_invert=False, scene_detect=False,
+            divergence=3.0, divergence_min=2.0, divergence_max=16.0), device="cpu")
+        assert result is None, "nothing decoded at all must report None, not a half-empty result"
+    finally:
+        VU.hook_frame = orig_hook_frame
+        AD.ensure_weights = orig_ensure_weights
+
+    print("_self_test_scan_strength_core: PASS")
+
+
+def _self_test_scan_strength_button():
+    """ADR-440: "Scan 3D Strength" button -- real, always-selectable regardless
+    of whether the "Auto 3D Strength" checkbox itself is on, since the whole
+    point is to help decide that checkbox/its settings before committing to a
+    real conversion (unlike every other Auto 3D Strength control, which only
+    makes sense once that checkbox is on). Only the button's existence/wiring
+    is checked here -- no real scan is run (see _self_test_scan_strength_core
+    for the actual logic, and the ADR-440 docs note for the one real short-clip
+    verification done outside this automated suite)."""
+    import wx
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.btn_nt_scan_strength.GetLabel() == "Scan 3D Strength..."
+        assert callable(frame.on_click_btn_nt_scan_strength)
+        assert callable(frame.on_exit_nt_scan_strength_worker)
+
+        frame.chk_nt_auto_div.SetValue(False)
+        frame.update_nt_auto_divergence()
+        assert frame.btn_nt_scan_strength.IsEnabled(), \
+            "must stay usable even with Auto 3D Strength itself off -- that's the whole point"
+
+        frame.chk_nt_auto_div.SetValue(True)
+        frame.update_nt_auto_divergence()
+        assert frame.btn_nt_scan_strength.IsEnabled()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    print("_self_test_scan_strength_button: PASS")
+
+
 def _self_test_face_protect():
     """ADR-214: iw3.face_protect's own masking math (synthetic tensors, detection mocked -- real
     detection accuracy on a photo was verified live separately, not something a fast synthetic test
@@ -37474,6 +37690,8 @@ def _run_self_tests():
         _self_test_auto_divergence_metadata_tags,
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,
+        _self_test_scan_strength_core,
+        _self_test_scan_strength_button,
         _self_test_audio_subtitle_restore_dual_eye_flag,
         _self_test_restore_audio_uses_per_file_source_in_folder,
         _self_test_default_depth_model_is_any_v3_mono,

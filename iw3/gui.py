@@ -1601,7 +1601,32 @@ class MainFrame(wx.Frame):
               "shot is completely unaffected either way.\n"
               "Recommended: leave empty unless you've specifically noticed close-ups clustering well "
               "below Auto Range (max) and want them to reach further -- try a value a bit below your "
-              "Auto Range (max), and watch it on real close-up footage."))
+              "Auto Range (max), and watch it on real close-up footage.\n"
+              "Note: with Invert checked below, this box actually reshapes your WIDE shots instead -- "
+              "Invert swaps which end of the shot each box controls, same as it does for everything "
+              "else here."))
+        self.lbl_nt_wide = wx.StaticText(self.grp_stereo, label=T("Wide Strength"))
+        self.cbo_nt_wide = EditableComboBox(self.grp_stereo, choices=["", "2.2", "2.5", "2.8"],
+                                            name="cbo_nt_wide")
+        self.cbo_nt_wide.SetValue("")
+        self.cbo_nt_wide.SetToolTip(
+            T("ADR-444: what it's for: the exact mirror of Close-Up Strength above, for the other end -- "
+              "what a REAL (non-extreme) wide shot gets, set independently of everything above 3D "
+              "Strength, so wide shots stay put no matter what you do with 3D Strength (typical) or "
+              "Close-Up Strength.\n"
+              "Why: raising 3D Strength to get more punch out of your medium shots still drags anything "
+              "short of the single most-extreme wide/low-end shot upward too -- only that one exact "
+              "extreme point is ever protected on its own. This box gives wide shots their OWN curve "
+              "below 3D Strength instead.\n"
+              "Leave empty (default) to keep the original single-curve behavior. Only takes effect once "
+              "a shot is judged more than halfway toward wide -- everything from a medium shot up to "
+              "close-up is completely unaffected either way.\n"
+              "Recommended: leave empty unless you've specifically noticed wide shots drifting when you "
+              "adjust 3D Strength and want them locked in place -- try a value a bit above your Auto "
+              "Range (min), and watch it on real wide-shot footage.\n"
+              "Note: with Invert checked below, this box actually reshapes your CLOSE-UP shots instead -- "
+              "Invert swaps which end of the shot each box controls, same as it does for everything "
+              "else here."))
         self.chk_nt_auto_div_overlay = wx.CheckBox(self.grp_stereo, label=T("Show strength on video (debug)"),
                                                    name="chk_nt_auto_div_overlay")
         self.chk_nt_auto_div_overlay.SetToolTip(
@@ -3741,6 +3766,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_nt_cut_smooth, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_nt_closeup, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_nt_closeup, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_nt_wide, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_nt_wide, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_nt_auto_div_invert, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_scene_log, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -11149,6 +11176,7 @@ class MainFrame(wx.Frame):
             self.cbo_nt_div_max,
             self.cbo_nt_cut_smooth,
             self.cbo_nt_closeup,
+            self.cbo_nt_wide,
             self.cbo_convergence_cut_smooth,
             self.cbo_convergence_subject_lock,
             self.cbo_sod_track_update_interval,
@@ -11865,6 +11893,7 @@ class MainFrame(wx.Frame):
             self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
             self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay,
             self.chk_nt_auto_div_scene_log, self.lbl_nt_closeup, self.cbo_nt_closeup,
+            self.lbl_nt_wide, self.cbo_nt_wide,
             self.lbl_resolution_preset, self.cbo_resolution_preset,
             self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
@@ -11897,7 +11926,7 @@ class MainFrame(wx.Frame):
         for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
                   self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
                   self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_invert,
-                  self.lbl_nt_closeup, self.cbo_nt_closeup,
+                  self.lbl_nt_closeup, self.cbo_nt_closeup, self.lbl_nt_wide, self.cbo_nt_wide,
                   self.chk_nt_auto_div_overlay, self.chk_nt_auto_div_scene_log):
             c.Enable(on)
         self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
@@ -12288,6 +12317,11 @@ class MainFrame(wx.Frame):
         # original single-curve behavior).
         if not validate_number(self.cbo_nt_closeup.GetValue(), 0.0, 100.0, allow_empty=True):
             self.show_validation_error_message(T("Close-Up Strength"), 0.0, 100.0)
+            return None
+        # ADR-444: Wide Strength is also allowed empty (the default -- keep the
+        # original single-curve behavior).
+        if not validate_number(self.cbo_nt_wide.GetValue(), 0.0, 100.0, allow_empty=True):
+            self.show_validation_error_message(T("Wide Strength"), 0.0, 100.0)
             return None
         if not validate_number(self.cbo_pad.GetValue(), 0.0, 10.0, allow_empty=True):
             self.show_validation_error_message(T("Padding"), 0.0, 10.0)
@@ -12718,6 +12752,9 @@ class MainFrame(wx.Frame):
             # ADR-443: an empty box means "keep the original single-curve behavior" -- None.
             auto_divergence_closeup=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_nt_closeup.GetValue()),
+            # ADR-444: closeup's exact mirror.
+            auto_divergence_wide=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_nt_wide.GetValue()),
             auto_divergence_overlay=self.chk_nt_auto_div_overlay.GetValue(),
             auto_divergence_scene_log=self.chk_nt_auto_div_scene_log.GetValue(),
             face_protect_strength=float(self.cbo_face_protect.GetValue()),
@@ -14081,6 +14118,12 @@ class MainFrame(wx.Frame):
             self.cbo_nt_closeup.SetValue("")
         else:
             _apply_combo_value(self.cbo_nt_closeup, _closeup_restore)
+        # ADR-444: closeup's exact mirror.
+        _wide_restore = getattr(args, "auto_divergence_wide", None)
+        if _wide_restore is None:
+            self.cbo_nt_wide.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_nt_wide, _wide_restore)
         self.chk_nt_auto_div_overlay.SetValue(bool(getattr(args, "auto_divergence_overlay", False)))
         self.chk_nt_auto_div_scene_log.SetValue(bool(getattr(args, "auto_divergence_scene_log", False)))
         _apply_combo_value(self.cbo_face_protect, getattr(args, "face_protect_strength", 0.0))
@@ -32477,12 +32520,13 @@ def _self_test_nt_auto_divergence_controls():
         siblings = (frame.cbo_nt_auto_div_mode, frame.lbl_nt_div_range, frame.cbo_nt_div_min,
                    frame.cbo_nt_div_max, frame.lbl_nt_auto_div_stab, frame.cbo_nt_auto_div_stab,
                    frame.lbl_nt_cut_smooth, frame.cbo_nt_cut_smooth, frame.chk_nt_auto_div_invert,
-                   frame.lbl_nt_closeup, frame.cbo_nt_closeup,
+                   frame.lbl_nt_closeup, frame.cbo_nt_closeup, frame.lbl_nt_wide, frame.cbo_nt_wide,
                    frame.chk_nt_auto_div_overlay, frame.chk_nt_auto_div_scene_log)
         assert not frame.chk_nt_auto_div.GetValue() and all(not c.IsEnabled() for c in siblings)
         assert frame.lbl_divergence.GetLabelText() == "3D Strength"
         assert frame.cbo_nt_cut_smooth.GetValue() == "0", "must default to off"
         assert frame.cbo_nt_closeup.GetValue() == "", "Close-Up Strength must default to empty"
+        assert frame.cbo_nt_wide.GetValue() == "", "Wide Strength must default to empty"
 
         frame.chk_nt_auto_div.SetValue(True)
         frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
@@ -32498,6 +32542,7 @@ def _self_test_nt_auto_divergence_controls():
         frame.chk_nt_auto_div_overlay.SetValue(True)
         frame.chk_nt_auto_div_scene_log.SetValue(True)
         frame.cbo_nt_closeup.SetValue("4.6")
+        frame.cbo_nt_wide.SetValue("2.3")
         args = frame.parse_args(skip_set_state=True)
         assert args.auto_divergence is True and args.auto_divergence_mode == "cuts"
         assert args.divergence_min == 3.0 and args.divergence_max == 12.0
@@ -32506,9 +32551,11 @@ def _self_test_nt_auto_divergence_controls():
         assert args.auto_divergence_invert is True
         assert args.auto_divergence_scene_log is True
         assert args.auto_divergence_closeup == 4.6, "ADR-443: Close-Up Strength must round-trip too"
+        assert args.auto_divergence_wide == 2.3, "ADR-444: Wide Strength must round-trip too"
         assert "--auto-divergence" in frame.get_cli_command(), "must show up in Copy Command like any real setting"
         assert "--auto-divergence-invert" in frame.get_cli_command()
         assert "--auto-divergence-closeup" in frame.get_cli_command()
+        assert "--auto-divergence-wide" in frame.get_cli_command()
 
         frame.apply_parsed_args_to_gui(args)
         assert frame.chk_nt_auto_div.GetValue() and frame.cbo_nt_div_min.GetValue() == "3.0"
@@ -32517,13 +32564,17 @@ def _self_test_nt_auto_divergence_controls():
         assert frame.chk_nt_auto_div_invert.GetValue() is True, "invert checkbox must round-trip too"
         assert frame.chk_nt_auto_div_scene_log.GetValue() is True, "scene-log checkbox must round-trip too"
         assert frame.cbo_nt_closeup.GetValue() == "4.6", "Close-Up Strength must round-trip too"
+        assert frame.cbo_nt_wide.GetValue() == "2.3", "Wide Strength must round-trip too"
 
-        # ADR-443: restoring None (unset -- the default) must blank the box, not
-        # type the literal word "None".
+        # ADR-443/444: restoring None (unset -- the default) must blank the box,
+        # not type the literal word "None".
         args.auto_divergence_closeup = None
+        args.auto_divergence_wide = None
         frame.apply_parsed_args_to_gui(args)
         assert frame.cbo_nt_closeup.GetValue() == "", \
             f"restoring unset Close-Up Strength must leave the box empty, got {frame.cbo_nt_closeup.GetValue()!r}"
+        assert frame.cbo_nt_wide.GetValue() == "", \
+            f"restoring unset Wide Strength must leave the box empty, got {frame.cbo_nt_wide.GetValue()!r}"
 
         frame.chk_nt_auto_div.SetValue(False)
         frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
@@ -32613,6 +32664,20 @@ def _self_test_auto_divergence_metadata_tags():
     assert "_cu" not in name2, "unset (default) Close-Up Strength must leave no trace in the filename"
     assert "auto_divergence_closeup" not in comment2, \
         "unset (default) Close-Up Strength must leave no trace in the metadata comment"
+
+    # ADR-444: Wide Strength -- closeup's exact mirror, same "only when set" convention.
+    wide_on = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename",
+        "--auto-divergence", "--divergence-min", "3.5", "--divergence-max", "5.0",
+        "--auto-divergence-wide", "3.6",
+    ])
+    wide_on.video_extension = ".mkv"
+    name4 = U.make_output_filename("a.mp4", wide_on, video=True)
+    assert "_wd36" in name4, name4
+    assert "iw3_auto_divergence_wide=3.6" in U._build_iw3_comment_metadata(wide_on, video=True)
+    assert "_wd" not in name2, "unset (default) Wide Strength must leave no trace in the filename"
+    assert "auto_divergence_wide" not in comment2, \
+        "unset (default) Wide Strength must leave no trace in the metadata comment"
     print("_self_test_auto_divergence_metadata_tags: PASS")
 
 
@@ -32667,6 +32732,69 @@ def _self_test_auto_divergence_closeup_curve():
         prev = v
 
     print("_self_test_auto_divergence_closeup_curve: PASS")
+
+
+def _self_test_auto_divergence_wide_curve():
+    """ADR-444: real follow-up to ADR-443 -- decker confirmed raising typical
+    for more "punch" in the middle still drags anything short of the single
+    most-extreme low-end shot upward too (proven live: with lo=3.6, s=0.2
+    moves from 3.615 to 3.796 as typical goes from 3.8 to 4.2), and asked for
+    the exact mirror of ADR-443's fix for the lower half, as an opt-in. Same
+    verification shape as _self_test_auto_divergence_closeup_curve, mirrored,
+    plus a combined-both-pins check -- pure math, no GPU/CLIP/real movie
+    needed."""
+    from nt_autostrength.autodiv import strength_curve
+
+    lo, typical, hi = 3.6, 4.2, 5.0
+
+    # wide=None must reproduce the ORIGINAL single-curve formula exactly,
+    # across the WHOLE domain -- full backward compatibility.
+    for s in (0.0, 0.1, 0.2, 0.25, 0.4, 0.5, 0.75, 1.0):
+        assert abs(strength_curve(s, lo, typical, hi, wide=None)
+                   - strength_curve(s, lo, typical, hi)) < 1e-9, s
+
+    wide = 3.65
+    # Upper half (s >= 0.5) must stay byte-identical to the original formula
+    # even with wide SET -- this is the real point of the whole feature.
+    for s in (0.5, 0.6, 0.75, 1.0):
+        with_wide = strength_curve(s, lo, typical, hi, wide=wide)
+        original = strength_curve(s, lo, typical, hi)
+        assert abs(with_wide - original) < 1e-9, \
+            f"s={s} must be unaffected by wide, got {with_wide} vs {original}"
+
+    # Continuity at the s=0.5 seam: both halves must agree exactly on `typical`.
+    assert abs(strength_curve(0.5, lo, typical, hi, wide=wide) - typical) < 1e-9
+
+    # The lower half must hit its own pin exactly at s=0.25...
+    assert abs(strength_curve(0.25, lo, typical, hi, wide=wide) - wide) < 1e-9
+    # ...and still start at the real endpoint (lo) exactly at s=0.0, same as before.
+    assert abs(strength_curve(0.0, lo, typical, hi, wide=wide) - lo) < 1e-9
+
+    # The real point of the feature: near-but-not-extreme low-end shots
+    # (s=0.1, 0.2, 0.3) must now land noticeably LOWER (closer to lo) than
+    # the original single curve put them.
+    for s in (0.1, 0.2, 0.3):
+        pinned = strength_curve(s, lo, typical, hi, wide=wide)
+        original = strength_curve(s, lo, typical, hi)
+        assert pinned < original, \
+            f"s={s} must be pulled toward lo with wide set, got {pinned} >= {original}"
+
+    # Monotonically increasing through the lower half -- no weird dip/overshoot.
+    prev = lo
+    for s in (0.1, 0.2, 0.25, 0.3, 0.4, 0.5):
+        v = strength_curve(s, lo, typical, hi, wide=wide)
+        assert v >= prev, f"must be monotonically increasing, got {v} after {prev} at s={s}"
+        prev = v
+
+    # Both pins together: all 5 control points land exactly where set, in one curve.
+    closeup = 4.7
+    assert abs(strength_curve(0.0, lo, typical, hi, closeup, wide) - lo) < 1e-9
+    assert abs(strength_curve(0.25, lo, typical, hi, closeup, wide) - wide) < 1e-9
+    assert abs(strength_curve(0.5, lo, typical, hi, closeup, wide) - typical) < 1e-9
+    assert abs(strength_curve(0.75, lo, typical, hi, closeup, wide) - closeup) < 1e-9
+    assert abs(strength_curve(1.0, lo, typical, hi, closeup, wide) - hi) < 1e-9
+
+    print("_self_test_auto_divergence_wide_curve: PASS")
 
 
 def _self_test_auto_divergence_cut_smooth():
@@ -37939,6 +38067,7 @@ def _run_self_tests():
         _self_test_nt_auto_divergence_controls,
         _self_test_auto_divergence_metadata_tags,
         _self_test_auto_divergence_closeup_curve,
+        _self_test_auto_divergence_wide_curve,
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,
         _self_test_scan_strength_core,

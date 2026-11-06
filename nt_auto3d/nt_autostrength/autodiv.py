@@ -308,7 +308,7 @@ def depth_closeness(depth):
 # --------------------------------------------------------------------------
 # closeness -> strength, and the behaviour over time
 # --------------------------------------------------------------------------
-def strength_curve(s, lo, typical, hi, closeup=None):
+def strength_curve(s, lo, typical, hi, closeup=None, wide=None):
     """lo at s=0, hi at s=1, `typical` at s=0.5 (a medium shot).
 
     ADR-443: `closeup` (optional, None = unchanged default -- see below)
@@ -326,14 +326,40 @@ def strength_curve(s, lo, typical, hi, closeup=None):
     supplies `closeup` (the GUI's own "Close-Up Strength" box, see ADR-443's
     own note in iw3/gui.py) -- None reproduces the original single-curve
     formula for the ENTIRE 0..1 domain, not just the lower half, so every
-    existing caller/preset/command line keeps the exact same behavior."""
+    existing caller/preset/command line keeps the exact same behavior.
+
+    ADR-444: `wide` (optional, None = unchanged default) is `closeup`'s exact
+    mirror image for the LOWER half (s below 0.5), pinning what a REAL (non-
+    extreme) wide shot, s=0.25, gets. Real follow-up request, after decker
+    confirmed raising `typical` for more "punch" in the middle still drags
+    anything that isn't the single most-extreme low-end shot upward too
+    (only s=0 itself is ever protected, by the lower half's own formula) --
+    so this gives the SAME independent-bending fix ADR-443 gave the upper
+    half to the lower half instead, reusing the identical math shape
+    (lo at s=0, typical at s=0.5, `wide` pinned at the midpoint s=0.25),
+    just mirrored. Explicitly requested as an OPTIONAL addition, same as
+    ADR-442's own "ship it as a checkbox, not a new default" precedent --
+    None reproduces the exact pre-ADR-444 behavior, so ADR-443's own fix
+    (and everyone who never touches this) is completely unaffected."""
     lo, hi = min(lo, hi), max(lo, hi)
     if hi - lo < 1e-6:
         return lo
     s = min(max(float(s), 0.0), 1.0)
     t = min(max((typical - lo) / (hi - lo), 0.02), 0.98)
     gamma = math.log(t) / math.log(0.5)
-    if closeup is None or s <= 0.5:
+    if s <= 0.5:
+        if wide is None:
+            return lo + (hi - lo) * s ** gamma
+        # Lower half only: s in [0, 0.5] remapped to v in [0, 1], its own curve
+        # from (v=0, lo) to (v=1, typical), pinned at (v=0.5 -> s=0.25, wide)
+        # -- the exact mirror of the upper-half branch below.
+        v = s * 2.0
+        if abs(typical - lo) < 1e-6:
+            return lo
+        t3 = min(max((wide - lo) / (typical - lo), 0.02), 0.98)
+        gamma3 = math.log(t3) / math.log(0.5)
+        return lo + (typical - lo) * v ** gamma3
+    if closeup is None:
         return lo + (hi - lo) * s ** gamma
     # Upper half only: s in (0.5, 1] remapped to u in (0, 1], its own curve
     # from (u=0, typical) to (u=1, hi), pinned at (u=0.5 -> s=0.75, closeup)
@@ -354,6 +380,16 @@ def _parse_optional_closeup(value):
     this module rather than imported from there (core iw3 must not depend on
     this add-on, and this add-on's own create_parser() patch runs before
     iw3.utils is fully set up to import back from)."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
+def _parse_optional_wide(value):
+    """argparse type= for --auto-divergence-wide, ADR-444: the exact mirror
+    of _parse_optional_closeup above, for the lower-half pin instead."""
     if value is None:
         return None
     if isinstance(value, str) and value.strip().lower() in ("none", ""):
@@ -569,17 +605,20 @@ class _RunState:
         lo = float(getattr(args, "divergence_min", DEFAULT_MIN))
         hi = float(getattr(args, "divergence_max", DEFAULT_MAX))
         typical = float(args.divergence)
-        # ADR-443: None (default) reproduces the original single-curve formula
-        # exactly -- see strength_curve()'s own docstring.
+        # ADR-443/444: None (default, either one) reproduces the original
+        # single-curve formula exactly -- see strength_curve()'s own docstring.
         closeup = getattr(args, "auto_divergence_closeup", None)
         closeup = float(closeup) if closeup is not None else None
+        wide = getattr(args, "auto_divergence_wide", None)
+        wide = float(wide) if wide is not None else None
         used = self.tracker.run(scores, embs, reset_pts, own_cuts,
-                                lambda c: strength_curve(c, lo, typical, hi, closeup))
+                                lambda c: strength_curve(c, lo, typical, hi, closeup, wide))
         divs = [round(d / STEP) * STEP for d in used]
         if self.verbose or not self.announced:
             self.announced = True
             _say(f"{self.tracker.mode}, {lo:g}-{hi:g} around {typical:g}"
                  + (f", close-up pinned at {closeup:g}" if closeup is not None else "")
+                 + (f", wide pinned at {wide:g}" if wide is not None else "")
                  + ("" if self.estimator.model is not None else " (depth-only estimate)")
                  + f"; now {divs[-1]:.1f}")
         self.last_depth, self.last_divs = obj, divs
@@ -1170,6 +1209,13 @@ def _patch_utils(U):
                             "wide/medium shots below --divergence at all. Leave unset (default, "
                             "\"none\") to keep the original single-curve behavior, where raising "
                             "--divergence to stretch the top always drags the bottom up with it too.")
+        g.add_argument("--auto-divergence-wide", type=_parse_optional_wide, default=None,
+                       help="ADR-444: the exact mirror of --auto-divergence-closeup for the LOWER "
+                            "half -- what a REAL (non-extreme) wide shot gets, independently of "
+                            "everything above --divergence. Leave unset (default, \"none\") to keep "
+                            "the original single-curve behavior for the lower half, where raising "
+                            "--divergence still drags anything short of the single most-extreme "
+                            "low-end shot upward too.")
         g.add_argument("--auto-divergence-overlay", action="store_true",
                        help="debug: write the strength used into the top-left of every frame")
         g.add_argument("--auto-divergence-scene-log", action="store_true",

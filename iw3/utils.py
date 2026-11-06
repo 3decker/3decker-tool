@@ -3950,6 +3950,10 @@ def make_output_filename(input_filename, args, video=False):
             auto_div_closeup = getattr(args, "auto_divergence_closeup", None)
             if auto_div_closeup is not None:
                 auto3d_tag += f"_cu{to_deciaml(auto_div_closeup, 10, 2)}"
+            # ADR-444: closeup's exact mirror, same "only when set" convention.
+            auto_div_wide = getattr(args, "auto_divergence_wide", None)
+            if auto_div_wide is not None:
+                auto3d_tag += f"_wd{to_deciaml(auto_div_wide, 10, 2)}"
             if getattr(args, "auto_divergence_overlay", False):
                 auto3d_tag += "dbg"
         else:
@@ -4116,6 +4120,10 @@ def _build_iw3_comment_metadata(args, video=True):
         auto_div_closeup_val = getattr(args, "auto_divergence_closeup", None)
         if auto_div_closeup_val is not None:
             comment_parts.append(f"iw3_auto_divergence_closeup={auto_div_closeup_val}")
+        # ADR-444: closeup's exact mirror, same "only when set" convention.
+        auto_div_wide_val = getattr(args, "auto_divergence_wide", None)
+        if auto_div_wide_val is not None:
+            comment_parts.append(f"iw3_auto_divergence_wide={auto_div_wide_val}")
         if getattr(args, "auto_divergence_overlay", False):
             comment_parts.append("iw3_auto_divergence_overlay=1")
     comment_parts.append(f"iw3_convergence={args.convergence}")

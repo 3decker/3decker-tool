@@ -782,6 +782,22 @@ def _format_scene_log(st, output_filename, fps):
     lines.append("")
     overall = weighted_sum / total_frames if total_frames else 0.0
     lines.append(f"Average 3D Strength for whole movie (time-weighted): {overall:.2f}")
+    # ADR-446: real follow-up request -- decker kept asking for this exact
+    # breakdown by hand after every real log/scan ("show me the different
+    # strength values and how many scenes landed on each"); writing it
+    # straight into the file means he never has to ask again. One shared
+    # function (_tally_scene_values(), already built for the Scan 3D
+    # Strength button's own on-screen summary, ADR-440) means this appears
+    # in BOTH a real conversion's own scene log (_finish_scene_log) and a
+    # Scan 3D Strength preview's log (_write_scan_log) automatically, since
+    # both already funnel through this one shared formatter -- no separate
+    # code path to keep in sync.
+    if st.scene_records:
+        lines.append("")
+        lines.append(f"3D Strength values used, most common first ({len(st.scene_records)} scenes):")
+        for value, count in _tally_scene_values(st.scene_records):
+            scene_word = "scene" if count == 1 else "scenes"
+            lines.append(f"  {value:.1f}  --  {count} {scene_word}")
     return "\n".join(lines) + "\n"
 
 
@@ -907,8 +923,17 @@ def _make_scan_args(args, device):
 def _tally_scene_values(scene_records):
     """[(value, how many scenes used it)], most-common first (ties broken by
     the higher value) -- the same "how many scenes used each strength" count
-    a user would otherwise have to tally by hand from the scene log text."""
-    counts = collections.Counter(mean for _, _, _, mean in scene_records)
+    a user would otherwise have to tally by hand from the scene log text.
+
+    ADR-446: real bug caught by this feature's own test -- `mean` is a
+    running average (`_scene_flush()`'s `sum/frames`), so two scenes that
+    both display as the identical "3.7" (the same `.1f` the per-scene log
+    lines and this tally both show) can still be two different RAW floats
+    a few ULPs apart (e.g. a 3-frame scene's running mean vs. a 2-frame
+    scene's), splitting what looks like one value into two separate rows.
+    Rounding to 1 decimal BEFORE tallying -- the same precision the display
+    already commits to -- means "what you see is what gets counted"."""
+    counts = collections.Counter(round(mean, 1) for _, _, _, mean in scene_records)
     return sorted(counts.items(), key=lambda kv: (-kv[1], -kv[0]))
 
 

@@ -32963,7 +32963,19 @@ def _self_test_auto_divergence_scene_log():
     assert "Scene 2   00:00:05 - 00:00:08   (3 frames)   3D Strength: 16.0" in lines
     assert "Scene 3   00:00:08 - 00:00:10   (2 frames)   3D Strength: 9.0" in lines
     # time-weighted average: (5*2.0 + 3*16.0 + 2*9.0) / 10 = (10 + 48 + 18) / 10 = 7.6
-    assert lines[-1] == "Average 3D Strength for whole movie (time-weighted): 7.60", lines[-1]
+    assert "Average 3D Strength for whole movie (time-weighted): 7.60" in lines, lines
+    # ADR-446: real follow-up request -- a value-by-value breakdown is now
+    # written straight into the log (same tally _self_test_scan_strength_core
+    # already covers for the Scan 3D Strength preview's own log), so decker
+    # never has to ask for it by hand again. All three scenes here have a
+    # distinct value (one each), so the tie-break (value descending) decides
+    # the order: 16.0, 9.0, 2.0.
+    assert lines[-4:] == [
+        "3D Strength values used, most common first (3 scenes):",
+        "  16.0  --  1 scene",
+        "  9.0  --  1 scene",
+        "  2.0  --  1 scene",
+    ], lines
 
     # No real fps reachable -> frame numbers instead of timestamps, with a clear note.
     text_no_fps = AD._format_scene_log(st, "movie_SBS.mp4", fps=None)
@@ -33020,6 +33032,43 @@ def _self_test_auto_divergence_scene_log():
             AD._finish_scene_log(off_st, args_off, "process_video", ("movie3.mp4", tmp_off))
             assert os.listdir(tmp_off) == [], "the flag must be off by default -- nothing should be written"
     print("_self_test_auto_divergence_scene_log: PASS")
+
+
+def _self_test_scene_log_value_tally():
+    """ADR-446: real follow-up request -- after I manually tallied "which 3D
+    Strength values were used and how many scenes landed on each" for a real
+    log file (twice, for two different movies this same session), decker
+    asked for this to be written straight into the log file itself, for both
+    a real conversion's own scene log and a Scan 3D Strength preview's log --
+    "could you implement this to the GUI so next time the log is created it
+    includes that analysis." One shared fix in _format_scene_log() (used by
+    both _finish_scene_log() and _write_scan_log()) covers both. Pure
+    Python, no GPU/CLIP/real movie needed."""
+    from nt_autostrength import autodiv as AD
+
+    # 4 separate scenes (real cut boundaries at frames 0/3/6/8): three land on
+    # 3.7 (most common), one on 4.0 -- real repeated values, so this also
+    # covers the "scene" vs "scenes" pluralization and the most-common-first
+    # ordering, not just the all-distinct case
+    # _self_test_auto_divergence_scene_log's own tail check already covers.
+    st = AD._RunState.__new__(AD._RunState)
+    st.reset_scene_log()
+    st.scene_log_meta = ("cuts", 3.5, 5.0, 3.8)
+    st._scene_record(
+        [3.7, 3.7, 3.7, 3.7, 3.7, 3.7, 3.7, 3.7, 4.0, 4.0],
+        [True, False, False, True, False, False, True, False, True, False])
+    st._scene_flush()
+    assert len(st.scene_records) == 4, st.scene_records
+
+    text = AD._format_scene_log(st, "movie.mkv", fps=1.0)
+    lines = text.splitlines()
+    assert lines[-3:] == [
+        "3D Strength values used, most common first (4 scenes):",
+        "  3.7  --  3 scenes",
+        "  4.0  --  1 scene",
+    ], lines
+
+    print("_self_test_scene_log_value_tally: PASS")
 
 
 def _self_test_scan_strength_core():
@@ -38144,6 +38193,7 @@ def _run_self_tests():
         _self_test_closeup_wide_invert_relabel,
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,
+        _self_test_scene_log_value_tally,
         _self_test_scan_strength_core,
         _self_test_scan_strength_batching,
         _self_test_scan_strength_fast_toggle,

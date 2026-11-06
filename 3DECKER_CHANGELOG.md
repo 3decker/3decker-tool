@@ -33,6 +33,8 @@ it matters.
 
 **Improved: "Close-Up Strength" and "Wide Strength" now relabel themselves automatically when you check Invert.** Previously you had to remember that Invert swaps which real shot type each box affects, which was easy to get backwards. Now the box names themselves flip the instant you check Invert — whichever label you're looking at always tells you what it's really doing to your footage right now, no mental math required.
 
+**Added: every 3D Strength log (both a real conversion's own log and a Scan 3D Strength preview) now ends with a value-by-value breakdown.** No more counting by hand — the log now lists every distinct 3D Strength value that was actually used and how many scenes landed on each one, most common first. Also fixed a subtle counting bug this turned up: two scenes that visibly show the same number (like 3.7) could occasionally get counted as two different values behind the scenes — now fixed, so the count always matches what you actually see.
+
 ## Update — November 5, 2026
 
 **Fixed: settings could still come back wrong after closing and reopening the app, if you'd loaded a named Preset at any point.** The app was quietly re-applying your last-used Preset's own saved values every time it started, instead of whatever you actually had set up when you closed it — so anything you changed after loading a Preset (without re-saving it) would silently revert on the next restart, which defeated the whole point of auto-save. Now startup always brings back the literal state everything was in when you closed the app, for every setting — Presets still work exactly the same when you load or save them yourself, they just no longer get silently re-applied behind your back on the next launch.

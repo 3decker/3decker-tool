@@ -1843,6 +1843,31 @@ class MainFrame(wx.Frame):
               "them on your own footage, since which looks best is genuinely content-dependent."))
         self.cbo_convergence_lock_switch.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_lock_switch)
 
+        self.lbl_convergence_lock_decide_speed = wx.StaticText(
+            self.grp_stereo, label=T("Cut Decision Speed"))
+        self.cbo_convergence_lock_decide_speed = EditableComboBox(
+            self.grp_stereo, choices=["", "0.0", "0.3", "0.6", "0.9"],
+            name="cbo_convergence_lock_decide_speed")
+        self.cbo_convergence_lock_decide_speed.SetValue("")
+        self.cbo_convergence_lock_decide_speed.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode. What: how many frames shot_lock waits right "
+              "after a cut before it LOCKS IN its wide/mid/close-up decision for the new scene, overriding "
+              "Convergence Smoothing above just for that decision.\n"
+              "Why: the decision itself normally waits on Convergence Smoothing too -- so turning that up "
+              "for a nicer Switch Style glide also makes the decision land LATER, after you've already "
+              "settled into the new scene. By then even an invisible glide (ease) reads as a separate, "
+              "delayed change instead of being hidden by the cut itself. This box lets you keep "
+              "Convergence Smoothing high for everything else while still deciding fast right at the cut.\n"
+              "Pros: a fast, masked decision at every cut without giving up smooth behavior elsewhere.\n"
+              "Cons: one more number to tune: an obvious but harmless one, "
+              "set this far enough apart from Convergence Smoothing to actually matter.\n"
+              "Values: same 0.00-0.95 scale and meaning as Convergence Smoothing -- lower means fewer "
+              "frames/faster decision, higher means more frames/slower decision. Leave empty (default) to "
+              "keep inheriting Convergence Smoothing for the decision too, same as before this box existed.\n"
+              "Recommended: leave empty unless you specifically want slow/smooth gliding AND a fast cut "
+              "decision at the same time -- if you're fine with both being fast together, just lower "
+              "Convergence Smoothing instead and skip this box entirely. If you do use it, try 0.0-0.3."))
+
         self.chk_clip_shot_symmetric = wx.CheckBox(
             self.grp_stereo, label=T("Also Push Wide Shots Up (clip_shot)"), name="chk_clip_shot_symmetric")
         self.chk_clip_shot_symmetric.SetValue(False)
@@ -3557,6 +3582,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_mid, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_switch, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_switch, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_decide_speed, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_decide_speed, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_clip_shot_bias_strength, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_clip_shot_bias_strength, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -10929,6 +10956,7 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_wide,
             self.cbo_convergence_lock_mid,
             self.cbo_convergence_lock_closeup,
+            self.cbo_convergence_lock_decide_speed,
             self.cbo_clip_shot_bias_strength,
             self.cbo_face_protect,
             self.cbo_resolution,
@@ -11357,7 +11385,8 @@ class MainFrame(wx.Frame):
         for c in (self.lbl_convergence_lock_wide, self.cbo_convergence_lock_wide,
                   self.lbl_convergence_lock_mid, self.cbo_convergence_lock_mid,
                   self.lbl_convergence_lock_closeup, self.cbo_convergence_lock_closeup,
-                  self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch):
+                  self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch,
+                  self.lbl_convergence_lock_decide_speed, self.cbo_convergence_lock_decide_speed):
             c.Enable(mode == "shot_lock")
         self.chk_clip_shot_symmetric.Enable(mode == "clip_shot")
         self.lbl_clip_shot_bias_strength.Enable(mode == "clip_shot")
@@ -11986,6 +12015,11 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_convergence_lock_mid.GetValue(), 0.0, 1.0, allow_empty=True):
             self.show_validation_error_message(T("Mid Shot Value"), 0.0, 1.0)
             return None
+        # ADR-436: Cut Decision Speed is also allowed empty (the default -- keep
+        # inheriting Convergence Smoothing for the decision, same as before).
+        if not validate_number(self.cbo_convergence_lock_decide_speed.GetValue(), 0.0, 0.95, allow_empty=True):
+            self.show_validation_error_message(T("Cut Decision Speed"), 0.0, 0.95)
+            return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
@@ -12392,6 +12426,9 @@ class MainFrame(wx.Frame):
                 self.cbo_convergence_lock_mid.GetValue()),
             convergence_lock_closeup=float(self.cbo_convergence_lock_closeup.GetValue()),
             convergence_lock_switch=self.cbo_convergence_lock_switch.GetValue(),
+            # ADR-436: an empty box means "inherit Convergence Smoothing" -- None.
+            convergence_lock_decide_speed=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_convergence_lock_decide_speed.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
@@ -13719,6 +13756,13 @@ class MainFrame(wx.Frame):
                            getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE))
         _apply_combo_value(self.cbo_convergence_lock_switch,
                            getattr(args, "convergence_lock_switch", DEFAULT_SHOT_LOCK_SWITCH))
+        # ADR-436: None (inherit Convergence Smoothing) must restore to an empty
+        # box, same reasoning as Mid Shot Value just above.
+        _decide_speed_restore = getattr(args, "convergence_lock_decide_speed", None)
+        if _decide_speed_restore is None:
+            self.cbo_convergence_lock_decide_speed.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_convergence_lock_decide_speed, _decide_speed_restore)
         self.chk_clip_shot_symmetric.SetValue(bool(getattr(args, "clip_shot_symmetric", False)))
         _apply_combo_value(self.cbo_clip_shot_bias_strength, getattr(args, "clip_shot_bias_strength", 0.25))
         self.chk_convergence_overlay.SetValue(bool(getattr(args, "convergence_overlay", False)))
@@ -35070,6 +35114,100 @@ def _self_test_shot_lock_ease_switch():
     print("_self_test_shot_lock_ease_switch: PASS")
 
 
+def _self_test_shot_lock_decide_speed():
+    """ADR-436: real follow-up question -- "how can we make the switch between
+    scenes instant but invisible?" The actual bottleneck was never the Switch
+    Style -- it's that the settle-then-lock DECISION itself waits on
+    Convergence Smoothing's own decay, so turning that up for a nicer `ease`
+    glide also makes the decision land later. Cut Decision Speed must let the
+    decision run on its OWN schedule, independently of Convergence Smoothing,
+    while leaving everyone who never touches it byte-for-byte unchanged
+    (empty box -> None -> still inherits Convergence Smoothing, exactly like
+    before this setting existed)."""
+    import wx
+    from . import utils as U
+    from .convergence_tracker import settle_frames_for_decay
+    from .shot_lock_estimator import ShotLockEstimator
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        assert frame.cbo_convergence_lock_decide_speed.IsEnabled()
+        assert frame.cbo_convergence_lock_decide_speed.GetValue() == "", \
+            "must default to empty (inherit Convergence Smoothing)"
+
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_decide_speed is None, \
+            f"empty Cut Decision Speed box must parse to None, got {args.convergence_lock_decide_speed!r}"
+        cmd = frame.get_cli_command()
+        assert "--convergence-lock-decide-speed" not in cmd, \
+            f"must not appear on the command line at all while unset, got: {cmd}"
+
+        frame.cbo_convergence_lock_decide_speed.SetValue("0.0")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_decide_speed == 0.0
+        cmd = frame.get_cli_command()
+        assert "--convergence-lock-decide-speed" in cmd, cmd
+
+        # Restoring None must blank the box, not type the literal word "None".
+        frame.apply_parsed_args_to_gui(
+            U.create_parser(required_true=False).parse_args(
+                ["-i", "a.mp4", "-o", "o", "--convergence-mode", "shot_lock"]))
+        assert frame.cbo_convergence_lock_decide_speed.GetValue() == "", \
+            f"restoring unset must leave the box empty, got {frame.cbo_convergence_lock_decide_speed.GetValue()!r}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # Round-trip through the real parser (string "none" too, same as the CLI help text says).
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                  "--convergence-mode", "shot_lock",
+                                  "--convergence-lock-decide-speed", "none"])
+    assert reparsed.convergence_lock_decide_speed is None
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                  "--convergence-mode", "shot_lock",
+                                  "--convergence-lock-decide-speed", "0.0"])
+    assert reparsed.convergence_lock_decide_speed == 0.0
+
+    # Filename/metadata tags: present only when actually overridden.
+    args_unset = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock"])
+    args_unset.video_extension = ".mkv"
+    assert "decidespd" not in U.make_output_filename("movie.mp4", args_unset, video=True)
+    assert "iw3_convergence_lock_decide_speed" not in U._build_iw3_comment_metadata(args_unset, video=True)
+    args_set = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-decide-speed", "0.0"])
+    args_set.video_extension = ".mkv"
+    assert "decidespd00" in U.make_output_filename("movie.mp4", args_set, video=True)
+    assert "iw3_convergence_lock_decide_speed=0.0" in U._build_iw3_comment_metadata(args_set, video=True)
+
+    # The actual math: unset must inherit decay's own settle count; an explicit
+    # low value must land on its OWN, much smaller settle count instead -- the
+    # whole point of decoupling it from Convergence Smoothing. Built via
+    # object.__new__(), bypassing __init__ (no real CLIP model load needed for
+    # this pure-math check), same pattern as the other shot_lock self-tests.
+    est = object.__new__(ShotLockEstimator)
+    est.decay = 0.9
+    est.decide_speed = None
+    est._recompute_decide_settle()
+    assert est._decide_settle == settle_frames_for_decay(0.9), \
+        "unset decide_speed must inherit decay's own settle count"
+
+    est.decide_speed = 0.0
+    est._recompute_decide_settle()
+    assert est._decide_settle == settle_frames_for_decay(0.0) == 4
+    assert est._decide_settle < settle_frames_for_decay(0.9), \
+        "an explicit low Cut Decision Speed must decide in far fewer frames than the shared decay would"
+
+    print("_self_test_shot_lock_decide_speed: PASS")
+
+
 def _self_test_clip_shot_symmetric_gui_and_cli():
     """ADR-424/425: "Also Push Wide Shots Up" and "Bias Strength" must enable only for
     clip_shot mode, default off/0.25 (unchanged clip_shot behavior), round-trip
@@ -36816,6 +36954,7 @@ def _run_self_tests():
         _self_test_shot_lock_gui_and_cli,
         _self_test_shot_lock_mid_disabled,
         _self_test_shot_lock_ease_switch,
+        _self_test_shot_lock_decide_speed,
         _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

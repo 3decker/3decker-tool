@@ -96,11 +96,32 @@ rest on an in-between number, not one of the 2 (or 3) locked values. The new
 `ease` switch keeps the exact same locked, per-scene decision snap/snap_ramp
 already make -- only HOW it moves between two different locked decisions
 changes. See _ease_toward() and the module-level switch-style table above.
+
+ADR-436: real follow-up question, after ADR-435 shipped -- "scenes 1-2 decide
+0.60, scenes 3-5 decide 0.20, scene 6 decides 0.65, scene 7 decides 0.20 --
+how do we make the SWITCH between them instant but invisible?" The real
+bottleneck isn't the switch style at all (snap/snap_ramp/ease already cover
+instant vs. gradual) -- it's that the DECISION itself doesn't land until
+`self.tracker.settle` frames after the cut (the first `settle` frames of a
+scene are spent averaging `closeness` before _classify() ever runs, see
+`__call__` below). That settle count was always derived from
+--convergence-smoothing's shared decay, so turning that smoothing UP for a
+nicer `ease` glide also pushes the decision LATER -- by the time it fires,
+the viewer has already settled into the new scene, so even an invisible glide
+reads as a separate, delayed event rather than being masked by the cut.
+--convergence-lock-decide-speed decouples the two: an independent decay-shaped
+value (same 0..0.95 scale/meaning as --convergence-smoothing) that controls
+ONLY how many frames the decision waits, via its own `_decide_settle` (see
+_recompute_decide_settle() below) instead of `self.tracker.settle`.
+--convergence-smoothing keeps controlling everything else unchanged (ease's
+glide speed, snap_ramp's drift/deadband). Left at its default (None), the
+decision keeps inheriting --convergence-smoothing exactly like before this
+setting existed -- zero behavior change for anyone who doesn't set it.
 """
 import torch
 
 from .clip_shot_estimator import ClipShotEstimator
-from .convergence_tracker import SceneHoldTracker
+from .convergence_tracker import SceneHoldTracker, settle_frames_for_decay
 
 SWITCH_MODES = ("snap", "snap_ramp", "blend", "ease")
 DEFAULT_SWITCH = "snap_ramp"
@@ -115,7 +136,7 @@ MID_HIGH = 2.0 / 3.0
 
 class ShotLockEstimator():
     def __init__(self, wide_value, closeup_value, device_id, switch=DEFAULT_SWITCH,
-                 decay=0.9, cut_smooth=0, mid_value=None):
+                 decay=0.9, cut_smooth=0, mid_value=None, decide_speed=None):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
@@ -127,6 +148,9 @@ class ShotLockEstimator():
         self.switch = switch if switch in SWITCH_MODES else DEFAULT_SWITCH
         self.decay = decay
         self.cut_smooth = int(cut_smooth or 0)
+        # ADR-436: None (default) means "inherit decay" -- see module docstring
+        # and _recompute_decide_settle().
+        self.decide_speed = None if decide_speed is None else float(decide_speed)
         # Composition, not inheritance -- see module docstring. convergence=0.5 and
         # the ema/scene_hold/cut_smooth args passed here are irrelevant: only
         # `_closeness()` is ever called on this instance, never `__call__()`.
@@ -147,6 +171,7 @@ class ShotLockEstimator():
         self._scene_running_c = None
         self._scene_n = 0
         self._scene_locked_value = None
+        self._recompute_decide_settle()
 
     def to(self, device):
         """Mirrors ClipShotEstimator.to()/ADR-407 -- moves the composed CLIP model
@@ -155,14 +180,26 @@ class ShotLockEstimator():
         self._clip.to(device)
         return self
 
-    def reset(self, decay=None, cut_smooth=None, **_ignored):
+    def _recompute_decide_settle(self):
+        """ADR-436: how many frames __call__'s settle-then-lock decision window
+        (see module docstring) waits before classifying a new scene. Normally the
+        SAME count as self.tracker.settle (both derived from --convergence-
+        smoothing's decay) -- decide_speed, when set, overrides it independently
+        instead, so the decision can run on its own schedule."""
+        effective = self.decide_speed if self.decide_speed is not None else self.decay
+        self._decide_settle = settle_frames_for_decay(effective)
+
+    def reset(self, decay=None, cut_smooth=None, decide_speed=None, **_ignored):
         if decay is not None:
             self.decay = decay
         if cut_smooth is not None:
             self.cut_smooth = int(cut_smooth or 0)
+        if decide_speed is not None:
+            self.decide_speed = decide_speed
         self.tracker.set_decay(self.decay)
         self.tracker.set_cut_smooth(self.cut_smooth if self.switch == "snap_ramp" else 0)
         self.tracker.reset()
+        self._recompute_decide_settle()
         self.blend_ema = None
         self.ease_value = None
         self._last_raw = None
@@ -273,7 +310,7 @@ class ShotLockEstimator():
                                              else self._scene_running_c
                                              + (c - self._scene_running_c) / (self._scene_n + 1))
                     self._scene_n += 1
-                    if self._scene_n >= self.tracker.settle:
+                    if self._scene_n >= self._decide_settle:
                         self._scene_locked_value = self._classify(self._scene_running_c)
                         if self.switch != "ease":
                             self.tracker.mark_cut()  # the one clean transition into the decision

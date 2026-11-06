@@ -23,7 +23,20 @@ behavior; a nonzero value eases `out` from its pre-cut value to the new scene's
 settling value over that many frames instead of jumping in one frame. Mirrors
 nt_auto3d's own equivalent, separately implemented here rather than imported --
 core iw3 must not depend on that optional add-on.
+
+ADR-436: `settle_frames_for_decay()` below is factored out of set_decay() so
+shot_lock_estimator.py can compute its OWN settle count from a second,
+independent decay value (--convergence-lock-decide-speed) instead of always
+inheriting this tracker's shared decay -- see that module's docstring for why
+(decoupling how fast a cut DECISION lands from how smooth everything else is).
 """
+
+
+def settle_frames_for_decay(decay):
+    """0 -> 4 frames, 0.95 -> ~23 frames. Shared by SceneHoldTracker.set_decay()
+    below and shot_lock_estimator's own decision-speed override (ADR-436)."""
+    decay = max(0.0, min(0.95, float(decay)))
+    return max(1, round(4 + decay * 20))
 
 
 class SceneHoldTracker():
@@ -39,7 +52,7 @@ class SceneHoldTracker():
         # signal must move before the held value follows at all.
         decay = max(0.0, min(0.95, float(decay)))
         self.decay = decay
-        self.settle = max(1, round(4 + decay * 20))      # 0 -> 4 frames, 0.95 -> ~23 frames
+        self.settle = settle_frames_for_decay(decay)      # 0 -> 4 frames, 0.95 -> ~23 frames
         self.drift = 0.05 - decay * 0.035                 # 0 -> 0.05/frame, 0.95 -> ~0.0167/frame
         self.deadband = 0.015 + decay * 0.06              # 0 -> 0.015, 0.95 -> ~0.072 (depth units, 0..1)
 

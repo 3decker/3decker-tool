@@ -3687,6 +3687,11 @@ def make_output_filename(input_filename, args, video=False):
                     shot_lock_cut_smooth = int(getattr(args, "convergence_cut_smooth", 0) or 0)
                     if shot_lock_cut_smooth > 0:
                         convergence_smoothing += f"_cutsm{shot_lock_cut_smooth}"
+                # ADR-436: only shown when actually overridden -- same "only when
+                # meaningful" convention as every other optional tag here.
+                lock_decide_speed = getattr(args, "convergence_lock_decide_speed", None)
+                if lock_decide_speed is not None:
+                    convergence_smoothing += f"_decidespd{to_deciaml(lock_decide_speed, 100, 2)}"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4116,6 +4121,11 @@ def _build_iw3_comment_metadata(args, video=True):
             if (getattr(args, "convergence_lock_switch", DEFAULT_SWITCH) == "snap_ramp"
                     and getattr(args, "convergence_cut_smooth", 0)):
                 comment_parts.append(f"iw3_convergence_cut_smooth={args.convergence_cut_smooth}")
+            # ADR-436: omitted entirely when unset (None) -- same convention as the
+            # Mid Shot Value tag just above.
+            lock_decide_speed_val = getattr(args, "convergence_lock_decide_speed", None)
+            if lock_decide_speed_val is not None:
+                comment_parts.append(f"iw3_convergence_lock_decide_speed={lock_decide_speed_val}")
         if args.convergence_mode == "clip_shot":
             if getattr(args, "clip_shot_symmetric", False):
                 comment_parts.append("iw3_clip_shot_symmetric=1")
@@ -8354,6 +8364,19 @@ def _parse_rife_hybrid_percent(value):
     return float(value)
 
 
+def _parse_optional_decide_speed(value):
+    """argparse type= for --convergence-lock-decide-speed, ADR-436: a plain
+    float, or "none"/empty (case-insensitive, the GUI box left blank) to keep
+    inheriting --convergence-smoothing for shot_lock's own cut decision --
+    same shape as _parse_optional_mid below, kept separate since the two
+    flags disable two unrelated things."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
 def _parse_optional_mid(value):
     """argparse type= for --convergence-lock-mid, ADR-434: a plain float, or
     "none"/empty (case-insensitive) to disable shot_lock's Mid Shot Value tier
@@ -8460,6 +8483,17 @@ def create_parser(required_true=True):
                              "ease (ADR-435: same locked decision as snap/snap_ramp, but glides there with "
                              "a continuously-decaying chase using --convergence-smoothing's decay instead "
                              "of a fixed-speed ramp -- --convergence-cut-smooth has no effect in this mode)")
+    parser.add_argument("--convergence-lock-decide-speed", type=_parse_optional_decide_speed, default=None,
+                        help="ADR-436: --convergence-mode shot_lock only: overrides how many frames shot_lock "
+                             "waits after a real cut before LOCKING its wide/mid/close-up decision in, "
+                             "independently of --convergence-smoothing (which keeps controlling everything "
+                             "else -- ease's glide speed, snap_ramp's drift/deadband). Same 0..0.95 scale and "
+                             "meaning as --convergence-smoothing (higher = more frames, slower to decide), "
+                             "just scoped to the decision alone. Leave unset (default, \"none\") to keep "
+                             "inheriting --convergence-smoothing for the decision too, exactly like before "
+                             "this setting existed. Lower it toward 0 to make the decision land close enough "
+                             "to the cut to be masked by it, while keeping --convergence-smoothing high for "
+                             "smooth behavior the rest of the time.")
     parser.add_argument("--clip-shot-symmetric", action="store_true",
                         help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
                              "recede) by the same amount close-ups get pushed down, instead of staying "
@@ -9468,7 +9502,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             device_id=args.gpu[0],
             switch=getattr(args, "convergence_lock_switch", DEFAULT_SWITCH),
             decay=getattr(args, "convergence_smoothing", 0.9),
-            cut_smooth=getattr(args, "convergence_cut_smooth", 0))
+            cut_smooth=getattr(args, "convergence_cut_smooth", 0),
+            decide_speed=getattr(args, "convergence_lock_decide_speed", None))
 
     if args.export_disparity:
         args.export = True

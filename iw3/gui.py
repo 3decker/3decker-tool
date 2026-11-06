@@ -90,7 +90,7 @@ from .shot_lock_estimator import (
     DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE, DEFAULT_CLOSEUP_VALUE,
     DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH,
     DEFAULT_SIGNAL as DEFAULT_SHOT_LOCK_SIGNAL,
-    DEFAULT_STRENGTH_THRESHOLD)
+    DEFAULT_STRENGTH_THRESHOLD, DEFAULT_THRESHOLD_MODE)
 
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
@@ -1903,11 +1903,14 @@ class MainFrame(wx.Frame):
             name="cbo_convergence_lock_strength_threshold")
         self.cbo_convergence_lock_strength_threshold.SetValue(f"{DEFAULT_STRENGTH_THRESHOLD:.2f}")
         self.cbo_convergence_lock_strength_threshold.SetToolTip(
-            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence. The "
-              "HIGH cutoff line on the 3D Strength scale: scenes using a 3D Strength ABOVE this number "
-              "lock in Wide/High Strength Value. Everything at or below it locks in Close-Up/Low Strength "
-              "Value, UNLESS Strength Threshold (Low) below is also set -- then it locks in Mid Shot "
-              "Value instead, down to that second cutoff.\n"
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence.\n"
+              "With Strength Match Mode set to range (default): the HIGH cutoff line on the 3D Strength "
+              "scale -- scenes using a 3D Strength ABOVE this number lock in Wide/High Strength Value. "
+              "Everything at or below it locks in Close-Up/Low Strength Value, UNLESS Strength Threshold "
+              "(Low) below is also set -- then it locks in Mid Shot Value instead, down to that second "
+              "cutoff.\n"
+              "With Strength Match Mode set to nearest: this is the High reference point instead -- a "
+              "scene's real 3D Strength picks whichever of High/Mid/Low it's numerically closest to.\n"
               "Recommended: pick a number that actually sits between the 3D Strength values your own "
               "footage tends to use -- for example, if close-up scenes usually land around 3.8 and wider "
               "scenes around 3.9 or higher, 3.85 would be a clean cutoff between them. Check your own "
@@ -1920,14 +1923,51 @@ class MainFrame(wx.Frame):
             name="cbo_convergence_lock_strength_threshold_low")
         self.cbo_convergence_lock_strength_threshold_low.SetValue("")
         self.cbo_convergence_lock_strength_threshold_low.SetToolTip(
-            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence. A "
-              "SECOND cutoff line, turning the plain above/below split into a 3-way one -- scenes using a "
-              "3D Strength AT OR BELOW this number lock in Close-Up/Low Strength Value; scenes BETWEEN "
-              "this and Strength Threshold (High) above lock in Mid Shot Value instead.\n"
-              "Leave empty (default) to keep the plain 2-way split -- Mid Shot Value then has no effect.\n"
-              "Example: Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.40 -- anything over "
-              "3.9 uses your High Strength Value, anything from 3.7 up to 3.9 uses 0.40, anything under "
-              "3.7 uses your Low Strength Value."))
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence.\n"
+              "With Strength Match Mode set to range (default): a SECOND cutoff line, turning the plain "
+              "above/below split into a 3-way one -- scenes using a 3D Strength AT OR BELOW this number "
+              "lock in Close-Up/Low Strength Value; scenes BETWEEN this and Strength Threshold (High) "
+              "above lock in Mid Shot Value instead. Leave empty (default) to keep the plain 2-way split.\n"
+              "With Strength Match Mode set to nearest: this is the Low reference point instead -- leave "
+              "empty to compare only against High (and Mid, if set).\n"
+              "Example (range mode): Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.40 -- "
+              "anything over 3.9 uses your High Strength Value, anything from 3.7 up to 3.9 uses 0.40, "
+              "anything under 3.7 uses your Low Strength Value."))
+
+        self.lbl_convergence_lock_threshold_mode = wx.StaticText(
+            self.grp_stereo, label=T("Strength Match Mode"))
+        self.cbo_convergence_lock_threshold_mode = wx.ComboBox(
+            self.grp_stereo, choices=["range", "nearest"], name="cbo_convergence_lock_threshold_mode")
+        self.cbo_convergence_lock_threshold_mode.SetEditable(False)
+        self.cbo_convergence_lock_threshold_mode.SetStringSelection(DEFAULT_THRESHOLD_MODE)
+        self.cbo_convergence_lock_threshold_mode.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence. How the "
+              "Strength Threshold boxes decide which value a scene gets.\n"
+              "range (default): draws cutoff LINES -- above Strength Threshold (High) uses High Strength "
+              "Value, at or below Strength Threshold (Low) uses Low Strength Value (if that box is set), "
+              "the band between uses Mid Shot Value.\n"
+              "nearest: instead gives each value its OWN single reference number -- Strength Threshold "
+              "(High), (Mid), and (Low) -- and picks whichever one the scene's real 3D Strength is "
+              "numerically closest to. Example: High=3.9, Mid=3.8, Low=3.2 -- a scene at 3.6 is closest "
+              "to Mid (0.40); a scene at 3.95 is closest to High (0.60).\n"
+              "Recommended: range if your footage has a clean gap between tiers; nearest if you'd rather "
+              "think in terms of 3 typical numbers than 2 cutoff lines."))
+        self.cbo_convergence_lock_threshold_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_lock_threshold_mode)
+
+        self.lbl_convergence_lock_strength_threshold_mid = wx.StaticText(
+            self.grp_stereo, label=T("Strength Threshold (Mid)"))
+        self.cbo_convergence_lock_strength_threshold_mid = EditableComboBox(
+            self.grp_stereo, choices=["", "3.6", "3.8", "4.0"],
+            name="cbo_convergence_lock_strength_threshold_mid")
+        self.cbo_convergence_lock_strength_threshold_mid.SetValue("")
+        self.cbo_convergence_lock_strength_threshold_mid.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence and "
+              "Strength Match Mode set to nearest. The Mid reference point -- a scene's real 3D Strength "
+              "picks whichever of High/Mid/Low it's numerically closest to.\n"
+              "Leave empty (default) to leave Mid out of the comparison entirely -- scenes then only ever "
+              "pick between High and Low.\n"
+              "Recommended: a number that sits between your High and Low reference points, close to what "
+              "your own footage's 3D Strength actually looks like for a medium shot."))
 
         self.chk_clip_shot_symmetric = wx.CheckBox(
             self.grp_stereo, label=T("Also Push Wide Shots Up (clip_shot)"), name="chk_clip_shot_symmetric")
@@ -3651,6 +3691,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_strength_threshold, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_strength_threshold_low, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_strength_threshold_low, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_threshold_mode, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_threshold_mode, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_strength_threshold_mid, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_strength_threshold_mid, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_clip_shot_bias_strength, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_clip_shot_bias_strength, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -11026,6 +11070,7 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_decide_speed,
             self.cbo_convergence_lock_strength_threshold,
             self.cbo_convergence_lock_strength_threshold_low,
+            self.cbo_convergence_lock_strength_threshold_mid,
             self.cbo_clip_shot_bias_strength,
             self.cbo_face_protect,
             self.cbo_resolution,
@@ -11476,26 +11521,38 @@ class MainFrame(wx.Frame):
         self.update_shot_lock_signal()
 
     def update_shot_lock_signal(self):
-        """ADR-437/438: enables Strength Threshold (High/Low) only for the
-        divergence signal, and relabels Wide/Close-Up to their divergence-signal
-        names so the same two value boxes read correctly under either signal,
-        instead of showing a visual-framing label for a 3D-Strength-driven
-        value. ADR-438: Mid Shot Value stays enabled for shot_lock regardless of
-        signal -- under divergence it simply has no effect until Strength
-        Threshold (Low) is also filled in (same "inert while empty" shape as
-        Strength Threshold (Low) itself), so there's no need to grey it out."""
+        """ADR-437/438/439: enables Strength Threshold (High/Low) and Strength
+        Match Mode only for the divergence signal, and relabels Wide/Close-Up to
+        their divergence-signal names so the same two value boxes read correctly
+        under either signal, instead of showing a visual-framing label for a
+        3D-Strength-driven value. ADR-438: Mid Shot Value stays enabled for
+        shot_lock regardless of signal -- under divergence it simply has no
+        effect until Strength Threshold (Low) (range mode) or Strength Threshold
+        (Mid) (nearest mode) is also filled in, so there's no need to grey it
+        out. ADR-439: Strength Threshold (Mid) only enables under nearest --
+        it has no meaning at all in range mode (that mode uses the Low/High
+        pair as boundaries, not a 3rd reference point)."""
         mode = self.cbo_convergence_mode.GetValue()
         signal = self.cbo_convergence_lock_signal.GetValue()
+        threshold_mode = self.cbo_convergence_lock_threshold_mode.GetValue()
         is_divergence = mode == "shot_lock" and signal == "divergence"
+        is_nearest = is_divergence and threshold_mode == "nearest"
         self.lbl_convergence_lock_strength_threshold.Enable(is_divergence)
         self.cbo_convergence_lock_strength_threshold.Enable(is_divergence)
         self.lbl_convergence_lock_strength_threshold_low.Enable(is_divergence)
         self.cbo_convergence_lock_strength_threshold_low.Enable(is_divergence)
+        self.lbl_convergence_lock_threshold_mode.Enable(is_divergence)
+        self.cbo_convergence_lock_threshold_mode.Enable(is_divergence)
+        self.lbl_convergence_lock_strength_threshold_mid.Enable(is_nearest)
+        self.cbo_convergence_lock_strength_threshold_mid.Enable(is_nearest)
         self.lbl_convergence_lock_wide.SetLabel(
             T("High Strength Value") if is_divergence else T("Wide Shot Value"))
         self.lbl_convergence_lock_closeup.SetLabel(
             T("Low Strength Value") if is_divergence else T("Close-Up Value"))
         self.Layout()
+
+    def on_changed_cbo_convergence_lock_threshold_mode(self, event):
+        self.update_shot_lock_signal()
 
     def update_convergence_cut_smooth(self):
         # Meaningful in two unrelated cases: (1) Hold Steady Per Scene is checked (any AI
@@ -12126,6 +12183,12 @@ class MainFrame(wx.Frame):
                                allow_empty=True):
             self.show_validation_error_message(T("Strength Threshold (Low)"), 0.0, 100.0)
             return None
+        # ADR-439: Strength Threshold (Mid) is also allowed empty (the default --
+        # leave Mid out of the nearest-match comparison).
+        if not validate_number(self.cbo_convergence_lock_strength_threshold_mid.GetValue(), 0.0, 100.0,
+                               allow_empty=True):
+            self.show_validation_error_message(T("Strength Threshold (Mid)"), 0.0, 100.0)
+            return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
@@ -12540,6 +12603,10 @@ class MainFrame(wx.Frame):
             # ADR-438: an empty box means "plain 2-way split" -- None, not a parsed float.
             convergence_lock_strength_threshold_low=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_convergence_lock_strength_threshold_low.GetValue()),
+            convergence_lock_threshold_mode=self.cbo_convergence_lock_threshold_mode.GetValue(),
+            # ADR-439: an empty box means "leave Mid out of the comparison" -- None.
+            convergence_lock_strength_threshold_mid=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_convergence_lock_strength_threshold_mid.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
@@ -13885,6 +13952,15 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_strength_threshold_low.SetValue("")
         else:
             _apply_combo_value(self.cbo_convergence_lock_strength_threshold_low, _threshold_low_restore)
+        _apply_combo_value(self.cbo_convergence_lock_threshold_mode,
+                           getattr(args, "convergence_lock_threshold_mode", DEFAULT_THRESHOLD_MODE))
+        # ADR-439: None (Mid left out of the comparison) must restore to an empty
+        # box, same reasoning as Strength Threshold (Low) just above.
+        _threshold_mid_restore = getattr(args, "convergence_lock_strength_threshold_mid", None)
+        if _threshold_mid_restore is None:
+            self.cbo_convergence_lock_strength_threshold_mid.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_convergence_lock_strength_threshold_mid, _threshold_mid_restore)
         self.update_shot_lock_signal()
         self.chk_clip_shot_symmetric.SetValue(bool(getattr(args, "clip_shot_symmetric", False)))
         _apply_combo_value(self.cbo_clip_shot_bias_strength, getattr(args, "clip_shot_bias_strength", 0.25))
@@ -35421,8 +35497,10 @@ def _self_test_shot_lock_divergence_signal():
     est.decay = 0.9
     est.decide_speed = None
     est.signal = "divergence"
+    est.threshold_mode = "range"
     est.strength_threshold = 3.85
     est.strength_threshold_low = None
+    est.strength_threshold_mid = None
     est._clip = None
     from .convergence_tracker import SceneHoldTracker
     est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
@@ -35542,8 +35620,10 @@ def _self_test_shot_lock_divergence_signal_three_way():
     est.decay = 0.9
     est.decide_speed = None
     est.signal = "divergence"
+    est.threshold_mode = "range"
     est.strength_threshold = 3.9
     est.strength_threshold_low = 3.7
+    est.strength_threshold_mid = None
     est._clip = None
     est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
     est.blend_ema = None
@@ -35570,6 +35650,145 @@ def _self_test_shot_lock_divergence_signal_three_way():
     assert abs(lock_for(3.2) - 0.20) < 1e-5, "well below the low threshold must lock the low value"
 
     print("_self_test_shot_lock_divergence_signal_three_way: PASS")
+
+
+def _self_test_shot_lock_divergence_nearest_mode():
+    """ADR-439: real follow-up to ADR-437/438 -- "could you add a threshold for
+    the mid as well?" Clarified via direct back-and-forth: the real ask was a
+    THIRD way to classify, confirmed explicitly by decker -- give each value
+    its own single reference number and pick whichever one the real 3D
+    Strength is numerically CLOSEST to, instead of drawing cutoff lines.
+    Strength Match Mode must be a real, selectable choice (default "range",
+    byte-for-byte unchanged from ADR-437/438); Strength Threshold (Mid) must
+    enable only under nearest; it must round-trip through parse_args()/the
+    CLI/create_parser(); and the actual classification must pick the nearest
+    of the available reference points, falling back to the single-cutoff
+    rule when only the High reference is set."""
+    import torch
+    import wx
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        frame.cbo_convergence_lock_signal.SetValue("divergence")
+        frame.on_changed_cbo_convergence_lock_signal(wx.CommandEvent())
+        assert "nearest" in list(frame.cbo_convergence_lock_threshold_mode.GetItems())
+        assert frame.cbo_convergence_lock_threshold_mode.GetValue() == "range", \
+            "must default to range -- byte-for-byte unchanged ADR-437/438 behavior"
+        assert not frame.cbo_convergence_lock_strength_threshold_mid.IsEnabled(), \
+            "Strength Threshold (Mid) must stay off under range mode"
+
+        frame.cbo_convergence_lock_threshold_mode.SetValue("nearest")
+        frame.on_changed_cbo_convergence_lock_threshold_mode(wx.CommandEvent())
+        assert frame.cbo_convergence_lock_strength_threshold_mid.IsEnabled()
+
+        frame.cbo_convergence_lock_strength_threshold.SetValue("3.9")
+        frame.cbo_convergence_lock_strength_threshold_mid.SetValue("3.8")
+        frame.cbo_convergence_lock_strength_threshold_low.SetValue("3.2")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_threshold_mode == "nearest"
+        assert args.convergence_lock_strength_threshold_mid == 3.8
+        cmd = frame.get_cli_command()
+        assert "nearest" in cmd and "3.8" in cmd, cmd
+
+        # Switching back to range must disable Mid again and restoring an unset
+        # Mid threshold must blank the box, not type "None".
+        frame.apply_parsed_args_to_gui(
+            U.create_parser(required_true=False).parse_args(
+                ["-i", "a.mp4", "-o", "o", "--convergence-mode", "shot_lock",
+                 "--convergence-lock-signal", "divergence"]))
+        assert frame.cbo_convergence_lock_threshold_mode.GetValue() == "range"
+        assert not frame.cbo_convergence_lock_strength_threshold_mid.IsEnabled()
+        assert frame.cbo_convergence_lock_strength_threshold_mid.GetValue() == "", \
+            f"restoring unset Mid must leave the box empty, got {frame.cbo_convergence_lock_strength_threshold_mid.GetValue()!r}"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                  "--convergence-mode", "shot_lock",
+                                  "--convergence-lock-signal", "divergence",
+                                  "--convergence-lock-threshold-mode", "nearest",
+                                  "--convergence-lock-strength-threshold", "3.9",
+                                  "--convergence-lock-strength-threshold-mid", "3.8",
+                                  "--convergence-lock-strength-threshold-low", "3.2"])
+    assert reparsed.convergence_lock_threshold_mode == "nearest"
+    assert reparsed.convergence_lock_strength_threshold_mid == 3.8
+
+    # Filename/metadata tags: present only for the non-default nearest mode.
+    args_range = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-signal", "divergence"])
+    args_range.video_extension = ".mkv"
+    assert "nearest" not in U.make_output_filename("movie.mp4", args_range, video=True)
+    assert "iw3_convergence_lock_threshold_mode" not in U._build_iw3_comment_metadata(args_range, video=True)
+    args_nearest = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-signal", "divergence", "--convergence-lock-threshold-mode", "nearest",
+         "--convergence-lock-strength-threshold", "3.9", "--convergence-lock-strength-threshold-mid", "3.8"])
+    args_nearest.video_extension = ".mkv"
+    name = U.make_output_filename("movie.mp4", args_nearest, video=True)
+    assert "_nearest" in name and "mid380" in name, name
+    meta = U._build_iw3_comment_metadata(args_nearest, video=True)
+    assert "iw3_convergence_lock_threshold_mode=nearest" in meta
+    assert "iw3_convergence_lock_strength_threshold_mid=3.8" in meta
+
+    # The actual nearest-match math, decker's own exact numbers from this
+    # follow-up -- built via object.__new__(), bypassing __init__ (no CLIP
+    # model is even constructed for this signal, so nothing to bypass either way).
+    est = object.__new__(ShotLockEstimator)
+    est.wide_value, est.closeup_value, est.mid_value = 0.60, 0.20, 0.40
+    est.switch = "snap"
+    est.decay = 0.9
+    est.decide_speed = None
+    est.signal = "divergence"
+    est.threshold_mode = "nearest"
+    est.strength_threshold = 3.9
+    est.strength_threshold_mid = 3.8
+    est.strength_threshold_low = 3.2
+    est._clip = None
+    est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
+    est.blend_ema = None
+    est.ease_value = None
+    est._last_raw = None
+    est._scene_running_c = None
+    est._scene_n = 0
+    est._scene_locked_value = None
+    est._recompute_decide_settle()
+
+    depth = torch.zeros(1, 1, 2, 2)
+
+    def lock_for(divergence):
+        est._pending_scene_reset = True
+        v = None
+        for _ in range(30):
+            v = est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=divergence).item()
+        return v
+
+    assert abs(lock_for(3.95) - 0.60) < 1e-5, "closest to the High reference (3.9) must lock the High value"
+    assert abs(lock_for(3.6) - 0.40) < 1e-5, "closest to the Mid reference (3.8) must lock the Mid value"
+    assert abs(lock_for(3.2) - 0.20) < 1e-5, "exactly on the Low reference must lock the Low value"
+
+    # With Mid left unset, it must drop out of the comparison entirely --
+    # a 2-way nearest match between only High and Low.
+    est.strength_threshold_mid = None
+    assert abs(lock_for(3.5) - 0.20) < 1e-5, "with Mid unset, must compare only High vs. Low"
+
+    # With only the High reference available at all, must fall back to the
+    # same single-cutoff rule "range" mode uses for that same base case.
+    est.strength_threshold_low = None
+    assert abs(lock_for(3.95) - 0.60) < 1e-5, "above High with nothing else set must still lock High"
+    assert abs(lock_for(3.5) - 0.20) < 1e-5, "at/below High with nothing else set must still lock Low"
+
+    print("_self_test_shot_lock_divergence_nearest_mode: PASS")
 
 
 def _self_test_clip_shot_symmetric_gui_and_cli():
@@ -37321,6 +37540,7 @@ def _run_self_tests():
         _self_test_shot_lock_decide_speed,
         _self_test_shot_lock_divergence_signal,
         _self_test_shot_lock_divergence_signal_three_way,
+        _self_test_shot_lock_divergence_nearest_mode,
         _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

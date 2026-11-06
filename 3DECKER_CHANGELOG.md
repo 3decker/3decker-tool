@@ -19,6 +19,8 @@ it matters.
 
 **Added: a second threshold for the 3D-Strength-based Convergence option above, so you can split it into 3 values instead of 2.** Fill in the new "Strength Threshold (Low)" box (leave it empty for the plain 2-value version above) and shot_lock now uses Mid Shot Value too, for any scene whose 3D Strength falls between your two thresholds — e.g. above 3.9 uses your High Strength Value, between 3.7 and 3.9 uses Mid Shot Value, and at or below 3.7 uses your Low Strength Value.
 
+**Added: a new "closest match" way to use the 3D-Strength-based Convergence option, so Mid can have its own number too.** New "Strength Match Mode" dropdown — leave it on "range" (default, the cutoff-line behavior above, unchanged) or switch it to "nearest": give each of your 3 values its own single reference number (High/Mid/Low Strength Threshold) and the scene just uses whichever one its real 3D Strength is closest to, instead of drawing lines between them. Leave "Strength Threshold (Mid)" empty to compare only High vs. Low.
+
 ## Update — November 5, 2026
 
 **Fixed: settings could still come back wrong after closing and reopening the app, if you'd loaded a named Preset at any point.** The app was quietly re-applying your last-used Preset's own saved values every time it started, instead of whatever you actually had set up when you closed it — so anything you changed after loading a Preset (without re-saving it) would silently revert on the next restart, which defeated the whole point of auto-save. Now startup always brings back the literal state everything was in when you closed the app, for every setting — Presets still work exactly the same when you load or save them yourself, they just no longer get silently re-applied behind your back on the next launch.

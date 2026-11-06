@@ -57,7 +57,8 @@ from .clip_shot_estimator import ClipShotEstimator
 from .sod_track_estimator import SodTrackEstimator
 from .shot_lock_estimator import (ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE,
                                   DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH,
-                                  DEFAULT_SIGNAL, DEFAULT_STRENGTH_THRESHOLD)
+                                  DEFAULT_SIGNAL, DEFAULT_STRENGTH_THRESHOLD,
+                                  DEFAULT_THRESHOLD_MODE, THRESHOLD_MODES)
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
@@ -3704,6 +3705,13 @@ def make_output_filename(input_filename, args, video=False):
                     lock_threshold_low = getattr(args, "convergence_lock_strength_threshold_low", None)
                     if lock_threshold_low is not None:
                         convergence_smoothing += f"lo{to_deciaml(lock_threshold_low, 100, 2)}"
+                    # ADR-439: only shown for the non-default nearest-match mode.
+                    lock_threshold_mode = getattr(args, "convergence_lock_threshold_mode", DEFAULT_THRESHOLD_MODE)
+                    if lock_threshold_mode == "nearest":
+                        convergence_smoothing += "_nearest"
+                        lock_threshold_mid = getattr(args, "convergence_lock_strength_threshold_mid", None)
+                        if lock_threshold_mid is not None:
+                            convergence_smoothing += f"mid{to_deciaml(lock_threshold_mid, 100, 2)}"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4151,6 +4159,14 @@ def _build_iw3_comment_metadata(args, video=True):
                 if lock_threshold_low_val is not None:
                     comment_parts.append(
                         f"iw3_convergence_lock_strength_threshold_low={lock_threshold_low_val}")
+                # ADR-439: omitted entirely for the default "range" mode.
+                lock_threshold_mode_val = getattr(args, "convergence_lock_threshold_mode", DEFAULT_THRESHOLD_MODE)
+                if lock_threshold_mode_val == "nearest":
+                    comment_parts.append(f"iw3_convergence_lock_threshold_mode={lock_threshold_mode_val}")
+                    lock_threshold_mid_val = getattr(args, "convergence_lock_strength_threshold_mid", None)
+                    if lock_threshold_mid_val is not None:
+                        comment_parts.append(
+                            f"iw3_convergence_lock_strength_threshold_mid={lock_threshold_mid_val}")
         if args.convergence_mode == "clip_shot":
             if getattr(args, "clip_shot_symmetric", False):
                 comment_parts.append("iw3_clip_shot_symmetric=1")
@@ -8421,6 +8437,18 @@ def _parse_optional_strength_threshold_low(value):
     return float(value)
 
 
+def _parse_optional_strength_threshold_mid(value):
+    """argparse type= for --convergence-lock-strength-threshold-mid, ADR-439:
+    same shape as _parse_optional_strength_threshold_low above -- a plain
+    float, or "none"/empty (case-insensitive) to leave the Mid reference out
+    of --convergence-lock-threshold-mode nearest's candidate list entirely."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
 def _parse_optional_mid(value):
     """argparse type= for --convergence-lock-mid, ADR-434: a plain float, or
     "none"/empty (case-insensitive) to disable shot_lock's Mid Shot Value tier
@@ -8557,11 +8585,27 @@ def create_parser(required_true=True):
     parser.add_argument("--convergence-lock-strength-threshold-low", type=_parse_optional_strength_threshold_low,
                         default=None,
                         help="ADR-438: --convergence-mode shot_lock only, --convergence-lock-signal "
-                             "divergence only: a second, LOW cutoff line, turning the plain 2-way split "
-                             "above into a 3-way one. At or below this locks --convergence-lock-closeup; "
-                             "the band between this and --convergence-lock-strength-threshold locks "
-                             "--convergence-lock-mid instead. Leave unset (default, \"none\") to keep the "
-                             "plain 2-way split.")
+                             "divergence only: with --convergence-lock-threshold-mode range (default), a "
+                             "second, LOW cutoff line, turning the plain 2-way split above into a 3-way "
+                             "one -- at or below this locks --convergence-lock-closeup, the band between "
+                             "this and --convergence-lock-strength-threshold locks --convergence-lock-mid "
+                             "instead. With threshold-mode nearest (ADR-439), this is instead the LOW "
+                             "reference point candidate. Leave unset (default, \"none\") to disable this "
+                             "tier entirely.")
+    parser.add_argument("--convergence-lock-threshold-mode", type=str,
+                        choices=list(THRESHOLD_MODES), default=DEFAULT_THRESHOLD_MODE,
+                        help="ADR-439: --convergence-mode shot_lock only, --convergence-lock-signal "
+                             "divergence only: range (default): draws cutoff LINES -- see "
+                             "--convergence-lock-strength-threshold/-low. nearest: instead gives each "
+                             "value its own single reference number (--convergence-lock-strength-"
+                             "threshold, -mid, -low) and picks whichever one the real divergence value "
+                             "is numerically closest to.")
+    parser.add_argument("--convergence-lock-strength-threshold-mid", type=_parse_optional_strength_threshold_mid,
+                        default=None,
+                        help="ADR-439: --convergence-mode shot_lock only, --convergence-lock-signal "
+                             "divergence only, --convergence-lock-threshold-mode nearest only: the Mid "
+                             "reference point candidate. Leave unset (default, \"none\") to leave Mid out "
+                             "of the nearest-match comparison entirely.")
     parser.add_argument("--clip-shot-symmetric", action="store_true",
                         help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
                              "recede) by the same amount close-ups get pushed down, instead of staying "
@@ -9575,7 +9619,9 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             signal=getattr(args, "convergence_lock_signal", DEFAULT_SIGNAL),
             strength_threshold=getattr(args, "convergence_lock_strength_threshold",
                                        DEFAULT_STRENGTH_THRESHOLD),
-            strength_threshold_low=getattr(args, "convergence_lock_strength_threshold_low", None))
+            strength_threshold_low=getattr(args, "convergence_lock_strength_threshold_low", None),
+            threshold_mode=getattr(args, "convergence_lock_threshold_mode", DEFAULT_THRESHOLD_MODE),
+            strength_threshold_mid=getattr(args, "convergence_lock_strength_threshold_mid", None))
 
     if args.export_disparity:
         args.export = True

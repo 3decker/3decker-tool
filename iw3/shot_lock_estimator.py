@@ -168,6 +168,28 @@ SAME binary 0/1 "closeness" as ADR-437 for the 2-way case, or 0.5 (which
 already falls inside ADR-429's own middle third) for the new band --
 _classify()/_blend_value() need no further changes at all, the same way
 ADR-437 needed none.
+
+ADR-439: real follow-up, same session as ADR-438 -- "could you add a
+threshold for the mid as well?" Clarified via direct back-and-forth: ADR-438's
+`strength_threshold_low` only works as a cutoff LINE (the boundary where Mid
+stops and Low begins) -- Mid itself never got its own reference number the
+way High and Low each have. Confirmed the real ask was a THIRD way to
+classify: give each of the (up to) 3 values its own single reference number
+on the Auto 3D Strength scale, and pick whichever one the real per-scene
+value is numerically CLOSEST to, instead of drawing cutoff lines at all.
+`threshold_mode` (--convergence-lock-threshold-mode, "range" default,
+unchanged ADR-437/438 behavior) switches to `"nearest"`: `strength_threshold`
+(High reference), the new `strength_threshold_mid` (Mid reference, None/
+empty by default), and `strength_threshold_low` (Low reference, reused from
+ADR-438 but now a point, not a boundary, in this mode) are each candidates;
+`_closeness_for_divergence()` picks whichever candidate is nearest to the
+real divergence value and returns that candidate's own pseudo-closeness
+(0.0/0.5/1.0, same values ADR-437/438 already used) -- still no changes
+needed to _classify()/_blend_value(). A candidate whose reference is left
+empty (Mid, or even Low) is simply never a candidate -- with only the High
+reference set at all (the ADR-437 base case), there is nothing to compare
+distances against, so this falls back to that same single-cutoff rule
+instead of being undefined.
 """
 import torch
 
@@ -189,13 +211,19 @@ MID_HIGH = 2.0 / 3.0
 SIGNAL_MODES = ("clip", "divergence")
 DEFAULT_SIGNAL = "clip"
 DEFAULT_STRENGTH_THRESHOLD = 4.0
+# ADR-439: "range" draws cutoff lines (ADR-437/438, unchanged default);
+# "nearest" instead gives each value its own single reference number and
+# picks whichever one the real divergence value is closest to.
+THRESHOLD_MODES = ("range", "nearest")
+DEFAULT_THRESHOLD_MODE = "range"
 
 
 class ShotLockEstimator():
     def __init__(self, wide_value, closeup_value, device_id, switch=DEFAULT_SWITCH,
                  decay=0.9, cut_smooth=0, mid_value=None, decide_speed=None,
                  signal=DEFAULT_SIGNAL, strength_threshold=DEFAULT_STRENGTH_THRESHOLD,
-                 strength_threshold_low=None):
+                 strength_threshold_low=None, threshold_mode=DEFAULT_THRESHOLD_MODE,
+                 strength_threshold_mid=None):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
@@ -216,6 +244,11 @@ class ShotLockEstimator():
         # ADR-438: None (default) means a plain 2-way split, unchanged from
         # ADR-437 -- see module docstring.
         self.strength_threshold_low = None if strength_threshold_low is None else float(strength_threshold_low)
+        # ADR-439: "range" (default) keeps ADR-437/438 behavior unchanged;
+        # "nearest" reinterprets the thresholds above as reference POINTS --
+        # see module docstring and _closeness_for_divergence().
+        self.threshold_mode = threshold_mode if threshold_mode in THRESHOLD_MODES else DEFAULT_THRESHOLD_MODE
+        self.strength_threshold_mid = None if strength_threshold_mid is None else float(strength_threshold_mid)
         # Composition, not inheritance -- see module docstring. convergence=0.5 and
         # the ema/scene_hold/cut_smooth args passed here are irrelevant: only
         # `_closeness()` is ever called on this instance, never `__call__()`.
@@ -332,17 +365,38 @@ class ShotLockEstimator():
         return self.tracker.update(locked_value)
 
     def _closeness_for_divergence(self, divergence):
-        """ADR-437/438: reduces the real divergence value to the same 0..1
+        """ADR-437/438/439: reduces the real divergence value to the same 0..1
         "closeness" _classify()/_blend_value() already expect -- see module
-        docstring. Above strength_threshold -> 0.0 (wide_value, "High Strength
-        Value"). With strength_threshold_low unset (ADR-437, the default, a
-        plain 2-way split): anything else -> 1.0 (closeup_value, "Low Strength
-        Value"). With it set (ADR-438, 3-way): at or below it -> 1.0; the band
-        between the two thresholds -> 0.5, which already falls inside ADR-429's
-        own middle third and picks mid_value, same as CLIP's own middle zone."""
+        docstring.
+
+        threshold_mode="range" (default, ADR-437/438 unchanged): above
+        strength_threshold -> 0.0 (wide_value, "High Strength Value"). With
+        strength_threshold_low unset (ADR-437, a plain 2-way split): anything
+        else -> 1.0 (closeup_value, "Low Strength Value"). With it set
+        (ADR-438, 3-way): at or below it -> 1.0; the band between the two
+        thresholds -> 0.5, which already falls inside ADR-429's own middle
+        third and picks mid_value, same as CLIP's own middle zone.
+
+        threshold_mode="nearest" (ADR-439): strength_threshold/
+        strength_threshold_mid/strength_threshold_low are each a candidate
+        REFERENCE POINT (mid/low only when actually set) instead of a cutoff
+        line -- picks whichever candidate's reference is numerically closest
+        to the real divergence value and returns THAT candidate's own pseudo-
+        closeness. With only the High reference available (nothing else set),
+        falls back to the same single-cutoff rule "range" mode uses for that
+        same base case, since there's nothing to compare distances against."""
         if divergence is None:
             return 1.0
         divergence = float(divergence)
+        if self.threshold_mode == "nearest":
+            candidates = [(self.strength_threshold, 0.0)]
+            if self.strength_threshold_mid is not None:
+                candidates.append((self.strength_threshold_mid, 0.5))
+            if self.strength_threshold_low is not None:
+                candidates.append((self.strength_threshold_low, 1.0))
+            if len(candidates) == 1:
+                return 0.0 if divergence > self.strength_threshold else 1.0
+            return min(candidates, key=lambda pair: abs(divergence - pair[0]))[1]
         if divergence > self.strength_threshold:
             return 0.0
         if self.strength_threshold_low is not None and divergence <= self.strength_threshold_low:

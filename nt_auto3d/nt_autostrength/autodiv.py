@@ -587,13 +587,17 @@ class _RunState:
         live_path/live_output_filename/live_fps up front, the same way
         reset_convergence_scene_log() does, so write_live() below has somewhere to
         write to as soon as the first scene closes, not only at the very end."""
-        self.scene_records = []    # [(start_frame, end_frame, frame_count, mean_strength), ...]
+        # ADR-451: raw_mean added -- the SAME per-frame value before STEP's 0.1
+        # rounding snaps it, see _scene_record()'s own note.
+        self.scene_records = []    # [(start_frame, end_frame, frame_count, mean_strength,
+                                    #   raw_mean_strength), ...]
         self.scene_log_meta = None  # (mode, min, max, typical, invert, closeup, wide,
                                     #  wide_floor, wide_floor_cutoff) for the log header
         self._scene_open = False
         self._scene_start = 0
         self._scene_frames = 0
         self._scene_sum = 0.0
+        self._scene_raw_sum = 0.0
         self._scene_total_frames = 0
         self.live_path = None
         self.live_output_filename = None
@@ -634,13 +638,15 @@ class _RunState:
         close out the final still-open scene."""
         if self._scene_open and self._scene_frames > 0:
             mean = self._scene_sum / self._scene_frames
+            raw_mean = self._scene_raw_sum / self._scene_frames
             self.scene_records.append(
-                (self._scene_start, self._scene_total_frames, self._scene_frames, mean))
+                (self._scene_start, self._scene_total_frames, self._scene_frames, mean, raw_mean))
         self._scene_open = False
         self._scene_frames = 0
         self._scene_sum = 0.0
+        self._scene_raw_sum = 0.0
 
-    def _scene_record(self, divs, cuts):
+    def _scene_record(self, divs, cuts, raw=None):
         """Buffers this batch's frames into the scene log, starting a new scene at
         each real cut. `cuts` is either tracker.last_cuts (the live own_cuts/
         CLIP-similarity guess Tracker.run() itself just computed for the ACTUAL
@@ -654,8 +660,21 @@ class _RunState:
         strength applied across that scene's frames. In `cuts` mode this is just the
         one held value; in `hybrid`/`smooth` mode the strength drifts within a scene,
         and "scene" there just means "the span between two detected cuts" even though
-        the value moved inside it -- a deliberate choice, well-defined in every mode."""
-        for cut, d in zip(cuts, divs):
+        the value moved inside it -- a deliberate choice, well-defined in every mode.
+
+        ADR-451: `raw`, when given, is the SAME frames' strength curve output BEFORE
+        STEP's 0.1 rounding snaps it to the value actually applied to the video (see
+        divergences()'s own `used` vs `divs`) -- real follow-up request, after decker
+        asked whether scenes crammed onto the same rounded value (e.g. 607 scenes
+        sharing just "3.7"/"3.8") might really be more spread out underneath. Tracked
+        as a SEPARATE running sum/mean alongside the existing rounded one, purely for
+        the log's own display -- never changes divs/what's actually applied, only what
+        gets reported. None (the default, every existing caller) reuses `divs` itself,
+        so raw_mean == mean exactly whenever a caller doesn't supply the real raw
+        values -- full backward compatibility."""
+        if raw is None:
+            raw = divs
+        for cut, d, r in zip(cuts, divs, raw):
             if cut and self._scene_open:
                 self._scene_flush()
                 self.write_live()  # ADR-450: a real scene just closed -- update the live log now
@@ -664,6 +683,7 @@ class _RunState:
                 self._scene_start = self._scene_total_frames
             self._scene_frames += 1
             self._scene_sum += float(d)
+            self._scene_raw_sum += float(r)
             self._scene_total_frames += 1
 
     def divergences(self, im, depth, args, reset_pts, same_obj=None, log_reset_pts=None):
@@ -739,7 +759,8 @@ class _RunState:
             # back to the original own_cuts-based grouping for any caller that never
             # passes log_reset_pts (unchanged, original behavior).
             cuts_for_log = log_reset_pts if log_reset_pts is not None else self.tracker.last_cuts
-            self._scene_record(divs, cuts_for_log)
+            # ADR-451: `used` is the real pre-rounding curve output -- see _scene_record()'s own note.
+            self._scene_record(divs, cuts_for_log, raw=used)
         log = os.environ.get("NT_AUTODIV_LOG")
         if log:
             try:
@@ -920,10 +941,13 @@ def _format_scene_log(st, output_filename, fps, in_progress=False):
     lines.append("")
     total_frames = 0
     weighted_sum = 0.0
-    for i, (start, end, frames, mean) in enumerate(st.scene_records, 1):
+    for i, (start, end, frames, mean, raw_mean) in enumerate(st.scene_records, 1):
         span = (f"{_format_time(start / fps)} - {_format_time(end / fps)}" if fps
                else f"frame {start} - {end}")
-        lines.append(f"Scene {i}   {span}   ({frames} frames)   3D Strength: {mean:.1f}")
+        # ADR-451: `raw_mean` is the real pre-rounding curve output -- whether this
+        # scene's rounded value (3.7, 3.8, ...) is masking real underlying spread, or
+        # genuinely is that flat, shows up directly here.
+        lines.append(f"Scene {i}   {span}   ({frames} frames)   3D Strength: {mean:.1f}  (raw {raw_mean:.3f})")
         total_frames += frames
         weighted_sum += mean * frames
     lines.append("")
@@ -1076,7 +1100,7 @@ def _tally_scene_values(scene_records):
     scene's), splitting what looks like one value into two separate rows.
     Rounding to 1 decimal BEFORE tallying -- the same precision the display
     already commits to -- means "what you see is what gets counted"."""
-    counts = collections.Counter(round(mean, 1) for _, _, _, mean in scene_records)
+    counts = collections.Counter(round(mean, 1) for _, _, _, mean, _ in scene_records)
     return sorted(counts.items(), key=lambda kv: (-kv[1], -kv[0]))
 
 
@@ -1199,8 +1223,8 @@ def scan_strength(input_path, args, device="cpu", max_fps=None, hwaccel=None,
     log_path = output_log_path or _scan_log_path(input_path)
     _write_scan_log(st, log_path, path.basename(str(input_path)), resolved_fps[0])
 
-    total_frames = sum(frames for _, _, frames, _ in st.scene_records)
-    weighted_sum = sum(mean * frames for _, _, frames, mean in st.scene_records)
+    total_frames = sum(frames for _, _, frames, _, _ in st.scene_records)
+    weighted_sum = sum(mean * frames for _, _, frames, mean, _ in st.scene_records)
     return {
         "log_path": log_path,
         "scene_count": len(st.scene_records),

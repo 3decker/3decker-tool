@@ -33133,7 +33133,11 @@ def _self_test_auto_divergence_scene_log():
     st._scene_flush()
     # Hand-computed: scene 1 = frames [0,5) (5 frames, mean 2.0), scene 2 = [5,8)
     # (3 frames, mean 16.0), scene 3 = [8,10) (2 frames, mean 9.0).
-    assert st.scene_records == [(0, 5, 5, 2.0), (5, 8, 3, 16.0), (8, 10, 2, 9.0)], st.scene_records
+    # ADR-451: raw_mean == mean exactly here, since this test's own _scene_record()
+    # call doesn't pass raw= -- the real-use case (divergences()'s raw=used) is
+    # covered separately, by _self_test_auto_divergence_scene_log_raw.
+    assert st.scene_records == [(0, 5, 5, 2.0, 2.0), (5, 8, 3, 16.0, 16.0), (8, 10, 2, 9.0, 9.0)], \
+        st.scene_records
 
     text = AD._format_scene_log(st, "movie_SBS.mp4", fps=1.0)
     lines = text.splitlines()
@@ -33141,9 +33145,11 @@ def _self_test_auto_divergence_scene_log():
     # ADR-449: Invert is always stated explicitly either way, even when off.
     assert lines[1] == "Auto 3D Strength: cuts mode, range 2-16, typical (3D Strength) 6, Invert: off", \
         lines[1]
-    assert "Scene 1   00:00:00 - 00:00:05   (5 frames)   3D Strength: 2.0" in lines
-    assert "Scene 2   00:00:05 - 00:00:08   (3 frames)   3D Strength: 16.0" in lines
-    assert "Scene 3   00:00:08 - 00:00:10   (2 frames)   3D Strength: 9.0" in lines
+    # ADR-451: raw_mean == mean exactly here (this test's own _scene_record() call
+    # doesn't pass raw=), so the "(raw ...)" suffix just repeats the rounded value.
+    assert "Scene 1   00:00:00 - 00:00:05   (5 frames)   3D Strength: 2.0  (raw 2.000)" in lines
+    assert "Scene 2   00:00:05 - 00:00:08   (3 frames)   3D Strength: 16.0  (raw 16.000)" in lines
+    assert "Scene 3   00:00:08 - 00:00:10   (2 frames)   3D Strength: 9.0  (raw 9.000)" in lines
     # time-weighted average: (5*2.0 + 3*16.0 + 2*9.0) / 10 = (10 + 48 + 18) / 10 = 7.6
     assert "Average 3D Strength for whole movie (time-weighted): 7.60" in lines, lines
     # ADR-446: real follow-up request -- a value-by-value breakdown is now
@@ -33162,7 +33168,7 @@ def _self_test_auto_divergence_scene_log():
     # No real fps reachable -> frame numbers instead of timestamps, with a clear note.
     text_no_fps = AD._format_scene_log(st, "movie_SBS.mp4", fps=None)
     assert "could not be determined" in text_no_fps
-    assert "Scene 1   frame 0 - 5   (5 frames)   3D Strength: 2.0" in text_no_fps.splitlines()
+    assert "Scene 1   frame 0 - 5   (5 frames)   3D Strength: 2.0  (raw 2.000)" in text_no_fps.splitlines()
 
     # Part 2: one real per-movie log file per movie in a batch, not one combined log
     # (the same real requirement ADR-279's job log already solved) -- exercised
@@ -33394,6 +33400,50 @@ def _self_test_scene_log_header_settings():
     print("_self_test_scene_log_header_settings: PASS")
 
 
+def _self_test_scene_log_raw_value():
+    """ADR-451: real follow-up request -- decker asked whether scenes crammed onto
+    the same rounded value (607 scenes sharing just "3.7"/"3.8" in a real movie)
+    might really be more spread out underneath, since STEP's 0.1 rounding happens
+    BEFORE the scene log ever sees the number. `_scene_record()`'s new `raw=`
+    parameter captures the real pre-rounding curve output as a SEPARATE running
+    mean, purely for display -- never changes what's actually applied to the video.
+    Pure Python, no GPU/CLIP/real movie needed."""
+    from nt_autostrength import autodiv as AD
+
+    st = AD._RunState.__new__(AD._RunState)
+    st.reset_scene_log()
+    st.scene_log_meta = ("cuts", 3.5, 5.0, 3.8, False, None, None, None, None)
+    # Scene 1: 2 frames, both rounded to 3.7 but with real raw values 3.72/3.74 that
+    # average to 3.73 -- real sub-0.1 spread the rounded display alone can't show.
+    # Scene 2: 1 frame, rounded 3.8, raw exactly 3.8 (no hidden spread for this one).
+    st._scene_record([3.7, 3.7, 3.8], [True, False, True], raw=[3.72, 3.74, 3.8])
+    st._scene_flush()
+    assert len(st.scene_records) == 2, st.scene_records
+    assert st.scene_records[0][:4] == (0, 2, 2, 3.7), st.scene_records
+    assert abs(st.scene_records[0][4] - 3.73) < 1e-9, st.scene_records
+    assert st.scene_records[1] == (2, 3, 1, 3.8, 3.8), st.scene_records
+
+    text = AD._format_scene_log(st, "movie.mkv", fps=1.0)
+    lines = text.splitlines()
+    assert "Scene 1   00:00:00 - 00:00:02   (2 frames)   3D Strength: 3.7  (raw 3.730)" in lines, lines
+    assert "Scene 2   00:00:02 - 00:00:03   (1 frames)   3D Strength: 3.8  (raw 3.800)" in lines, lines
+
+    # The tally must still be based on the ROUNDED/applied value, not the raw one --
+    # it answers "what did the video actually use", unaffected by this feature.
+    assert AD._tally_scene_values(st.scene_records) == [(3.8, 1), (3.7, 1)], \
+        AD._tally_scene_values(st.scene_records)
+
+    # Not passing raw= at all (every pre-ADR-451 caller) must leave raw_mean == mean
+    # exactly -- full backward compatibility.
+    st2 = AD._RunState.__new__(AD._RunState)
+    st2.reset_scene_log()
+    st2._scene_record([4.1, 4.1], [True, False])
+    st2._scene_flush()
+    assert st2.scene_records == [(0, 2, 2, 4.1, 4.1)], st2.scene_records
+
+    print("_self_test_scene_log_raw_value: PASS")
+
+
 def _self_test_scan_strength_core():
     """ADR-440: "Scan 3D Strength" -- real user request: "is there a way we can
     scan a movie to get the auto 3D strength values of the whole movie before
@@ -33421,7 +33471,7 @@ def _self_test_scan_strength_core():
         "the real args/state must be completely untouched by building scan_args"
 
     # _tally_scene_values: most-common first, ties broken by the higher value.
-    scene_records = [(0, 5, 5, 2.0), (5, 8, 3, 16.0), (8, 10, 2, 9.0), (10, 15, 5, 2.0)]
+    scene_records = [(0, 5, 5, 2.0, 2.0), (5, 8, 3, 16.0, 16.0), (8, 10, 2, 9.0, 9.0), (10, 15, 5, 2.0, 2.0)]
     assert AD._tally_scene_values(scene_records) == [(2.0, 2), (16.0, 1), (9.0, 1)], \
         AD._tally_scene_values(scene_records)
 
@@ -33502,7 +33552,7 @@ def _self_test_scan_strength_batching():
         def divergences(self, im, depth, args, reset_pts=None, log_reset_pts=None, same_obj=None):
             self.calls.append(im.shape[0])
             assert depth.shape[0] == im.shape[0], "the depth placeholder must match the real batch size"
-            self.scene_records.append((0, im.shape[0], im.shape[0], 1.0))
+            self.scene_records.append((0, im.shape[0], im.shape[0], 1.0, 1.0))
             return [1.0] * im.shape[0]
 
         def _scene_flush(self):
@@ -38520,6 +38570,7 @@ def _run_self_tests():
         _self_test_auto_divergence_scene_log_live,
         _self_test_scene_log_value_tally,
         _self_test_scene_log_header_settings,
+        _self_test_scene_log_raw_value,
         _self_test_scan_strength_core,
         _self_test_scan_strength_batching,
         _self_test_scan_strength_fast_toggle,

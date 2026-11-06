@@ -7004,6 +7004,21 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_
                 depth_batch, dequeue_ticket_id = _batch_infer(
                     x, pts, flush=flush, enqueue_ticket_id=enqueue_ticket_id)
 
+            # Upstream f46442eb (nagadomi, 2026-11-07), hand-applied: at a scene
+            # boundary (or when more frames than one batch come back at once, e.g. a
+            # video depth model releasing its buffered window), return the generator
+            # itself so frames are produced one at a time on the main thread, instead
+            # of materializing every output frame on the GPU here at once -- that list
+            # is what spiked VRAM. Same reason the flush path above already does this.
+            # Needs the matching FrameCallbackPool change (get_results() passes a
+            # generator through instead of always building a list).
+            if depth_batch is not None and (any(reset_ema) or len(depth_batch) > args.batch_size):
+                return _postprocess(
+                    depth_batch, reset_ema, ema_updates,
+                    dequeue_ticket_id=dequeue_ticket_id,
+                    flush=flush,
+                    device=device
+                )
             results = _postprocess(
                 depth_batch, reset_ema, ema_updates,
                 dequeue_ticket_id=dequeue_ticket_id,

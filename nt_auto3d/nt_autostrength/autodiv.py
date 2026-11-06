@@ -308,7 +308,8 @@ def depth_closeness(depth):
 # --------------------------------------------------------------------------
 # closeness -> strength, and the behaviour over time
 # --------------------------------------------------------------------------
-def strength_curve(s, lo, typical, hi, closeup=None, wide=None):
+def strength_curve(s, lo, typical, hi, closeup=None, wide=None,
+                    wide_floor=None, wide_floor_cutoff=None):
     """lo at s=0, hi at s=1, `typical` at s=0.5 (a medium shot).
 
     ADR-443: `closeup` (optional, None = unchanged default -- see below)
@@ -340,7 +341,26 @@ def strength_curve(s, lo, typical, hi, closeup=None, wide=None):
     just mirrored. Explicitly requested as an OPTIONAL addition, same as
     ADR-442's own "ship it as a checkbox, not a new default" precedent --
     None reproduces the exact pre-ADR-444 behavior, so ADR-443's own fix
-    (and everyone who never touches this) is completely unaffected."""
+    (and everyone who never touches this) is completely unaffected.
+
+    ADR-447: `wide_floor`/`wide_floor_cutoff` (optional, either None =
+    unchanged default) are a DIFFERENT kind of control from `wide` above --
+    a hard, flat floor instead of a single smooth pin. Real finding that led
+    here: decker had a real scene sitting partway between the `wide` pin
+    (s=0.25) and the center (s=0.5, where `typical` lives); no matter how
+    low he pushed `wide` -- even all the way down to `lo` itself, where the
+    curve is already as steep as its own internal clamp allows -- that one
+    scene could only be dragged down to within a few tenths of `lo`, never
+    all the way to it, because a SINGLE pinned point can only bend the curve
+    around itself, not flatten an entire stretch past it. `wide_floor_cutoff`
+    is a real strength value: ANY scene whose already-computed result
+    (after the `wide` pin above, if any) falls below this cutoff gets
+    replaced outright with `wide_floor` instead -- a hard jump at the
+    boundary, not a smooth blend, by decker's own explicit choice over the
+    smoothed alternative once both were explained. Confined to the s<=0.5
+    branch below by construction, so (as already true of `wide` itself) it
+    can never reach into or affect the upper half (`closeup`'s own side) no
+    matter what values are passed."""
     lo, hi = min(lo, hi), max(lo, hi)
     if hi - lo < 1e-6:
         return lo
@@ -349,16 +369,24 @@ def strength_curve(s, lo, typical, hi, closeup=None, wide=None):
     gamma = math.log(t) / math.log(0.5)
     if s <= 0.5:
         if wide is None:
-            return lo + (hi - lo) * s ** gamma
-        # Lower half only: s in [0, 0.5] remapped to v in [0, 1], its own curve
-        # from (v=0, lo) to (v=1, typical), pinned at (v=0.5 -> s=0.25, wide)
-        # -- the exact mirror of the upper-half branch below.
-        v = s * 2.0
-        if abs(typical - lo) < 1e-6:
-            return lo
-        t3 = min(max((wide - lo) / (typical - lo), 0.02), 0.98)
-        gamma3 = math.log(t3) / math.log(0.5)
-        return lo + (typical - lo) * v ** gamma3
+            result = lo + (hi - lo) * s ** gamma
+        else:
+            # Lower half only: s in [0, 0.5] remapped to v in [0, 1], its own
+            # curve from (v=0, lo) to (v=1, typical), pinned at
+            # (v=0.5 -> s=0.25, wide) -- the exact mirror of the upper-half
+            # branch below.
+            v = s * 2.0
+            if abs(typical - lo) < 1e-6:
+                return lo
+            t3 = min(max((wide - lo) / (typical - lo), 0.02), 0.98)
+            gamma3 = math.log(t3) / math.log(0.5)
+            result = lo + (typical - lo) * v ** gamma3
+        # ADR-447: hard floor, applied after the pin above (if any) -- see
+        # this function's own docstring for why a pin alone can't do this.
+        if (wide_floor is not None and wide_floor_cutoff is not None
+                and result < wide_floor_cutoff):
+            result = wide_floor
+        return result
     if closeup is None:
         return lo + (hi - lo) * s ** gamma
     # Upper half only: s in (0.5, 1] remapped to u in (0, 1], its own curve
@@ -390,6 +418,26 @@ def _parse_optional_closeup(value):
 def _parse_optional_wide(value):
     """argparse type= for --auto-divergence-wide, ADR-444: the exact mirror
     of _parse_optional_closeup above, for the lower-half pin instead."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
+def _parse_optional_wide_floor(value):
+    """argparse type= for --auto-divergence-wide-floor, ADR-447: same
+    float-or-none/empty convention as the others above."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
+def _parse_optional_wide_floor_cutoff(value):
+    """argparse type= for --auto-divergence-wide-floor-cutoff, ADR-447:
+    same float-or-none/empty convention as the others above."""
     if value is None:
         return None
     if isinstance(value, str) and value.strip().lower() in ("none", ""):
@@ -611,14 +659,21 @@ class _RunState:
         closeup = float(closeup) if closeup is not None else None
         wide = getattr(args, "auto_divergence_wide", None)
         wide = float(wide) if wide is not None else None
+        wide_floor = getattr(args, "auto_divergence_wide_floor", None)
+        wide_floor = float(wide_floor) if wide_floor is not None else None
+        wide_floor_cutoff = getattr(args, "auto_divergence_wide_floor_cutoff", None)
+        wide_floor_cutoff = float(wide_floor_cutoff) if wide_floor_cutoff is not None else None
         used = self.tracker.run(scores, embs, reset_pts, own_cuts,
-                                lambda c: strength_curve(c, lo, typical, hi, closeup, wide))
+                                lambda c: strength_curve(c, lo, typical, hi, closeup, wide,
+                                                          wide_floor, wide_floor_cutoff))
         divs = [round(d / STEP) * STEP for d in used]
         if self.verbose or not self.announced:
             self.announced = True
             _say(f"{self.tracker.mode}, {lo:g}-{hi:g} around {typical:g}"
                  + (f", close-up pinned at {closeup:g}" if closeup is not None else "")
                  + (f", wide pinned at {wide:g}" if wide is not None else "")
+                 + (f", floor {wide_floor:g} below {wide_floor_cutoff:g}"
+                    if wide_floor is not None and wide_floor_cutoff is not None else "")
                  + ("" if self.estimator.model is not None else " (depth-only estimate)")
                  + f"; now {divs[-1]:.1f}")
         self.last_depth, self.last_divs = obj, divs
@@ -1241,6 +1296,19 @@ def _patch_utils(U):
                             "the original single-curve behavior for the lower half, where raising "
                             "--divergence still drags anything short of the single most-extreme "
                             "low-end shot upward too.")
+        g.add_argument("--auto-divergence-wide-floor", type=_parse_optional_wide_floor, default=None,
+                       help="ADR-447: a hard floor for the lower half, for when even "
+                            "--auto-divergence-wide pushed all the way to --divergence-min still "
+                            "isn't enough -- any scene whose value would otherwise land below "
+                            "--auto-divergence-wide-floor-cutoff gets forced to exactly this value "
+                            "instead (a hard jump at the boundary, not a smooth blend). Requires "
+                            "--auto-divergence-wide-floor-cutoff to also be set. Leave unset "
+                            "(default, \"none\") to keep the smooth curve everywhere.")
+        g.add_argument("--auto-divergence-wide-floor-cutoff", type=_parse_optional_wide_floor_cutoff,
+                       default=None,
+                       help="ADR-447: the cutoff that goes with --auto-divergence-wide-floor -- any "
+                            "scene whose value would otherwise be below this gets floored. Leave "
+                            "unset (default, \"none\") to keep the smooth curve everywhere.")
         g.add_argument("--auto-divergence-overlay", action="store_true",
                        help="debug: write the strength used into the top-left of every frame")
         g.add_argument("--auto-divergence-scene-log", action="store_true",

@@ -1627,6 +1627,36 @@ class MainFrame(wx.Frame):
               "Note: with Invert checked below, this box actually reshapes your CLOSE-UP shots instead -- "
               "Invert swaps which end of the shot each box controls, same as it does for everything "
               "else here."))
+        self.lbl_nt_wide_floor = wx.StaticText(self.grp_stereo, label=T("Wide Floor"))
+        self.cbo_nt_wide_floor = EditableComboBox(self.grp_stereo, choices=["", "3.5", "2.0"],
+                                                   name="cbo_nt_wide_floor")
+        self.cbo_nt_wide_floor.SetValue("")
+        self.cbo_nt_wide_floor.SetToolTip(
+            T("ADR-447: what it's for: a hard floor for your widest shots, for when even Wide Strength "
+              "pushed all the way down still isn't low enough. Any scene whose value would otherwise "
+              "land below Wide Floor Cutoff (the box below) gets forced to exactly this value instead.\n"
+              "Why: Wide Strength only pins a single point on the curve -- a scene sitting further out "
+              "than that point still gets dragged partway back up as 3D Strength (typical) rises, no "
+              "matter how low you set Wide Strength. This is a real limit, not a bug: a smooth curve "
+              "through one pinned point can't flatten an entire stretch past it. This box forces a true, "
+              "flat floor instead.\n"
+              "Unlike Wide Strength, this creates a real jump: scenes right at the cutoff boundary can "
+              "land on very different values from each other, not a smooth gradient.\n"
+              "Leave empty (default, together with Wide Floor Cutoff) to keep the smooth curve "
+              "everywhere.\n"
+              "Note: with Invert checked below, this box actually floors your CLOSE-UP shots instead."))
+        self.lbl_nt_wide_floor_cutoff = wx.StaticText(self.grp_stereo, label=T("Wide Floor Cutoff"))
+        self.cbo_nt_wide_floor_cutoff = EditableComboBox(self.grp_stereo, choices=["", "3.9", "3.7"],
+                                                          name="cbo_nt_wide_floor_cutoff")
+        self.cbo_nt_wide_floor_cutoff.SetValue("")
+        self.cbo_nt_wide_floor_cutoff.SetToolTip(
+            T("ADR-447: what it's for: the cutoff that goes with Wide Floor above. Any scene whose value "
+              "would otherwise be below this cutoff gets floored to exactly Wide Floor instead.\n"
+              "Both this box and Wide Floor must be set together -- setting only one does nothing.\n"
+              "Recommended: set this to a bit above where you've noticed real scenes stuck too high, and "
+              "set Wide Floor to where you actually want them. Check a real scan afterward to see which "
+              "scenes landed on the floor.\n"
+              "Leave empty (default) to keep the smooth curve everywhere."))
         self.chk_nt_auto_div_overlay = wx.CheckBox(self.grp_stereo, label=T("Show strength on video (debug)"),
                                                    name="chk_nt_auto_div_overlay")
         self.chk_nt_auto_div_overlay.SetToolTip(
@@ -3769,6 +3799,10 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_nt_closeup, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_nt_wide, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_nt_wide, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_nt_wide_floor, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_nt_wide_floor, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_nt_wide_floor_cutoff, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_nt_wide_floor_cutoff, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_nt_auto_div_invert, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_scene_log, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -11178,6 +11212,8 @@ class MainFrame(wx.Frame):
             self.cbo_nt_cut_smooth,
             self.cbo_nt_closeup,
             self.cbo_nt_wide,
+            self.cbo_nt_wide_floor,
+            self.cbo_nt_wide_floor_cutoff,
             self.cbo_convergence_cut_smooth,
             self.cbo_convergence_subject_lock,
             self.cbo_sod_track_update_interval,
@@ -11895,6 +11931,8 @@ class MainFrame(wx.Frame):
             self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay,
             self.chk_nt_auto_div_scene_log, self.lbl_nt_closeup, self.cbo_nt_closeup,
             self.lbl_nt_wide, self.cbo_nt_wide,
+            self.lbl_nt_wide_floor, self.cbo_nt_wide_floor,
+            self.lbl_nt_wide_floor_cutoff, self.cbo_nt_wide_floor_cutoff,
             self.lbl_resolution_preset, self.cbo_resolution_preset,
             self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
             self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
@@ -11928,6 +11966,8 @@ class MainFrame(wx.Frame):
                   self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
                   self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_invert,
                   self.lbl_nt_closeup, self.cbo_nt_closeup, self.lbl_nt_wide, self.cbo_nt_wide,
+                  self.lbl_nt_wide_floor, self.cbo_nt_wide_floor,
+                  self.lbl_nt_wide_floor_cutoff, self.cbo_nt_wide_floor_cutoff,
                   self.chk_nt_auto_div_overlay, self.chk_nt_auto_div_scene_log):
             c.Enable(on)
         self.lbl_divergence.SetLabel(T("3D Strength") + (" (typical)" if on else ""))
@@ -11951,6 +11991,10 @@ class MainFrame(wx.Frame):
         inv = self.chk_nt_auto_div_invert.GetValue()
         self.lbl_nt_closeup.SetLabel(T("Wide Strength") if inv else T("Close-Up Strength"))
         self.lbl_nt_wide.SetLabel(T("Close-Up Strength") if inv else T("Wide Strength"))
+        # ADR-447: the floor/cutoff pair lives on the same lower-half side as
+        # Wide Strength, so it relabels the same way, for the same reason.
+        self.lbl_nt_wide_floor.SetLabel(T("Close-Up Floor") if inv else T("Wide Floor"))
+        self.lbl_nt_wide_floor_cutoff.SetLabel(T("Close-Up Floor Cutoff") if inv else T("Wide Floor Cutoff"))
         self.Layout()
 
     def on_changed_chk_nt_auto_div_invert(self, event):
@@ -12344,6 +12388,13 @@ class MainFrame(wx.Frame):
         # original single-curve behavior).
         if not validate_number(self.cbo_nt_wide.GetValue(), 0.0, 100.0, allow_empty=True):
             self.show_validation_error_message(T("Wide Strength"), 0.0, 100.0)
+            return None
+        # ADR-447: both allowed empty (the default -- keep the smooth curve everywhere).
+        if not validate_number(self.cbo_nt_wide_floor.GetValue(), 0.0, 100.0, allow_empty=True):
+            self.show_validation_error_message(T("Wide Floor"), 0.0, 100.0)
+            return None
+        if not validate_number(self.cbo_nt_wide_floor_cutoff.GetValue(), 0.0, 100.0, allow_empty=True):
+            self.show_validation_error_message(T("Wide Floor Cutoff"), 0.0, 100.0)
             return None
         if not validate_number(self.cbo_pad.GetValue(), 0.0, 10.0, allow_empty=True):
             self.show_validation_error_message(T("Padding"), 0.0, 10.0)
@@ -12777,6 +12828,11 @@ class MainFrame(wx.Frame):
             # ADR-444: closeup's exact mirror.
             auto_divergence_wide=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_nt_wide.GetValue()),
+            # ADR-447: a hard floor for the lower half, empty = unset = keep the smooth curve.
+            auto_divergence_wide_floor=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_nt_wide_floor.GetValue()),
+            auto_divergence_wide_floor_cutoff=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_nt_wide_floor_cutoff.GetValue()),
             auto_divergence_overlay=self.chk_nt_auto_div_overlay.GetValue(),
             auto_divergence_scene_log=self.chk_nt_auto_div_scene_log.GetValue(),
             face_protect_strength=float(self.cbo_face_protect.GetValue()),
@@ -14146,6 +14202,17 @@ class MainFrame(wx.Frame):
             self.cbo_nt_wide.SetValue("")
         else:
             _apply_combo_value(self.cbo_nt_wide, _wide_restore)
+        # ADR-447: same empty-means-None convention as above.
+        _wide_floor_restore = getattr(args, "auto_divergence_wide_floor", None)
+        if _wide_floor_restore is None:
+            self.cbo_nt_wide_floor.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_nt_wide_floor, _wide_floor_restore)
+        _wide_floor_cutoff_restore = getattr(args, "auto_divergence_wide_floor_cutoff", None)
+        if _wide_floor_cutoff_restore is None:
+            self.cbo_nt_wide_floor_cutoff.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_nt_wide_floor_cutoff, _wide_floor_cutoff_restore)
         self.chk_nt_auto_div_overlay.SetValue(bool(getattr(args, "auto_divergence_overlay", False)))
         self.chk_nt_auto_div_scene_log.SetValue(bool(getattr(args, "auto_divergence_scene_log", False)))
         _apply_combo_value(self.cbo_face_protect, getattr(args, "face_protect_strength", 0.0))
@@ -32543,12 +32610,16 @@ def _self_test_nt_auto_divergence_controls():
                    frame.cbo_nt_div_max, frame.lbl_nt_auto_div_stab, frame.cbo_nt_auto_div_stab,
                    frame.lbl_nt_cut_smooth, frame.cbo_nt_cut_smooth, frame.chk_nt_auto_div_invert,
                    frame.lbl_nt_closeup, frame.cbo_nt_closeup, frame.lbl_nt_wide, frame.cbo_nt_wide,
+                   frame.lbl_nt_wide_floor, frame.cbo_nt_wide_floor,
+                   frame.lbl_nt_wide_floor_cutoff, frame.cbo_nt_wide_floor_cutoff,
                    frame.chk_nt_auto_div_overlay, frame.chk_nt_auto_div_scene_log)
         assert not frame.chk_nt_auto_div.GetValue() and all(not c.IsEnabled() for c in siblings)
         assert frame.lbl_divergence.GetLabelText() == "3D Strength"
         assert frame.cbo_nt_cut_smooth.GetValue() == "0", "must default to off"
         assert frame.cbo_nt_closeup.GetValue() == "", "Close-Up Strength must default to empty"
         assert frame.cbo_nt_wide.GetValue() == "", "Wide Strength must default to empty"
+        assert frame.cbo_nt_wide_floor.GetValue() == "", "Wide Floor must default to empty"
+        assert frame.cbo_nt_wide_floor_cutoff.GetValue() == "", "Wide Floor Cutoff must default to empty"
 
         frame.chk_nt_auto_div.SetValue(True)
         frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
@@ -32565,6 +32636,8 @@ def _self_test_nt_auto_divergence_controls():
         frame.chk_nt_auto_div_scene_log.SetValue(True)
         frame.cbo_nt_closeup.SetValue("4.6")
         frame.cbo_nt_wide.SetValue("2.3")
+        frame.cbo_nt_wide_floor.SetValue("2.0")
+        frame.cbo_nt_wide_floor_cutoff.SetValue("2.5")
         args = frame.parse_args(skip_set_state=True)
         assert args.auto_divergence is True and args.auto_divergence_mode == "cuts"
         assert args.divergence_min == 3.0 and args.divergence_max == 12.0
@@ -32574,10 +32647,14 @@ def _self_test_nt_auto_divergence_controls():
         assert args.auto_divergence_scene_log is True
         assert args.auto_divergence_closeup == 4.6, "ADR-443: Close-Up Strength must round-trip too"
         assert args.auto_divergence_wide == 2.3, "ADR-444: Wide Strength must round-trip too"
+        assert args.auto_divergence_wide_floor == 2.0, "ADR-447: Wide Floor must round-trip too"
+        assert args.auto_divergence_wide_floor_cutoff == 2.5, "ADR-447: Wide Floor Cutoff must round-trip too"
         assert "--auto-divergence" in frame.get_cli_command(), "must show up in Copy Command like any real setting"
         assert "--auto-divergence-invert" in frame.get_cli_command()
         assert "--auto-divergence-closeup" in frame.get_cli_command()
         assert "--auto-divergence-wide" in frame.get_cli_command()
+        assert "--auto-divergence-wide-floor" in frame.get_cli_command()
+        assert "--auto-divergence-wide-floor-cutoff" in frame.get_cli_command()
 
         frame.apply_parsed_args_to_gui(args)
         assert frame.chk_nt_auto_div.GetValue() and frame.cbo_nt_div_min.GetValue() == "3.0"
@@ -32587,16 +32664,25 @@ def _self_test_nt_auto_divergence_controls():
         assert frame.chk_nt_auto_div_scene_log.GetValue() is True, "scene-log checkbox must round-trip too"
         assert frame.cbo_nt_closeup.GetValue() == "4.6", "Close-Up Strength must round-trip too"
         assert frame.cbo_nt_wide.GetValue() == "2.3", "Wide Strength must round-trip too"
+        assert frame.cbo_nt_wide_floor.GetValue() == "2.0", "Wide Floor must round-trip too"
+        assert frame.cbo_nt_wide_floor_cutoff.GetValue() == "2.5", "Wide Floor Cutoff must round-trip too"
 
-        # ADR-443/444: restoring None (unset -- the default) must blank the box,
+        # ADR-443/444/447: restoring None (unset -- the default) must blank the box,
         # not type the literal word "None".
         args.auto_divergence_closeup = None
         args.auto_divergence_wide = None
+        args.auto_divergence_wide_floor = None
+        args.auto_divergence_wide_floor_cutoff = None
         frame.apply_parsed_args_to_gui(args)
         assert frame.cbo_nt_closeup.GetValue() == "", \
             f"restoring unset Close-Up Strength must leave the box empty, got {frame.cbo_nt_closeup.GetValue()!r}"
         assert frame.cbo_nt_wide.GetValue() == "", \
             f"restoring unset Wide Strength must leave the box empty, got {frame.cbo_nt_wide.GetValue()!r}"
+        assert frame.cbo_nt_wide_floor.GetValue() == "", \
+            f"restoring unset Wide Floor must leave the box empty, got {frame.cbo_nt_wide_floor.GetValue()!r}"
+        assert frame.cbo_nt_wide_floor_cutoff.GetValue() == "", \
+            "restoring unset Wide Floor Cutoff must leave the box empty, got " \
+            f"{frame.cbo_nt_wide_floor_cutoff.GetValue()!r}"
 
         frame.chk_nt_auto_div.SetValue(False)
         frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
@@ -32700,6 +32786,34 @@ def _self_test_auto_divergence_metadata_tags():
     assert "_wd" not in name2, "unset (default) Wide Strength must leave no trace in the filename"
     assert "auto_divergence_wide" not in comment2, \
         "unset (default) Wide Strength must leave no trace in the metadata comment"
+
+    # ADR-447: the floor/cutoff pair -- tagged only when BOTH are actually set.
+    floor_on = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename",
+        "--auto-divergence", "--divergence-min", "3.5", "--divergence-max", "5.0",
+        "--auto-divergence-wide-floor", "3.5", "--auto-divergence-wide-floor-cutoff", "3.9",
+    ])
+    floor_on.video_extension = ".mkv"
+    name5 = U.make_output_filename("a.mp4", floor_on, video=True)
+    assert "_wdfl35co39" in name5, name5
+    comment5 = U._build_iw3_comment_metadata(floor_on, video=True)
+    assert "iw3_auto_divergence_wide_floor=3.5" in comment5
+    assert "iw3_auto_divergence_wide_floor_cutoff=3.9" in comment5
+    assert "_wdfl" not in name2, "unset (default) Wide Floor must leave no trace in the filename"
+    assert "auto_divergence_wide_floor" not in comment2, \
+        "unset (default) Wide Floor must leave no trace in the metadata comment"
+
+    # setting only one of the pair must do nothing -- same "both or neither" convention as the code.
+    floor_half = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--metadata", "filename",
+        "--auto-divergence", "--divergence-min", "3.5", "--divergence-max", "5.0",
+        "--auto-divergence-wide-floor", "3.5",
+    ])
+    floor_half.video_extension = ".mkv"
+    assert "_wdfl" not in U.make_output_filename("a.mp4", floor_half, video=True), \
+        "setting only Wide Floor (not Wide Floor Cutoff too) must leave no trace in the filename"
+    assert "auto_divergence_wide_floor" not in U._build_iw3_comment_metadata(floor_half, video=True), \
+        "setting only Wide Floor (not Wide Floor Cutoff too) must leave no trace in the metadata comment"
     print("_self_test_auto_divergence_metadata_tags: PASS")
 
 
@@ -32819,6 +32933,61 @@ def _self_test_auto_divergence_wide_curve():
     print("_self_test_auto_divergence_wide_curve: PASS")
 
 
+def _self_test_auto_divergence_wide_floor():
+    """ADR-447: real finding -- decker had a real scene sitting between the
+    `wide` pin (s=0.25) and the center (s=0.5), and no matter how far he
+    pushed Wide Strength down (confirmed live, even to --divergence-min
+    itself, where the pin's own curve is already as steep as its internal
+    clamp allows), that one scene only ever reached within a few tenths of
+    lo, never lo itself -- a single pinned point can't flatten an entire
+    stretch past it. This hard floor/cutoff pair is the real fix: anything
+    whose already-computed value (after the `wide` pin, if set) falls below
+    the cutoff gets replaced outright with the floor. Pure math, no GPU/
+    CLIP/real movie needed."""
+    from nt_autostrength.autodiv import strength_curve
+
+    lo, typical, hi = 3.5, 4.1, 5.0
+
+    # Both None (the default) must reproduce the exact pre-ADR-447 value,
+    # whether or not `wide` itself is set -- full backward compatibility.
+    for s in (0.0, 0.2, 0.42, 0.5, 0.75, 1.0):
+        assert abs(strength_curve(s, lo, typical, hi, wide=3.54, wide_floor=None, wide_floor_cutoff=None)
+                   - strength_curve(s, lo, typical, hi, wide=3.54)) < 1e-9, s
+
+    # Setting only ONE of the pair must do nothing -- same "both or neither" the GUI/CLI enforce.
+    assert abs(strength_curve(0.42, lo, typical, hi, wide=3.54, wide_floor=3.5)
+               - strength_curve(0.42, lo, typical, hi, wide=3.54)) < 1e-9
+    assert abs(strength_curve(0.42, lo, typical, hi, wide=3.54, wide_floor_cutoff=3.9)
+               - strength_curve(0.42, lo, typical, hi, wide=3.54)) < 1e-9
+
+    # The real case this was built for: a scene at s=0.42 (Close-up Strength
+    # pushed as far as lo itself still only reaches ~3.72-3.8) must now land
+    # exactly on the floor once a cutoff above its natural value is set.
+    natural = strength_curve(0.42, lo, typical, hi, wide=3.54)
+    assert 3.7 < natural < 3.9, natural  # sanity: confirms the scenario this fixes
+    floored = strength_curve(0.42, lo, typical, hi, wide=3.54, wide_floor=3.5, wide_floor_cutoff=3.9)
+    assert abs(floored - 3.5) < 1e-9, floored
+
+    # A scene whose natural value is ABOVE the cutoff must be completely unaffected.
+    above_cutoff = strength_curve(0.49, lo, typical, hi, wide=3.54)
+    assert above_cutoff >= 3.9, above_cutoff  # sanity
+    unaffected = strength_curve(0.49, lo, typical, hi, wide=3.54, wide_floor=3.5, wide_floor_cutoff=3.9)
+    assert abs(unaffected - above_cutoff) < 1e-9
+
+    # Upper half (s > 0.5) must be completely unaffected no matter what
+    # wide_floor/wide_floor_cutoff are set to -- confined to the lower half
+    # by construction, same guarantee already true of `wide` itself.
+    for s in (0.6, 0.75, 1.0):
+        with_closeup = strength_curve(s, lo, typical, hi, closeup=4.6)
+        with_floor_too = strength_curve(s, lo, typical, hi, closeup=4.6,
+                                         wide_floor=4.9, wide_floor_cutoff=4.95)
+        assert abs(with_closeup - with_floor_too) < 1e-9, \
+            f"s={s}: upper half must never be touched by wide_floor/cutoff, " \
+            f"got {with_closeup} vs {with_floor_too}"
+
+    print("_self_test_auto_divergence_wide_floor: PASS")
+
+
 def _self_test_closeup_wide_invert_relabel():
     """ADR-445: real follow-up request -- decker asked for a way to make
     Close-Up Strength/Wide Strength "more intuitive and easier" with Invert,
@@ -32838,6 +33007,9 @@ def _self_test_closeup_wide_invert_relabel():
         assert frame.lbl_nt_closeup.GetLabelText() == "Close-Up Strength", \
             "Invert off (default) must show the plain, non-inverted labels"
         assert frame.lbl_nt_wide.GetLabelText() == "Wide Strength"
+        assert frame.lbl_nt_wide_floor.GetLabelText() == "Wide Floor", \
+            "ADR-447: Invert off (default) must show the plain, non-inverted floor label too"
+        assert frame.lbl_nt_wide_floor_cutoff.GetLabelText() == "Wide Floor Cutoff"
 
         frame.chk_nt_auto_div_invert.SetValue(True)
         frame.on_changed_chk_nt_auto_div_invert(wx.CommandEvent())
@@ -32845,11 +33017,16 @@ def _self_test_closeup_wide_invert_relabel():
             "checking Invert must swap the Close-Up Strength box's label to say what it REALLY shapes now"
         assert frame.lbl_nt_wide.GetLabelText() == "Close-Up Strength", \
             "checking Invert must swap the Wide Strength box's label too"
+        assert frame.lbl_nt_wide_floor.GetLabelText() == "Close-Up Floor", \
+            "ADR-447: checking Invert must swap the floor label the same way"
+        assert frame.lbl_nt_wide_floor_cutoff.GetLabelText() == "Close-Up Floor Cutoff"
 
         frame.chk_nt_auto_div_invert.SetValue(False)
         frame.on_changed_chk_nt_auto_div_invert(wx.CommandEvent())
         assert frame.lbl_nt_closeup.GetLabelText() == "Close-Up Strength", "unchecking must swap them back"
         assert frame.lbl_nt_wide.GetLabelText() == "Wide Strength"
+        assert frame.lbl_nt_wide_floor.GetLabelText() == "Wide Floor", "unchecking must swap the floor back too"
+        assert frame.lbl_nt_wide_floor_cutoff.GetLabelText() == "Wide Floor Cutoff"
 
         # Restoring a real command line with Invert on must show the swapped
         # labels immediately too, not just after a manual toggle.
@@ -32862,6 +33039,9 @@ def _self_test_closeup_wide_invert_relabel():
         assert frame.lbl_nt_closeup.GetLabelText() == "Wide Strength", \
             "restoring Invert=True from a command line must also show the swapped labels"
         assert frame.lbl_nt_wide.GetLabelText() == "Close-Up Strength"
+        assert frame.lbl_nt_wide_floor.GetLabelText() == "Close-Up Floor", \
+            "ADR-447: restoring Invert=True from a command line must also swap the floor labels"
+        assert frame.lbl_nt_wide_floor_cutoff.GetLabelText() == "Close-Up Floor Cutoff"
     finally:
         if frame is not None:
             frame.Destroy()
@@ -38190,6 +38370,7 @@ def _run_self_tests():
         _self_test_auto_divergence_metadata_tags,
         _self_test_auto_divergence_closeup_curve,
         _self_test_auto_divergence_wide_curve,
+        _self_test_auto_divergence_wide_floor,
         _self_test_closeup_wide_invert_relabel,
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,

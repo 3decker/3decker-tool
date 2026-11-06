@@ -3954,6 +3954,13 @@ def make_output_filename(input_filename, args, video=False):
             auto_div_wide = getattr(args, "auto_divergence_wide", None)
             if auto_div_wide is not None:
                 auto3d_tag += f"_wd{to_deciaml(auto_div_wide, 10, 2)}"
+            # ADR-447: a hard floor for the lower half -- only shown when BOTH values are
+            # set, same as how the floor only takes effect when both are set.
+            auto_div_wide_floor = getattr(args, "auto_divergence_wide_floor", None)
+            auto_div_wide_floor_cutoff = getattr(args, "auto_divergence_wide_floor_cutoff", None)
+            if auto_div_wide_floor is not None and auto_div_wide_floor_cutoff is not None:
+                auto3d_tag += (f"_wdfl{to_deciaml(auto_div_wide_floor, 10, 2)}"
+                               f"co{to_deciaml(auto_div_wide_floor_cutoff, 10, 2)}")
             if getattr(args, "auto_divergence_overlay", False):
                 auto3d_tag += "dbg"
         else:
@@ -4124,6 +4131,12 @@ def _build_iw3_comment_metadata(args, video=True):
         auto_div_wide_val = getattr(args, "auto_divergence_wide", None)
         if auto_div_wide_val is not None:
             comment_parts.append(f"iw3_auto_divergence_wide={auto_div_wide_val}")
+        # ADR-447: only recorded when BOTH are set, same as when the floor actually applies.
+        auto_div_wide_floor_val = getattr(args, "auto_divergence_wide_floor", None)
+        auto_div_wide_floor_cutoff_val = getattr(args, "auto_divergence_wide_floor_cutoff", None)
+        if auto_div_wide_floor_val is not None and auto_div_wide_floor_cutoff_val is not None:
+            comment_parts.append(f"iw3_auto_divergence_wide_floor={auto_div_wide_floor_val}")
+            comment_parts.append(f"iw3_auto_divergence_wide_floor_cutoff={auto_div_wide_floor_cutoff_val}")
         if getattr(args, "auto_divergence_overlay", False):
             comment_parts.append("iw3_auto_divergence_overlay=1")
     comment_parts.append(f"iw3_convergence={args.convergence}")

@@ -580,7 +580,8 @@ class _RunState:
         own reset) rather than after writing, so a run that never reaches a clean
         finish simply has nothing written for it."""
         self.scene_records = []    # [(start_frame, end_frame, frame_count, mean_strength), ...]
-        self.scene_log_meta = None  # (mode, min, max, typical) for the log header
+        self.scene_log_meta = None  # (mode, min, max, typical, invert, closeup, wide,
+                                    #  wide_floor, wide_floor_cutoff) for the log header
         self._scene_open = False
         self._scene_start = 0
         self._scene_frames = 0
@@ -678,7 +679,14 @@ class _RunState:
                  + f"; now {divs[-1]:.1f}")
         self.last_depth, self.last_divs = obj, divs
         if getattr(args, "auto_divergence_scene_log", False):
-            self.scene_log_meta = (self.tracker.mode, lo, hi, typical)
+            # ADR-448: real follow-up request -- decker kept having to tell me by hand
+            # which closeup/wide/floor/invert settings a given log/scan was actually
+            # produced with, since the header never recorded them. Carrying the same
+            # values _say()'s own debug line already prints means the log header can
+            # show them too, with no separate source of truth to keep in sync.
+            self.scene_log_meta = (self.tracker.mode, lo, hi, typical,
+                                   getattr(args, "auto_divergence_invert", False),
+                                   closeup, wide, wide_floor, wide_floor_cutoff)
             # ADR-417: when the caller supplies log_reset_pts (iw3 core's own
             # independently-scanned REAL scene cuts -- see _ensure_convergence_log_
             # scene_pts in iw3/utils.py), group the log by those instead of
@@ -820,9 +828,20 @@ def _format_time(sec):
 
 
 def _format_scene_log(st, output_filename, fps):
-    mode, lo, hi, typical = st.scene_log_meta or (st.tracker.mode, 0.0, 0.0, 0.0)
-    lines = [f"3D Strength log -- {path.basename(str(output_filename))}",
-             f"Auto 3D Strength: {mode} mode, range {lo:g}-{hi:g}, typical (3D Strength) {typical:g}"]
+    mode, lo, hi, typical, invert, closeup, wide, wide_floor, wide_floor_cutoff = (
+        st.scene_log_meta or (st.tracker.mode, 0.0, 0.0, 0.0, False, None, None, None, None))
+    # ADR-448: same phrasing _say()'s own debug line already uses for these, so the
+    # log header and the live console/progress line never say anything different.
+    header = f"Auto 3D Strength: {mode} mode, range {lo:g}-{hi:g}, typical (3D Strength) {typical:g}"
+    if invert:
+        header += ", inverted (wide=more, close-up=less)"
+    if closeup is not None:
+        header += f", close-up pinned at {closeup:g}"
+    if wide is not None:
+        header += f", wide pinned at {wide:g}"
+    if wide_floor is not None and wide_floor_cutoff is not None:
+        header += f", floor {wide_floor:g} below {wide_floor_cutoff:g}"
+    lines = [f"3D Strength log -- {path.basename(str(output_filename))}", header]
     if not fps:
         lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
     lines.append("")

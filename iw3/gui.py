@@ -33128,7 +33128,7 @@ def _self_test_auto_divergence_scene_log():
 
     st = AD._RunState.__new__(AD._RunState)   # skip __init__: no Estimator/CLIP needed for this part
     st.reset_scene_log()
-    st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+    st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0, False, None, None, None, None)
     st._scene_record(divs, cuts)
     st._scene_flush()
     # Hand-computed: scene 1 = frames [0,5) (5 frames, mean 2.0), scene 2 = [5,8)
@@ -33178,7 +33178,7 @@ def _self_test_auto_divergence_scene_log():
             args.video_extension = ".mkv"
             one_st = AD._RunState.__new__(AD._RunState)
             one_st.reset_scene_log()
-            one_st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+            one_st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0, False, None, None, None, None)
             one_st._scene_record(list(strengths), [True] * len(strengths))
             AD._finish_scene_log(one_st, args, "process_video", (input_name, tmp_out))
             return args
@@ -33207,7 +33207,7 @@ def _self_test_auto_divergence_scene_log():
             args_off.video_extension = ".mkv"
             off_st = AD._RunState.__new__(AD._RunState)
             off_st.reset_scene_log()
-            off_st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+            off_st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0, False, None, None, None, None)
             off_st._scene_record([2.0], [True])
             AD._finish_scene_log(off_st, args_off, "process_video", ("movie3.mp4", tmp_off))
             assert os.listdir(tmp_off) == [], "the flag must be off by default -- nothing should be written"
@@ -33233,7 +33233,7 @@ def _self_test_scene_log_value_tally():
     # _self_test_auto_divergence_scene_log's own tail check already covers.
     st = AD._RunState.__new__(AD._RunState)
     st.reset_scene_log()
-    st.scene_log_meta = ("cuts", 3.5, 5.0, 3.8)
+    st.scene_log_meta = ("cuts", 3.5, 5.0, 3.8, False, None, None, None, None)
     st._scene_record(
         [3.7, 3.7, 3.7, 3.7, 3.7, 3.7, 3.7, 3.7, 4.0, 4.0],
         [True, False, False, True, False, False, True, False, True, False])
@@ -33249,6 +33249,54 @@ def _self_test_scene_log_value_tally():
     ], lines
 
     print("_self_test_scene_log_value_tally: PASS")
+
+
+def _self_test_scene_log_header_settings():
+    """ADR-448: real follow-up request -- decker kept having to tell me by
+    hand which closeup/wide/floor/invert settings a given log or scan was
+    actually produced with (the header never recorded them), after several
+    real back-and-forths where I had to ask "what settings did you use for
+    this one?" The header now shows exactly what _say()'s own debug line
+    already shows live, so the log is self-describing. Pure Python, no GPU/
+    CLIP/real movie needed."""
+    from nt_autostrength import autodiv as AD
+
+    # Nothing set beyond the basics -- header must look exactly like before
+    # this ADR, byte for byte (full backward compatibility for every log
+    # that doesn't use any of the optional settings).
+    st = AD._RunState.__new__(AD._RunState)
+    st.reset_scene_log()
+    st.scene_log_meta = ("cuts", 3.5, 5.0, 3.8, False, None, None, None, None)
+    st._scene_record([3.7], [True])
+    st._scene_flush()
+    text = AD._format_scene_log(st, "movie.mkv", fps=1.0)
+    header = text.splitlines()[1]
+    assert header == "Auto 3D Strength: cuts mode, range 3.5-5, typical (3D Strength) 3.8", header
+
+    # Everything set at once -- same phrasing _say()'s own debug line uses.
+    st2 = AD._RunState.__new__(AD._RunState)
+    st2.reset_scene_log()
+    st2.scene_log_meta = ("cuts", 3.5, 5.0, 4.1, True, 4.7, 3.6, 3.5, 3.9)
+    st2._scene_record([3.7], [True])
+    st2._scene_flush()
+    header2 = AD._format_scene_log(st2, "movie.mkv", fps=1.0).splitlines()[1]
+    assert header2 == (
+        "Auto 3D Strength: cuts mode, range 3.5-5, typical (3D Strength) 4.1, "
+        "inverted (wide=more, close-up=less), close-up pinned at 4.7, "
+        "wide pinned at 3.6, floor 3.5 below 3.9"
+    ), header2
+
+    # Only one of the floor/cutoff pair set -- must leave no trace (same "both
+    # or neither" convention as the feature itself).
+    st3 = AD._RunState.__new__(AD._RunState)
+    st3.reset_scene_log()
+    st3.scene_log_meta = ("cuts", 3.5, 5.0, 4.1, False, None, None, 3.5, None)
+    st3._scene_record([3.7], [True])
+    st3._scene_flush()
+    header3 = AD._format_scene_log(st3, "movie.mkv", fps=1.0).splitlines()[1]
+    assert "floor" not in header3, header3
+
+    print("_self_test_scene_log_header_settings: PASS")
 
 
 def _self_test_scan_strength_core():
@@ -33293,7 +33341,7 @@ def _self_test_scan_strength_core():
     with tempfile.TemporaryDirectory() as tmp_out:
         st = AD._RunState.__new__(AD._RunState)
         st.reset_scene_log()
-        st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0)
+        st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0, False, None, None, None, None)
         st._scene_record([2.0, 2.0, 2.0, 2.0, 2.0, 16.0, 16.0, 16.0, 9.0, 9.0],
                          [True] * 5 + [False] * 2 + [True] * 2 + [False])
         st._scene_flush()
@@ -33351,7 +33399,7 @@ def _self_test_scan_strength_batching():
 
     class _FakeRunState:
         def __init__(self, args):
-            self.scene_log_meta = ("hybrid", 2.0, 16.0, 6.0)
+            self.scene_log_meta = ("hybrid", 2.0, 16.0, 6.0, False, None, None, None, None)
             self.scene_records = []
             self.calls = []
             instances.append(self)
@@ -38375,6 +38423,7 @@ def _run_self_tests():
         _self_test_auto_divergence_cut_smooth,
         _self_test_auto_divergence_scene_log,
         _self_test_scene_log_value_tally,
+        _self_test_scene_log_header_settings,
         _self_test_scan_strength_core,
         _self_test_scan_strength_batching,
         _self_test_scan_strength_fast_toggle,

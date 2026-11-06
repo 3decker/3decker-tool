@@ -308,14 +308,57 @@ def depth_closeness(depth):
 # --------------------------------------------------------------------------
 # closeness -> strength, and the behaviour over time
 # --------------------------------------------------------------------------
-def strength_curve(s, lo, typical, hi):
-    """lo at s=0, hi at s=1, `typical` at s=0.5 (a medium shot)."""
+def strength_curve(s, lo, typical, hi, closeup=None):
+    """lo at s=0, hi at s=1, `typical` at s=0.5 (a medium shot).
+
+    ADR-443: `closeup` (optional, None = unchanged default -- see below)
+    pins what a REAL (non-extreme) close-up, s=0.75, gets, on its OWN curve
+    for the upper half (s above 0.5). Real follow-up request: decker wanted
+    ordinary close-ups to reach further toward `hi` without moving the wide/
+    medium shots he already liked lower in the range. With a single shared
+    gamma (the original, unchanged behavior below) that trade-off is
+    unavoidable -- raising `typical` to stretch the top always drags the
+    bottom up with it too, since one curve covers the whole 0..1 domain.
+    Splitting the curve at s=0.5 lets the upper half bend independently:
+    continuous with the lower half at s=0.5 (both sides agree exactly on
+    `typical` there, by construction of each half's own gamma), but free to
+    climb at its own rate above it. Only ever used when the caller actually
+    supplies `closeup` (the GUI's own "Close-Up Strength" box, see ADR-443's
+    own note in iw3/gui.py) -- None reproduces the original single-curve
+    formula for the ENTIRE 0..1 domain, not just the lower half, so every
+    existing caller/preset/command line keeps the exact same behavior."""
     lo, hi = min(lo, hi), max(lo, hi)
     if hi - lo < 1e-6:
         return lo
+    s = min(max(float(s), 0.0), 1.0)
     t = min(max((typical - lo) / (hi - lo), 0.02), 0.98)
     gamma = math.log(t) / math.log(0.5)
-    return lo + (hi - lo) * min(max(float(s), 0.0), 1.0) ** gamma
+    if closeup is None or s <= 0.5:
+        return lo + (hi - lo) * s ** gamma
+    # Upper half only: s in (0.5, 1] remapped to u in (0, 1], its own curve
+    # from (u=0, typical) to (u=1, hi), pinned at (u=0.5 -> s=0.75, closeup)
+    # the same way the lower half is pinned at (s=0.5, typical) above.
+    u = (s - 0.5) * 2.0
+    if abs(hi - typical) < 1e-6:
+        return hi
+    t2 = min(max((closeup - typical) / (hi - typical), 0.02), 0.98)
+    gamma2 = math.log(t2) / math.log(0.5)
+    return typical + (hi - typical) * u ** gamma2
+
+
+def _parse_optional_closeup(value):
+    """argparse type= for --auto-divergence-closeup, ADR-443: a plain float,
+    or "none"/empty (case-insensitive) to keep strength_curve()'s original
+    single-curve behavior -- same shape as iw3/utils.py's own
+    _parse_optional_mid/_parse_optional_strength_threshold_low, kept local to
+    this module rather than imported from there (core iw3 must not depend on
+    this add-on, and this add-on's own create_parser() patch runs before
+    iw3.utils is fully set up to import back from)."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
 
 
 # How settled the strength is. Per frame (so at 24-30 fps):
@@ -526,12 +569,17 @@ class _RunState:
         lo = float(getattr(args, "divergence_min", DEFAULT_MIN))
         hi = float(getattr(args, "divergence_max", DEFAULT_MAX))
         typical = float(args.divergence)
+        # ADR-443: None (default) reproduces the original single-curve formula
+        # exactly -- see strength_curve()'s own docstring.
+        closeup = getattr(args, "auto_divergence_closeup", None)
+        closeup = float(closeup) if closeup is not None else None
         used = self.tracker.run(scores, embs, reset_pts, own_cuts,
-                                lambda c: strength_curve(c, lo, typical, hi))
+                                lambda c: strength_curve(c, lo, typical, hi, closeup))
         divs = [round(d / STEP) * STEP for d in used]
         if self.verbose or not self.announced:
             self.announced = True
             _say(f"{self.tracker.mode}, {lo:g}-{hi:g} around {typical:g}"
+                 + (f", close-up pinned at {closeup:g}" if closeup is not None else "")
                  + ("" if self.estimator.model is not None else " (depth-only estimate)")
                  + f"; now {divs[-1]:.1f}")
         self.last_depth, self.last_divs = obj, divs
@@ -1115,6 +1163,13 @@ def _patch_utils(U):
                        help="ADR-419: reverse which end of the shot gets more -- wide shots "
                             "and landscapes get the MOST 3D strength, close-ups get the LEAST, "
                             "instead of the normal (real-camera-like) direction")
+        g.add_argument("--auto-divergence-closeup", type=_parse_optional_closeup, default=None,
+                       help="ADR-443: what a REAL (non-extreme) close-up gets, independently of "
+                            "everything below --divergence (the typical/medium-shot value) -- lets "
+                            "close-ups reach further toward --divergence-max without moving the "
+                            "wide/medium shots below --divergence at all. Leave unset (default, "
+                            "\"none\") to keep the original single-curve behavior, where raising "
+                            "--divergence to stretch the top always drags the bottom up with it too.")
         g.add_argument("--auto-divergence-overlay", action="store_true",
                        help="debug: write the strength used into the top-left of every frame")
         g.add_argument("--auto-divergence-scene-log", action="store_true",

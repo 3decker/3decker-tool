@@ -3944,6 +3944,12 @@ def make_output_filename(input_filename, args, video=False):
                 # ADR-419: wide=most/close-up=least instead of the normal direction --
                 # named explicitly so a reversed run never looks like a normal one.
                 auto3d_tag += "_inv"
+            # ADR-443: only shown when actually set -- None (the default) is the
+            # original single-curve behavior, same convention as every other
+            # optional add-on tag here.
+            auto_div_closeup = getattr(args, "auto_divergence_closeup", None)
+            if auto_div_closeup is not None:
+                auto3d_tag += f"_cu{to_deciaml(auto_div_closeup, 10, 2)}"
             if getattr(args, "auto_divergence_overlay", False):
                 auto3d_tag += "dbg"
         else:
@@ -4105,6 +4111,11 @@ def _build_iw3_comment_metadata(args, video=True):
         if (getattr(args, "auto_divergence_mode", "hybrid") != "smooth"
                 and getattr(args, "auto_divergence_cut_smooth", 0)):
             comment_parts.append(f"iw3_auto_divergence_cut_smooth={args.auto_divergence_cut_smooth}")
+        # ADR-443: omitted entirely when unset (None), same convention as every
+        # other optional add-on tag here.
+        auto_div_closeup_val = getattr(args, "auto_divergence_closeup", None)
+        if auto_div_closeup_val is not None:
+            comment_parts.append(f"iw3_auto_divergence_closeup={auto_div_closeup_val}")
         if getattr(args, "auto_divergence_overlay", False):
             comment_parts.append("iw3_auto_divergence_overlay=1")
     comment_parts.append(f"iw3_convergence={args.convergence}")

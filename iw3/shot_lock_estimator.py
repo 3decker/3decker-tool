@@ -147,6 +147,27 @@ the GUI for this signal rather than specially coded around, since it could
 never trigger anyway. The composed CLIP model (self._clip) is only built
 when signal="clip" -- no point loading/downloading it for a user who only
 ever wants the divergence signal.
+
+ADR-438: real follow-up request, same session as ADR-437 -- "what about if
+I want... anything over 3.9 uses 0.60, anything between 3.7 and 3.89 uses
+0.40, and anything lower than 3.69 uses 0.20?" A real 3-way version of
+ADR-437's divergence signal, mirroring ADR-429's own CLIP 3-way split
+(wide/mid/close-up) but with user-set cutoff NUMBERS instead of CLIP's
+fixed 1/3..2/3 zones. `strength_threshold_low` (--convergence-lock-
+strength-threshold-low, None/empty by default) is the second cutoff --
+ADR-437's existing `strength_threshold` is the HIGH one. With it unset
+(default), behavior is byte-for-byte unchanged from ADR-437 (a plain 2-way
+split: above `strength_threshold` -> wide_value, at or below ->
+closeup_value). Set it, and a 3-way split turns on: above
+`strength_threshold` -> wide_value; at or below `strength_threshold_low`
+-> closeup_value; the band between the two -> `mid_value` (Mid Shot Value,
+no longer disabled for this signal -- it simply has no effect while this
+box is empty, same as the 2-way case, so there's no need to grey it out
+specially). New `_closeness_for_divergence()` does this by producing the
+SAME binary 0/1 "closeness" as ADR-437 for the 2-way case, or 0.5 (which
+already falls inside ADR-429's own middle third) for the new band --
+_classify()/_blend_value() need no further changes at all, the same way
+ADR-437 needed none.
 """
 import torch
 
@@ -173,7 +194,8 @@ DEFAULT_STRENGTH_THRESHOLD = 4.0
 class ShotLockEstimator():
     def __init__(self, wide_value, closeup_value, device_id, switch=DEFAULT_SWITCH,
                  decay=0.9, cut_smooth=0, mid_value=None, decide_speed=None,
-                 signal=DEFAULT_SIGNAL, strength_threshold=DEFAULT_STRENGTH_THRESHOLD):
+                 signal=DEFAULT_SIGNAL, strength_threshold=DEFAULT_STRENGTH_THRESHOLD,
+                 strength_threshold_low=None):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
@@ -191,6 +213,9 @@ class ShotLockEstimator():
         # ADR-437: what gets classified -- see module docstring.
         self.signal = signal if signal in SIGNAL_MODES else DEFAULT_SIGNAL
         self.strength_threshold = float(strength_threshold)
+        # ADR-438: None (default) means a plain 2-way split, unchanged from
+        # ADR-437 -- see module docstring.
+        self.strength_threshold_low = None if strength_threshold_low is None else float(strength_threshold_low)
         # Composition, not inheritance -- see module docstring. convergence=0.5 and
         # the ema/scene_hold/cut_smooth args passed here are irrelevant: only
         # `_closeness()` is ever called on this instance, never `__call__()`.
@@ -306,6 +331,26 @@ class ShotLockEstimator():
             return self._ease_toward(locked_value)
         return self.tracker.update(locked_value)
 
+    def _closeness_for_divergence(self, divergence):
+        """ADR-437/438: reduces the real divergence value to the same 0..1
+        "closeness" _classify()/_blend_value() already expect -- see module
+        docstring. Above strength_threshold -> 0.0 (wide_value, "High Strength
+        Value"). With strength_threshold_low unset (ADR-437, the default, a
+        plain 2-way split): anything else -> 1.0 (closeup_value, "Low Strength
+        Value"). With it set (ADR-438, 3-way): at or below it -> 1.0; the band
+        between the two thresholds -> 0.5, which already falls inside ADR-429's
+        own middle third and picks mid_value, same as CLIP's own middle zone."""
+        if divergence is None:
+            return 1.0
+        divergence = float(divergence)
+        if divergence > self.strength_threshold:
+            return 0.0
+        if self.strength_threshold_low is not None and divergence <= self.strength_threshold_low:
+            return 1.0
+        if self.strength_threshold_low is not None:
+            return 0.5
+        return 1.0
+
     def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None, divergence=None):
         B = depth.shape[0]
         reset_pts = reset_pts if reset_pts is not None else [False] * B
@@ -317,16 +362,12 @@ class ShotLockEstimator():
         has_real_cuts = log_reset_pts is not None
         log_reset_pts = log_reset_pts if has_real_cuts else [False] * B
         if self.signal == "divergence":
-            # ADR-437: the real Auto 3D Strength value in effect for this exact call
-            # (or the single static --divergence number when that add-on is off --
-            # see module docstring) reduced straight to a binary 0/1 "closeness,"
-            # the same shape _classify()/_blend_value() already expect -- no CLIP
-            # call at all for this signal. _classify()'s existing convention picks
-            # wide_value for c<0.5 and closeup_value for c>=0.5 -- so ABOVE the
-            # threshold (locks wide_value, relabeled "High Strength Value" in the
-            # GUI) must map to the LOW end of that scale (c=0.0), not the high end.
-            above = divergence is not None and float(divergence) > self.strength_threshold
-            closeness = torch.full((B,), 0.0 if above else 1.0, device=depth.device, dtype=depth.dtype)
+            # ADR-437/438: the real Auto 3D Strength value in effect for this exact
+            # call (or the single static --divergence number when that add-on is
+            # off -- see module docstring), reduced via _closeness_for_divergence()
+            # -- no CLIP call at all for this signal.
+            c_val = self._closeness_for_divergence(divergence)
+            closeness = torch.full((B,), c_val, device=depth.device, dtype=depth.dtype)
         else:
             closeness = self._clip._closeness(rgb, depth)  # 0 = wide .. 1 = close-up
 

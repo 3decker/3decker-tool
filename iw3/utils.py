@@ -3700,6 +3700,10 @@ def make_output_filename(input_filename, args, video=False):
                     lock_threshold = getattr(args, "convergence_lock_strength_threshold",
                                              DEFAULT_STRENGTH_THRESHOLD)
                     convergence_smoothing += f"_sigdiv{to_deciaml(lock_threshold, 100, 2)}"
+                    # ADR-438: only shown when the 3-way split is actually on.
+                    lock_threshold_low = getattr(args, "convergence_lock_strength_threshold_low", None)
+                    if lock_threshold_low is not None:
+                        convergence_smoothing += f"lo{to_deciaml(lock_threshold_low, 100, 2)}"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4142,6 +4146,11 @@ def _build_iw3_comment_metadata(args, video=True):
                 comment_parts.append(
                     f"iw3_convergence_lock_strength_threshold="
                     f"{getattr(args, 'convergence_lock_strength_threshold', DEFAULT_STRENGTH_THRESHOLD)}")
+                # ADR-438: omitted entirely when the 3-way split is off (None).
+                lock_threshold_low_val = getattr(args, "convergence_lock_strength_threshold_low", None)
+                if lock_threshold_low_val is not None:
+                    comment_parts.append(
+                        f"iw3_convergence_lock_strength_threshold_low={lock_threshold_low_val}")
         if args.convergence_mode == "clip_shot":
             if getattr(args, "clip_shot_symmetric", False):
                 comment_parts.append("iw3_clip_shot_symmetric=1")
@@ -8400,6 +8409,18 @@ def _parse_optional_decide_speed(value):
     return float(value)
 
 
+def _parse_optional_strength_threshold_low(value):
+    """argparse type= for --convergence-lock-strength-threshold-low, ADR-438: a
+    plain float, or "none"/empty (case-insensitive) to keep the plain 2-way
+    split from ADR-437 -- same shape as _parse_optional_mid/_parse_optional_
+    decide_speed above, kept separate since all three disable different things."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
 def _parse_optional_mid(value):
     """argparse type= for --convergence-lock-mid, ADR-434: a plain float, or
     "none"/empty (case-insensitive) to disable shot_lock's Mid Shot Value tier
@@ -8529,9 +8550,18 @@ def create_parser(required_true=True):
     parser.add_argument("--convergence-lock-strength-threshold", type=float,
                         default=DEFAULT_STRENGTH_THRESHOLD,
                         help="ADR-437: --convergence-mode shot_lock only, --convergence-lock-signal "
-                             "divergence only: the cutoff line on the Auto 3D Strength scale. Above this "
-                             "locks --convergence-lock-wide for the scene; at or below locks "
-                             "--convergence-lock-closeup.")
+                             "divergence only: the HIGH cutoff line on the Auto 3D Strength scale. Above "
+                             "this locks --convergence-lock-wide for the scene; at or below it locks "
+                             "--convergence-lock-closeup, UNLESS --convergence-lock-strength-threshold-low "
+                             "is also set (see that flag).")
+    parser.add_argument("--convergence-lock-strength-threshold-low", type=_parse_optional_strength_threshold_low,
+                        default=None,
+                        help="ADR-438: --convergence-mode shot_lock only, --convergence-lock-signal "
+                             "divergence only: a second, LOW cutoff line, turning the plain 2-way split "
+                             "above into a 3-way one. At or below this locks --convergence-lock-closeup; "
+                             "the band between this and --convergence-lock-strength-threshold locks "
+                             "--convergence-lock-mid instead. Leave unset (default, \"none\") to keep the "
+                             "plain 2-way split.")
     parser.add_argument("--clip-shot-symmetric", action="store_true",
                         help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
                              "recede) by the same amount close-ups get pushed down, instead of staying "
@@ -9544,7 +9574,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             decide_speed=getattr(args, "convergence_lock_decide_speed", None),
             signal=getattr(args, "convergence_lock_signal", DEFAULT_SIGNAL),
             strength_threshold=getattr(args, "convergence_lock_strength_threshold",
-                                       DEFAULT_STRENGTH_THRESHOLD))
+                                       DEFAULT_STRENGTH_THRESHOLD),
+            strength_threshold_low=getattr(args, "convergence_lock_strength_threshold_low", None))
 
     if args.export_disparity:
         args.export = True

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 6, 2026
+## Latest Update — November 7, 2026
+
+**Added: Foreground Scale now has its own "shot_lock" mode, completely separate from Convergence Plane's.** You already know Convergence Plane's shot_lock -- pick a Wide value and a Close-Up value, and every scene automatically uses whichever one fits, based on the real 3D Strength number that scene is using. Now the same idea works for Foreground Scale (the setting that controls how your depth translates into pop) -- turn on "Foreground Scale Mode: shot_lock" and set your own Wide/Close-Up (and optionally Mid) values plus your own High/Low strength thresholds. These are entirely separate boxes from Convergence Plane's own shot_lock settings, by design -- you can run both at the same time, each tuned to its own numbers, both watching the same 3D Strength value and reacting independently.
+
+## Update — November 6, 2026
 
 **Added: shot_lock's Convergence Plane can now follow the real 3D Strength number instead of the shot's visual framing.** New "Classify By" option, set it to "divergence" instead of the default "clip" and shot_lock stops looking at the picture entirely — it watches whatever 3D Strength (Auto 3D Strength) value is actually being used for each scene instead. Set a "Strength Threshold (High)" (default 4.0, fully adjustable): any scene using a 3D Strength above that number automatically gets your "High Strength Value," any scene at or below it gets your "Low Strength Value" — using the same settle-then-lock-for-the-whole-scene behavior, Switch Style, and Cut Decision Speed you already have for the normal wide/close-up version. Only means something with Auto 3D Strength actually turned on.
 

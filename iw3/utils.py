@@ -3966,11 +3966,34 @@ def make_output_filename(input_filename, args, video=False):
         else:
             auto3d_tag = ""
 
+        # ADR-452: --foreground-scale-mode shot_lock -- entirely separate feature/
+        # state from Convergence Plane's own shot_lock tag above (lock_wide/mid/
+        # closeup), see foreground_scale_estimator.py. Prefix "fsl" (not "fs",
+        # already used by the plain constant-mode tag just below) so a renamed
+        # file can never collide with a constant-mode run.
+        if getattr(args, "foreground_scale_mode", "constant") == "shot_lock":
+            fsl_wide = getattr(args, "foreground_scale_lock_wide", 0.0)
+            fsl_mid = getattr(args, "foreground_scale_lock_mid", None)
+            fsl_closeup = getattr(args, "foreground_scale_lock_closeup", 0.0)
+            fsl_thresh_high = getattr(args, "foreground_scale_lock_threshold_high", 4.0)
+            fsl_thresh_low = getattr(args, "foreground_scale_lock_threshold_low", None)
+            # ADR-434's own convention: no "M..." segment at all when the Mid Shot
+            # Value box was left empty (disabled).
+            fsl_mid_tag = f"M{to_deciaml(fsl_mid, 100, 2)}" if fsl_mid is not None else ""
+            fsl_tag = (f"_fsllockW{to_deciaml(fsl_wide, 100, 2)}"
+                       f"{fsl_mid_tag}"
+                       f"C{to_deciaml(fsl_closeup, 100, 2)}"
+                       f"_sigdiv{to_deciaml(fsl_thresh_high, 100, 2)}")
+            if fsl_thresh_low is not None:
+                fsl_tag += f"lo{to_deciaml(fsl_thresh_low, 100, 2)}"
+        else:
+            fsl_tag = ""
+
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}{auto3d_tag}_"
                     f"{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}{fp}{bp}{mp}{pf}{po}_"
+                    f"di{edge_dilation}_fs{args.foreground_scale}{fsl_tag}{fp}{bp}{mp}{pf}{po}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
                     f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{fprot_tag}"
                     f"{sharp_tag}{rife_tag}{smtag}{bitrate}")
@@ -4214,6 +4237,26 @@ def _build_iw3_comment_metadata(args, video=True):
     else:
         comment_parts.append(f"iw3_edge_dilation={args.edge_dilation}")
     comment_parts.append(f"iw3_foreground_scale={args.foreground_scale}")
+    # ADR-452: --foreground-scale-mode shot_lock -- entirely separate feature/state
+    # from Convergence Plane's own shot_lock comment tags above, see
+    # foreground_scale_estimator.py. Omitted entirely for the default "constant"
+    # mode, same "only shown when meaningful" convention as every other optional
+    # tag here.
+    if getattr(args, "foreground_scale_mode", "constant") == "shot_lock":
+        comment_parts.append("iw3_foreground_scale_mode=shot_lock")
+        comment_parts.append(
+            f"iw3_foreground_scale_lock_wide={getattr(args, 'foreground_scale_lock_wide', 0.0)}")
+        fsl_mid_val = getattr(args, "foreground_scale_lock_mid", None)
+        if fsl_mid_val is not None:
+            comment_parts.append(f"iw3_foreground_scale_lock_mid={fsl_mid_val}")
+        comment_parts.append(
+            f"iw3_foreground_scale_lock_closeup={getattr(args, 'foreground_scale_lock_closeup', 0.0)}")
+        comment_parts.append(
+            f"iw3_foreground_scale_lock_threshold_high="
+            f"{getattr(args, 'foreground_scale_lock_threshold_high', 4.0)}")
+        fsl_thresh_low_val = getattr(args, "foreground_scale_lock_threshold_low", None)
+        if fsl_thresh_low_val is not None:
+            comment_parts.append(f"iw3_foreground_scale_lock_threshold_low={fsl_thresh_low_val}")
     if getattr(args, "foreground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_foreground_pop={args.foreground_pop}")
         if getattr(args, "foreground_pop_threshold_low", 0.85) != 0.85:
@@ -4937,8 +4980,22 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         # BCHW
         pass
 
-    if args.state["convergence_model"] is not None:
+    # ADR-452: a single mapper_fn resolved once, used at every call site below.
+    # --foreground-scale-mode shot_lock (entirely separate state/thresholds from
+    # Convergence Plane's own shot_lock -- see foreground_scale_estimator.py)
+    # overrides which mapper this call uses, by the real per-scene divergence
+    # value in effect for THIS call (same non-stale guarantee ADR-437 already
+    # relies on for Convergence Plane's own divergence signal -- see
+    # nt_auto3d/nt_autostrength/autodiv.py's apply_divergence() wrapper). This
+    # works regardless of which Convergence Plane mode is active, including
+    # "constant"/off.
+    fs_model = args.state.get("foreground_scale_model")
+    if fs_model is not None:
+        mapper_fn = fs_model(divergence=getattr(args, "divergence", None))
+    else:
         mapper_fn = get_mapper(args.mapper)
+
+    if args.state["convergence_model"] is not None:
         if getattr(args, "convergence_mode", "constant") == "shot_lock":
             # ADR-422: shot_lock needs the REAL, independently-scanned scene
             # boundaries for its own actual per-scene lock-and-hold decision, not
@@ -4975,7 +5032,7 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             depth = mapper_fn(depth)
     else:
         convergence = args.convergence
-        depth = get_mapper(args.mapper)(depth)
+        depth = mapper_fn(depth)
 
     # ADR-237: real user-found bug -- the inpaint methods below (forward_inpaint/
     # mlbw_l2_inpaint/monobw_inpaint) buffer frames internally and only return a
@@ -8496,6 +8553,34 @@ def _parse_optional_mid(value):
     return float(value)
 
 
+def _parse_optional_foreground_scale_mid(value):
+    """argparse type= for --foreground-scale-lock-mid, ADR-452: a plain float, or
+    "none"/empty (case-insensitive, the GUI box left blank) to disable Foreground
+    Scale shot_lock's Mid Shot Value tier entirely -- same shape as
+    _parse_optional_mid above (Convergence Plane's own equivalent), kept as a
+    separate function since the two flags belong to entirely separate features
+    with entirely separate state (see foreground_scale_estimator.py)."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
+def _parse_optional_foreground_scale_threshold_low(value):
+    """argparse type= for --foreground-scale-lock-threshold-low, ADR-452: a plain
+    float, or "none"/empty (case-insensitive) to keep Foreground Scale shot_lock's
+    plain 2-way wide/close-up split -- same shape as
+    _parse_optional_strength_threshold_low above (Convergence Plane's own
+    equivalent), kept separate for the same reason as
+    _parse_optional_foreground_scale_mid."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
 def create_parser(required_true=True):
     class Range(object):
         def __init__(self, start, end):
@@ -9079,6 +9164,51 @@ def create_parser(required_true=True):
                         help="foreground scaling level. 0 is disabled")
     parser.add_argument("--mapper-type", type=str, choices=["div", "mul", "shift"], default=None,
                         help="mapper type for foreground scaling level")
+    parser.add_argument("--foreground-scale-mode", type=str, choices=["constant", "shot_lock"],
+                        default="constant",
+                        help="ADR-452: constant (default): always use the single --foreground-scale "
+                             "value above, unchanged. shot_lock: replicates Convergence Plane's own "
+                             "shot_lock mode (ADR-420/437), but for --foreground-scale instead of "
+                             "--convergence, and with ENTIRELY SEPARATE thresholds/values -- the real "
+                             "per-scene Auto 3D Strength divergence value picks one of "
+                             "--foreground-scale-lock-wide/-mid/-closeup via --foreground-scale-lock-"
+                             "threshold-high/-low, independently of (and runnable at the same time as) "
+                             "--convergence-mode shot_lock's own --convergence-lock-* settings. Only "
+                             "means something with Auto 3D Strength actually enabled (otherwise "
+                             "--divergence is just one static number for the whole movie, so there's "
+                             "nothing to classify against).")
+    parser.add_argument("--foreground-scale-lock-wide", type=float, default=0.0,
+                        help="--foreground-scale-mode shot_lock only: the --foreground-scale value "
+                             "used on scenes whose real Auto 3D Strength divergence is above "
+                             "--foreground-scale-lock-threshold-high. Independent of "
+                             "--convergence-lock-wide.")
+    parser.add_argument("--foreground-scale-lock-mid", type=_parse_optional_foreground_scale_mid,
+                        default=None,
+                        help="--foreground-scale-mode shot_lock only: the --foreground-scale value "
+                             "used on scenes whose divergence falls between --foreground-scale-lock-"
+                             "threshold-low and --foreground-scale-lock-threshold-high. Leave unset "
+                             "(default, \"none\") to disable this tier -- a plain 2-way wide/close-up "
+                             "split instead. Independent of --convergence-lock-mid.")
+    parser.add_argument("--foreground-scale-lock-closeup", type=float, default=0.0,
+                        help="--foreground-scale-mode shot_lock only: the --foreground-scale value "
+                             "used on scenes whose real Auto 3D Strength divergence is at or below "
+                             "--foreground-scale-lock-threshold-high (or, with --foreground-scale-lock-"
+                             "threshold-low also set, at or below that lower threshold). Independent "
+                             "of --convergence-lock-closeup.")
+    parser.add_argument("--foreground-scale-lock-threshold-high", type=float, default=4.0,
+                        help="--foreground-scale-mode shot_lock only: the HIGH cutoff line on the Auto "
+                             "3D Strength scale. Above this locks --foreground-scale-lock-wide for the "
+                             "scene; at or below it locks --foreground-scale-lock-closeup, UNLESS "
+                             "--foreground-scale-lock-threshold-low is also set (see that flag). "
+                             "Independent of --convergence-lock-strength-threshold.")
+    parser.add_argument("--foreground-scale-lock-threshold-low",
+                        type=_parse_optional_foreground_scale_threshold_low, default=None,
+                        help="--foreground-scale-mode shot_lock only: a second, LOW cutoff line, "
+                             "turning the plain 2-way split above into a 3-way one -- at or below this "
+                             "locks --foreground-scale-lock-closeup, the band between this and "
+                             "--foreground-scale-lock-threshold-high locks --foreground-scale-lock-mid "
+                             "instead. Leave unset (default, \"none\") to disable this tier entirely. "
+                             "Independent of --convergence-lock-strength-threshold-low.")
     parser.add_argument("--vr180", action="store_true",
                         help="output in VR180 format")
     parser.add_argument("--half-sbs", action="store_true",
@@ -9716,6 +9846,10 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         "output_sink": output_sink,
         "depth_model": depth_model,
         "convergence_model": convergence_model,
+        # ADR-452: built below in iw3_main() once is_metric()/mapper_type are known
+        # (--foreground-scale-mode shot_lock only) -- None here is the default,
+        # unchanged "constant" behavior.
+        "foreground_scale_model": None,
         "device": create_device(args.gpu),
         "devices": [create_device(gpu_id) for gpu_id in args.gpu],
     }
@@ -9844,10 +9978,28 @@ def iw3_main(args):
         args.mapper = resolve_mapper_name(mapper=args.mapper, foreground_scale=args.foreground_scale,
                                           metric_depth=is_metric,
                                           mapper_type=args.mapper_type)
+        # ADR-452: --foreground-scale-mode shot_lock only -- see
+        # foreground_scale_estimator.py for the full rationale. Built here (not in
+        # set_state_args()) because it needs is_metric/args.mapper_type, neither of
+        # which is known yet at that point.
+        if getattr(args, "foreground_scale_mode", "constant") == "shot_lock":
+            from .foreground_scale_estimator import ForegroundScaleEstimator
+            args.state["foreground_scale_model"] = ForegroundScaleEstimator(
+                wide_value=getattr(args, "foreground_scale_lock_wide", 0.0),
+                mid_value=getattr(args, "foreground_scale_lock_mid", None),
+                closeup_value=getattr(args, "foreground_scale_lock_closeup", 0.0),
+                threshold_high=getattr(args, "foreground_scale_lock_threshold_high", 4.0),
+                threshold_low=getattr(args, "foreground_scale_lock_threshold_low", None),
+                metric_depth=is_metric, mapper_type=args.mapper_type)
     else:
         depth_model = None
         # specified args.mapper never used in process_config_*
         args.mapper = "none"
+        # ADR-452: this pipeline (YAML-config-input / export-reconstruct) already
+        # ignores the base --foreground-scale value above (args.mapper is forced to
+        # "none" instead) -- Foreground Scale shot_lock intentionally does not apply
+        # here either, so args.state["foreground_scale_model"] stays at its
+        # set_state_args() default of None.
 
     if args.export:
         export_main(args)

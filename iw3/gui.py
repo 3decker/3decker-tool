@@ -92,6 +92,13 @@ from .shot_lock_estimator import (
     DEFAULT_SIGNAL as DEFAULT_SHOT_LOCK_SIGNAL,
     DEFAULT_STRENGTH_THRESHOLD, DEFAULT_THRESHOLD_MODE)
 
+# Foreground Scale's own shot_lock defaults (ADR-452) -- entirely separate from
+# Convergence Plane's shot_lock defaults above, matching iw3/utils.py
+# create_parser()'s --foreground-scale-lock-* defaults.
+DEFAULT_FOREGROUND_SCALE_LOCK_WIDE = 0.0
+DEFAULT_FOREGROUND_SCALE_LOCK_CLOSEUP = 0.0
+DEFAULT_FOREGROUND_SCALE_LOCK_THRESHOLD_HIGH = 4.0
+
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
 VIDEO_EXTENSIONS = extension_list_to_wildcard(KNOWN_VIDEO_EXTENSIONS)
@@ -2553,6 +2560,116 @@ class MainFrame(wx.Frame):
               "once instead of trading one for the other, raise 3D Strength (Divergence) instead — it "
               "scales both ends up together rather than redistributing between them."))
 
+        # Foreground Scale shot-lock (ADR-452): its own independent per-shot lock,
+        # parallel to Convergence Plane's shot_lock above but for Foreground Scale
+        # instead of Convergence Plane -- separate Mode combo, separate Wide/Mid/
+        # Close-Up value boxes, separate Threshold (High/Low) boxes. None of these
+        # widgets share state with cbo_convergence_lock_wide/_mid/_closeup/
+        # _strength_threshold/_strength_threshold_low above.
+        self.lbl_foreground_scale_mode = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Foreground Scale Mode"))
+        self.cbo_foreground_scale_mode = wx.ComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), name="cbo_foreground_scale_mode")
+        self.cbo_foreground_scale_mode.SetEditable(False)
+        self.cbo_foreground_scale_mode.Append(T("Constant"), "constant")
+        self.cbo_foreground_scale_mode.Append(T("Shot Lock"), "shot_lock")
+        self.cbo_foreground_scale_mode.SetSelection(0)
+        self.cbo_foreground_scale_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_foreground_scale_mode)
+        self.cbo_foreground_scale_mode.SetToolTip(
+            T("What it's for: lets Foreground Scale above switch automatically between shots instead of "
+              "using one fixed value for the whole video -- its own separate per-shot system, completely "
+              "independent of Convergence Plane's own shot_lock Mode/values further up (different "
+              "setting, different thresholds, different locked values -- the two never share state).\n"
+              "Constant (default): Foreground Scale above always applies unchanged for the whole video.\n"
+              "Shot Lock: each scene's own 3D Strength (divergence) decides which of the three value "
+              "boxes below it locks in for that scene -- Wide Shot Value above Strength Threshold "
+              "(High), Close-Up Value at or below Strength Threshold (Low) (or below Strength Threshold "
+              "(High), if Strength Threshold (Low) is left empty), Mid Shot Value in between.\n"
+              "Con: like any shot-driven switch, the Foreground Scale redistribution itself will jump "
+              "between scenes rather than staying perfectly smooth within one continuous shot whose own "
+              "3D Strength changes mid-take.\n"
+              "Recommended: Constant unless you specifically want Foreground Scale to track 3D Strength "
+              "per scene -- try your own footage and judge by eye."))
+
+        self.lbl_foreground_scale_lock_wide = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Wide Shot Value"))
+        self.cbo_foreground_scale_lock_wide = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["1.5", "1.0", "0.5", "0.0"],
+            name="cbo_foreground_scale_lock_wide")
+        self.cbo_foreground_scale_lock_wide.SetValue(f"{DEFAULT_FOREGROUND_SCALE_LOCK_WIDE:.2f}")
+        self.cbo_foreground_scale_lock_wide.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode. The Foreground Scale value (-3.0 to 3.0) "
+              "locked in for every scene whose 3D Strength is ABOVE Strength Threshold (High) below -- "
+              "its own independent value, not shared with Convergence Plane's own Wide Shot Value.\n"
+              "Recommended: try your own footage and judge by eye -- a modest positive value gives wide "
+              "shots a punchier, more sculpted foreground; 0.0 (default) leaves the depth model's own "
+              "curve unchanged, same as a plain Foreground Scale of 0."))
+
+        self.lbl_foreground_scale_lock_mid = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Mid Shot Value"))
+        self.cbo_foreground_scale_lock_mid = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["", "0.5", "0.0", "-0.5"],
+            name="cbo_foreground_scale_lock_mid")
+        self.cbo_foreground_scale_lock_mid.SetValue("")
+        self.cbo_foreground_scale_lock_mid.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode. The Foreground Scale value used on scenes "
+              "whose 3D Strength falls between Strength Threshold (Low) and Strength Threshold (High) "
+              "below. Leave this box empty (default) to turn the middle tier off entirely -- every scene "
+              "then gets a plain above/below decision at Strength Threshold (High) instead.\n"
+              "Independent of Convergence Plane's own Mid Shot Value -- the two settings never share a "
+              "box or a threshold.\n"
+              "Recommended: roughly halfway between Wide Shot Value and Close-Up Value -- try your own "
+              "footage and judge by eye."))
+
+        self.lbl_foreground_scale_lock_closeup = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Close-Up Value"))
+        self.cbo_foreground_scale_lock_closeup = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["-1.5", "-1.0", "-0.5", "0.0"],
+            name="cbo_foreground_scale_lock_closeup")
+        self.cbo_foreground_scale_lock_closeup.SetValue(f"{DEFAULT_FOREGROUND_SCALE_LOCK_CLOSEUP:.2f}")
+        self.cbo_foreground_scale_lock_closeup.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode. The Foreground Scale value (-3.0 to 3.0) "
+              "locked in for every scene whose 3D Strength is AT OR BELOW Strength Threshold (Low) below "
+              "(or at or below Strength Threshold (High), if Strength Threshold (Low) is left empty) -- "
+              "its own independent value, not shared with Convergence Plane's own Close-Up Value.\n"
+              "Recommended: try your own footage and judge by eye -- a modest negative value gives "
+              "close-up scenes a deeper-feeling background; 0.0 (default) leaves the depth model's own "
+              "curve unchanged, same as a plain Foreground Scale of 0."))
+
+        self.lbl_foreground_scale_lock_threshold_high = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Strength Threshold (High)"))
+        self.cbo_foreground_scale_lock_threshold_high = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["3.5", "4.0", "4.5", "5.0"],
+            name="cbo_foreground_scale_lock_threshold_high")
+        self.cbo_foreground_scale_lock_threshold_high.SetValue(
+            f"{DEFAULT_FOREGROUND_SCALE_LOCK_THRESHOLD_HIGH:.2f}")
+        self.cbo_foreground_scale_lock_threshold_high.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode. The HIGH cutoff line on the 3D Strength "
+              "scale -- scenes using a 3D Strength ABOVE this number lock in Wide Shot Value. Everything "
+              "at or below it locks in Close-Up Value, UNLESS Strength Threshold (Low) below is also "
+              "set -- then it locks in Mid Shot Value instead, down to that second cutoff.\n"
+              "Entirely separate from Convergence Plane's own Strength Threshold (High) -- the two "
+              "settings compare against the same kind of 3D Strength number but keep their own "
+              "independent cutoff.\n"
+              "Recommended: pick a number that actually sits between the 3D Strength values your own "
+              "footage tends to use -- check your own 3D Strength log file to see the real numbers."))
+
+        self.lbl_foreground_scale_lock_threshold_low = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Strength Threshold (Low)"))
+        self.cbo_foreground_scale_lock_threshold_low = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["", "3.0", "3.5", "4.0"],
+            name="cbo_foreground_scale_lock_threshold_low")
+        self.cbo_foreground_scale_lock_threshold_low.SetValue("")
+        self.cbo_foreground_scale_lock_threshold_low.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode. A SECOND cutoff line, turning the plain "
+              "above/below split into a 3-way one -- scenes using a 3D Strength AT OR BELOW this number "
+              "lock in Close-Up Value; scenes BETWEEN this and Strength Threshold (High) above lock in "
+              "Mid Shot Value instead. Leave empty (default) to keep the plain 2-way split.\n"
+              "Entirely separate from Convergence Plane's own Strength Threshold (Low).\n"
+              "Example: Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.0 -- anything over "
+              "3.9 uses Wide Shot Value, anything from 3.7 up to 3.9 uses 0.0, anything under 3.7 uses "
+              "Close-Up Value."))
+
         self.chk_depth_aa = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Depth Anti-aliasing"), name="chk_depth_aa")
         self.chk_depth_aa.SetValue(False)
         self.chk_depth_aa.SetToolTip(
@@ -3935,6 +4052,20 @@ class MainFrame(wx.Frame):
         k = 0
         pane_layout_stability.Add(self.lbl_foreground_scale, (k, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_foreground_scale, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_mode, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_mode, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_wide, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_wide, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_mid, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_mid, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_closeup, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_closeup, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_threshold_high,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_threshold_high, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_threshold_low,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_threshold_low, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.lbl_edge_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_edge_dilation, (k, 1), flag=wx.EXPAND)
         pane_layout_stability.Add(self.cbo_edge_dilation_y, (k, 2), flag=wx.EXPAND)
@@ -10610,6 +10741,7 @@ class MainFrame(wx.Frame):
         self.update_sharpen()
         self.update_temporal_stabilize()
         self.update_convergence_mode()
+        self.update_foreground_scale_mode()
         self.update_scene_segment()
         self.update_nt_auto_divergence()
         self.update_stereo_advanced_visibility()
@@ -11254,6 +11386,11 @@ class MainFrame(wx.Frame):
             *self.grp_video.get_editable_comboboxes(),
             *self.grp_video_dec.get_editable_comboboxes(),
             self.cbo_foreground_scale,
+            self.cbo_foreground_scale_lock_wide,
+            self.cbo_foreground_scale_lock_mid,
+            self.cbo_foreground_scale_lock_closeup,
+            self.cbo_foreground_scale_lock_threshold_high,
+            self.cbo_foreground_scale_lock_threshold_low,
             self.cbo_foreground_pop,
             self.cbo_foreground_pop_threshold_low,
             self.cbo_foreground_pop_threshold_high,
@@ -11706,6 +11843,22 @@ class MainFrame(wx.Frame):
 
     def on_changed_cbo_convergence_lock_threshold_mode(self, event):
         self.update_shot_lock_signal()
+
+    def update_foreground_scale_mode(self):
+        """Foreground Scale's own shot-lock enable/disable (ADR-452) -- a
+        separate code path from update_convergence_mode()/update_shot_lock_signal()
+        above, keyed off cbo_foreground_scale_mode instead of cbo_convergence_mode,
+        and only ever touching the foreground_scale_lock_* widgets."""
+        mode = self.cbo_foreground_scale_mode.GetClientData(self.cbo_foreground_scale_mode.GetSelection())
+        for c in (self.lbl_foreground_scale_lock_wide, self.cbo_foreground_scale_lock_wide,
+                  self.lbl_foreground_scale_lock_mid, self.cbo_foreground_scale_lock_mid,
+                  self.lbl_foreground_scale_lock_closeup, self.cbo_foreground_scale_lock_closeup,
+                  self.lbl_foreground_scale_lock_threshold_high, self.cbo_foreground_scale_lock_threshold_high,
+                  self.lbl_foreground_scale_lock_threshold_low, self.cbo_foreground_scale_lock_threshold_low):
+            c.Enable(mode == "shot_lock")
+
+    def on_changed_cbo_foreground_scale_mode(self, event):
+        self.update_foreground_scale_mode()
 
     def update_convergence_cut_smooth(self):
         # Meaningful in two unrelated cases: (1) Hold Steady Per Scene is checked (any AI
@@ -12501,6 +12654,28 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_foreground_scale.GetValue(), -3.0, 3.0, allow_empty=False):
             self.show_validation_error_message(T("Foreground Scale"), -3, 3)
             return None
+        if not validate_number(self.cbo_foreground_scale_lock_wide.GetValue(), -3.0, 3.0, allow_empty=False):
+            self.show_validation_error_message(T("Wide Shot Value"), -3.0, 3.0)
+            return None
+        if not validate_number(self.cbo_foreground_scale_lock_closeup.GetValue(), -3.0, 3.0, allow_empty=False):
+            self.show_validation_error_message(T("Close-Up Value"), -3.0, 3.0)
+            return None
+        # Mid Shot Value is allowed empty -- parse_args() below turns the empty box
+        # into a real foreground_scale_lock_mid=None that disables the middle tier,
+        # same idiom as Convergence Plane's own convergence_lock_mid above.
+        if not validate_number(self.cbo_foreground_scale_lock_mid.GetValue(), -3.0, 3.0, allow_empty=True):
+            self.show_validation_error_message(T("Mid Shot Value"), -3.0, 3.0)
+            return None
+        if not validate_number(self.cbo_foreground_scale_lock_threshold_high.GetValue(), 0.0, 100.0,
+                               allow_empty=False):
+            self.show_validation_error_message(T("Strength Threshold (High)"), 0.0, 100.0)
+            return None
+        # Strength Threshold (Low) is also allowed empty (the default -- keep the
+        # plain 2-way split).
+        if not validate_number(self.cbo_foreground_scale_lock_threshold_low.GetValue(), 0.0, 100.0,
+                               allow_empty=True):
+            self.show_validation_error_message(T("Strength Threshold (Low)"), 0.0, 100.0)
+            return None
 
         resolution = self.cbo_resolution.GetValue()
         if resolution == "Default" or resolution == "":
@@ -12843,6 +13018,19 @@ class MainFrame(wx.Frame):
             preserve_screen_border=preserve_screen_border,
             depth_model=depth_model_type,
             foreground_scale=float(self.cbo_foreground_scale.GetValue()),
+            foreground_scale_mode=self.cbo_foreground_scale_mode.GetClientData(
+                self.cbo_foreground_scale_mode.GetSelection()),
+            foreground_scale_lock_wide=float(self.cbo_foreground_scale_lock_wide.GetValue()),
+            # an empty box means "disabled" -- None, not a parsed float (same idiom
+            # as Convergence Plane's own convergence_lock_mid above).
+            foreground_scale_lock_mid=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_foreground_scale_lock_mid.GetValue()),
+            foreground_scale_lock_closeup=float(self.cbo_foreground_scale_lock_closeup.GetValue()),
+            foreground_scale_lock_threshold_high=float(
+                self.cbo_foreground_scale_lock_threshold_high.GetValue()),
+            # an empty box means "plain 2-way split" -- None, not a parsed float.
+            foreground_scale_lock_threshold_low=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_foreground_scale_lock_threshold_low.GetValue()),
             foreground_pop=float(self.cbo_foreground_pop.GetValue()),
             foreground_pop_threshold_low=float(self.cbo_foreground_pop_threshold_low.GetValue()) / 100.0,
             foreground_pop_threshold_high=float(self.cbo_foreground_pop_threshold_high.GetValue()) / 100.0,
@@ -14223,6 +14411,34 @@ class MainFrame(wx.Frame):
         self.chk_preserve_screen_border.SetValue(bool(args.preserve_screen_border))
         _apply_combo_value(self.cbo_depth_model, args.depth_model)
         _apply_combo_value(self.cbo_foreground_scale, args.foreground_scale)
+        _foreground_scale_mode_value = getattr(args, "foreground_scale_mode", "constant") or "constant"
+        for i in range(self.cbo_foreground_scale_mode.GetCount()):
+            if self.cbo_foreground_scale_mode.GetClientData(i) == _foreground_scale_mode_value:
+                self.cbo_foreground_scale_mode.SetSelection(i)
+                break
+        else:
+            self.cbo_foreground_scale_mode.SetSelection(0)
+        _apply_combo_value(self.cbo_foreground_scale_lock_wide,
+                           getattr(args, "foreground_scale_lock_wide", DEFAULT_FOREGROUND_SCALE_LOCK_WIDE))
+        # None (disabled) must restore to an empty box, not the literal text
+        # "None" _apply_combo_value's plain str() would otherwise produce (same
+        # idiom as Convergence Plane's own convergence_lock_mid restore above).
+        _fs_lock_mid_restore = getattr(args, "foreground_scale_lock_mid", None)
+        if _fs_lock_mid_restore is None:
+            self.cbo_foreground_scale_lock_mid.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_foreground_scale_lock_mid, _fs_lock_mid_restore)
+        _apply_combo_value(
+            self.cbo_foreground_scale_lock_closeup,
+            getattr(args, "foreground_scale_lock_closeup", DEFAULT_FOREGROUND_SCALE_LOCK_CLOSEUP))
+        _apply_combo_value(
+            self.cbo_foreground_scale_lock_threshold_high,
+            getattr(args, "foreground_scale_lock_threshold_high", DEFAULT_FOREGROUND_SCALE_LOCK_THRESHOLD_HIGH))
+        _fs_threshold_low_restore = getattr(args, "foreground_scale_lock_threshold_low", None)
+        if _fs_threshold_low_restore is None:
+            self.cbo_foreground_scale_lock_threshold_low.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_foreground_scale_lock_threshold_low, _fs_threshold_low_restore)
         _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
         _apply_combo_value(
             self.cbo_foreground_pop_threshold_low,
@@ -38396,6 +38612,172 @@ def _self_test_helper_text_filter_rules():
     print("_self_test_helper_text_filter_rules: PASS")
 
 
+def _self_test_foreground_scale_lock_gui_and_cli():
+    """ADR-452: Foreground Scale's own shot_lock mode (parallel to, but
+    completely independent from, Convergence Plane's existing shot_lock) --
+    its Mode combo must be a real dropdown mapping display labels to
+    foreground_scale_mode CLI values ("constant"/"shot_lock"); its five
+    dedicated controls (Wide/Mid/Close-Up Value, Strength Threshold High/Low)
+    must enable ONLY for Shot Lock and must never be affected by, or affect,
+    Convergence Plane's own separate shot-lock widgets; and all six fields
+    must round-trip through parse_args()/the CLI command and restore."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        mode_items = [frame.cbo_foreground_scale_mode.GetClientData(i)
+                      for i in range(frame.cbo_foreground_scale_mode.GetCount())]
+        assert mode_items == ["constant", "shot_lock"], mode_items
+
+        frame.cbo_foreground_scale_mode.SetSelection(0)  # Constant
+        frame.update_foreground_scale_mode()
+        assert not frame.cbo_foreground_scale_lock_wide.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_mid.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_closeup.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_threshold_high.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_threshold_low.IsEnabled()
+
+        frame.cbo_foreground_scale_mode.SetSelection(1)  # Shot Lock
+        frame.update_foreground_scale_mode()
+        assert frame.cbo_foreground_scale_lock_wide.IsEnabled()
+        assert frame.cbo_foreground_scale_lock_mid.IsEnabled()
+        assert frame.cbo_foreground_scale_lock_closeup.IsEnabled()
+        assert frame.cbo_foreground_scale_lock_threshold_high.IsEnabled()
+        assert frame.cbo_foreground_scale_lock_threshold_low.IsEnabled()
+
+        # Independence from Convergence Plane's own shot_lock: switching this
+        # Mode must never touch cbo_convergence_lock_wide's own enable state,
+        # which stays gated on cbo_convergence_mode alone.
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_lock_wide.IsEnabled(), \
+            "Foreground Scale Mode must never enable Convergence Plane's own shot-lock widgets"
+
+        frame.cbo_foreground_scale_lock_wide.SetValue("1.2")
+        frame.cbo_foreground_scale_lock_mid.SetValue("0.3")
+        frame.cbo_foreground_scale_lock_closeup.SetValue("-0.8")
+        frame.cbo_foreground_scale_lock_threshold_high.SetValue("4.5")
+        frame.cbo_foreground_scale_lock_threshold_low.SetValue("3.2")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.foreground_scale_mode == "shot_lock"
+        assert args.foreground_scale_lock_wide == 1.2
+        assert args.foreground_scale_lock_mid == 0.3
+        assert args.foreground_scale_lock_closeup == -0.8
+        assert args.foreground_scale_lock_threshold_high == 4.5
+        assert args.foreground_scale_lock_threshold_low == 3.2
+
+        cmd = frame.get_cli_command()
+        assert "--foreground-scale-mode" in cmd and "shot_lock" in cmd, cmd
+        assert "--foreground-scale-lock-wide" in cmd, cmd
+        assert "--foreground-scale-lock-mid" in cmd, cmd
+        assert "--foreground-scale-lock-closeup" in cmd, cmd
+        assert "--foreground-scale-lock-threshold-high" in cmd, cmd
+        assert "--foreground-scale-lock-threshold-low" in cmd, cmd
+
+        frame.cbo_foreground_scale_lock_wide.SetValue("0.0")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_foreground_scale_lock_wide.GetValue() == "1.2", \
+            "restore must bring the value back"
+        assert frame.cbo_foreground_scale_mode.GetClientData(
+            frame.cbo_foreground_scale_mode.GetSelection()) == "shot_lock"
+        assert frame.cbo_foreground_scale_lock_wide.IsEnabled(), \
+            "restore must re-apply the enable state for the restored mode"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # Round-trip through the real CLI parser too, not just the in-memory args object.
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args([
+        "-i", "a.mp4", "-o", "o",
+        "--foreground-scale-mode", "shot_lock",
+        "--foreground-scale-lock-wide", "1.2",
+        "--foreground-scale-lock-mid", "0.3",
+        "--foreground-scale-lock-closeup", "-0.8",
+        "--foreground-scale-lock-threshold-high", "4.5",
+        "--foreground-scale-lock-threshold-low", "3.2",
+    ])
+    assert reparsed.foreground_scale_mode == "shot_lock"
+    assert reparsed.foreground_scale_lock_wide == 1.2
+    assert reparsed.foreground_scale_lock_mid == 0.3
+    assert reparsed.foreground_scale_lock_closeup == -0.8
+    assert reparsed.foreground_scale_lock_threshold_high == 4.5
+    assert reparsed.foreground_scale_lock_threshold_low == 3.2
+
+    print("_self_test_foreground_scale_lock_gui_and_cli: PASS")
+
+
+def _self_test_foreground_scale_lock_mid_disabled():
+    """ADR-452: Foreground Scale's own Mid Shot Value and Strength Threshold
+    (Low) must each be independently leavable empty, mirroring Convergence
+    Plane's own convergence_lock_mid/convergence_lock_strength_threshold_low
+    behavior but through this feature's completely separate fields -- an
+    empty box must validate (not error), parse to None, round-trip through
+    the real CLI parser, and restore back to an empty box rather than the
+    literal text "None"."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_foreground_scale_mode.SetSelection(1)  # Shot Lock
+        frame.update_foreground_scale_mode()
+
+        frame.cbo_foreground_scale_lock_wide.SetValue("0.9")
+        frame.cbo_foreground_scale_lock_mid.SetValue("")  # left empty
+        frame.cbo_foreground_scale_lock_closeup.SetValue("-0.4")
+        frame.cbo_foreground_scale_lock_threshold_high.SetValue("4.2")
+        frame.cbo_foreground_scale_lock_threshold_low.SetValue("")  # left empty
+        args = frame.parse_args(skip_set_state=True)
+        assert args.foreground_scale_lock_mid is None, \
+            f"empty Mid Shot Value box must parse to None, got {args.foreground_scale_lock_mid!r}"
+        assert args.foreground_scale_lock_threshold_low is None, \
+            f"empty Strength Threshold (Low) box must parse to None, got {args.foreground_scale_lock_threshold_low!r}"
+
+        cmd = frame.get_cli_command()
+        assert "--foreground-scale-lock-mid" not in cmd, cmd
+        assert "--foreground-scale-lock-threshold-low" not in cmd, cmd
+
+        # Restoring a None value must blank the boxes, not type the literal word "None".
+        frame.cbo_foreground_scale_lock_mid.SetValue("0.3")
+        frame.cbo_foreground_scale_lock_threshold_low.SetValue("3.0")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_foreground_scale_lock_mid.GetValue() == "", \
+            (f"restoring a disabled Mid Shot Value must leave the box empty, got "
+             f"{frame.cbo_foreground_scale_lock_mid.GetValue()!r}")
+        assert frame.cbo_foreground_scale_lock_threshold_low.GetValue() == "", \
+            (f"restoring a disabled Strength Threshold (Low) must leave the box empty, got "
+             f"{frame.cbo_foreground_scale_lock_threshold_low.GetValue()!r}")
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # Round-trip the real command line back through the parser (not just
+    # checking string content) -- confirms the None really survives a save/
+    # restore of a command line, not just this one in-memory args object.
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args([
+        "-i", "a.mp4", "-o", "o",
+        "--foreground-scale-mode", "shot_lock",
+        "--foreground-scale-lock-wide", "0.9",
+        "--foreground-scale-lock-mid", "none",
+        "--foreground-scale-lock-closeup", "-0.4",
+        "--foreground-scale-lock-threshold-high", "4.2",
+        "--foreground-scale-lock-threshold-low", "none",
+    ])
+    assert reparsed.foreground_scale_lock_mid is None
+    assert reparsed.foreground_scale_lock_threshold_low is None
+
+    print("_self_test_foreground_scale_lock_mid_disabled: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -38653,6 +39035,8 @@ def _run_self_tests():
         _self_test_convergence_overlay_inpaint_alignment,
         _self_test_convergence_overlay_gui,
         _self_test_postprocess_image_always_even,
+        _self_test_foreground_scale_lock_gui_and_cli,
+        _self_test_foreground_scale_lock_mid_disabled,
     ]
     failures = []
     for test in tests:

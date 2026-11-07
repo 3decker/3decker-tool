@@ -2057,6 +2057,11 @@ class MainFrame(wx.Frame):
               "cutoff.\n"
               "With Strength Match Mode set to nearest: this is the High reference point instead -- a "
               "scene's real 3D Strength picks whichever of High/Mid/Low it's numerically closest to.\n"
+              "IMPORTANT: \"above this = Wide\" assumes Auto 3D Strength's own Invert option is ON (wide "
+              "shots then land at the HIGH end of your 3D Strength numbers). With Invert OFF, it's the "
+              "opposite -- close-ups land at the high end -- so check your own 3D Strength log file for "
+              "which shots actually sit above vs. below this number before relying on the Wide/Close-Up "
+              "labels.\n"
               "Recommended: pick a number that actually sits between the 3D Strength values your own "
               "footage tends to use -- for example, if close-up scenes usually land around 3.8 and wider "
               "scenes around 3.9 or higher, 3.85 would be a clean cutoff between them. Check your own "
@@ -2078,7 +2083,9 @@ class MainFrame(wx.Frame):
               "empty to compare only against High (and Mid, if set).\n"
               "Example (range mode): Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.40 -- "
               "anything over 3.9 uses your High Strength Value, anything from 3.7 up to 3.9 uses 0.40, "
-              "anything under 3.7 uses your Low Strength Value."))
+              "anything under 3.7 uses your Low Strength Value.\n"
+              "Same Invert caveat as Strength Threshold (High) above: \"at or below this = Close-Up\" "
+              "assumes Auto 3D Strength's Invert option is ON."))
 
         self.lbl_convergence_lock_threshold_mode = wx.StaticText(
             self.grp_stereo, label=T("Strength Match Mode"))
@@ -2651,6 +2658,11 @@ class MainFrame(wx.Frame):
               "Entirely separate from Convergence Plane's own Strength Threshold (High) -- the two "
               "settings compare against the same kind of 3D Strength number but keep their own "
               "independent cutoff.\n"
+              "IMPORTANT: \"above this = Wide\" assumes Auto 3D Strength's own Invert option is ON (wide "
+              "shots then land at the HIGH end of your 3D Strength numbers). With Invert OFF, it's the "
+              "opposite -- close-ups land at the high end -- so check your own 3D Strength log file for "
+              "which shots actually sit above vs. below this number before relying on the Wide/Close-Up "
+              "labels.\n"
               "Recommended: pick a number that actually sits between the 3D Strength values your own "
               "footage tends to use -- check your own 3D Strength log file to see the real numbers."))
 
@@ -2668,7 +2680,9 @@ class MainFrame(wx.Frame):
               "Entirely separate from Convergence Plane's own Strength Threshold (Low).\n"
               "Example: Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.0 -- anything over "
               "3.9 uses Wide Shot Value, anything from 3.7 up to 3.9 uses 0.0, anything under 3.7 uses "
-              "Close-Up Value."))
+              "Close-Up Value.\n"
+              "Same Invert caveat as Strength Threshold (High) above: \"at or below this = Close-Up\" "
+              "assumes Auto 3D Strength's Invert option is ON."))
 
         self.chk_depth_aa = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Depth Anti-aliasing"), name="chk_depth_aa")
         self.chk_depth_aa.SetValue(False)

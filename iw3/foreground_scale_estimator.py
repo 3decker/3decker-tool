@@ -62,6 +62,15 @@ class ForegroundScaleEstimator():
             return self.mid_value if self.mid_value is not None else self.closeup_value
         return self.closeup_value
 
+    def classify_value(self, divergence):
+        """ADR-453: public wrapper for `_classify()` -- the Foreground Scale scene
+        log (--foreground-scale-scene-log, see iw3/utils.py's
+        `_ForegroundScaleSceneLogState`) needs the classified scalar value itself
+        (which of wide_value/mid_value/closeup_value this call locked in), not
+        just the mapper_fn `__call__()` maps it to. `_classify()` itself is left
+        untouched -- this is a one-line pass-through, not a rename."""
+        return self._classify(divergence)
+
     def _mapper_fn_for(self, value):
         fn = self._mapper_fn_for_cache.get(value)
         if fn is None:

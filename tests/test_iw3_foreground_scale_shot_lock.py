@@ -14,6 +14,7 @@ Run directly: python tests/test_iw3_foreground_scale_shot_lock.py (from the
 nunif/ dir), or import and call main().
 """
 import sys
+import tempfile
 from os import path
 from unittest.mock import MagicMock
 
@@ -22,6 +23,8 @@ sys.path.insert(0, path.join(path.dirname(__file__), ".."))
 from iw3.foreground_scale_estimator import ForegroundScaleEstimator  # noqa: E402
 from iw3.utils import (  # noqa: E402
     create_parser, make_output_filename, _build_iw3_comment_metadata, apply_divergence,
+    reset_foreground_scale_scene_log, finish_foreground_scale_scene_log,
+    reset_convergence_scene_log, finish_convergence_scene_log,
 )
 
 
@@ -253,6 +256,155 @@ def _test_apply_divergence_mapper_matches_classified_foreground_scale():
     print("_test_apply_divergence_mapper_matches_classified_foreground_scale: PASS")
 
 
+def _make_fsl_log_args(tmpdir, **overrides):
+    args = create_parser(required_true=False).parse_args([])
+    args.method = "grid_sample"
+    args.mapper = "none"
+    args.metadata = "filename"
+    args.video_extension = ".mkv"
+    for k, v in overrides.items():
+        setattr(args, k, v)
+    input_path = path.join(tmpdir, "in.mp4")
+    output_path = path.join(tmpdir, "out.mp4")
+    return args, input_path, output_path
+
+
+def _run_two_scenes(args, fs_model, divergence_a, divergence_b):
+    """Two apply_divergence() calls, each a 2-frame batch with a cut after the
+    2nd frame -- the minimum shape needed to produce two separate scene rows."""
+    import torch
+
+    args.state = {"convergence_model": None, "foreground_scale_model": fs_model}
+    depth = torch.rand(2, 1, 4, 4)
+    im = torch.rand(2, 3, 4, 4)
+
+    args.divergence = divergence_a
+    left1, right1 = apply_divergence(depth.clone(), im.clone(), args, side_model=None,
+                                     reset_pts=[False, True], log_reset_pts=[False, True])
+    assert left1 is not None
+
+    args.divergence = divergence_b
+    left2, right2 = apply_divergence(depth.clone(), im.clone(), args, side_model=None,
+                                     reset_pts=[False, True], log_reset_pts=[False, True])
+    assert left2 is not None
+
+
+def _test_flag_defaults_false():
+    args = create_parser(required_true=False).parse_args([])
+    assert args.foreground_scale_scene_log is False
+    reparsed = create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--foreground-scale-scene-log"])
+    assert reparsed.foreground_scale_scene_log is True
+    print("_test_flag_defaults_false: PASS")
+
+
+def _test_scene_log_suffix_and_no_collision_with_convergence_log():
+    # Both logs enabled at once (the additive/independence requirement) must
+    # produce two SEPARATE files with distinct suffixes, neither clobbering
+    # the other.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        args, input_path, output_path = _make_fsl_log_args(
+            tmpdir,
+            foreground_scale_mode="constant",
+            foreground_scale=0.5,
+            foreground_scale_scene_log=True,
+            convergence_mode="constant",
+            convergence_scene_log=True,
+        )
+        reset_foreground_scale_scene_log(args, input_path=input_path, output_path=output_path)
+        reset_convergence_scene_log(args, input_path=input_path, output_path=output_path)
+        _run_two_scenes(args, fs_model=None, divergence_a=5.0, divergence_b=1.0)
+        finish_foreground_scale_scene_log(args, input_path, output_path)
+        finish_convergence_scene_log(args, input_path, output_path)
+
+        fsl_path = path.join(tmpdir, "out_foreground_scale_log.txt")
+        conv_path = path.join(tmpdir, "out_convergence_log.txt")
+        assert path.exists(fsl_path), "Foreground Scale scene log must be written"
+        # Convergence's own log never writes in "constant" mode (no tensor to log --
+        # see convergence_scene_log_active in apply_divergence()); this just confirms
+        # the two logs' paths/suffixes stay independent, not that both always write.
+        assert not path.exists(conv_path)
+        assert fsl_path != conv_path
+        print("_test_scene_log_suffix_and_no_collision_with_convergence_log: PASS")
+
+
+def _test_shot_lock_rows_tagged_wide_and_closeup():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        args, input_path, output_path = _make_fsl_log_args(
+            tmpdir,
+            foreground_scale_mode="shot_lock",
+            foreground_scale=0.0,
+            foreground_scale_scene_log=True,
+            foreground_scale_lock_wide=2.0,
+            foreground_scale_lock_mid=None,
+            foreground_scale_lock_closeup=-2.0,
+            foreground_scale_lock_threshold_high=4.0,
+            foreground_scale_lock_threshold_low=None,
+        )
+        fs_model = ForegroundScaleEstimator(wide_value=2.0, closeup_value=-2.0, threshold_high=4.0)
+        reset_foreground_scale_scene_log(args, input_path=input_path, output_path=output_path)
+        _run_two_scenes(args, fs_model=fs_model, divergence_a=5.0, divergence_b=1.0)
+        finish_foreground_scale_scene_log(args, input_path, output_path)
+
+        log_path = path.join(tmpdir, "out_foreground_scale_log.txt")
+        assert path.exists(log_path)
+        with open(log_path, encoding="utf-8") as f:
+            text = f.read()
+        assert "Foreground Scale log --" in text
+        assert "shot_lock mode" in text
+        lines = [ln for ln in text.splitlines() if ln.startswith("Scene ")]
+        assert len(lines) == 2, lines
+        assert "Foreground Scale: 2.00" in lines[0] and "[Wide]" in lines[0], lines[0]
+        assert "Foreground Scale: -2.00" in lines[1] and "[Close-Up]" in lines[1], lines[1]
+        assert "Shot classification" in text
+        print("_test_shot_lock_rows_tagged_wide_and_closeup: PASS")
+
+
+def _test_constant_mode_rows_have_no_tag():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        args, input_path, output_path = _make_fsl_log_args(
+            tmpdir,
+            foreground_scale_mode="constant",
+            foreground_scale=0.75,
+            foreground_scale_scene_log=True,
+        )
+        reset_foreground_scale_scene_log(args, input_path=input_path, output_path=output_path)
+        # args.state["foreground_scale_model"] stays None in constant mode (see
+        # set_state_args()/iw3_main()) -- divergence value is irrelevant here.
+        _run_two_scenes(args, fs_model=None, divergence_a=5.0, divergence_b=1.0)
+        finish_foreground_scale_scene_log(args, input_path, output_path)
+
+        log_path = path.join(tmpdir, "out_foreground_scale_log.txt")
+        assert path.exists(log_path)
+        with open(log_path, encoding="utf-8") as f:
+            text = f.read()
+        assert "constant mode, value 0.75" in text
+        lines = [ln for ln in text.splitlines() if ln.startswith("Scene ")]
+        assert len(lines) == 2, lines
+        for ln in lines:
+            assert "Foreground Scale: 0.75" in ln, ln
+            assert "[Wide]" not in ln and "[Mid]" not in ln and "[Close-Up]" not in ln, ln
+        assert "Shot classification" not in text
+        print("_test_constant_mode_rows_have_no_tag: PASS")
+
+
+def _test_flag_off_writes_no_file():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        args, input_path, output_path = _make_fsl_log_args(
+            tmpdir,
+            foreground_scale_mode="constant",
+            foreground_scale=0.5,
+            foreground_scale_scene_log=False,
+        )
+        reset_foreground_scale_scene_log(args, input_path=input_path, output_path=output_path)
+        _run_two_scenes(args, fs_model=None, divergence_a=5.0, divergence_b=1.0)
+        finish_foreground_scale_scene_log(args, input_path, output_path)
+
+        log_path = path.join(tmpdir, "out_foreground_scale_log.txt")
+        assert not path.exists(log_path), "flag off must never write a log file"
+        print("_test_flag_off_writes_no_file: PASS")
+
+
 def main():
     _test_classify_2way()
     _test_classify_3way()
@@ -261,6 +413,11 @@ def main():
     _test_filename_and_comment_tags_independent_of_convergence_lock()
     _test_apply_divergence_resolves_mapper_fn_once_per_call()
     _test_apply_divergence_mapper_matches_classified_foreground_scale()
+    _test_flag_defaults_false()
+    _test_scene_log_suffix_and_no_collision_with_convergence_log()
+    _test_shot_lock_rows_tagged_wide_and_closeup()
+    _test_constant_mode_rows_have_no_tag()
+    _test_flag_off_writes_no_file()
     print("ALL PASS")
 
 

@@ -4257,6 +4257,12 @@ def _build_iw3_comment_metadata(args, video=True):
         fsl_thresh_low_val = getattr(args, "foreground_scale_lock_threshold_low", None)
         if fsl_thresh_low_val is not None:
             comment_parts.append(f"iw3_foreground_scale_lock_threshold_low={fsl_thresh_low_val}")
+    # ADR-453: independent of foreground_scale_mode -- unlike the shot_lock-only
+    # tags just above, this log also writes real rows in "constant" mode (see
+    # _format_foreground_scale_scene_log()'s own settings-line handling), so it's
+    # recorded on the flag alone, same "only shown when meaningful" convention.
+    if getattr(args, "foreground_scale_scene_log", False):
+        comment_parts.append("iw3_foreground_scale_scene_log=1")
     if getattr(args, "foreground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_foreground_pop={args.foreground_pop}")
         if getattr(args, "foreground_pop_threshold_low", 0.85) != 0.85:
@@ -4969,6 +4975,225 @@ def finish_convergence_scene_log(args, input_path, output_path, fps=None):
               f"({type(e).__name__}: {e})", file=sys.stderr)
 
 
+# --------------------------------------------------------------------------
+# "Log Foreground Scale Value per Scene" (--foreground-scale-scene-log, ADR-453):
+# a direct structural analog of the Convergence Plane scene log just above, but
+# for ADR-452's completely separate --foreground-scale-mode shot_lock feature
+# (see foreground_scale_estimator.py). Deliberately its own class/state key/
+# pending-queue/helpers -- never shared with _ConvergenceSceneLogState -- so the
+# two logs can run at the same time, writing two separate files, with zero
+# shared mutable state. Unlike Convergence's own log (which only ever produces
+# rows for its auto convergence modes, never "constant"), this log is
+# meaningful in BOTH --foreground-scale-mode constant (every scene logs the
+# same single --foreground-scale value, no [Wide/Mid/Close-Up] tag) and
+# shot_lock (each scene also gets tagged with which locked value it used) --
+# see _format_foreground_scale_scene_log()'s own settings-line handling.
+# --------------------------------------------------------------------------
+class _ForegroundScaleSceneLogState():
+    """Lives at args.state["_foreground_scale_scene_log"]. Reset once per fresh
+    movie (reset_foreground_scale_scene_log()) and the COMPLETE, final version
+    is always written once at the end of that movie
+    (finish_foreground_scale_scene_log()) -- same live-write-during-run +
+    finish-overwrites-with-final shape as _ConvergenceSceneLogState (ADR-405),
+    including the atomic tmp-then-os.replace() write.
+
+    `pending` holds (value, cut_after) tuples in INPUT-frame order, pushed by
+    apply_divergence() and drained one per actual OUTPUT frame -- same
+    ADR-237 buffering reasoning as Convergence's own `pending` queue, kept as a
+    completely separate deque/object so the two features never interfere."""
+
+    def __init__(self):
+        self.scene_records = []    # [(start_frame, end_frame, frame_count, mean_value), ...]
+        self.meta = None            # (mode, foreground_scale_value, lock_values)
+        self.pending = collections.deque()
+        self._scene_open = False
+        self._scene_start = 0
+        self._scene_frames = 0
+        self._scene_sum = 0.0
+        self._scene_total_frames = 0
+        self.live_path = None
+        self.live_output_filename = None
+        self.live_fps = None
+
+    def record(self, value, cut_after):
+        """Buffers one OUTPUT frame's foreground scale value, closing the scene
+        right after a frame flagged cut_after=True -- identical timing to
+        _ConvergenceSceneLogState.record()."""
+        if not self._scene_open:
+            self._scene_open = True
+            self._scene_start = self._scene_total_frames
+        self._scene_frames += 1
+        self._scene_sum += float(value)
+        self._scene_total_frames += 1
+        if cut_after:
+            self.flush()
+            self.write_live()
+
+    def flush(self):
+        if self._scene_open and self._scene_frames > 0:
+            mean = self._scene_sum / self._scene_frames
+            self.scene_records.append(
+                (self._scene_start, self._scene_total_frames, self._scene_frames, mean))
+        self._scene_open = False
+        self._scene_frames = 0
+        self._scene_sum = 0.0
+
+    def write_live(self):
+        """ADR-405-style live rewrite -- see _ConvergenceSceneLogState.write_live()
+        for the full rationale. Never raises -- a failed live write must never
+        interrupt a real, multi-hour conversion."""
+        if not self.live_path or not self.scene_records:
+            return
+        try:
+            text = _format_foreground_scale_scene_log(self, self.live_output_filename, self.live_fps,
+                                                       in_progress=True)
+            tmp = f"{self.live_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.live_path)
+        except Exception as e:                                           # noqa: BLE001
+            print(f"[foreground-scale-log] could not write live progress "
+                  f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
+def reset_foreground_scale_scene_log(args, input_path=None, output_path=None, fps=None):
+    """Called once per fresh movie, from the exact same call sites that call
+    reset_convergence_scene_log() -- a direct structural analog of that
+    function, for the completely independent --foreground-scale-scene-log
+    feature. `fps`/`input_path`/`output_path` behave identically (see that
+    function's own docstring)."""
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict):
+        return
+    log_state = _ForegroundScaleSceneLogState()
+    if (getattr(args, "foreground_scale_scene_log", False)
+            and input_path is not None and output_path is not None):
+        try:
+            real_output, log_path = _foreground_scale_scene_log_paths(args, input_path, output_path)
+            log_state.live_path = log_path
+            log_state.live_output_filename = real_output
+            # _convergence_scene_log_fps() is a plain, stateless fps lookup (no
+            # convergence-specific state at all) -- reused as-is rather than
+            # duplicated, same "real fps Final Render actually encodes at" logic
+            # either log needs.
+            log_state.live_fps = fps if fps is not None else _convergence_scene_log_fps(args, input_path)
+        except Exception as e:                                           # noqa: BLE001
+            print(f"[foreground-scale-log] could not resolve a live log path "
+                  f"({type(e).__name__}: {e}) -- will still write the complete "
+                  f"log once the movie finishes.", file=sys.stderr)
+    state["_foreground_scale_scene_log"] = log_state
+
+
+def _foreground_scale_scene_log_paths(args, input_path, output_path):
+    """(real output filename, scene-log path) for one movie -- a direct analog
+    of _convergence_scene_log_paths(), swapping in a completely distinct
+    "_foreground_scale_log.txt" suffix so this log, Convergence's own
+    "_convergence_log.txt", and Auto 3D Strength's own "_3d_strength_log.txt"
+    can all coexist in the same output directory without ever colliding."""
+    job_log = _resolve_single_file_log_path(args, input_path, output_path)
+    base = job_log[:-len("_log.txt")] if job_log.endswith("_log.txt") else path.splitext(job_log)[0]
+    output = str(output_path)
+    if is_output_dir(output):
+        output = path.join(output, make_output_filename(input_path, args, video=is_video(str(input_path))))
+    return output, base + "_foreground_scale_log.txt"
+
+
+def _classify_shot_lock_mean_foreground_scale(mean, lock_values):
+    """ADR-453: Foreground Scale's own nearest-value classifier -- a deliberate,
+    separate function from _classify_shot_lock_mean() (same "range" rule, same
+    mid-may-be-None handling) rather than a shared/reused one, per ADR-452's
+    explicit independence decision: this feature's own wide/mid/closeup VALUES
+    must never be compared using Convergence Plane's own classification call,
+    even though the two happen to share the same nearest-match shape today."""
+    wide, mid, closeup = lock_values
+    candidates = [("Wide", wide), ("Close-Up", closeup)]
+    if mid is not None:
+        candidates.append(("Mid", mid))
+    label, _ = min(candidates, key=lambda kv: abs(kv[1] - mean))
+    return label
+
+
+def _format_foreground_scale_scene_log(st, output_filename, fps, in_progress=False):
+    """`in_progress`: same meaning as _format_convergence_scene_log()'s own
+    parameter. Unlike that function, the settings/header line covers BOTH
+    constant mode (every scene logged the same single --foreground-scale
+    value -- there is no lock classification to show) and shot_lock mode
+    (the three locked values this run can classify a scene's mean against)."""
+    meta = st.meta or ("constant", 0.0, None)
+    mode, foreground_scale_value, lock_values = meta
+    if mode == "shot_lock" and lock_values is not None:
+        wide, mid, closeup = lock_values
+        mid_part = f", mid {mid:g}" if mid is not None else ""
+        header = (f"Foreground Scale: shot_lock mode, wide {wide:g}{mid_part}, "
+                  f"close-up {closeup:g}")
+    else:
+        header = f"Foreground Scale: constant mode, value {foreground_scale_value:g}"
+    title = f"Foreground Scale log -- {path.basename(str(output_filename))}"
+    if in_progress:
+        title += " (IN PROGRESS -- conversion still running)"
+    lines = [title, header]
+    if not fps:
+        lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
+    lines.append("")
+    total_frames = 0
+    weighted_sum = 0.0
+    shot_counts = {"Wide": 0, "Mid": 0, "Close-Up": 0}
+    for i, (start, end, frames, mean) in enumerate(st.scene_records, 1):
+        span = (f"{_format_hms(start / fps)} - {_format_hms(end / fps)}" if fps
+               else f"frame {start} - {end}")
+        line = f"Scene {i}   {span}   ({frames} frames)   Foreground Scale: {mean:.2f}"
+        if lock_values is not None:
+            label = _classify_shot_lock_mean_foreground_scale(mean, lock_values)
+            shot_counts[label] += 1
+            line += f"   [{label}]"
+        lines.append(line)
+        total_frames += frames
+        weighted_sum += mean * frames
+    lines.append("")
+    overall = weighted_sum / total_frames if total_frames else 0.0
+    if in_progress:
+        lines.append(f"Average Foreground Scale so far (time-weighted, {len(st.scene_records)} scene(s), "
+                     f"conversion still running): {overall:.2f}")
+    else:
+        lines.append(f"Average Foreground Scale for whole movie (time-weighted): {overall:.2f}")
+    if lock_values is not None and st.scene_records:
+        so_far = " so far" if in_progress else ""
+        mid_part = f"{shot_counts['Mid']} mid, " if lock_values[1] is not None else ""
+        lines.append(
+            f"Shot classification{so_far}: {shot_counts['Wide']} wide, {mid_part}"
+            f"{shot_counts['Close-Up']} close-up (of {len(st.scene_records)} scene(s))")
+    return "\n".join(lines) + "\n"
+
+
+def finish_foreground_scale_scene_log(args, input_path, output_path, fps=None):
+    """Writes the "Log Foreground Scale Value per Scene" text file for the
+    just-finished movie -- called from the exact same call sites that call
+    finish_convergence_scene_log(), right next to each one. A direct
+    structural analog of that function for the independent
+    --foreground-scale-scene-log feature."""
+    if not getattr(args, "foreground_scale_scene_log", False):
+        return
+    state = getattr(args, "state", None)
+    st = state.get("_foreground_scale_scene_log") if isinstance(state, dict) else None
+    if st is None:
+        return
+    st.flush()
+    if not st.scene_records:
+        return
+    if fps is None:
+        fps = _convergence_scene_log_fps(args, input_path)
+    try:
+        real_output, log_path = _foreground_scale_scene_log_paths(args, input_path, output_path)
+        text = _format_foreground_scale_scene_log(st, real_output, fps)
+        tmp = f"{log_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, log_path)
+    except Exception as e:                                           # noqa: BLE001
+        print(f"[foreground-scale-log] could not write the Foreground Scale scene log "
+              f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
 def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=None):
     batch = True
     if depth.ndim != 4:
@@ -4994,6 +5219,44 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         mapper_fn = fs_model(divergence=getattr(args, "divergence", None))
     else:
         mapper_fn = get_mapper(args.mapper)
+
+    # "Log Foreground Scale Value per Scene" (--foreground-scale-scene-log, ADR-453):
+    # same pending-queue push/drain pattern as Convergence's own scene log (ADR-237),
+    # but completely independent state (_ForegroundScaleSceneLogState) -- kept fully
+    # separate so both logs can run at once without colliding or interfering. Unlike
+    # Convergence's shot_lock (a real per-frame tensor from its own convergence_model),
+    # args.divergence is a single scalar for this WHOLE call (ADR-452: Auto 3D
+    # Strength's own apply_divergence() wrapper already splits any batch at each
+    # divergence-value change point before delegating here -- see
+    # foreground_scale_estimator.py's module docstring), so the SAME classified/
+    # constant value is pushed for every input frame in this call's batch. In
+    # "constant" mode fs_model is None (see set_state_args()/iw3_main()) -- there is
+    # nothing to classify, so the plain --foreground-scale value itself is logged,
+    # giving every scene a real row with no [Wide/Mid/Close-Up] tag.
+    foreground_scale_scene_log_active = getattr(args, "foreground_scale_scene_log", False)
+    if foreground_scale_scene_log_active:
+        fsl_log_state = args.state.setdefault("_foreground_scale_scene_log", _ForegroundScaleSceneLogState())
+        fsl_value = (fs_model.classify_value(getattr(args, "divergence", None))
+                    if fs_model is not None else float(args.foreground_scale))
+        fsl_mode_for_log = getattr(args, "foreground_scale_mode", "constant")
+        fsl_log_state.meta = (
+            fsl_mode_for_log,
+            float(args.foreground_scale),
+            (
+                (float(getattr(args, "foreground_scale_lock_wide", 0.0)),
+                 (lambda m: float(m) if m is not None else None)(
+                     getattr(args, "foreground_scale_lock_mid", None)),
+                 float(getattr(args, "foreground_scale_lock_closeup", 0.0)))
+                if fsl_mode_for_log == "shot_lock" else None
+            ),
+        )
+        if log_reset_pts is not None:
+            fsl_rp_for_log = log_reset_pts
+        elif reset_pts is not None:
+            fsl_rp_for_log = reset_pts
+        else:
+            fsl_rp_for_log = [False] * depth.shape[0]
+        fsl_log_state.pending.extend((fsl_value, cut) for cut in fsl_rp_for_log)
 
     if args.state["convergence_model"] is not None:
         if getattr(args, "convergence_mode", "constant") == "shot_lock":
@@ -5294,6 +5557,18 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         for _ in range(n_out):
             value, cut_after = scene_pending.popleft() if scene_pending else (0.0, False)
             scene_log_state.record(value, cut_after)
+
+    # "Log Foreground Scale Value per Scene": drains exactly as many (value,
+    # cut_after) pairs as frames actually came back this call -- same reasoning as
+    # Convergence's own drain just above, kept as a fully separate queue/state so the
+    # two logs never interfere with each other.
+    if foreground_scale_scene_log_active and left_eye is not None:
+        n_out = 1 if left_eye.ndim == 3 else left_eye.shape[0]
+        fsl_log_state = args.state["_foreground_scale_scene_log"]
+        fsl_pending = fsl_log_state.pending
+        for _ in range(n_out):
+            value, cut_after = fsl_pending.popleft() if fsl_pending else (0.0, False)
+            fsl_log_state.record(value, cut_after)
 
     if not batch:
         if left_eye is not None:
@@ -6543,7 +6818,15 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     elif ((getattr(args, "convergence_scene_log", False)
             and getattr(args, "convergence_mode", "constant") != "constant")
             or getattr(args, "auto_divergence_scene_log", False)
-            or getattr(args, "convergence_mode", "constant") == "shot_lock"):
+            or getattr(args, "convergence_mode", "constant") == "shot_lock"
+            # ADR-453: "Log Foreground Scale Value per Scene" needs the same real,
+            # independently-scanned scene boundaries, unconditionally (not gated on
+            # foreground_scale_mode) -- it logs real per-scene rows even in
+            # "constant" mode (see _format_foreground_scale_scene_log()), so without
+            # this it would get zero real cut points and record everything as one
+            # giant "scene" whenever Convergence Plane's own log/mode and Auto 3D
+            # Strength's own log are all off/constant.
+            or getattr(args, "foreground_scale_scene_log", False)):
         log_segment_pts = _ensure_convergence_log_scene_pts(input_filename, args, scene_cache_max_fps)
     else:
         log_segment_pts = set()
@@ -7601,6 +7884,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     # ADR-405: input_path/output_path passed here too, so it can write real
     # progress live as this movie converts, not only once at the very end.
     reset_convergence_scene_log(args, input_path=original_input_filename, output_path=output_path)
+    reset_foreground_scale_scene_log(args, input_path=original_input_filename, output_path=output_path)
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -7674,6 +7958,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     # try block above would skip everything from here down, including this call --
     # matching autodiv.py's fresh()/_finish_scene_log() behavior exactly).
     finish_convergence_scene_log(args, original_input_filename, final_output_path)
+    finish_foreground_scale_scene_log(args, original_input_filename, final_output_path)
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -8222,6 +8507,8 @@ def process_config_video(config, args, side_model):
     # real progress live as this movie converts, not only once at the very end.
     reset_convergence_scene_log(args, input_path=args.input, output_path=args.output,
                                 fps=float(getattr(config, "fps", 0)) or None)
+    reset_foreground_scale_scene_log(args, input_path=args.input, output_path=args.output,
+                                     fps=float(getattr(config, "fps", 0)) or None)
 
     if is_output_dir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -8381,6 +8668,7 @@ def process_config_video(config, args, side_model):
     # above returns normally (an exception there skips this, same as process_video()).
     # config.fps is the real, already-resolved fps -- never re-derived here.
     finish_convergence_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
+    finish_foreground_scale_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
 
 
 def process_config_images(config, args, side_model):
@@ -9209,6 +9497,21 @@ def create_parser(required_true=True):
                              "--foreground-scale-lock-threshold-high locks --foreground-scale-lock-mid "
                              "instead. Leave unset (default, \"none\") to disable this tier entirely. "
                              "Independent of --convergence-lock-strength-threshold-low.")
+    parser.add_argument("--foreground-scale-scene-log", action="store_true",
+                        help=("ADR-453: writes a text file next to the finished video listing the "
+                              "Foreground Scale value used for each scene, plus one overall average for "
+                              "the whole movie -- a direct analog of --convergence-scene-log, but for "
+                              "--foreground-scale/--foreground-scale-mode instead of Convergence Plane, "
+                              "and completely independent of it (its own separate file, its own separate "
+                              "state -- both logs can be on at once without colliding). Works in BOTH "
+                              "--foreground-scale-mode constant (every scene logs the same single "
+                              "--foreground-scale value; constant never varies, so there's no "
+                              "[Wide/Mid/Close-Up] tag) and shot_lock (each scene is also tagged with "
+                              "which of --foreground-scale-lock-wide/-mid/-closeup it locked in). Gets "
+                              "real per-scene boundaries even with --scene-detect off -- it scans for "
+                              "scene cuts on its own just for this log, same as --convergence-scene-log. "
+                              "Writes live, not just at the end (ADR-405-style), for video jobs only (no "
+                              "effect on single images, which have no \"scene\")."))
     parser.add_argument("--vr180", action="store_true",
                         help="output in VR180 format")
     parser.add_argument("--half-sbs", action="store_true",

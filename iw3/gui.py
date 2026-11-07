@@ -2686,6 +2686,44 @@ class MainFrame(wx.Frame):
               "Same Invert caveat as Strength Threshold (High) above: \"at or below this = Close-Up\" "
               "assumes Auto 3D Strength's Invert option is ON."))
 
+        # ADR-453: Foreground Scale's own scene log, a direct analog of Convergence
+        # Plane's "Log Convergence Value per Scene" (chk_convergence_scene_log) above
+        # but for this completely separate feature/state -- its own file, its own
+        # args.state key, never touched by update_foreground_scale_mode()'s own
+        # enable/disable gating (stays always-enabled, same as a constant-mode run
+        # still produces real, untagged scene rows -- see
+        # _format_foreground_scale_scene_log() in iw3/utils.py).
+        self.chk_foreground_scale_scene_log = wx.CheckBox(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Log Foreground Scale Value per Scene"),
+            name="chk_foreground_scale_scene_log")
+        self.chk_foreground_scale_scene_log.SetValue(False)
+        self.chk_foreground_scale_scene_log.SetToolTip(
+            T("What it's for: writes a text file next to the finished video listing the Foreground Scale "
+              "value used for each scene, plus one overall average for the whole movie -- a direct "
+              "analog of Convergence Plane's own \"Log Convergence Value per Scene\" above, but for this "
+              "completely separate Foreground Scale Mode setting (its own file, its own independent "
+              "state -- both logs can be turned on at once without colliding or interfering).\n"
+              "Works in BOTH Foreground Scale Mode settings: Constant (every scene logs the same single "
+              "Foreground Scale value above -- no [Wide/Mid/Close-Up] tag, since there's nothing to "
+              "classify) and Shot Lock (each scene is also tagged with which of Wide/Mid/Close-Up Value "
+              "it actually locked in).\n"
+              "Gets real per-scene boundaries on its own: it scans for scene cuts just for this log, "
+              "even if Scene Detection (and Automated Scene Batch) are OFF for the main conversion. The "
+              "one-time scan this costs is shared with Scene Detection/Scene Batch/Hybrid Frame Rate/"
+              "Convergence Plane's own scene log (whichever ran first against this source wins; the "
+              "rest get a free cache hit).\n"
+              "Writes live, not just at the end: the real file updates itself after every scene that "
+              "finishes, clearly marked \"IN PROGRESS\" until the movie actually completes -- so "
+              "cancelling or a crash partway through still leaves a real, readable log of every scene "
+              "that finished before then.\n"
+              "Pros: a plain text file, nothing burned into the picture itself; lets you confirm Shot "
+              "Lock is actually tracking 3D Strength per scene the way you expect, without watching the "
+              "whole video.\n"
+              "Con: adds one small, independent scene-cut scan the first time nothing else has already "
+              "triggered one for this source.\n"
+              "Recommended: on if you want a record of what Foreground Scale actually used per scene "
+              "(especially useful while tuning Shot Lock); off otherwise."))
+
         self.chk_depth_aa = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Depth Anti-aliasing"), name="chk_depth_aa")
         self.chk_depth_aa.SetValue(False)
         self.chk_depth_aa.SetToolTip(
@@ -4082,6 +4120,7 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.lbl_foreground_scale_lock_threshold_low,
                                   (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_foreground_scale_lock_threshold_low, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.chk_foreground_scale_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.lbl_edge_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_edge_dilation, (k, 1), flag=wx.EXPAND)
         pane_layout_stability.Add(self.cbo_edge_dilation_y, (k, 2), flag=wx.EXPAND)
@@ -13047,6 +13086,7 @@ class MainFrame(wx.Frame):
             # an empty box means "plain 2-way split" -- None, not a parsed float.
             foreground_scale_lock_threshold_low=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_foreground_scale_lock_threshold_low.GetValue()),
+            foreground_scale_scene_log=self.chk_foreground_scale_scene_log.GetValue(),
             foreground_pop=float(self.cbo_foreground_pop.GetValue()),
             foreground_pop_threshold_low=float(self.cbo_foreground_pop_threshold_low.GetValue()) / 100.0,
             foreground_pop_threshold_high=float(self.cbo_foreground_pop_threshold_high.GetValue()) / 100.0,
@@ -14455,6 +14495,7 @@ class MainFrame(wx.Frame):
             self.cbo_foreground_scale_lock_threshold_low.SetValue("")
         else:
             _apply_combo_value(self.cbo_foreground_scale_lock_threshold_low, _fs_threshold_low_restore)
+        self.chk_foreground_scale_scene_log.SetValue(bool(getattr(args, "foreground_scale_scene_log", False)))
         _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
         _apply_combo_value(
             self.cbo_foreground_pop_threshold_low,
@@ -38794,6 +38835,55 @@ def _self_test_foreground_scale_lock_mid_disabled():
     print("_self_test_foreground_scale_lock_mid_disabled: PASS")
 
 
+def _self_test_foreground_scale_scene_log_gui_and_cli():
+    """ADR-453: chk_foreground_scale_scene_log must round-trip through
+    parse_args()/the CLI command/restore, default to off, and -- unlike the
+    foreground_scale_lock_* widgets above -- stay enabled regardless of
+    Foreground Scale Mode (update_foreground_scale_mode() must never touch
+    it), mirroring Convergence Plane's own chk_convergence_scene_log checkbox
+    not being part of a mode-only widget cluster."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.chk_foreground_scale_scene_log.GetValue() is False
+
+        # Must stay enabled in both Foreground Scale Mode settings.
+        frame.cbo_foreground_scale_mode.SetSelection(0)  # Constant
+        frame.update_foreground_scale_mode()
+        assert frame.chk_foreground_scale_scene_log.IsEnabled()
+        frame.cbo_foreground_scale_mode.SetSelection(1)  # Shot Lock
+        frame.update_foreground_scale_mode()
+        assert frame.chk_foreground_scale_scene_log.IsEnabled()
+
+        frame.chk_foreground_scale_scene_log.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.foreground_scale_scene_log is True
+
+        cmd = frame.get_cli_command()
+        assert "--foreground-scale-scene-log" in cmd, cmd
+
+        frame.chk_foreground_scale_scene_log.SetValue(False)
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_foreground_scale_scene_log.GetValue() is True, \
+            "restore must bring the checked state back"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--foreground-scale-scene-log"])
+    assert reparsed.foreground_scale_scene_log is True
+    reparsed_off = parser.parse_args(["-i", "a.mp4", "-o", "o"])
+    assert reparsed_off.foreground_scale_scene_log is False
+
+    print("_self_test_foreground_scale_scene_log_gui_and_cli: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -39053,6 +39143,7 @@ def _run_self_tests():
         _self_test_postprocess_image_always_even,
         _self_test_foreground_scale_lock_gui_and_cli,
         _self_test_foreground_scale_lock_mid_disabled,
+        _self_test_foreground_scale_scene_log_gui_and_cli,
     ]
     failures = []
     for test in tests:

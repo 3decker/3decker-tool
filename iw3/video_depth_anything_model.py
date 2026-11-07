@@ -216,11 +216,22 @@ class VideoDepthAnythingModel(BaseDepthModel):
         # main stream is active.
         super().move_to(device)
         if self.model is not None and not isinstance(self.model, DeviceSwitchInference):
-            self.model.cur_list = move_nested_tensors(self.model.cur_list, device)
-            self.model.pre_input = move_nested_tensors(self.model.pre_input, device)
-            self.model.overlap_input = move_nested_tensors(self.model.overlap_input, device)
-            self.model.depth_list_aligned = move_nested_tensors(self.model.depth_list_aligned, device)
-            self.model.ref_align = move_nested_tensors(self.model.ref_align, device)
+            # ADR-454: these 5 attributes only exist on self.model once the online
+            # model's own forward pass has run at least once (it lazily creates them
+            # on first use, same shape as _fresh_online_state() above). move_to() can
+            # be called before that -- e.g. an error-cleanup/VRAM-release path firing
+            # right after the very first inference call itself failed (a real crash
+            # observed: CUDA OOM on the first forward pass, then this code's own
+            # cleanup masked it behind "'VideoDepthAnythingOnline' object has no
+            # attribute 'overlap_input'" instead of showing the real OOM). getattr()
+            # with _fresh_online_state()'s own defaults makes "nothing to move yet" a
+            # no-op instead of a crash.
+            self.model.cur_list = move_nested_tensors(getattr(self.model, "cur_list", []), device)
+            self.model.pre_input = move_nested_tensors(getattr(self.model, "pre_input", None), device)
+            self.model.overlap_input = move_nested_tensors(getattr(self.model, "overlap_input", None), device)
+            self.model.depth_list_aligned = move_nested_tensors(
+                getattr(self.model, "depth_list_aligned", []), device)
+            self.model.ref_align = move_nested_tensors(getattr(self.model, "ref_align", None), device)
         self._flip_state = move_nested_tensors(self._flip_state, device)
         return self
 

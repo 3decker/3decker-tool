@@ -2601,16 +2601,17 @@ class MainFrame(wx.Frame):
         self.lbl_foreground_scale_lock_wide = wx.StaticText(
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Wide Shot Value"))
         self.cbo_foreground_scale_lock_wide = EditableComboBox(
-            self.cpn_stereo_stability_flicker.GetPane(), choices=["1.5", "1.0", "0.5", "0.0"],
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["-1.5", "-1.0", "-0.5", "0.0"],
             name="cbo_foreground_scale_lock_wide")
         self.cbo_foreground_scale_lock_wide.SetValue(f"{DEFAULT_FOREGROUND_SCALE_LOCK_WIDE:.2f}")
         self.cbo_foreground_scale_lock_wide.SetToolTip(
             T("Only affects Shot Lock Foreground Scale Mode. The Foreground Scale value (-3.0 to 3.0) "
               "locked in for every scene whose 3D Strength is ABOVE Strength Threshold (High) below -- "
               "its own independent value, not shared with Convergence Plane's own Wide Shot Value.\n"
-              "Recommended: try your own footage and judge by eye -- a modest positive value gives wide "
-              "shots a punchier, more sculpted foreground; 0.0 (default) leaves the depth model's own "
-              "curve unchanged, same as a plain Foreground Scale of 0."))
+              "Recommended: try your own footage and judge by eye -- a modest negative value keeps a "
+              "wide shot's background from getting flattened, since Positive Foreground Scale trades "
+              "background depth away to make the foreground pop harder; 0.0 (default) leaves the depth "
+              "model's own curve unchanged, same as a plain Foreground Scale of 0."))
 
         self.lbl_foreground_scale_lock_mid = wx.StaticText(
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Mid Shot Value"))
@@ -2631,7 +2632,7 @@ class MainFrame(wx.Frame):
         self.lbl_foreground_scale_lock_closeup = wx.StaticText(
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Close-Up Value"))
         self.cbo_foreground_scale_lock_closeup = EditableComboBox(
-            self.cpn_stereo_stability_flicker.GetPane(), choices=["-1.5", "-1.0", "-0.5", "0.0"],
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["1.5", "1.0", "0.5", "0.0"],
             name="cbo_foreground_scale_lock_closeup")
         self.cbo_foreground_scale_lock_closeup.SetValue(f"{DEFAULT_FOREGROUND_SCALE_LOCK_CLOSEUP:.2f}")
         self.cbo_foreground_scale_lock_closeup.SetToolTip(
@@ -2639,9 +2640,10 @@ class MainFrame(wx.Frame):
               "locked in for every scene whose 3D Strength is AT OR BELOW Strength Threshold (Low) below "
               "(or at or below Strength Threshold (High), if Strength Threshold (Low) is left empty) -- "
               "its own independent value, not shared with Convergence Plane's own Close-Up Value.\n"
-              "Recommended: try your own footage and judge by eye -- a modest negative value gives "
-              "close-up scenes a deeper-feeling background; 0.0 (default) leaves the depth model's own "
-              "curve unchanged, same as a plain Foreground Scale of 0."))
+              "Recommended: try your own footage and judge by eye -- a modest positive value gives "
+              "close-up scenes a punchier, more sculpted foreground, since there's little background "
+              "left in frame to lose by trading its depth away; 0.0 (default) leaves the depth model's "
+              "own curve unchanged, same as a plain Foreground Scale of 0."))
 
         self.lbl_foreground_scale_lock_threshold_high = wx.StaticText(
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Strength Threshold (High)"))

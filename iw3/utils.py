@@ -4278,6 +4278,11 @@ def _build_iw3_comment_metadata(args, video=True):
     # recorded on the flag alone, same "only shown when meaningful" convention.
     if getattr(args, "foreground_scale_scene_log", False):
         comment_parts.append("iw3_foreground_scale_scene_log=1")
+    # ADR-456: "Combine Scene Logs" -- independent of every mode above (it just
+    # forces the 3 flags above on, see set_state_args()), same "only shown when
+    # meaningful" convention as every other optional tag here.
+    if getattr(args, "combined_scene_log", False):
+        comment_parts.append("iw3_combined_scene_log=1")
     if getattr(args, "foreground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_foreground_pop={args.foreground_pop}")
         if getattr(args, "foreground_pop_threshold_low", 0.85) != 0.85:
@@ -4760,6 +4765,11 @@ class _ConvergenceSceneLogState():
         self.live_path = None
         self.live_output_filename = None
         self.live_fps = None
+        # ADR-456: "Combine Scene Logs" -- set True by reset_convergence_scene_log()
+        # when args.combined_scene_log is on. record()/flush() still run exactly as
+        # before (the combined log's merge needs this state's own scene_records) --
+        # only write_live()'s own bytes-to-disk step is skipped below.
+        self.combined_mode = False
 
     def record(self, value, cut_after):
         """Buffers one OUTPUT frame's convergence value, closing the scene
@@ -4791,7 +4801,7 @@ class _ConvergenceSceneLogState():
         the class docstring). Never raises -- a failed live write must never
         interrupt a real, multi-hour conversion; finish_convergence_scene_log()
         still gets the real, authoritative last word at the end regardless."""
-        if not self.live_path or not self.scene_records:
+        if not self.live_path or not self.scene_records or self.combined_mode:
             return
         try:
             text = _format_convergence_scene_log(self, self.live_output_filename, self.live_fps,
@@ -4827,6 +4837,10 @@ def reset_convergence_scene_log(args, input_path=None, output_path=None, fps=Non
     if not isinstance(state, dict):
         return
     log_state = _ConvergenceSceneLogState()
+    # ADR-456: "Combine Scene Logs" -- this state object keeps accumulating
+    # scene_records as always; only its own write_live()/finish_*() disk write
+    # is skipped (see those functions' own guards).
+    log_state.combined_mode = bool(getattr(args, "combined_scene_log", False))
     if (getattr(args, "convergence_scene_log", False)
             and input_path is not None and output_path is not None):
         try:
@@ -4976,6 +4990,10 @@ def finish_convergence_scene_log(args, input_path, output_path, fps=None):
     st.flush()
     if not st.scene_records:
         return
+    if getattr(args, "combined_scene_log", False):
+        # ADR-456: state stays fully flushed above (the combined log's merge
+        # needs it) -- only this feature's OWN file write is skipped.
+        return
     if fps is None:
         fps = _convergence_scene_log_fps(args, input_path)
     try:
@@ -5029,6 +5047,10 @@ class _ForegroundScaleSceneLogState():
         self.live_path = None
         self.live_output_filename = None
         self.live_fps = None
+        # ADR-456: same "Combine Scene Logs" meaning as _ConvergenceSceneLogState's
+        # own combined_mode -- state keeps accumulating, only this feature's own
+        # disk write is skipped.
+        self.combined_mode = False
 
     def record(self, value, cut_after):
         """Buffers one OUTPUT frame's foreground scale value, closing the scene
@@ -5057,7 +5079,7 @@ class _ForegroundScaleSceneLogState():
         """ADR-405-style live rewrite -- see _ConvergenceSceneLogState.write_live()
         for the full rationale. Never raises -- a failed live write must never
         interrupt a real, multi-hour conversion."""
-        if not self.live_path or not self.scene_records:
+        if not self.live_path or not self.scene_records or self.combined_mode:
             return
         try:
             text = _format_foreground_scale_scene_log(self, self.live_output_filename, self.live_fps,
@@ -5081,6 +5103,8 @@ def reset_foreground_scale_scene_log(args, input_path=None, output_path=None, fp
     if not isinstance(state, dict):
         return
     log_state = _ForegroundScaleSceneLogState()
+    # ADR-456: see _ConvergenceSceneLogState's own combined_mode note above.
+    log_state.combined_mode = bool(getattr(args, "combined_scene_log", False))
     if (getattr(args, "foreground_scale_scene_log", False)
             and input_path is not None and output_path is not None):
         try:
@@ -5195,6 +5219,10 @@ def finish_foreground_scale_scene_log(args, input_path, output_path, fps=None):
     st.flush()
     if not st.scene_records:
         return
+    if getattr(args, "combined_scene_log", False):
+        # ADR-456: state stays fully flushed above -- only this feature's OWN
+        # file write is skipped, same as finish_convergence_scene_log().
+        return
     if fps is None:
         fps = _convergence_scene_log_fps(args, input_path)
     try:
@@ -5206,6 +5234,283 @@ def finish_foreground_scale_scene_log(args, input_path, output_path, fps=None):
         os.replace(tmp, log_path)
     except Exception as e:                                           # noqa: BLE001
         print(f"[foreground-scale-log] could not write the Foreground Scale scene log "
+              f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
+# "Combine Scene Logs" (GUI-only --combined-scene-log, ADR-456): real follow-up
+# request -- decker wanted the 3 scene logs just above (3D Strength /
+# Convergence / Foreground Scale) merged into ONE file with all 3 numbers on
+# each scene's line, instead of having to open 3 separate files to compare
+# them. Two explicit design decisions decker made up front: (1) this REPLACES
+# the 3 separate files -- turning it on means the individual
+# _3d_strength_log.txt / _convergence_log.txt / _foreground_scale_log.txt
+# files are no longer written at all (see each one's own `combined_mode`/
+# `_combined_mode` guard on its write_live()/finish_*() above); (2) the
+# combined file updates LIVE, scene-by-scene, the same crash-safety every log
+# above already has, not just once at the end.
+#
+# set_state_args() (near the top of this file) is the single place that
+# forces auto_divergence_scene_log/convergence_scene_log/
+# foreground_scale_scene_log all on whenever combined_scene_log is on, so
+# every caller only ever has to set this one flag.
+#
+# All 3 sources share the EXACT same real scene-cut boundaries whenever all 3
+# flags are on together (log_segment_pts/log_reset_pts, resolved once via
+# _ensure_convergence_log_scene_pts() and threaded through) -- so scene N's
+# (start, end, frames) is identical across all 3 records lists, in the same
+# order, and a plain index-zip merge up to the shortest list's length is
+# correct without any timestamp matching.
+#
+# Real consequence of this, not a bug: Auto 3D Strength's own per-run state
+# (args.state["nt_autodiv"]) only ever exists when --auto-divergence itself is
+# on (it's created lazily inside the add-on's own apply_divergence() wrapper,
+# which is a pure no-op pass-through when that flag is off) -- so turning on
+# ONLY "Combine Scene Logs" without also turning on Auto 3D Strength never
+# produces a combined file at all (no 3D Strength state to merge). Same
+# precondition the standalone "Log 3D Strength per Scene" checkbox already
+# has (it's greyed out unless Auto 3D Strength itself is on).
+# --------------------------------------------------------------------------
+class _CombinedSceneLogState():
+    """Lives at args.state["_combined_scene_log"]. `written` tracks how many
+    scenes have already been merged into the live file so far, so
+    _maybe_write_combined_scene_log_live() only rewrites the file when a NEW
+    scene has actually closed across all 3 sources since the last rewrite."""
+
+    def __init__(self):
+        self.live_path = None
+        self.live_output_filename = None
+        self.live_fps = None
+        self.written = 0
+
+
+def reset_combined_scene_log(args, input_path=None, output_path=None, fps=None):
+    """Called from the exact same call sites that call
+    reset_convergence_scene_log()/reset_foreground_scale_scene_log() --
+    resolves a live path up front the same way those two do, when
+    combined_scene_log is on and both paths are already known."""
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict):
+        return
+    log_state = _CombinedSceneLogState()
+    if (getattr(args, "combined_scene_log", False)
+            and input_path is not None and output_path is not None):
+        try:
+            real_output, log_path = _combined_scene_log_paths(args, input_path, output_path)
+            log_state.live_path = log_path
+            log_state.live_output_filename = real_output
+            log_state.live_fps = fps if fps is not None else _convergence_scene_log_fps(args, input_path)
+        except Exception as e:                                           # noqa: BLE001
+            print(f"[combined-scene-log] could not resolve a live log path "
+                  f"({type(e).__name__}: {e}) -- will still write the complete "
+                  f"log once the movie finishes.", file=sys.stderr)
+    state["_combined_scene_log"] = log_state
+
+
+def _combined_scene_log_paths(args, input_path, output_path):
+    """(real output filename, scene-log path) for one movie -- a direct analog
+    of _convergence_scene_log_paths()/_foreground_scale_scene_log_paths(),
+    swapping in its own "_combined_scene_log.txt" suffix so it never collides
+    with any of the 3 individual logs or the real job log."""
+    job_log = _resolve_single_file_log_path(args, input_path, output_path)
+    base = job_log[:-len("_log.txt")] if job_log.endswith("_log.txt") else path.splitext(job_log)[0]
+    output = str(output_path)
+    if is_output_dir(output):
+        output = path.join(output, make_output_filename(input_path, args, video=is_video(str(input_path))))
+    return output, base + "_combined_scene_log.txt"
+
+
+def _format_combined_scene_log(strength_state, conv_state, fg_state, output_filename, fps, in_progress=False):
+    """One text block merging the 3 independent per-scene logs above, by plain
+    index (see this section's own module-level note for why that's correct
+    here). `strength_state` may be None (Auto 3D Strength's add-on not active
+    / no data) -- handled gracefully, with a blank 3D Strength column rather
+    than crashing. Deliberately does NOT port over autodiv.py's own "3D
+    Strength values used, most common first" tally (_tally_scene_values) --
+    that function lives in the add-on module, and importing it from core
+    iw3/utils.py would be a bad reverse dependency (core -> add-on); that
+    breakdown stays a nice-to-have only Auto 3D Strength's own standalone scan
+    tool shows."""
+    strength_records = list(getattr(strength_state, "scene_records", None) or [])
+    strength_meta = getattr(strength_state, "scene_log_meta", None) or (
+        "hybrid", 0.0, 0.0, 0.0, False, None, None, None, None)
+    s_mode, s_lo, s_hi, s_typical, s_invert, s_closeup, s_wide, s_wide_floor, s_wide_floor_cutoff = strength_meta
+
+    conv_records = list(getattr(conv_state, "scene_records", None) or [])
+    conv_meta = getattr(conv_state, "meta", None) or ("sod_v1", 0.5, 0.9, False, 0, None)
+    c_mode, c_value, c_smoothing, c_scene_hold, c_cut_smooth = conv_meta[:5]
+    c_lock_values = conv_meta[5] if len(conv_meta) > 5 else None
+
+    fg_records = list(getattr(fg_state, "scene_records", None) or [])
+    fg_meta = getattr(fg_state, "meta", None) or ("constant", 0.0, None)
+    fg_mode, fg_value, fg_lock_values = fg_meta
+
+    # Header lines -- same phrasing as each individual formatter's own header
+    # (see _format_scene_log()/_format_convergence_scene_log()/
+    # _format_foreground_scale_scene_log() above).
+    strength_header = (
+        f"Auto 3D Strength: {s_mode} mode, range {s_lo:g}-{s_hi:g}, typical (3D Strength) {s_typical:g}"
+        + (", Invert: on (wide=more, close-up=less)" if s_invert else ", Invert: off"))
+    if s_closeup is not None:
+        strength_header += f", close-up pinned at {s_closeup:g}"
+    if s_wide is not None:
+        strength_header += f", wide pinned at {s_wide:g}"
+    if s_wide_floor is not None and s_wide_floor_cutoff is not None:
+        strength_header += f", floor {s_wide_floor:g} below {s_wide_floor_cutoff:g}"
+
+    conv_header = (f"Convergence Plane: {c_mode} mode, convergence {c_value:g}, "
+                   f"smoothing {c_smoothing:g}, scene hold {'on' if c_scene_hold else 'off'}")
+    if c_scene_hold and c_cut_smooth:
+        conv_header += f", cut smooth {c_cut_smooth}"
+
+    if fg_mode == "shot_lock" and fg_lock_values is not None:
+        fg_wide, fg_mid, fg_closeup = fg_lock_values
+        fg_mid_part = f", mid {fg_mid:g}" if fg_mid is not None else ""
+        fg_header = (f"Foreground Scale: shot_lock mode, wide {fg_wide:g}{fg_mid_part}, "
+                     f"close-up {fg_closeup:g}")
+    else:
+        fg_header = f"Foreground Scale: constant mode, value {fg_value:g}"
+
+    title = f"Combined Scene Log -- {path.basename(str(output_filename))}"
+    if in_progress:
+        title += " (IN PROGRESS -- conversion still running)"
+    lines = [title, strength_header, conv_header, fg_header]
+    if not fps:
+        lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
+    lines.append("")
+
+    n = min(len(strength_records), len(conv_records), len(fg_records))
+    total_frames = 0
+    s_weighted = c_weighted = fg_weighted = 0.0
+    shot_counts_conv = {"Wide": 0, "Mid": 0, "Close-Up": 0}
+    shot_counts_fg = {"Wide": 0, "Mid": 0, "Close-Up": 0}
+    for i in range(n):
+        start, end, frames, s_mean, s_raw = strength_records[i]
+        _, _, _, c_mean = conv_records[i]
+        _, _, _, fg_mean = fg_records[i]
+        span = (f"{_format_hms(start / fps)} - {_format_hms(end / fps)}" if fps
+               else f"frame {start} - {end}")
+        line = (f"Scene {i + 1}   {span}   ({frames} frames)   "
+                f"3D Strength: {s_mean:.1f} (raw {s_raw:.3f})   "
+                f"Convergence: {c_mean:.2f}")
+        if c_lock_values is not None:
+            label = _classify_shot_lock_mean(c_mean, c_lock_values)
+            shot_counts_conv[label] += 1
+            line += f" [{label}]"
+        line += f"   Foreground Scale: {fg_mean:.2f}"
+        if fg_lock_values is not None:
+            label = _classify_shot_lock_mean_foreground_scale(fg_mean, fg_lock_values)
+            shot_counts_fg[label] += 1
+            line += f" [{label}]"
+        lines.append(line)
+        total_frames += frames
+        s_weighted += s_mean * frames
+        c_weighted += c_mean * frames
+        fg_weighted += fg_mean * frames
+
+    lines.append("")
+    s_overall = s_weighted / total_frames if total_frames else 0.0
+    c_overall = c_weighted / total_frames if total_frames else 0.0
+    fg_overall = fg_weighted / total_frames if total_frames else 0.0
+    so_far = " so far" if in_progress else ""
+    if in_progress:
+        lines.append(f"Average 3D Strength{so_far} (time-weighted, {n} scene(s), "
+                     f"conversion still running): {s_overall:.2f}")
+        lines.append(f"Average Convergence{so_far} (time-weighted, {n} scene(s), "
+                     f"conversion still running): {c_overall:.2f}")
+        lines.append(f"Average Foreground Scale{so_far} (time-weighted, {n} scene(s), "
+                     f"conversion still running): {fg_overall:.2f}")
+    else:
+        lines.append(f"Average 3D Strength for whole movie (time-weighted): {s_overall:.2f}")
+        lines.append(f"Average Convergence for whole movie (time-weighted): {c_overall:.2f}")
+        lines.append(f"Average Foreground Scale for whole movie (time-weighted): {fg_overall:.2f}")
+
+    if c_lock_values is not None and n:
+        mid_part = f"{shot_counts_conv['Mid']} mid, " if c_lock_values[1] is not None else ""
+        lines.append(
+            f"Convergence shot classification{so_far}: {shot_counts_conv['Wide']} wide, {mid_part}"
+            f"{shot_counts_conv['Close-Up']} close-up (of {n} scene(s))")
+    if fg_lock_values is not None and n:
+        mid_part = f"{shot_counts_fg['Mid']} mid, " if fg_lock_values[1] is not None else ""
+        lines.append(
+            f"Foreground Scale shot classification{so_far}: {shot_counts_fg['Wide']} wide, {mid_part}"
+            f"{shot_counts_fg['Close-Up']} close-up (of {n} scene(s))")
+    return "\n".join(lines) + "\n"
+
+
+def _maybe_write_combined_scene_log_live(args):
+    """Called from apply_divergence(), right after all 3 of this call's own
+    scene-closes (if any) have already happened and are reflected in all 3
+    scene_records lists -- the single correct hook point (see this section's
+    own module-level note). No-op unless combined_scene_log is on and a live
+    path was actually resolved; bails out silently if any of the 3 source
+    states is missing (e.g. Auto 3D Strength itself is off, so there is no
+    nt_autodiv state to merge yet). Never raises."""
+    if not getattr(args, "combined_scene_log", False):
+        return
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict):
+        return
+    combo = state.get("_combined_scene_log")
+    if combo is None or not combo.live_path:
+        return
+    strength_state = state.get("nt_autodiv")
+    conv_state = state.get("_convergence_scene_log")
+    fg_state = state.get("_foreground_scale_scene_log")
+    if strength_state is None or conv_state is None or fg_state is None:
+        return
+    strength_records = getattr(strength_state, "scene_records", None) or []
+    conv_records = getattr(conv_state, "scene_records", None) or []
+    fg_records = getattr(fg_state, "scene_records", None) or []
+    n = min(len(strength_records), len(conv_records), len(fg_records))
+    if n <= combo.written:
+        return
+    combo.written = n
+    try:
+        text = _format_combined_scene_log(strength_state, conv_state, fg_state,
+                                          combo.live_output_filename, combo.live_fps, in_progress=True)
+        tmp = f"{combo.live_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, combo.live_path)
+    except Exception as e:                                           # noqa: BLE001
+        print(f"[combined-scene-log] could not write live progress "
+              f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
+def finish_combined_scene_log(args, input_path, output_path, fps, strength_state):
+    """The FINAL authoritative write (parallel to finish_convergence_scene_log()/
+    finish_foreground_scale_scene_log()) -- called once from autodiv.py's own
+    _finish_scene_log(), the one point confirmed to run AFTER both
+    finish_convergence_scene_log() and finish_foreground_scale_scene_log() have
+    already flushed their own state for this movie (see autodiv.py's own
+    comment on this call site for the confirmed ordering). `strength_state` is
+    passed in directly by that caller (which already has its own `st` object
+    at hand) rather than re-read from args.state here.
+
+    Bails out (no file written) if combined_scene_log is off, if conv_state/
+    fg_state can't be found in args.state, or if any of the 3 scene_records
+    lists is empty."""
+    if not getattr(args, "combined_scene_log", False):
+        return
+    state = getattr(args, "state", None)
+    conv_state = state.get("_convergence_scene_log") if isinstance(state, dict) else None
+    fg_state = state.get("_foreground_scale_scene_log") if isinstance(state, dict) else None
+    if conv_state is None or fg_state is None:
+        return
+    if not (getattr(strength_state, "scene_records", None)
+            and conv_state.scene_records and fg_state.scene_records):
+        return
+    try:
+        real_output, log_path = _combined_scene_log_paths(args, input_path, output_path)
+        text = _format_combined_scene_log(strength_state, conv_state, fg_state, real_output, fps,
+                                          in_progress=False)
+        tmp = f"{log_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, log_path)
+    except Exception as e:                                           # noqa: BLE001
+        print(f"[combined-scene-log] could not write the combined scene log "
               f"({type(e).__name__}: {e})", file=sys.stderr)
 
 
@@ -5584,6 +5889,14 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         for _ in range(n_out):
             value, cut_after = fsl_pending.popleft() if fsl_pending else (0.0, False)
             fsl_log_state.record(value, cut_after)
+
+    # "Combine Scene Logs" (ADR-456): by this point, all 3 of this call's own
+    # scene-closes (if any) have already happened and are reflected in all 3
+    # scene_records lists above -- the single correct hook point to check
+    # whether a new scene closed across all 3 sources and rewrite the one
+    # merged live file if so.
+    if getattr(args, "combined_scene_log", False) and left_eye is not None:
+        _maybe_write_combined_scene_log_live(args)
 
     if not batch:
         if left_eye is not None:
@@ -7900,6 +8213,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     # progress live as this movie converts, not only once at the very end.
     reset_convergence_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_foreground_scale_scene_log(args, input_path=original_input_filename, output_path=output_path)
+    reset_combined_scene_log(args, input_path=original_input_filename, output_path=output_path)
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -8524,6 +8838,8 @@ def process_config_video(config, args, side_model):
                                 fps=float(getattr(config, "fps", 0)) or None)
     reset_foreground_scale_scene_log(args, input_path=args.input, output_path=args.output,
                                      fps=float(getattr(config, "fps", 0)) or None)
+    reset_combined_scene_log(args, input_path=args.input, output_path=args.output,
+                             fps=float(getattr(config, "fps", 0)) or None)
 
     if is_output_dir(args.output):
         os.makedirs(args.output, exist_ok=True)
@@ -10039,6 +10355,16 @@ class _PauseVramSuspendEvent():
 
 def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None, stage_fn=None,
                    output_sink=None):
+    if getattr(args, "combined_scene_log", False):
+        # ADR-456: "Combine Scene Logs" merges the 3 independent per-scene logs
+        # (3D Strength / Convergence / Foreground Scale) into one file -- forcing
+        # all 3 underlying flags on here, in ONE place, means every caller only
+        # ever has to set combined_scene_log itself. Each of the 3 individual
+        # writers skips its own disk write when this is on (see each one's own
+        # guard below) so only the merged file is ever produced.
+        args.auto_divergence_scene_log = True
+        args.convergence_scene_log = True
+        args.foreground_scale_scene_log = True
     if depth_model is None:
         depth_model = create_depth_model(args.depth_model)
     depth_model.enable_refine(getattr(args, "depth_refine", False),

@@ -602,6 +602,12 @@ class _RunState:
         self.live_path = None
         self.live_output_filename = None
         self.live_fps = None
+        # ADR-456: "Combine Scene Logs" -- when on, this feature's own write_live()
+        # below must still flush/accumulate scene_records as always (the combined
+        # log's merge needs that data), but never actually write ITS OWN file to
+        # disk -- the combined file replaces it. `args=None` (every existing
+        # caller/test that never passes it) keeps this False, unchanged.
+        self._combined_mode = bool(getattr(args, "combined_scene_log", False))
         state = getattr(args, "state", None)
         pending = state.get("_nt_autodiv_pending_log_info") if isinstance(state, dict) else None
         if pending is not None and getattr(args, "auto_divergence_scene_log", False):
@@ -621,7 +627,7 @@ class _RunState:
         no-op when live_path wasn't resolved. Never raises -- a failed live write must
         never interrupt a real, multi-hour conversion; _finish_scene_log() still gets
         the real, authoritative last word at the end regardless."""
-        if not self.live_path or not self.scene_records:
+        if not self.live_path or not self.scene_records or self._combined_mode:
             return
         try:
             text = _format_scene_log(self, self.live_output_filename, self.live_fps, in_progress=True)
@@ -996,6 +1002,30 @@ def _finish_scene_log(st, args, kind, call_args):
         return
     st._scene_flush()
     if not st.scene_records:
+        return
+    if getattr(args, "combined_scene_log", False):
+        # ADR-456: "Combine Scene Logs" replaces this standalone file with one
+        # merged file covering 3D Strength/Convergence/Foreground Scale together --
+        # this is the single point where that merged file's own FINAL,
+        # authoritative write is triggered (see the real ordering/confirmed-fact
+        # notes this ADR's own docs carry): by the time this function runs,
+        # Convergence's and Foreground Scale's own finish_*() calls have already
+        # flushed their last scene into their own scene_records (inside the
+        # wrapped process_video/process_config_video body that already returned
+        # above), even though -- per the same ADR -- they skipped their OWN disk
+        # write because this same flag is on.
+        try:
+            import iw3.utils as U
+            if kind == "process_video":
+                input_path, output_path = call_args[0], call_args[1]
+                fps = _resolve_video_fps(U, args, input_path)
+            else:  # process_config_video: config.fps is the real, already-resolved fps
+                config = call_args[0]
+                input_path, output_path = args.input, args.output
+                fps = float(getattr(config, "fps", 0)) or None
+            U.finish_combined_scene_log(args, input_path, output_path, fps, st)
+        except Exception as e:                                           # noqa: BLE001
+            _say(f"could not write the combined scene log ({type(e).__name__}: {e})")
         return
     try:
         real_output, log_path, fps = _resolve_scene_log_info(args, kind, call_args)

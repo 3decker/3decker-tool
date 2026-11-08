@@ -2772,6 +2772,33 @@ class MainFrame(wx.Frame):
               "Recommended: on if you want a record of what Foreground Scale actually used per scene "
               "(especially useful while tuning Shot Lock); off otherwise."))
 
+        # ADR-456: "Combine Scene Logs" -- real follow-up request: decker wanted the
+        # 3 logs just above (3D Strength / Convergence / Foreground Scale) merged
+        # into one file instead of 3 separate ones. GUI-only, no CLI flag (same
+        # pattern as the GUI's other checkbox-only settings) -- see
+        # set_state_args() in iw3/utils.py, the single place that forces the 3
+        # underlying flags on whenever this is checked.
+        self.chk_combined_scene_log = wx.CheckBox(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Combine all 3 scene logs into one file"),
+            name="chk_combined_scene_log")
+        self.chk_combined_scene_log.SetValue(False)
+        self.chk_combined_scene_log.SetToolTip(
+            T("What it's for: normally 3D Strength, Convergence, and Foreground Scale each write their "
+              "own separate scene-by-scene text file. Checking this box makes them write ONE file "
+              "instead, with all 3 numbers on every scene's line -- so you don't have to open 3 files "
+              "side by side to compare them.\n"
+              "What else it does: turns ON the logging for all 3 of those features automatically, even "
+              "if their own checkboxes above are unchecked -- you only need to check this one box.\n"
+              "Replaces, not adds: while this is checked, you get the one combined file INSTEAD of the "
+              "3 separate files -- the separate files are not written at all.\n"
+              "Writes live, not just at the end: same as the logs above, the real file updates itself "
+              "after every scene that finishes, clearly marked \"IN PROGRESS\" until the movie actually "
+              "completes.\n"
+              "Needs Auto 3D Strength turned on too: the 3D Strength column has nothing to show (and no "
+              "file is written at all) unless \"Auto 3D Strength\" above is also checked.\n"
+              "Recommended: on if you want one easy-to-read file with all 3 numbers together; off if you "
+              "prefer the 3 separate files, or don't need any of them."))
+
         self.chk_depth_aa = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Depth Anti-aliasing"), name="chk_depth_aa")
         self.chk_depth_aa.SetValue(False)
         self.chk_depth_aa.SetToolTip(
@@ -4173,6 +4200,7 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.lbl_foreground_scale_lock_smoothing, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_foreground_scale_lock_smoothing, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_foreground_scale_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.chk_combined_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.lbl_edge_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_edge_dilation, (k, 1), flag=wx.EXPAND)
         pane_layout_stability.Add(self.cbo_edge_dilation_y, (k, 2), flag=wx.EXPAND)
@@ -13163,6 +13191,9 @@ class MainFrame(wx.Frame):
             foreground_scale_lock_switch=self.cbo_foreground_scale_lock_switch.GetValue(),
             foreground_scale_lock_smoothing=float(self.cbo_foreground_scale_lock_smoothing.GetValue()),
             foreground_scale_scene_log=self.chk_foreground_scale_scene_log.GetValue(),
+            # ADR-456: GUI-only, no CLI/argparse entry -- see set_state_args() in
+            # iw3/utils.py for why that's enough (it forces the 3 flags above on).
+            combined_scene_log=self.chk_combined_scene_log.GetValue(),
             foreground_pop=float(self.cbo_foreground_pop.GetValue()),
             foreground_pop_threshold_low=float(self.cbo_foreground_pop_threshold_low.GetValue()) / 100.0,
             foreground_pop_threshold_high=float(self.cbo_foreground_pop_threshold_high.GetValue()) / 100.0,
@@ -14579,6 +14610,7 @@ class MainFrame(wx.Frame):
             getattr(args, "foreground_scale_lock_smoothing", DEFAULT_FOREGROUND_SCALE_LOCK_SMOOTHING))
         self.update_foreground_scale_lock_switch()
         self.chk_foreground_scale_scene_log.SetValue(bool(getattr(args, "foreground_scale_scene_log", False)))
+        self.chk_combined_scene_log.SetValue(bool(getattr(args, "combined_scene_log", False)))
         _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
         _apply_combo_value(
             self.cbo_foreground_pop_threshold_low,
@@ -38967,6 +38999,245 @@ def _self_test_foreground_scale_scene_log_gui_and_cli():
     print("_self_test_foreground_scale_scene_log_gui_and_cli: PASS")
 
 
+def _self_test_combined_scene_log_gui_and_metadata():
+    """ADR-456: "Combine Scene Logs" -- chk_combined_scene_log must default to
+    off and round-trip through parse_args()/restore, mirroring
+    _self_test_convergence_scene_log_gui_and_metadata()'s structure. GUI-only,
+    deliberately no CLI/argparse entry (see set_state_args() in iw3/utils.py
+    for why that's enough -- it forces the 3 underlying flags on in one
+    place), so there is no "--combined-scene-log" to round-trip through the
+    real CLI parser the way the 3 underlying checkboxes' own tests do --
+    only the metadata comment tag is checked against the real CLI-built args
+    below."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.chk_combined_scene_log.GetValue() is False, "must default to off"
+
+        frame.chk_combined_scene_log.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.combined_scene_log is True
+
+        frame.chk_combined_scene_log.SetValue(False)
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_combined_scene_log.GetValue() is True, "restore must bring the checked state back"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # metadata tag -- only when the flag is actually on (set directly, since
+    # there is no real "--combined-scene-log" CLI flag to parse).
+    parser = U.create_parser(required_true=False)
+    off = parser.parse_args(["-i", "a.mp4", "-o", "o"])
+    off.video_extension = ".mkv"
+    assert "combined_scene_log" not in U._build_iw3_comment_metadata(off, video=True)
+
+    on = parser.parse_args(["-i", "a.mp4", "-o", "o"])
+    on.video_extension = ".mkv"
+    on.combined_scene_log = True
+    assert "iw3_combined_scene_log=1" in U._build_iw3_comment_metadata(on, video=True)
+
+    print("_self_test_combined_scene_log_gui_and_metadata: PASS")
+
+
+def _self_test_combined_scene_log_merge():
+    """ADR-456: "Combine Scene Logs" -- the most important behavior to pin
+    down with a real test (per decker's own explicit request). Verified pure
+    Python, no GPU/model/real movie needed:
+
+    1. set_state_args() forces auto_divergence_scene_log/convergence_scene_log/
+       foreground_scale_scene_log all on whenever combined_scene_log is on (and
+       leaves them alone when it's off) -- the single place every caller relies
+       on, so turning on the one new checkbox is enough.
+    2. _format_combined_scene_log() against hand-computed scene lines, 3
+       separate time-weighted averages, and both sources' own shot-lock
+       tallies, merged by plain index -- including the strength_state=None
+       fallback (no crash, blank-ish 3D Strength column) and the no-fps
+       frame-number fallback.
+    3. End-to-end wiring through the real functions a real job calls: the 3
+       individual writers' own write_live()/finish_*() must skip their OWN
+       disk write (while still fully flushing/accumulating scene_records --
+       the merge needs that data), the ONE merged file must appear instead,
+       both live (apply_divergence()'s own hook, exercised here directly via
+       _maybe_write_combined_scene_log_live()) and at the very end -- through
+       autodiv.py's own _finish_scene_log(), the confirmed real trigger point
+       for finish_combined_scene_log().
+    """
+    import types
+    import tempfile
+    from os import path as _p
+    from nt_autostrength import autodiv as AD
+    from . import utils as U
+
+    # Part 1: set_state_args() forcing.
+    class _StubDepthModel:
+        def enable_refine(self, *a, **k):
+            pass
+
+        def enable_temporal_stabilize(self, *a, **k):
+            pass
+
+        def disable_temporal_stabilize(self):
+            pass
+
+        def get_name(self):
+            return "Any_V3"
+
+    parser = U.create_parser(required_true=False)
+    args_on = parser.parse_args(["-i", "a.mp4", "-o", "o", "--gpu", "-1"])
+    args_on.combined_scene_log = True
+    U.set_state_args(args_on, depth_model=_StubDepthModel())
+    assert args_on.auto_divergence_scene_log is True
+    assert args_on.convergence_scene_log is True
+    assert args_on.foreground_scale_scene_log is True
+
+    args_off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--gpu", "-1"])
+    args_off.combined_scene_log = False
+    U.set_state_args(args_off, depth_model=_StubDepthModel())
+    assert args_off.auto_divergence_scene_log is False
+    assert args_off.convergence_scene_log is False
+    assert args_off.foreground_scale_scene_log is False
+
+    # Part 2: _format_combined_scene_log() -- hand-computed merge. All 3
+    # sources share identical (start, end, frames) per scene here, matching
+    # what a real run with all 3 flags on actually produces (see this
+    # feature's own module note in iw3/utils.py on why that's always true).
+    strength_state = types.SimpleNamespace(
+        scene_records=[(0, 5, 5, 3.0, 3.000), (5, 8, 3, 10.0, 10.000), (8, 10, 2, 6.0, 6.000)],
+        scene_log_meta=("cuts", 2.0, 16.0, 6.0, False, None, None, None, None))
+    conv_state = types.SimpleNamespace(
+        scene_records=[(0, 5, 5, 0.3), (5, 8, 3, 0.7), (8, 10, 2, 0.5)],
+        meta=("shot_lock", 0.5, 0.9, False, 0, (0.2, 0.5, 0.8)))
+    fg_state = types.SimpleNamespace(
+        scene_records=[(0, 5, 5, 0.8), (5, 8, 3, 1.2), (8, 10, 2, 0.95)],
+        meta=("shot_lock", 1.0, (0.7, None, 1.3)))
+
+    text = U._format_combined_scene_log(strength_state, conv_state, fg_state, "movie_SBS.mp4", fps=1.0)
+    lines = text.splitlines()
+    assert lines[0] == "Combined Scene Log -- movie_SBS.mp4"
+    assert lines[1] == "Auto 3D Strength: cuts mode, range 2-16, typical (3D Strength) 6, Invert: off", lines[1]
+    assert lines[2] == "Convergence Plane: shot_lock mode, convergence 0.5, smoothing 0.9, scene hold off", lines[2]
+    assert lines[3] == "Foreground Scale: shot_lock mode, wide 0.7, close-up 1.3", lines[3]
+    assert ("Scene 1   00:00:00 - 00:00:05   (5 frames)   3D Strength: 3.0 (raw 3.000)   "
+            "Convergence: 0.30 [Wide]   Foreground Scale: 0.80 [Wide]") in lines, lines
+    assert ("Scene 2   00:00:05 - 00:00:08   (3 frames)   3D Strength: 10.0 (raw 10.000)   "
+            "Convergence: 0.70 [Close-Up]   Foreground Scale: 1.20 [Close-Up]") in lines, lines
+    assert ("Scene 3   00:00:08 - 00:00:10   (2 frames)   3D Strength: 6.0 (raw 6.000)   "
+            "Convergence: 0.50 [Mid]   Foreground Scale: 0.95 [Wide]") in lines, lines
+    # time-weighted: 3D Strength (5*3+3*10+2*6)/10=5.70, Convergence (5*.3+3*.7+2*.5)/10=0.46,
+    # Foreground Scale (5*.8+3*1.2+2*.95)/10=0.95
+    assert "Average 3D Strength for whole movie (time-weighted): 5.70" in lines, lines
+    assert "Average Convergence for whole movie (time-weighted): 0.46" in lines, lines
+    assert "Average Foreground Scale for whole movie (time-weighted): 0.95" in lines, lines
+    assert "Convergence shot classification: 1 wide, 1 mid, 1 close-up (of 3 scene(s))" in lines, lines
+    assert "Foreground Scale shot classification: 2 wide, 1 close-up (of 3 scene(s))" in lines, lines
+
+    # strength_state=None (Auto 3D Strength's add-on not active/no data) -> no
+    # crash, blank-ish (default-meta) 3D Strength header, zero scene rows
+    # (n is capped by the shortest of the 3 lists, which is now 0).
+    text_no_strength = U._format_combined_scene_log(None, conv_state, fg_state, "movie_SBS.mp4", fps=1.0)
+    assert ("Auto 3D Strength: hybrid mode, range 0-0, typical (3D Strength) 0, Invert: off"
+            in text_no_strength.splitlines())
+    assert "Scene 1" not in text_no_strength
+
+    # No real fps reachable -> frame numbers instead of timestamps.
+    text_no_fps = U._format_combined_scene_log(strength_state, conv_state, fg_state, "movie_SBS.mp4", fps=None)
+    assert "could not be determined" in text_no_fps
+    assert "Scene 1   frame 0 - 5   (5 frames)   3D Strength: 3.0 (raw 3.000)" in text_no_fps
+
+    # in_progress wording.
+    text_live = U._format_combined_scene_log(strength_state, conv_state, fg_state, "movie_SBS.mp4", fps=1.0,
+                                             in_progress=True)
+    assert "(IN PROGRESS -- conversion still running)" in text_live.splitlines()[0]
+    assert "Average 3D Strength so far (time-weighted, 3 scene(s), conversion still running): 5.70" in text_live
+
+    # Part 3: end-to-end wiring through the real functions a real job calls.
+    with tempfile.TemporaryDirectory() as tmp_out:
+        input_name = "movie_combined.mp4"
+        args = parser.parse_args([
+            "-i", input_name, "-o", tmp_out,
+            "--auto-divergence", "--auto-divergence-scene-log",
+            "--convergence-mode", "sod_v1", "--convergence-scene-log",
+            "--foreground-scale-scene-log",
+        ])
+        args.video_extension = ".mkv"
+        args.combined_scene_log = True  # GUI-only, set directly (no CLI flag)
+        args.state = {"device": "cpu"}
+
+        U.reset_convergence_scene_log(args, input_path=input_name, output_path=tmp_out)
+        U.reset_foreground_scale_scene_log(args, input_path=input_name, output_path=tmp_out)
+        U.reset_combined_scene_log(args, input_path=input_name, output_path=tmp_out)
+
+        conv_st = args.state["_convergence_scene_log"]
+        fg_st = args.state["_foreground_scale_scene_log"]
+        assert conv_st.combined_mode is True and fg_st.combined_mode is True
+
+        call_args = (input_name, tmp_out)
+        args.state["_nt_autodiv_pending_log_info"] = ("process_video", call_args)
+        st = AD._RunState.__new__(AD._RunState)   # skip __init__: no Estimator/CLIP needed
+        st.reset_scene_log(args)
+        assert st._combined_mode is True
+        st.scene_log_meta = ("cuts", 2.0, 16.0, 6.0, False, None, None, None, None)
+        args.state["nt_autodiv"] = st
+
+        name = U.make_output_filename(input_name, args, video=True)
+        base = _p.splitext(name)[0]
+        combined_log_path = _p.join(tmp_out, base + "_combined_scene_log.txt")
+        conv_log_path = _p.join(tmp_out, base + "_convergence_log.txt")
+        fg_log_path = _p.join(tmp_out, base + "_foreground_scale_log.txt")
+        strength_log_path = _p.join(tmp_out, base + "_3d_strength_log.txt")
+
+        # Scene 1 closes on all 3 sources.
+        conv_st.record(0.3, True)
+        fg_st.record(0.8, True)
+        st._scene_record([3.0, 10.0], [False, True])  # closes scene 1 (3.0), opens scene 2 (10.0)
+        U._maybe_write_combined_scene_log_live(args)
+        assert _p.isfile(combined_log_path), "the merged live file must exist once all 3 sources have a scene"
+        assert not _p.exists(conv_log_path), \
+            "the separate Convergence file must never be written while combined is on"
+        assert not _p.exists(fg_log_path), \
+            "the separate Foreground Scale file must never be written while combined is on"
+        text_after_1 = open(combined_log_path, encoding="utf-8").read()
+        assert "IN PROGRESS" in text_after_1, text_after_1
+        assert "Scene 1" in text_after_1 and "Scene 2" not in text_after_1, text_after_1
+
+        # Scene 2 closes on all 3 sources -- the SAME live file must update again.
+        conv_st.record(0.7, True)
+        fg_st.record(1.2, True)
+        st._scene_record([6.0], [True])  # closes scene 2 (10.0), opens scene 3 (6.0)
+        U._maybe_write_combined_scene_log_live(args)
+        text_after_2 = open(combined_log_path, encoding="utf-8").read()
+        assert "Scene 2" in text_after_2, text_after_2
+
+        # The movie "finishes" -- real call order: Convergence's and Foreground
+        # Scale's own finish_*() run first (inside the real wrapped process_video
+        # body) and must flush their last open scene but skip their own write;
+        # THEN autodiv.py's _finish_scene_log() (fresh()'s post-call hook) is what
+        # actually triggers the merged file's FINAL write.
+        conv_st.record(0.5, False)       # scene 3, left open on purpose
+        fg_st.record(0.95, False)        # scene 3, left open on purpose
+        U.finish_convergence_scene_log(args, input_name, tmp_out)
+        U.finish_foreground_scale_scene_log(args, input_name, tmp_out)
+        assert not _p.exists(conv_log_path) and not _p.exists(fg_log_path), \
+            "the 2 separate files must still never be written, even at finish time"
+        AD._finish_scene_log(st, args, "process_video", call_args)
+        assert not _p.exists(strength_log_path), \
+            "the separate 3D Strength file must never be written while combined is on"
+
+        final_text = open(combined_log_path, encoding="utf-8").read()
+        assert "IN PROGRESS" not in final_text, final_text
+        assert "Average 3D Strength for whole movie (time-weighted)" in final_text, final_text
+        assert "Scene 3" in final_text, "the final write must include the scene only closed by the finish flush"
+        assert not _p.exists(combined_log_path + ".tmp"), "the final write must be atomic too"
+
+    print("_self_test_combined_scene_log_merge: PASS")
+
+
 def _self_test_foreground_scale_lock_switch_gui_and_cli():
     """ADR-455: Foreground Scale Shot Lock's new "ease" switch (parallel to, but
     independent from, Convergence Plane's own Switch Style/ease) -- the Switch
@@ -39330,6 +39601,8 @@ def _run_self_tests():
         _self_test_foreground_scale_lock_gui_and_cli,
         _self_test_foreground_scale_lock_mid_disabled,
         _self_test_foreground_scale_scene_log_gui_and_cli,
+        _self_test_combined_scene_log_gui_and_metadata,
+        _self_test_combined_scene_log_merge,
         _self_test_foreground_scale_lock_switch_gui_and_cli,
     ]
     failures = []

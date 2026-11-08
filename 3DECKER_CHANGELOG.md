@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 7, 2026
+## Latest Update — November 8, 2026
+
+**Added: a "Combine all 3 scene logs into one file" checkbox, so you don't have to open 3 separate files to compare 3D Strength, Convergence, and Foreground Scale.** Normally, turning on all 3 scene-log checkboxes ("Log 3D Strength per Scene," "Log Convergence Value per Scene," "Log Foreground Scale Value per Scene") gives you 3 separate text files. Check this new box instead and you get ONE file, with all 3 numbers on every scene's line -- and it automatically turns logging on for all 3 of those features for you, even if their own checkboxes are left unchecked. While this box is checked, you get the one combined file *instead of* the 3 separate ones, not an extra 4th file. Just like the other scene logs, it writes live, scene by scene, as the movie converts (clearly marked "IN PROGRESS" until it finishes) -- so cancelling or a crash partway through still leaves a real, readable record of every scene that finished. Needs "Auto 3D Strength" turned on too, or there's no 3D Strength number to show.
+
+## Update — November 7, 2026
 
 **Added: Foreground Scale now has its own "shot_lock" mode, completely separate from Convergence Plane's.** You already know Convergence Plane's shot_lock -- pick a Wide value and a Close-Up value, and every scene automatically uses whichever one fits, based on the real 3D Strength number that scene is using. Now the same idea works for Foreground Scale (the setting that controls how your depth translates into pop) -- turn on "Foreground Scale Mode: shot_lock" and set your own Wide/Close-Up (and optionally Mid) values plus your own High/Low strength thresholds. These are entirely separate boxes from Convergence Plane's own shot_lock settings, by design -- you can run both at the same time, each tuned to its own numbers, both watching the same 3D Strength value and reacting independently.
 

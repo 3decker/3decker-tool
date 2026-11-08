@@ -3998,9 +3998,21 @@ def make_output_filename(input_filename, args, video=False):
 
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}{auto3d_tag}_"
+                    # ADR-457: Foreground Scale Shot Lock's own Wide/Mid/Close-up/
+                    # threshold tag (fsl_tag) moved ahead of the Convergence section --
+                    # real bug report, decker: with enough other settings active at
+                    # once (long movie title + Auto 3D Strength + Convergence Shot
+                    # Lock + this), the filename hit the MAX_FILENAME_LEN cap below
+                    # and silently dropped fsl_tag (it used to sit much later in this
+                    # string), even though the SAME numbers were still showing up
+                    # correctly in the untruncated embedded COMMENT metadata
+                    # (_build_iw3_comment_metadata() has no length cap). The cap only
+                    # ever keeps a PREFIX of this string, so whichever tag sits
+                    # earliest survives -- this is the fix, not a smarter truncator.
+                    f"fs{args.foreground_scale}{fsl_tag}_"
                     f"{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
-                    f"di{edge_dilation}_fs{args.foreground_scale}{fsl_tag}{fp}{bp}{mp}{pf}{po}_"
+                    f"di{edge_dilation}{fp}{bp}{mp}{pf}{po}_"
                     f"ipd{to_deciaml(args.ipd_offset, 1)}{ema}{drefine}{tstab}{dblend}"
                     f"{im_tag}{iof_tag}{imd_tag}{imw_tag}{spt_tag}{sw_tag}{sbd_tag}{psb_tag}{er_tag}{fprot_tag}"
                     f"{sharp_tag}{rife_tag}{smtag}{bitrate}")

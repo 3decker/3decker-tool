@@ -3986,6 +3986,13 @@ def make_output_filename(input_filename, args, video=False):
                        f"_sigdiv{to_deciaml(fsl_thresh_high, 100, 2)}")
             if fsl_thresh_low is not None:
                 fsl_tag += f"lo{to_deciaml(fsl_thresh_low, 100, 2)}"
+            # ADR-455: only appended for the non-default "ease" switch -- same
+            # "omit entirely at default" convention as the threshold_low segment
+            # just above, so a "snap" (unchanged) run's filename never changes.
+            fsl_switch = getattr(args, "foreground_scale_lock_switch", "snap")
+            if fsl_switch == "ease":
+                fsl_smoothing = getattr(args, "foreground_scale_lock_smoothing", 0.9)
+                fsl_tag += f"_ease{to_deciaml(fsl_smoothing, 100, 2)}"
         else:
             fsl_tag = ""
 
@@ -4257,6 +4264,14 @@ def _build_iw3_comment_metadata(args, video=True):
         fsl_thresh_low_val = getattr(args, "foreground_scale_lock_threshold_low", None)
         if fsl_thresh_low_val is not None:
             comment_parts.append(f"iw3_foreground_scale_lock_threshold_low={fsl_thresh_low_val}")
+        # ADR-455: only emitted for the non-default "ease" switch -- same
+        # "only shown when meaningful" convention as threshold_low just above.
+        fsl_switch_val = getattr(args, "foreground_scale_lock_switch", "snap")
+        if fsl_switch_val != "snap":
+            comment_parts.append(f"iw3_foreground_scale_lock_switch={fsl_switch_val}")
+            comment_parts.append(
+                f"iw3_foreground_scale_lock_smoothing="
+                f"{getattr(args, 'foreground_scale_lock_smoothing', 0.9)}")
     # ADR-453: independent of foreground_scale_mode -- unlike the shot_lock-only
     # tags just above, this log also writes real rows in "constant" mode (see
     # _format_foreground_scale_scene_log()'s own settings-line handling), so it's
@@ -9497,6 +9512,23 @@ def create_parser(required_true=True):
                              "--foreground-scale-lock-threshold-high locks --foreground-scale-lock-mid "
                              "instead. Leave unset (default, \"none\") to disable this tier entirely. "
                              "Independent of --convergence-lock-strength-threshold-low.")
+    parser.add_argument("--foreground-scale-lock-switch", type=str,
+                        choices=["snap", "ease"], default="snap",
+                        help="ADR-455: --foreground-scale-mode shot_lock only: snap (default, unchanged): "
+                             "instant jump to the newly locked value the moment a scene reclassifies. "
+                             "ease: glides continuously toward the newly locked value instead of snapping, "
+                             "using the same continuously-decaying chase as --convergence-lock-switch "
+                             "ease (speed controlled by --foreground-scale-lock-smoothing). Independent "
+                             "of --convergence-lock-switch -- Foreground Scale's own switch never needs "
+                             "snap_ramp/blend, since (unlike Convergence's CLIP-driven shot_lock) this "
+                             "feature's divergence value is already exact for every call, with nothing "
+                             "noisy to settle first.")
+    parser.add_argument("--foreground-scale-lock-smoothing", type=float, default=0.9,
+                        help="--foreground-scale-mode shot_lock only, --foreground-scale-lock-switch ease "
+                             "only: how slowly the glide chases the newly locked value. Same decay "
+                             "convention as --convergence-smoothing/Convergence Plane's own shot_lock ease "
+                             "(higher = slower/smoother, lower = snappier). No effect when "
+                             "--foreground-scale-lock-switch is snap (default).")
     parser.add_argument("--foreground-scale-scene-log", action="store_true",
                         help=("ADR-453: writes a text file next to the finished video listing the "
                               "Foreground Scale value used for each scene, plus one overall average for "
@@ -10293,7 +10325,9 @@ def iw3_main(args):
                 closeup_value=getattr(args, "foreground_scale_lock_closeup", 0.0),
                 threshold_high=getattr(args, "foreground_scale_lock_threshold_high", 4.0),
                 threshold_low=getattr(args, "foreground_scale_lock_threshold_low", None),
-                metric_depth=is_metric, mapper_type=args.mapper_type)
+                metric_depth=is_metric, mapper_type=args.mapper_type,
+                switch=getattr(args, "foreground_scale_lock_switch", "snap"),
+                decay=getattr(args, "foreground_scale_lock_smoothing", 0.9))
     else:
         depth_model = None
         # specified args.mapper never used in process_config_*

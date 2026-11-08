@@ -87,6 +87,66 @@ def _test_call_returns_cached_mapper_function():
     print("_test_call_returns_cached_mapper_function: PASS")
 
 
+def _test_ease_switch_glides_monotonically_toward_target():
+    # ADR-455: switch="ease" must NOT jump straight to a NEWLY classified target
+    # in one call -- it should move closer every call, via the same
+    # continuously-decaying chase as ShotLockEstimator._ease_toward() (decay=0.5
+    # halves the remaining distance each step, which is easy to assert on).
+    # The very first call ever (ease_value still None) has no previous value to
+    # glide FROM, so it legitimately lands exactly on that first target -- same
+    # shortcut ShotLockEstimator's own _ease_toward() takes for a movie's first
+    # scene. The real glide only shows up on the SECOND distinct target, so this
+    # first establishes a baseline away from -1.0 before switching to it.
+    est = ForegroundScaleEstimator(wide_value=-1.0, closeup_value=1.0, threshold_high=4.0,
+                                   switch="ease", decay=0.5)
+    assert est.ease_value is None
+
+    est(divergence=0.0)  # <= threshold_high -> target = closeup_value = 1.0
+    assert est.ease_value == 1.0
+
+    divergence = 5.0  # > threshold_high=4.0 -> target = wide_value = -1.0
+    prev_distance = abs(est.ease_value - (-1.0))
+    for _ in range(5):
+        est(divergence=divergence)
+        distance = abs(est.ease_value - (-1.0))
+        assert distance < prev_distance, (
+            f"ease_value must move strictly closer to the target each call, "
+            f"got distance {distance} after previously {prev_distance}")
+        prev_distance = distance
+    assert est.ease_value != -1.0, "must not have snapped straight to the target"
+    # _mapper_fn_for_cache must stay empty/unused for switch="ease".
+    assert est._mapper_fn_for_cache == {}, est._mapper_fn_for_cache
+    print("_test_ease_switch_glides_monotonically_toward_target: PASS")
+
+
+def _test_ease_switch_classify_value_unaffected():
+    # classify_value() (used only by the ADR-453 scene log) must keep returning
+    # the RAW instantaneous target, never the eased intermediate value, even
+    # while switch="ease" is actively gliding elsewhere via __call__().
+    est = ForegroundScaleEstimator(wide_value=-1.0, closeup_value=1.0, threshold_high=4.0,
+                                   switch="ease", decay=0.5)
+    est(divergence=0.0)  # establishes a baseline away from -1.0 (closeup_value=1.0)
+    est(divergence=5.0)  # starts the glide toward target=-1.0
+    assert est.ease_value != -1.0, "sanity: still mid-glide, not yet at the target"
+    assert est.classify_value(5.0) == -1.0, \
+        "classify_value() must always return the raw classified target, not the eased value"
+    assert est.classify_value(0.0) == 1.0  # closeup, unaffected by the ease glide in progress
+    print("_test_ease_switch_classify_value_unaffected: PASS")
+
+
+def _test_switch_snap_is_default_and_byte_identical_to_before():
+    # Backward compatibility: constructing without `switch` at all (every
+    # existing call site) must behave exactly like switch="snap" -- the
+    # original cached-mapper, instant-snap __call__() path, unchanged.
+    est_default = ForegroundScaleEstimator(wide_value=1.0, closeup_value=-1.0, threshold_high=4.0)
+    assert est_default.switch == "snap"
+    fn_a = est_default(divergence=10.0)
+    fn_b = est_default(divergence=9.0)
+    assert fn_a is fn_b
+    assert len(est_default._mapper_fn_for_cache) == 1
+    print("_test_switch_snap_is_default_and_byte_identical_to_before: PASS")
+
+
 def _test_filename_and_comment_tags_independent_of_convergence_lock():
     # constant mode (default): no "fsl" tag, no shot_lock comment fields at all.
     args_constant = _base_args()
@@ -410,6 +470,9 @@ def main():
     _test_classify_3way()
     _test_3way_with_mid_value_none_falls_back_to_closeup()
     _test_call_returns_cached_mapper_function()
+    _test_ease_switch_glides_monotonically_toward_target()
+    _test_ease_switch_classify_value_unaffected()
+    _test_switch_snap_is_default_and_byte_identical_to_before()
     _test_filename_and_comment_tags_independent_of_convergence_lock()
     _test_apply_divergence_resolves_mapper_fn_once_per_call()
     _test_apply_divergence_mapper_matches_classified_foreground_scale()

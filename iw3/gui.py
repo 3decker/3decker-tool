@@ -98,6 +98,11 @@ from .shot_lock_estimator import (
 DEFAULT_FOREGROUND_SCALE_LOCK_WIDE = 0.0
 DEFAULT_FOREGROUND_SCALE_LOCK_CLOSEUP = 0.0
 DEFAULT_FOREGROUND_SCALE_LOCK_THRESHOLD_HIGH = 4.0
+# ADR-455: deliberately its OWN default ("snap", not Convergence's DEFAULT_SHOT_LOCK_SWITCH
+# "snap_ramp") -- Foreground Scale's switch menu only ever has snap/ease, see
+# foreground_scale_estimator.py.
+DEFAULT_FOREGROUND_SCALE_LOCK_SWITCH = "snap"
+DEFAULT_FOREGROUND_SCALE_LOCK_SMOOTHING = 0.9
 
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
@@ -2686,6 +2691,49 @@ class MainFrame(wx.Frame):
               "Same Invert caveat as Strength Threshold (High) above: \"at or below this = Close-Up\" "
               "assumes Auto 3D Strength's Invert option is ON."))
 
+        # ADR-455: how Shot Lock Foreground Scale moves between its locked values --
+        # a direct analog of Convergence Plane's own Switch Style (cbo_convergence_lock_switch)
+        # above, but deliberately only snap/ease (never snap_ramp/blend -- see
+        # foreground_scale_estimator.py's module docstring for why those don't apply here).
+        self.lbl_foreground_scale_lock_switch = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Switch Style"))
+        self.cbo_foreground_scale_lock_switch = wx.ComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["snap", "ease"],
+            name="cbo_foreground_scale_lock_switch")
+        self.cbo_foreground_scale_lock_switch.SetEditable(False)
+        self.cbo_foreground_scale_lock_switch.SetStringSelection(DEFAULT_FOREGROUND_SCALE_LOCK_SWITCH)
+        self.cbo_foreground_scale_lock_switch.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode. How it moves between Wide/Mid/Close-Up Value "
+              "when a scene locks in a different one.\n"
+              "snap (default): jumps straight to the new value the instant a scene reclassifies -- "
+              "simplest, matches today's original behavior exactly, but can look like a visible pop.\n"
+              "ease: the SAME locked decision as snap -- every scene still lands on exactly one of your "
+              "values, never in between -- but glides there with a smooth, continuously-tapering chase "
+              "(speed set by Smoothing below) instead of jumping in one step.\n"
+              "Independent of Convergence Plane's own Switch Style above -- the two settings never share "
+              "state. Unlike Convergence's menu, there's no snap_ramp or blend option here: those exist "
+              "to smooth out noisy CLIP visual judgments before trusting a decision, and Foreground "
+              "Scale's own decision (driven by the exact 3D Strength number in effect) never has that "
+              "kind of noise to settle in the first place.\n"
+              "Recommended: ease if you want the transition itself to be invisible; snap (default) if "
+              "you're fine with an instant change at each scene cut."))
+        self.cbo_foreground_scale_lock_switch.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_foreground_scale_lock_switch)
+
+        self.lbl_foreground_scale_lock_smoothing = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Smoothing"))
+        self.cbo_foreground_scale_lock_smoothing = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["0.95", "0.9", "0.8", "0.6"],
+            name="cbo_foreground_scale_lock_smoothing")
+        self.cbo_foreground_scale_lock_smoothing.SetValue(f"{DEFAULT_FOREGROUND_SCALE_LOCK_SMOOTHING:.2f}")
+        self.cbo_foreground_scale_lock_smoothing.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode with Switch Style set to ease. Controls how "
+              "slowly the glide chases a newly locked value -- same decay idea as Convergence Smoothing/ "
+              "Convergence Plane's own shot_lock ease above.\n"
+              "Higher = slower, smoother glide. Lower = snappier, reaches the new value sooner.\n"
+              "No effect at all while Switch Style is snap (the default).\n"
+              "Recommended: 0.9 (default) is a reasonable starting point -- try your own footage and "
+              "judge by eye."))
+
         # ADR-453: Foreground Scale's own scene log, a direct analog of Convergence
         # Plane's "Log Convergence Value per Scene" (chk_convergence_scene_log) above
         # but for this completely separate feature/state -- its own file, its own
@@ -4120,6 +4168,10 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.lbl_foreground_scale_lock_threshold_low,
                                   (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_foreground_scale_lock_threshold_low, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_switch, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_switch, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_smoothing, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_smoothing, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_foreground_scale_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.lbl_edge_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_edge_dilation, (k, 1), flag=wx.EXPAND)
@@ -11446,6 +11498,7 @@ class MainFrame(wx.Frame):
             self.cbo_foreground_scale_lock_closeup,
             self.cbo_foreground_scale_lock_threshold_high,
             self.cbo_foreground_scale_lock_threshold_low,
+            self.cbo_foreground_scale_lock_smoothing,
             self.cbo_foreground_pop,
             self.cbo_foreground_pop_threshold_low,
             self.cbo_foreground_pop_threshold_high,
@@ -11909,11 +11962,29 @@ class MainFrame(wx.Frame):
                   self.lbl_foreground_scale_lock_mid, self.cbo_foreground_scale_lock_mid,
                   self.lbl_foreground_scale_lock_closeup, self.cbo_foreground_scale_lock_closeup,
                   self.lbl_foreground_scale_lock_threshold_high, self.cbo_foreground_scale_lock_threshold_high,
-                  self.lbl_foreground_scale_lock_threshold_low, self.cbo_foreground_scale_lock_threshold_low):
+                  self.lbl_foreground_scale_lock_threshold_low, self.cbo_foreground_scale_lock_threshold_low,
+                  self.lbl_foreground_scale_lock_switch, self.cbo_foreground_scale_lock_switch):
             c.Enable(mode == "shot_lock")
+        # ADR-455: Smoothing has its OWN extra gate (Switch Style == ease) on top
+        # of this one -- re-evaluate it together whenever Mode changes.
+        self.update_foreground_scale_lock_switch()
 
     def on_changed_cbo_foreground_scale_mode(self, event):
         self.update_foreground_scale_mode()
+
+    def update_foreground_scale_lock_switch(self):
+        """ADR-455: mirrors update_convergence_cut_smooth()'s own pattern --
+        Smoothing only ever means something with BOTH Foreground Scale Mode set
+        to shot_lock AND Switch Style set to ease, so it needs its own narrower
+        gate on top of update_foreground_scale_mode()'s plain mode check above."""
+        mode = self.cbo_foreground_scale_mode.GetClientData(self.cbo_foreground_scale_mode.GetSelection())
+        switch = self.cbo_foreground_scale_lock_switch.GetValue()
+        on = (mode == "shot_lock" and switch == "ease")
+        self.lbl_foreground_scale_lock_smoothing.Enable(on)
+        self.cbo_foreground_scale_lock_smoothing.Enable(on)
+
+    def on_changed_cbo_foreground_scale_lock_switch(self, event):
+        self.update_foreground_scale_lock_switch()
 
     def update_convergence_cut_smooth(self):
         # Meaningful in two unrelated cases: (1) Hold Steady Per Scene is checked (any AI
@@ -12731,6 +12802,9 @@ class MainFrame(wx.Frame):
                                allow_empty=True):
             self.show_validation_error_message(T("Strength Threshold (Low)"), 0.0, 100.0)
             return None
+        if not validate_number(self.cbo_foreground_scale_lock_smoothing.GetValue(), 0.0, 0.999):
+            self.show_validation_error_message(T("Smoothing"), 0.0, 0.999)
+            return None
 
         resolution = self.cbo_resolution.GetValue()
         if resolution == "Default" or resolution == "":
@@ -13086,6 +13160,8 @@ class MainFrame(wx.Frame):
             # an empty box means "plain 2-way split" -- None, not a parsed float.
             foreground_scale_lock_threshold_low=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_foreground_scale_lock_threshold_low.GetValue()),
+            foreground_scale_lock_switch=self.cbo_foreground_scale_lock_switch.GetValue(),
+            foreground_scale_lock_smoothing=float(self.cbo_foreground_scale_lock_smoothing.GetValue()),
             foreground_scale_scene_log=self.chk_foreground_scale_scene_log.GetValue(),
             foreground_pop=float(self.cbo_foreground_pop.GetValue()),
             foreground_pop_threshold_low=float(self.cbo_foreground_pop_threshold_low.GetValue()) / 100.0,
@@ -14495,6 +14571,13 @@ class MainFrame(wx.Frame):
             self.cbo_foreground_scale_lock_threshold_low.SetValue("")
         else:
             _apply_combo_value(self.cbo_foreground_scale_lock_threshold_low, _fs_threshold_low_restore)
+        _apply_combo_value(
+            self.cbo_foreground_scale_lock_switch,
+            getattr(args, "foreground_scale_lock_switch", DEFAULT_FOREGROUND_SCALE_LOCK_SWITCH))
+        _apply_combo_value(
+            self.cbo_foreground_scale_lock_smoothing,
+            getattr(args, "foreground_scale_lock_smoothing", DEFAULT_FOREGROUND_SCALE_LOCK_SMOOTHING))
+        self.update_foreground_scale_lock_switch()
         self.chk_foreground_scale_scene_log.SetValue(bool(getattr(args, "foreground_scale_scene_log", False)))
         _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
         _apply_combo_value(
@@ -38884,6 +38967,109 @@ def _self_test_foreground_scale_scene_log_gui_and_cli():
     print("_self_test_foreground_scale_scene_log_gui_and_cli: PASS")
 
 
+def _self_test_foreground_scale_lock_switch_gui_and_cli():
+    """ADR-455: Foreground Scale Shot Lock's new "ease" switch (parallel to, but
+    independent from, Convergence Plane's own Switch Style/ease) -- the Switch
+    Style combo must offer only snap/ease (never snap_ramp/blend, out of scope
+    for this feature -- see foreground_scale_estimator.py's module docstring);
+    Smoothing must enable ONLY when BOTH Foreground Scale Mode is shot_lock AND
+    Switch Style is ease; both widgets must round-trip through parse_args()/the
+    CLI command/restore; and a "snap" (default) run must leave both the
+    filename tag and the embedded comment metadata byte-for-byte unchanged
+    from before this feature existed (see test_iw3_foreground_scale_shot_lock.py
+    for the equivalent non-GUI/estimator-level backward-compatibility checks)."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        switch_items = list(frame.cbo_foreground_scale_lock_switch.GetItems())
+        assert switch_items == ["snap", "ease"], switch_items
+
+        # Default state: Foreground Scale Mode constant -> Switch Style/Smoothing
+        # both disabled (same cluster as the other foreground_scale_lock_* widgets).
+        frame.cbo_foreground_scale_mode.SetSelection(0)  # Constant
+        frame.update_foreground_scale_mode()
+        assert not frame.cbo_foreground_scale_lock_switch.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_smoothing.IsEnabled()
+
+        # Shot Lock + snap (default): Switch Style enables, Smoothing stays disabled.
+        frame.cbo_foreground_scale_mode.SetSelection(1)  # Shot Lock
+        frame.update_foreground_scale_mode()
+        assert frame.cbo_foreground_scale_lock_switch.IsEnabled()
+        assert frame.cbo_foreground_scale_lock_switch.GetValue() == "snap"
+        assert not frame.cbo_foreground_scale_lock_smoothing.IsEnabled(), \
+            "Smoothing must stay disabled while Switch Style is snap"
+
+        # Shot Lock + ease: Smoothing also enables now.
+        frame.cbo_foreground_scale_lock_switch.SetValue("ease")
+        frame.on_changed_cbo_foreground_scale_lock_switch(wx.CommandEvent())
+        assert frame.cbo_foreground_scale_lock_smoothing.IsEnabled(), \
+            "Smoothing must enable once Switch Style is ease"
+
+        # Switching back to Constant mode must disable Smoothing again even
+        # though Switch Style is still showing ease -- mode AND switch both gate it.
+        frame.cbo_foreground_scale_mode.SetSelection(0)  # Constant
+        frame.update_foreground_scale_mode()
+        assert not frame.cbo_foreground_scale_lock_switch.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_smoothing.IsEnabled(), \
+            "Smoothing must disable again once Foreground Scale Mode leaves shot_lock"
+
+        # Independence from Convergence Plane's own Switch Style.
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_lock_switch.IsEnabled(), \
+            "Foreground Scale's own Switch Style must never enable Convergence Plane's"
+
+        frame.cbo_foreground_scale_mode.SetSelection(1)  # Shot Lock
+        frame.update_foreground_scale_mode()
+        frame.cbo_foreground_scale_lock_switch.SetValue("ease")
+        frame.on_changed_cbo_foreground_scale_lock_switch(wx.CommandEvent())
+        frame.cbo_foreground_scale_lock_smoothing.SetValue("0.6")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.foreground_scale_lock_switch == "ease"
+        assert args.foreground_scale_lock_smoothing == 0.6
+
+        cmd = frame.get_cli_command()
+        assert "--foreground-scale-lock-switch" in cmd and "ease" in cmd, cmd
+        assert "--foreground-scale-lock-smoothing" in cmd, cmd
+
+        frame.cbo_foreground_scale_lock_switch.SetValue("snap")
+        frame.on_changed_cbo_foreground_scale_lock_switch(wx.CommandEvent())
+        frame.cbo_foreground_scale_lock_smoothing.SetValue("0.9")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_foreground_scale_lock_switch.GetValue() == "ease", \
+            "restore must bring Switch Style back"
+        assert frame.cbo_foreground_scale_lock_smoothing.GetValue() == "0.6", \
+            "restore must bring Smoothing back"
+        assert frame.cbo_foreground_scale_lock_smoothing.IsEnabled(), \
+            "restore must re-apply the enable state for the restored switch"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # Round-trip through the real CLI parser too, not just the in-memory args object.
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args([
+        "-i", "a.mp4", "-o", "o",
+        "--foreground-scale-mode", "shot_lock",
+        "--foreground-scale-lock-switch", "ease",
+        "--foreground-scale-lock-smoothing", "0.6",
+    ])
+    assert reparsed.foreground_scale_lock_switch == "ease"
+    assert reparsed.foreground_scale_lock_smoothing == 0.6
+
+    # Defaults (never passed at all) must be exactly today's unchanged values.
+    reparsed_default = parser.parse_args(["-i", "a.mp4", "-o", "o"])
+    assert reparsed_default.foreground_scale_lock_switch == "snap"
+    assert reparsed_default.foreground_scale_lock_smoothing == 0.9
+
+    print("_self_test_foreground_scale_lock_switch_gui_and_cli: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -39144,6 +39330,7 @@ def _run_self_tests():
         _self_test_foreground_scale_lock_gui_and_cli,
         _self_test_foreground_scale_lock_mid_disabled,
         _self_test_foreground_scale_scene_log_gui_and_cli,
+        _self_test_foreground_scale_lock_switch_gui_and_cli,
     ]
     failures = []
     for test in tests:

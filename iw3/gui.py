@@ -2783,32 +2783,72 @@ class MainFrame(wx.Frame):
               "Recommended: on if you want a record of what Foreground Scale actually used per scene "
               "(especially useful while tuning Shot Lock); off otherwise."))
 
-        # ADR-456: "Combine Scene Logs" -- real follow-up request: decker wanted the
-        # 3 logs just above (3D Strength / Convergence / Foreground Scale) merged
-        # into one file instead of 3 separate ones. GUI-only, no CLI flag (same
-        # pattern as the GUI's other checkbox-only settings) -- see
-        # set_state_args() in iw3/utils.py, the single place that forces the 3
-        # underlying flags on whenever this is checked.
+        # ADR-456/459: "Combine Scene Logs" -- real follow-up request: decker
+        # wanted the 4 logs just above/below (3D Strength / Convergence /
+        # Foreground Scale / Edge Fix) merged into one file instead of 4
+        # separate ones. GUI-only, no CLI flag (same pattern as the GUI's
+        # other checkbox-only settings) -- see set_state_args() in
+        # iw3/utils.py, the single place that forces the 4 underlying flags
+        # on whenever this is checked.
         self.chk_combined_scene_log = wx.CheckBox(
-            self.cpn_stereo_stability_flicker.GetPane(), label=T("Combine all 3 scene logs into one file"),
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Combine all 4 scene logs into one file"),
             name="chk_combined_scene_log")
         self.chk_combined_scene_log.SetValue(False)
         self.chk_combined_scene_log.SetToolTip(
-            T("What it's for: normally 3D Strength, Convergence, and Foreground Scale each write their "
-              "own separate scene-by-scene text file. Checking this box makes them write ONE file "
-              "instead, with all 3 numbers on every scene's line -- so you don't have to open 3 files "
+            T("What it's for: normally 3D Strength, Convergence, Foreground Scale, and Edge Fix each "
+              "write their own separate scene-by-scene text file. Checking this box makes them write ONE "
+              "file instead, with all 4 values on every scene's line -- so you don't have to open 4 files "
               "side by side to compare them.\n"
-              "What else it does: turns ON the logging for all 3 of those features automatically, even "
-              "if their own checkboxes above are unchecked -- you only need to check this one box.\n"
+              "What else it does: turns ON the logging for all 4 of those features automatically, even "
+              "if their own checkboxes above/below are unchecked -- you only need to check this one box.\n"
               "Replaces, not adds: while this is checked, you get the one combined file INSTEAD of the "
-              "3 separate files -- the separate files are not written at all.\n"
+              "4 separate files -- the separate files are not written at all.\n"
               "Writes live, not just at the end: same as the logs above, the real file updates itself "
               "after every scene that finishes, clearly marked \"IN PROGRESS\" until the movie actually "
               "completes.\n"
               "Needs Auto 3D Strength turned on too: the 3D Strength column has nothing to show (and no "
               "file is written at all) unless \"Auto 3D Strength\" above is also checked.\n"
-              "Recommended: on if you want one easy-to-read file with all 3 numbers together; off if you "
-              "prefer the 3 separate files, or don't need any of them."))
+              "Recommended: on if you want one easy-to-read file with all 4 values together; off if you "
+              "prefer the separate files, or don't need any of them."))
+
+        # ADR-459: Edge Fix's own scene log, a direct analog of Foreground
+        # Scale's "Log Foreground Scale Value per Scene" above but for this
+        # completely separate --edge-dilation-mode feature (ADR-458) -- its
+        # own file, its own args.state key, never touched by
+        # update_edge_dilation_mode()'s own enable/disable gating (stays
+        # always-enabled, same as a constant-mode run still produces real,
+        # untagged scene rows -- see _format_edge_dilation_scene_log() in
+        # iw3/utils.py).
+        self.chk_edge_dilation_scene_log = wx.CheckBox(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Log Edge Fix Value per Scene"),
+            name="chk_edge_dilation_scene_log")
+        self.chk_edge_dilation_scene_log.SetValue(False)
+        self.chk_edge_dilation_scene_log.SetToolTip(
+            T("What it's for: writes a text file next to the finished video listing the Edge Fix [x, y] "
+              "pair used for each scene -- a direct analog of Foreground Scale's own \"Log Foreground "
+              "Scale Value per Scene\" above, but for this completely separate Edge Fix Mode setting (its "
+              "own file, its own independent state -- all of these logs can be turned on at once without "
+              "colliding or interfering).\n"
+              "Works in BOTH Edge Fix Mode settings: Constant (every scene logs the same single Edge Fix "
+              "pair above -- no [Wide/Mid/Close-Up] tag, since there's nothing to classify) and Shot Lock "
+              "(each scene is also tagged with which of Wide/Mid/Close-Up Value it actually locked in, by "
+              "exact match -- Edge Fix always snaps to one of the 3, never a blend).\n"
+              "Gets real per-scene boundaries on its own: it scans for scene cuts just for this log, even "
+              "if Scene Detection (and Automated Scene Batch) are OFF for the main conversion. The "
+              "one-time scan this costs is shared with Scene Detection/Scene Batch/Hybrid Frame Rate/the "
+              "other scene logs above (whichever ran first against this source wins; the rest get a free "
+              "cache hit).\n"
+              "Writes live, not just at the end: the real file updates itself after every scene that "
+              "finishes, clearly marked \"IN PROGRESS\" until the movie actually completes -- so "
+              "cancelling or a crash partway through still leaves a real, readable log of every scene "
+              "that finished before then.\n"
+              "Pros: a plain text file, nothing burned into the picture itself; lets you confirm Shot "
+              "Lock is actually tracking 3D Strength per scene the way you expect, without watching the "
+              "whole video.\n"
+              "Con: adds one small, independent scene-cut scan the first time nothing else has already "
+              "triggered one for this source.\n"
+              "Recommended: on if you want a record of what Edge Fix actually used per scene (especially "
+              "useful while tuning Shot Lock); off otherwise."))
 
         self.chk_depth_aa = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(), label=T("Depth Anti-aliasing"), name="chk_depth_aa")
         self.chk_depth_aa.SetValue(False)
@@ -4364,6 +4404,7 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.lbl_foreground_scale_lock_smoothing, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_foreground_scale_lock_smoothing, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_foreground_scale_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.chk_edge_dilation_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_combined_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.lbl_edge_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_edge_dilation, (k, 1), flag=wx.EXPAND)
@@ -13485,6 +13526,7 @@ class MainFrame(wx.Frame):
             # an empty box means "plain 2-way split" -- None, not a parsed float.
             edge_dilation_lock_threshold_low=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_edge_dilation_lock_threshold_low.GetValue()),
+            edge_dilation_scene_log=self.chk_edge_dilation_scene_log.GetValue(),
             inpaint_model=inpaint_model,
             inpaint_overlap_frames=inpaint_overlap_frames,
             mask_inner_dilation=mask_inner_dilation,
@@ -14886,6 +14928,7 @@ class MainFrame(wx.Frame):
             getattr(args, "foreground_scale_lock_smoothing", DEFAULT_FOREGROUND_SCALE_LOCK_SMOOTHING))
         self.update_foreground_scale_lock_switch()
         self.chk_foreground_scale_scene_log.SetValue(bool(getattr(args, "foreground_scale_scene_log", False)))
+        self.chk_edge_dilation_scene_log.SetValue(bool(getattr(args, "edge_dilation_scene_log", False)))
         self.chk_combined_scene_log.SetValue(bool(getattr(args, "combined_scene_log", False)))
         _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
         _apply_combo_value(
@@ -39513,6 +39556,55 @@ def _self_test_foreground_scale_scene_log_gui_and_cli():
     print("_self_test_foreground_scale_scene_log_gui_and_cli: PASS")
 
 
+def _self_test_edge_dilation_scene_log_gui_and_cli():
+    """ADR-459: chk_edge_dilation_scene_log must round-trip through
+    parse_args()/the CLI command/restore, default to off, and -- unlike the
+    edge_dilation_lock_* widgets above -- stay enabled regardless of Edge Fix
+    Mode (update_edge_dilation_mode() must never touch it), mirroring
+    Foreground Scale's own chk_foreground_scale_scene_log checkbox not being
+    part of a mode-only widget cluster."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.chk_edge_dilation_scene_log.GetValue() is False
+
+        # Must stay enabled in both Edge Fix Mode settings.
+        frame.cbo_edge_dilation_mode.SetSelection(0)  # Constant
+        frame.update_edge_dilation_mode()
+        assert frame.chk_edge_dilation_scene_log.IsEnabled()
+        frame.cbo_edge_dilation_mode.SetSelection(1)  # Shot Lock
+        frame.update_edge_dilation_mode()
+        assert frame.chk_edge_dilation_scene_log.IsEnabled()
+
+        frame.chk_edge_dilation_scene_log.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.edge_dilation_scene_log is True
+
+        cmd = frame.get_cli_command()
+        assert "--edge-dilation-scene-log" in cmd, cmd
+
+        frame.chk_edge_dilation_scene_log.SetValue(False)
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.chk_edge_dilation_scene_log.GetValue() is True, \
+            "restore must bring the checked state back"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--edge-dilation-scene-log"])
+    assert reparsed.edge_dilation_scene_log is True
+    reparsed_off = parser.parse_args(["-i", "a.mp4", "-o", "o"])
+    assert reparsed_off.edge_dilation_scene_log is False
+
+    print("_self_test_edge_dilation_scene_log_gui_and_cli: PASS")
+
+
 def _self_test_combined_scene_log_gui_and_metadata():
     """ADR-456: "Combine Scene Logs" -- chk_combined_scene_log must default to
     off and round-trip through parse_args()/restore, mirroring
@@ -39565,15 +39657,21 @@ def _self_test_combined_scene_log_merge():
     Python, no GPU/model/real movie needed:
 
     1. set_state_args() forces auto_divergence_scene_log/convergence_scene_log/
-       foreground_scale_scene_log all on whenever combined_scene_log is on (and
-       leaves them alone when it's off) -- the single place every caller relies
-       on, so turning on the one new checkbox is enough.
+       foreground_scale_scene_log/edge_dilation_scene_log all on whenever
+       combined_scene_log is on (and leaves them alone when it's off) -- the
+       single place every caller relies on, so turning on the one new
+       checkbox is enough.
     2. _format_combined_scene_log() against hand-computed scene lines, 3
-       separate time-weighted averages, and both sources' own shot-lock
-       tallies, merged by plain index -- including the strength_state=None
-       fallback (no crash, blank-ish 3D Strength column) and the no-fps
-       frame-number fallback.
-    3. End-to-end wiring through the real functions a real job calls: the 3
+       separate time-weighted averages, and all 3 float sources' own
+       shot-lock tallies, merged by plain index -- including the
+       strength_state=None fallback (no crash, blank-ish 3D Strength column)
+       and the no-fps frame-number fallback. ADR-459: also covers edl_state
+       omitted entirely (byte-for-byte unchanged from before that feature
+       existed -- the whole point of its default-None design), edl_state in
+       shot_lock mode with a real exact-match classification, and edl_state
+       left at plain constant mode (no classification tag at all, since
+       there's nothing to classify against).
+    3. End-to-end wiring through the real functions a real job calls: the 4
        individual writers' own write_live()/finish_*() must skip their OWN
        disk write (while still fully flushing/accumulating scene_records --
        the merge needs that data), the ONE merged file must appear instead,
@@ -39609,6 +39707,7 @@ def _self_test_combined_scene_log_merge():
     assert args_on.auto_divergence_scene_log is True
     assert args_on.convergence_scene_log is True
     assert args_on.foreground_scale_scene_log is True
+    assert args_on.edge_dilation_scene_log is True
 
     args_off = parser.parse_args(["-i", "a.mp4", "-o", "o", "--gpu", "-1"])
     args_off.combined_scene_log = False
@@ -39616,6 +39715,7 @@ def _self_test_combined_scene_log_merge():
     assert args_off.auto_divergence_scene_log is False
     assert args_off.convergence_scene_log is False
     assert args_off.foreground_scale_scene_log is False
+    assert args_off.edge_dilation_scene_log is False
 
     # Part 2: _format_combined_scene_log() -- hand-computed merge. All 3
     # sources share identical (start, end, frames) per scene here, matching
@@ -39670,6 +39770,52 @@ def _self_test_combined_scene_log_merge():
     assert "(IN PROGRESS -- conversion still running)" in text_live.splitlines()[0]
     assert "Average 3D Strength so far (time-weighted, 3 scene(s), conversion still running): 5.70" in text_live
 
+    # ADR-459: edl_state omitted entirely (every pre-ADR-459 caller) -> must
+    # still be byte-for-byte the output already asserted above -- re-confirm
+    # explicitly, not just implicitly by the assertions above never passing
+    # edl_state.
+    text_no_edl = U._format_combined_scene_log(strength_state, conv_state, fg_state, "movie_SBS.mp4", fps=1.0)
+    assert text_no_edl == text, "omitting edl_state must be byte-for-byte identical to before ADR-459"
+
+    # ADR-459: edl_state in shot_lock mode -- Edge Fix's own [x, y] pair is
+    # SNAP-classified by EXACT tuple equality (never nearest-distance like the
+    # 2 float sources above), so each scene's recorded pair is deliberately
+    # one of wide/mid/closeup exactly.
+    edl_state_shot_lock = types.SimpleNamespace(
+        scene_records=[(0, 5, 5, (3, 2)), (5, 8, 3, (1, 1)), (8, 10, 2, (2, 1))],
+        meta=("shot_lock", (2, 1), ((3, 2), (2, 1), (1, 1))))
+    text_edl = U._format_combined_scene_log(strength_state, conv_state, fg_state, "movie_SBS.mp4", fps=1.0,
+                                            edl_state=edl_state_shot_lock)
+    edl_lines = text_edl.splitlines()
+    assert edl_lines[4] == "Edge Fix: shot_lock mode, wide 3/2, mid 2/1, close-up 1/1", edl_lines[4]
+    assert ("Scene 1   00:00:00 - 00:00:05   (5 frames)   3D Strength: 3.0 (raw 3.000)   "
+            "Convergence: 0.30 [Wide]   Foreground Scale: 0.80 [Wide]   Edge Fix: 3/2 [Wide]") in edl_lines, edl_lines
+    assert ("Scene 2   00:00:05 - 00:00:08   (3 frames)   3D Strength: 10.0 (raw 10.000)   "
+            "Convergence: 0.70 [Close-Up]   Foreground Scale: 1.20 [Close-Up]   "
+            "Edge Fix: 1/1 [Close-Up]") in edl_lines, edl_lines
+    assert ("Scene 3   00:00:08 - 00:00:10   (2 frames)   3D Strength: 6.0 (raw 6.000)   "
+            "Convergence: 0.50 [Mid]   Foreground Scale: 0.95 [Wide]   Edge Fix: 2/1 [Mid]") in edl_lines, edl_lines
+    assert "Edge Fix shot classification: 1 wide, 1 mid, 1 close-up (of 3 scene(s))" in edl_lines, edl_lines
+    # No "Average Edge Fix" line anywhere -- averaging an [x, y] pair is
+    # deliberately not a thing this feature does (see _EdgeDilationSceneLogState's
+    # own module note).
+    assert not any("Average Edge Fix" in line for line in edl_lines), edl_lines
+
+    # ADR-459: edl_state left at plain constant mode -- every scene logs the
+    # same single pair, no [Wide/Mid/Close-Up] tag at all (nothing to classify
+    # against), and no classification tally line either.
+    edl_state_constant = types.SimpleNamespace(
+        scene_records=[(0, 5, 5, (2, 1)), (5, 8, 3, (2, 1)), (8, 10, 2, (2, 1))],
+        meta=("constant", (2, 1), None))
+    text_edl_constant = U._format_combined_scene_log(strength_state, conv_state, fg_state, "movie_SBS.mp4", fps=1.0,
+                                                      edl_state=edl_state_constant)
+    edl_constant_lines = text_edl_constant.splitlines()
+    assert edl_constant_lines[4] == "Edge Fix: constant mode, value 2/1", edl_constant_lines[4]
+    assert ("Scene 1   00:00:00 - 00:00:05   (5 frames)   3D Strength: 3.0 (raw 3.000)   "
+            "Convergence: 0.30 [Wide]   Foreground Scale: 0.80 [Wide]   Edge Fix: 2/1") in edl_constant_lines, \
+        edl_constant_lines
+    assert not any("Edge Fix shot classification" in line for line in edl_constant_lines), edl_constant_lines
+
     # Part 3: end-to-end wiring through the real functions a real job calls.
     with tempfile.TemporaryDirectory() as tmp_out:
         input_name = "movie_combined.mp4"
@@ -39678,6 +39824,7 @@ def _self_test_combined_scene_log_merge():
             "--auto-divergence", "--auto-divergence-scene-log",
             "--convergence-mode", "sod_v1", "--convergence-scene-log",
             "--foreground-scale-scene-log",
+            "--edge-dilation-scene-log",
         ])
         args.video_extension = ".mkv"
         args.combined_scene_log = True  # GUI-only, set directly (no CLI flag)
@@ -39685,11 +39832,13 @@ def _self_test_combined_scene_log_merge():
 
         U.reset_convergence_scene_log(args, input_path=input_name, output_path=tmp_out)
         U.reset_foreground_scale_scene_log(args, input_path=input_name, output_path=tmp_out)
+        U.reset_edge_dilation_scene_log(args, input_path=input_name, output_path=tmp_out)
         U.reset_combined_scene_log(args, input_path=input_name, output_path=tmp_out)
 
         conv_st = args.state["_convergence_scene_log"]
         fg_st = args.state["_foreground_scale_scene_log"]
-        assert conv_st.combined_mode is True and fg_st.combined_mode is True
+        edl_st = args.state["_edge_dilation_scene_log"]
+        assert conv_st.combined_mode is True and fg_st.combined_mode is True and edl_st.combined_mode is True
 
         call_args = (input_name, tmp_out)
         args.state["_nt_autodiv_pending_log_info"] = ("process_video", call_args)
@@ -39704,41 +39853,49 @@ def _self_test_combined_scene_log_merge():
         combined_log_path = _p.join(tmp_out, base + "_combined_scene_log.txt")
         conv_log_path = _p.join(tmp_out, base + "_convergence_log.txt")
         fg_log_path = _p.join(tmp_out, base + "_foreground_scale_log.txt")
+        edl_log_path = _p.join(tmp_out, base + "_edge_fix_scene_log.txt")
         strength_log_path = _p.join(tmp_out, base + "_3d_strength_log.txt")
 
-        # Scene 1 closes on all 3 sources.
+        # Scene 1 closes on all 4 sources.
         conv_st.record(0.3, True)
         fg_st.record(0.8, True)
+        edl_st.record((3, 2), True)
         st._scene_record([3.0, 10.0], [False, True])  # closes scene 1 (3.0), opens scene 2 (10.0)
         U._maybe_write_combined_scene_log_live(args)
-        assert _p.isfile(combined_log_path), "the merged live file must exist once all 3 sources have a scene"
+        assert _p.isfile(combined_log_path), "the merged live file must exist once all 4 sources have a scene"
         assert not _p.exists(conv_log_path), \
             "the separate Convergence file must never be written while combined is on"
         assert not _p.exists(fg_log_path), \
             "the separate Foreground Scale file must never be written while combined is on"
+        assert not _p.exists(edl_log_path), \
+            "the separate Edge Fix file must never be written while combined is on"
         text_after_1 = open(combined_log_path, encoding="utf-8").read()
         assert "IN PROGRESS" in text_after_1, text_after_1
         assert "Scene 1" in text_after_1 and "Scene 2" not in text_after_1, text_after_1
+        assert "Edge Fix: 3/2" in text_after_1, text_after_1
 
-        # Scene 2 closes on all 3 sources -- the SAME live file must update again.
+        # Scene 2 closes on all 4 sources -- the SAME live file must update again.
         conv_st.record(0.7, True)
         fg_st.record(1.2, True)
+        edl_st.record((1, 1), True)
         st._scene_record([6.0], [True])  # closes scene 2 (10.0), opens scene 3 (6.0)
         U._maybe_write_combined_scene_log_live(args)
         text_after_2 = open(combined_log_path, encoding="utf-8").read()
         assert "Scene 2" in text_after_2, text_after_2
 
-        # The movie "finishes" -- real call order: Convergence's and Foreground
-        # Scale's own finish_*() run first (inside the real wrapped process_video
-        # body) and must flush their last open scene but skip their own write;
-        # THEN autodiv.py's _finish_scene_log() (fresh()'s post-call hook) is what
-        # actually triggers the merged file's FINAL write.
+        # The movie "finishes" -- real call order: Convergence's, Foreground
+        # Scale's, and Edge Fix's own finish_*() run first (inside the real
+        # wrapped process_video body) and must flush their last open scene but
+        # skip their own write; THEN autodiv.py's _finish_scene_log() (fresh()'s
+        # post-call hook) is what actually triggers the merged file's FINAL write.
         conv_st.record(0.5, False)       # scene 3, left open on purpose
         fg_st.record(0.95, False)        # scene 3, left open on purpose
+        edl_st.record((2, 1), False)     # scene 3, left open on purpose
         U.finish_convergence_scene_log(args, input_name, tmp_out)
         U.finish_foreground_scale_scene_log(args, input_name, tmp_out)
-        assert not _p.exists(conv_log_path) and not _p.exists(fg_log_path), \
-            "the 2 separate files must still never be written, even at finish time"
+        U.finish_edge_dilation_scene_log(args, input_name, tmp_out)
+        assert not _p.exists(conv_log_path) and not _p.exists(fg_log_path) and not _p.exists(edl_log_path), \
+            "the 3 separate files must still never be written, even at finish time"
         AD._finish_scene_log(st, args, "process_video", call_args)
         assert not _p.exists(strength_log_path), \
             "the separate 3D Strength file must never be written while combined is on"
@@ -39747,6 +39904,7 @@ def _self_test_combined_scene_log_merge():
         assert "IN PROGRESS" not in final_text, final_text
         assert "Average 3D Strength for whole movie (time-weighted)" in final_text, final_text
         assert "Scene 3" in final_text, "the final write must include the scene only closed by the finish flush"
+        assert "Edge Fix: 2/1" in final_text, final_text
         assert not _p.exists(combined_log_path + ".tmp"), "the final write must be atomic too"
 
     print("_self_test_combined_scene_log_merge: PASS")
@@ -40117,6 +40275,7 @@ def _run_self_tests():
         _self_test_edge_dilation_lock_gui_and_cli,
         _self_test_edge_dilation_lock_mid_disabled,
         _self_test_foreground_scale_scene_log_gui_and_cli,
+        _self_test_edge_dilation_scene_log_gui_and_cli,
         _self_test_combined_scene_log_gui_and_metadata,
         _self_test_combined_scene_log_merge,
         _self_test_foreground_scale_lock_switch_gui_and_cli,

@@ -4345,9 +4345,15 @@ def _build_iw3_comment_metadata(args, video=True):
     # recorded on the flag alone, same "only shown when meaningful" convention.
     if getattr(args, "foreground_scale_scene_log", False):
         comment_parts.append("iw3_foreground_scale_scene_log=1")
-    # ADR-456: "Combine Scene Logs" -- independent of every mode above (it just
-    # forces the 3 flags above on, see set_state_args()), same "only shown when
-    # meaningful" convention as every other optional tag here.
+    # ADR-459: independent of edge_dilation_mode -- same "only shown when
+    # meaningful" convention as --foreground-scale-scene-log's own tag just
+    # above (meaningful in constant mode too, since every scene still logs a
+    # real, untagged [x, y] pair there).
+    if getattr(args, "edge_dilation_scene_log", False):
+        comment_parts.append("iw3_edge_dilation_scene_log=1")
+    # ADR-456/459: "Combine Scene Logs" -- independent of every mode above (it
+    # just forces the 4 flags above on, see set_state_args()), same "only
+    # shown when meaningful" convention as every other optional tag here.
     if getattr(args, "combined_scene_log", False):
         comment_parts.append("iw3_combined_scene_log=1")
     if getattr(args, "foreground_pop", 0.0) != 0.0:
@@ -5305,6 +5311,242 @@ def finish_foreground_scale_scene_log(args, input_path, output_path, fps=None):
 
 
 # --------------------------------------------------------------------------
+# "Log Edge Fix Value per Scene" (--edge-dilation-scene-log, ADR-459): a direct
+# structural analog of the Foreground Scale scene log just above, but for
+# ADR-458's completely separate --edge-dilation-mode shot_lock feature (see
+# edge_dilation_estimator.py). Deliberately its own class/state key/pending-
+# queue/helpers -- never shared with any of the other 3 scene logs -- so all 4
+# can run at the same time, writing 4 separate files, with zero shared mutable
+# state.
+#
+# ONE REAL DIFFERENCE from every other scene log here: Edge Fix's value is an
+# [x, y] integer dilation-loop-count PAIR (dilation.py's edge_dilation_parse()),
+# not a continuous float -- and by ADR-458's own design it is SNAP ONLY, so
+# every frame within one scene already carries the EXACT SAME pair. There is
+# therefore nothing to average: `pending`/`scene_records` carry the literal
+# (x, y) tuple itself, and flush() takes the most common tuple seen this scene
+# (collections.Counter) rather than a mean -- a safe, simple way to get "the
+# scene's value" without assuming every call site pushes in perfectly uniform
+# batches. Classification against Wide/Mid/Close-Up is therefore exact-tuple-
+# equality (_classify_shot_lock_pair_edge_dilation()), not nearest-distance.
+# --------------------------------------------------------------------------
+class _EdgeDilationSceneLogState():
+    """Lives at args.state["_edge_dilation_scene_log"]. Reset once per fresh
+    movie (reset_edge_dilation_scene_log()) and the COMPLETE, final version is
+    always written once at the end of that movie
+    (finish_edge_dilation_scene_log()) -- same live-write-during-run +
+    finish-overwrites-with-final shape as _ForegroundScaleSceneLogState,
+    including the atomic tmp-then-os.replace() write.
+
+    `pending` holds (value, cut_after) tuples in INPUT-frame order, pushed by
+    apply_divergence() and drained one per actual OUTPUT frame -- same
+    ADR-237 buffering reasoning as every other scene log's own `pending`
+    queue, kept as a completely separate deque/object so none of the 4
+    features ever interfere with each other."""
+
+    def __init__(self):
+        self.scene_records = []    # [(start_frame, end_frame, frame_count, (x, y)), ...]
+        self.meta = None            # (mode, edge_dilation_value, lock_values)
+        self.pending = collections.deque()
+        self._scene_open = False
+        self._scene_start = 0
+        self._scene_frames = 0
+        self._scene_values = []
+        self._scene_total_frames = 0
+        self.live_path = None
+        self.live_output_filename = None
+        self.live_fps = None
+        # ADR-456/459: same "Combine Scene Logs" meaning as the other 3 scene
+        # logs' own combined_mode -- state keeps accumulating, only this
+        # feature's own disk write is skipped.
+        self.combined_mode = False
+
+    def record(self, value, cut_after):
+        """Buffers one OUTPUT frame's Edge Fix (x, y) pair, closing the scene
+        right after a frame flagged cut_after=True -- identical timing to
+        _ForegroundScaleSceneLogState.record()."""
+        if not self._scene_open:
+            self._scene_open = True
+            self._scene_start = self._scene_total_frames
+        self._scene_frames += 1
+        self._scene_values.append(tuple(value))
+        self._scene_total_frames += 1
+        if cut_after:
+            self.flush()
+            self.write_live()
+
+    def flush(self):
+        if self._scene_open and self._scene_frames > 0:
+            # Mode (most common pair), not a mean -- see this section's own
+            # module note for why that's the right notion of "the scene's
+            # value" for a SNAP-ONLY integer pair.
+            value = collections.Counter(self._scene_values).most_common(1)[0][0]
+            self.scene_records.append(
+                (self._scene_start, self._scene_total_frames, self._scene_frames, value))
+        self._scene_open = False
+        self._scene_frames = 0
+        self._scene_values = []
+
+    def write_live(self):
+        """ADR-405-style live rewrite -- see _ForegroundScaleSceneLogState.write_live()
+        for the full rationale. Never raises -- a failed live write must never
+        interrupt a real, multi-hour conversion."""
+        if not self.live_path or not self.scene_records or self.combined_mode:
+            return
+        try:
+            text = _format_edge_dilation_scene_log(self, self.live_output_filename, self.live_fps,
+                                                   in_progress=True)
+            tmp = f"{self.live_path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.live_path)
+        except Exception as e:                                           # noqa: BLE001
+            print(f"[edge-dilation-log] could not write live progress "
+                  f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
+def reset_edge_dilation_scene_log(args, input_path=None, output_path=None, fps=None):
+    """Called once per fresh movie, from the exact same call sites that call
+    reset_foreground_scale_scene_log() -- a direct structural analog of that
+    function, for the completely independent --edge-dilation-scene-log
+    feature. `fps`/`input_path`/`output_path` behave identically (see that
+    function's own docstring)."""
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict):
+        return
+    log_state = _EdgeDilationSceneLogState()
+    # ADR-456: see _ForegroundScaleSceneLogState's own combined_mode note above.
+    log_state.combined_mode = bool(getattr(args, "combined_scene_log", False))
+    if (getattr(args, "edge_dilation_scene_log", False)
+            and input_path is not None and output_path is not None):
+        try:
+            real_output, log_path = _edge_dilation_scene_log_paths(args, input_path, output_path)
+            log_state.live_path = log_path
+            log_state.live_output_filename = real_output
+            # _convergence_scene_log_fps() is a plain, stateless fps lookup (no
+            # convergence-specific state at all) -- reused as-is rather than
+            # duplicated, same "real fps Final Render actually encodes at" logic
+            # every one of these logs needs.
+            log_state.live_fps = fps if fps is not None else _convergence_scene_log_fps(args, input_path)
+        except Exception as e:                                           # noqa: BLE001
+            print(f"[edge-dilation-log] could not resolve a live log path "
+                  f"({type(e).__name__}: {e}) -- will still write the complete "
+                  f"log once the movie finishes.", file=sys.stderr)
+    state["_edge_dilation_scene_log"] = log_state
+
+
+def _edge_dilation_scene_log_paths(args, input_path, output_path):
+    """(real output filename, scene-log path) for one movie -- a direct analog
+    of _foreground_scale_scene_log_paths(), swapping in its own distinct
+    "_edge_fix_scene_log.txt" suffix so it never collides with any of the other
+    3 scene logs (or the real job log)."""
+    job_log = _resolve_single_file_log_path(args, input_path, output_path)
+    base = job_log[:-len("_log.txt")] if job_log.endswith("_log.txt") else path.splitext(job_log)[0]
+    output = str(output_path)
+    if is_output_dir(output):
+        output = path.join(output, make_output_filename(input_path, args, video=is_video(str(input_path))))
+    return output, base + "_edge_fix_scene_log.txt"
+
+
+def _classify_shot_lock_pair_edge_dilation(pair, lock_values):
+    """ADR-459: Edge Fix's own classifier -- unlike _classify_shot_lock_mean()/
+    _classify_shot_lock_mean_foreground_scale()'s nearest-value matching
+    (needed because those features time-weight-average a float over the
+    scene), Edge Fix's [x, y] pair is SNAP-classified by EdgeDilationEstimator
+    (ADR-458) -- every frame in a scene already carries EXACTLY one of wide/
+    mid/closeup, never a blend. So this is a plain exact-tuple-equality
+    lookup, not a distance comparison. Returns None (no tag) if the pair
+    matches none of them -- defensive only, should not happen in shot_lock
+    mode."""
+    wide, mid, closeup = lock_values
+    if tuple(pair) == tuple(wide):
+        return "Wide"
+    if mid is not None and tuple(pair) == tuple(mid):
+        return "Mid"
+    if tuple(pair) == tuple(closeup):
+        return "Close-Up"
+    return None
+
+
+def _format_edge_dilation_scene_log(st, output_filename, fps, in_progress=False):
+    """`in_progress`: same meaning as _format_foreground_scale_scene_log()'s own
+    parameter. Covers both constant mode (every scene logs the same single
+    --edge-dilation pair -- there is no lock classification to show) and
+    shot_lock (each scene also tagged with which locked pair it used, by exact
+    match -- see _classify_shot_lock_pair_edge_dilation()). Unlike every other
+    scene log here, there is deliberately no "average" line: averaging two
+    [x, y] dilation pairs is meaningless (see this section's own module note)."""
+    meta = st.meta or ("constant", (0, 0), None)
+    mode, edge_dilation_value, lock_values = meta
+    if mode == "shot_lock" and lock_values is not None:
+        wide, mid, closeup = lock_values
+        mid_part = f", mid {mid[0]}/{mid[1]}" if mid is not None else ""
+        header = (f"Edge Fix: shot_lock mode, wide {wide[0]}/{wide[1]}{mid_part}, "
+                  f"close-up {closeup[0]}/{closeup[1]}")
+    else:
+        header = f"Edge Fix: constant mode, value {edge_dilation_value[0]}/{edge_dilation_value[1]}"
+    title = f"Edge Fix log -- {path.basename(str(output_filename))}"
+    if in_progress:
+        title += " (IN PROGRESS -- conversion still running)"
+    lines = [title, header]
+    if not fps:
+        lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
+    lines.append("")
+    shot_counts = {"Wide": 0, "Mid": 0, "Close-Up": 0}
+    for i, (start, end, frames, value) in enumerate(st.scene_records, 1):
+        span = (f"{_format_hms(start / fps)} - {_format_hms(end / fps)}" if fps
+               else f"frame {start} - {end}")
+        line = f"Scene {i}   {span}   ({frames} frames)   Edge Fix: {value[0]}/{value[1]}"
+        if lock_values is not None:
+            label = _classify_shot_lock_pair_edge_dilation(value, lock_values)
+            if label is not None:
+                shot_counts[label] += 1
+                line += f"   [{label}]"
+        lines.append(line)
+    lines.append("")
+    if lock_values is not None and st.scene_records:
+        so_far = " so far" if in_progress else ""
+        mid_part = f"{shot_counts['Mid']} mid, " if lock_values[1] is not None else ""
+        lines.append(
+            f"Shot classification{so_far}: {shot_counts['Wide']} wide, {mid_part}"
+            f"{shot_counts['Close-Up']} close-up (of {len(st.scene_records)} scene(s))")
+    return "\n".join(lines) + "\n"
+
+
+def finish_edge_dilation_scene_log(args, input_path, output_path, fps=None):
+    """Writes the "Log Edge Fix Value per Scene" text file for the
+    just-finished movie -- called from the exact same call sites that call
+    finish_foreground_scale_scene_log(), right next to each one. A direct
+    structural analog of that function for the independent
+    --edge-dilation-scene-log feature."""
+    if not getattr(args, "edge_dilation_scene_log", False):
+        return
+    state = getattr(args, "state", None)
+    st = state.get("_edge_dilation_scene_log") if isinstance(state, dict) else None
+    if st is None:
+        return
+    st.flush()
+    if not st.scene_records:
+        return
+    if getattr(args, "combined_scene_log", False):
+        # ADR-456: state stays fully flushed above -- only this feature's OWN
+        # file write is skipped, same as finish_foreground_scale_scene_log().
+        return
+    if fps is None:
+        fps = _convergence_scene_log_fps(args, input_path)
+    try:
+        real_output, log_path = _edge_dilation_scene_log_paths(args, input_path, output_path)
+        text = _format_edge_dilation_scene_log(st, real_output, fps)
+        tmp = f"{log_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, log_path)
+    except Exception as e:                                           # noqa: BLE001
+        print(f"[edge-dilation-log] could not write the Edge Fix scene log "
+              f"({type(e).__name__}: {e})", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
 # "Combine Scene Logs" (GUI-only --combined-scene-log, ADR-456): real follow-up
 # request -- decker wanted the 3 scene logs just above (3D Strength /
 # Convergence / Foreground Scale) merged into ONE file with all 3 numbers on
@@ -5337,6 +5579,12 @@ def finish_foreground_scale_scene_log(args, input_path, output_path, fps=None):
 # produces a combined file at all (no 3D Strength state to merge). Same
 # precondition the standalone "Log 3D Strength per Scene" checkbox already
 # has (it's greyed out unless Auto 3D Strength itself is on).
+#
+# ADR-459 added Edge Fix as a 4th, OPTIONAL source (_format_combined_scene_log()'s
+# own edl_state=None parameter) -- "optional" so every pre-ADR-459 caller/test
+# keeps getting byte-for-byte identical output. set_state_args() forces
+# edge_dilation_scene_log on too now (same single place as the other 3), so in
+# practice it is always present whenever combined_scene_log is on.
 # --------------------------------------------------------------------------
 class _CombinedSceneLogState():
     """Lives at args.state["_combined_scene_log"]. `written` tracks how many
@@ -5387,7 +5635,8 @@ def _combined_scene_log_paths(args, input_path, output_path):
     return output, base + "_combined_scene_log.txt"
 
 
-def _format_combined_scene_log(strength_state, conv_state, fg_state, output_filename, fps, in_progress=False):
+def _format_combined_scene_log(strength_state, conv_state, fg_state, output_filename, fps, in_progress=False,
+                               edl_state=None):
     """One text block merging the 3 independent per-scene logs above, by plain
     index (see this section's own module-level note for why that's correct
     here). `strength_state` may be None (Auto 3D Strength's add-on not active
@@ -5397,7 +5646,15 @@ def _format_combined_scene_log(strength_state, conv_state, fg_state, output_file
     that function lives in the add-on module, and importing it from core
     iw3/utils.py would be a bad reverse dependency (core -> add-on); that
     breakdown stays a nice-to-have only Auto 3D Strength's own standalone scan
-    tool shows."""
+    tool shows.
+
+    `edl_state` (ADR-459): Edge Fix's own 4th source, _EdgeDilationSceneLogState
+    or None. Defaults to None -- EVERY caller from before this feature existed
+    passes nothing here, and must keep getting byte-for-byte the same output
+    as before (no Edge Fix header line, no Edge Fix column, no Edge Fix
+    classification tally). Unlike the 3 sources above, there is no "average"
+    row for it -- see _EdgeDilationSceneLogState's own module note for why
+    averaging an [x, y] dilation pair is meaningless."""
     strength_records = list(getattr(strength_state, "scene_records", None) or [])
     strength_meta = getattr(strength_state, "scene_log_meta", None) or (
         "hybrid", 0.0, 0.0, 0.0, False, None, None, None, None)
@@ -5412,9 +5669,22 @@ def _format_combined_scene_log(strength_state, conv_state, fg_state, output_file
     fg_meta = getattr(fg_state, "meta", None) or ("constant", 0.0, None)
     fg_mode, fg_value, fg_lock_values = fg_meta
 
+    # ADR-459: edl_records stays None (not just empty) when edl_state itself is
+    # None -- that distinction is what every backward-compat branch below
+    # keys off of, so a caller that never passes edl_state gets identical
+    # output to before this feature existed.
+    if edl_state is not None:
+        edl_records = list(getattr(edl_state, "scene_records", None) or [])
+        edl_meta = getattr(edl_state, "meta", None) or ("constant", (0, 0), None)
+        edl_mode, edl_value, edl_lock_values = edl_meta
+    else:
+        edl_records = None
+        edl_mode, edl_value, edl_lock_values = "constant", (0, 0), None
+
     # Header lines -- same phrasing as each individual formatter's own header
     # (see _format_scene_log()/_format_convergence_scene_log()/
-    # _format_foreground_scale_scene_log() above).
+    # _format_foreground_scale_scene_log()/_format_edge_dilation_scene_log()
+    # above).
     strength_header = (
         f"Auto 3D Strength: {s_mode} mode, range {s_lo:g}-{s_hi:g}, typical (3D Strength) {s_typical:g}"
         + (", Invert: on (wide=more, close-up=less)" if s_invert else ", Invert: off"))
@@ -5438,19 +5708,34 @@ def _format_combined_scene_log(strength_state, conv_state, fg_state, output_file
     else:
         fg_header = f"Foreground Scale: constant mode, value {fg_value:g}"
 
+    if edl_records is not None:
+        if edl_mode == "shot_lock" and edl_lock_values is not None:
+            edl_wide, edl_mid, edl_closeup = edl_lock_values
+            edl_mid_part = f", mid {edl_mid[0]}/{edl_mid[1]}" if edl_mid is not None else ""
+            edl_header = (f"Edge Fix: shot_lock mode, wide {edl_wide[0]}/{edl_wide[1]}{edl_mid_part}, "
+                          f"close-up {edl_closeup[0]}/{edl_closeup[1]}")
+        else:
+            edl_header = f"Edge Fix: constant mode, value {edl_value[0]}/{edl_value[1]}"
+
     title = f"Combined Scene Log -- {path.basename(str(output_filename))}"
     if in_progress:
         title += " (IN PROGRESS -- conversion still running)"
     lines = [title, strength_header, conv_header, fg_header]
+    if edl_records is not None:
+        lines.append(edl_header)
     if not fps:
         lines.append("(the real frame rate could not be determined -- showing frame numbers instead of times)")
     lines.append("")
 
-    n = min(len(strength_records), len(conv_records), len(fg_records))
+    counts = [len(strength_records), len(conv_records), len(fg_records)]
+    if edl_records is not None:
+        counts.append(len(edl_records))
+    n = min(counts)
     total_frames = 0
     s_weighted = c_weighted = fg_weighted = 0.0
     shot_counts_conv = {"Wide": 0, "Mid": 0, "Close-Up": 0}
     shot_counts_fg = {"Wide": 0, "Mid": 0, "Close-Up": 0}
+    shot_counts_edl = {"Wide": 0, "Mid": 0, "Close-Up": 0}
     for i in range(n):
         start, end, frames, s_mean, s_raw = strength_records[i]
         _, _, _, c_mean = conv_records[i]
@@ -5469,6 +5754,14 @@ def _format_combined_scene_log(strength_state, conv_state, fg_state, output_file
             label = _classify_shot_lock_mean_foreground_scale(fg_mean, fg_lock_values)
             shot_counts_fg[label] += 1
             line += f" [{label}]"
+        if edl_records is not None:
+            _, _, _, edl_pair = edl_records[i]
+            line += f"   Edge Fix: {edl_pair[0]}/{edl_pair[1]}"
+            if edl_lock_values is not None:
+                label = _classify_shot_lock_pair_edge_dilation(edl_pair, edl_lock_values)
+                if label is not None:
+                    shot_counts_edl[label] += 1
+                    line += f" [{label}]"
         lines.append(line)
         total_frames += frames
         s_weighted += s_mean * frames
@@ -5502,6 +5795,11 @@ def _format_combined_scene_log(strength_state, conv_state, fg_state, output_file
         lines.append(
             f"Foreground Scale shot classification{so_far}: {shot_counts_fg['Wide']} wide, {mid_part}"
             f"{shot_counts_fg['Close-Up']} close-up (of {n} scene(s))")
+    if edl_records is not None and edl_lock_values is not None and n:
+        mid_part = f"{shot_counts_edl['Mid']} mid, " if edl_lock_values[1] is not None else ""
+        lines.append(
+            f"Edge Fix shot classification{so_far}: {shot_counts_edl['Wide']} wide, {mid_part}"
+            f"{shot_counts_edl['Close-Up']} close-up (of {n} scene(s))")
     return "\n".join(lines) + "\n"
 
 
@@ -5526,16 +5824,25 @@ def _maybe_write_combined_scene_log_live(args):
     fg_state = state.get("_foreground_scale_scene_log")
     if strength_state is None or conv_state is None or fg_state is None:
         return
+    # ADR-459: Edge Fix's own 4th source -- deliberately NOT required to be
+    # present (unlike the 3 above): a caller that hasn't been updated to also
+    # reset_edge_dilation_scene_log() still gets a working combined log, just
+    # without the Edge Fix column, rather than losing the whole file.
+    edl_state = state.get("_edge_dilation_scene_log")
     strength_records = getattr(strength_state, "scene_records", None) or []
     conv_records = getattr(conv_state, "scene_records", None) or []
     fg_records = getattr(fg_state, "scene_records", None) or []
-    n = min(len(strength_records), len(conv_records), len(fg_records))
+    counts = [len(strength_records), len(conv_records), len(fg_records)]
+    if edl_state is not None:
+        counts.append(len(getattr(edl_state, "scene_records", None) or []))
+    n = min(counts)
     if n <= combo.written:
         return
     combo.written = n
     try:
         text = _format_combined_scene_log(strength_state, conv_state, fg_state,
-                                          combo.live_output_filename, combo.live_fps, in_progress=True)
+                                          combo.live_output_filename, combo.live_fps, in_progress=True,
+                                          edl_state=edl_state)
         tmp = f"{combo.live_path}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
@@ -5568,10 +5875,13 @@ def finish_combined_scene_log(args, input_path, output_path, fps, strength_state
     if not (getattr(strength_state, "scene_records", None)
             and conv_state.scene_records and fg_state.scene_records):
         return
+    # ADR-459: Edge Fix's own 4th source -- see _maybe_write_combined_scene_log_live()'s
+    # own comment for why this is deliberately not required to be present.
+    edl_state = state.get("_edge_dilation_scene_log") if isinstance(state, dict) else None
     try:
         real_output, log_path = _combined_scene_log_paths(args, input_path, output_path)
         text = _format_combined_scene_log(strength_state, conv_state, fg_state, real_output, fps,
-                                          in_progress=False)
+                                          in_progress=False, edl_state=edl_state)
         tmp = f"{log_path}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
@@ -5591,6 +5901,22 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
     else:
         # BCHW
         pass
+
+    # ADR-459: "Log Edge Fix Value per Scene" -- captured BEFORE
+    # "_last_applied_divergence" is overwritten just below, by calling
+    # _resolve_edge_dilation() again here while that state key still holds the
+    # SAME (one-call-behind) value it held when the real depth_model.infer()
+    # call for THIS depth map resolved its own --edge-dilation value a moment
+    # ago (nothing else touches that state key in between). This reproduces
+    # that exact real value without threading a new parameter through every
+    # infer()/apply_divergence() call site (several of which are separated by
+    # queues/threads, not a simple local variable) -- cheap either way, since
+    # _resolve_edge_dilation() is a pure classification call, never a model.
+    edge_dilation_scene_log_active = getattr(args, "edge_dilation_scene_log", False)
+    if edge_dilation_scene_log_active:
+        edl_value_for_log = edge_dilation_parse(_resolve_edge_dilation(args))
+    else:
+        edl_value_for_log = None
 
     # ADR-458: unconditionally persisted BEFORE anything else below -- the one
     # generic, add-on-agnostic "real divergence for this call" value that Edge
@@ -5655,6 +5981,36 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         else:
             fsl_rp_for_log = [False] * depth.shape[0]
         fsl_log_state.pending.extend((fsl_value, cut) for cut in fsl_rp_for_log)
+
+    # "Log Edge Fix Value per Scene" (--edge-dilation-scene-log, ADR-459): same
+    # pending-queue push/drain pattern as Foreground Scale's own scene log just
+    # above, but completely independent state (_EdgeDilationSceneLogState) --
+    # kept fully separate so all 4 logs can run at once without colliding.
+    # `edl_value_for_log` was already resolved above, BEFORE
+    # "_last_applied_divergence" was overwritten -- see that block's own
+    # comment for why. Same "SAME value for every input frame in this call's
+    # batch" reasoning as Foreground Scale's own push above.
+    if edge_dilation_scene_log_active:
+        edl_log_state = args.state.setdefault("_edge_dilation_scene_log", _EdgeDilationSceneLogState())
+        edl_mode_for_log = getattr(args, "edge_dilation_mode", "constant")
+        edl_log_state.meta = (
+            edl_mode_for_log,
+            edge_dilation_parse(getattr(args, "edge_dilation", [2, 1])),
+            (
+                (edge_dilation_parse(getattr(args, "edge_dilation_lock_wide", [3, 2])),
+                 (lambda m: edge_dilation_parse(m) if m is not None else None)(
+                     _edge_dilation_lock_mid_pair(args)),
+                 edge_dilation_parse(getattr(args, "edge_dilation_lock_closeup", [1, 1])))
+                if edl_mode_for_log == "shot_lock" else None
+            ),
+        )
+        if log_reset_pts is not None:
+            edl_rp_for_log = log_reset_pts
+        elif reset_pts is not None:
+            edl_rp_for_log = reset_pts
+        else:
+            edl_rp_for_log = [False] * depth.shape[0]
+        edl_log_state.pending.extend((edl_value_for_log, cut) for cut in edl_rp_for_log)
 
     if args.state["convergence_model"] is not None:
         if getattr(args, "convergence_mode", "constant") == "shot_lock":
@@ -5967,6 +6323,18 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         for _ in range(n_out):
             value, cut_after = fsl_pending.popleft() if fsl_pending else (0.0, False)
             fsl_log_state.record(value, cut_after)
+
+    # "Log Edge Fix Value per Scene": drains exactly as many (value, cut_after)
+    # pairs as frames actually came back this call -- same reasoning as
+    # Foreground Scale's own drain just above, kept as a fully separate queue/
+    # state so none of the 4 logs ever interfere with each other.
+    if edge_dilation_scene_log_active and left_eye is not None:
+        n_out = 1 if left_eye.ndim == 3 else left_eye.shape[0]
+        edl_log_state = args.state["_edge_dilation_scene_log"]
+        edl_pending = edl_log_state.pending
+        for _ in range(n_out):
+            value, cut_after = edl_pending.popleft() if edl_pending else ((0, 0), False)
+            edl_log_state.record(value, cut_after)
 
     # "Combine Scene Logs" (ADR-456): by this point, all 3 of this call's own
     # scene-closes (if any) have already happened and are reflected in all 3
@@ -8310,6 +8678,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     # progress live as this movie converts, not only once at the very end.
     reset_convergence_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_foreground_scale_scene_log(args, input_path=original_input_filename, output_path=output_path)
+    reset_edge_dilation_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_combined_scene_log(args, input_path=original_input_filename, output_path=output_path)
     try:
         if args.keyframe:
@@ -8385,6 +8754,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     # matching autodiv.py's fresh()/_finish_scene_log() behavior exactly).
     finish_convergence_scene_log(args, original_input_filename, final_output_path)
     finish_foreground_scale_scene_log(args, original_input_filename, final_output_path)
+    finish_edge_dilation_scene_log(args, original_input_filename, final_output_path)
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -8935,6 +9305,8 @@ def process_config_video(config, args, side_model):
                                 fps=float(getattr(config, "fps", 0)) or None)
     reset_foreground_scale_scene_log(args, input_path=args.input, output_path=args.output,
                                      fps=float(getattr(config, "fps", 0)) or None)
+    reset_edge_dilation_scene_log(args, input_path=args.input, output_path=args.output,
+                                  fps=float(getattr(config, "fps", 0)) or None)
     reset_combined_scene_log(args, input_path=args.input, output_path=args.output,
                              fps=float(getattr(config, "fps", 0)) or None)
 
@@ -9097,6 +9469,7 @@ def process_config_video(config, args, side_model):
     # config.fps is the real, already-resolved fps -- never re-derived here.
     finish_convergence_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
     finish_foreground_scale_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
+    finish_edge_dilation_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
 
 
 def process_config_images(config, args, side_model):
@@ -10298,6 +10671,22 @@ def create_parser(required_true=True):
                              "--edge-dilation-lock-closeup, the band between this and --edge-dilation-"
                              "lock-threshold-high locks --edge-dilation-lock-mid instead. Leave unset "
                              "(default, \"none\") to disable this tier entirely.")
+    parser.add_argument("--edge-dilation-scene-log", action="store_true",
+                        help=("ADR-459: writes a text file next to the finished video listing the "
+                              "Edge Fix [x, y] pair used for each scene -- a direct analog of "
+                              "--foreground-scale-scene-log, but for --edge-dilation/--edge-dilation-mode "
+                              "instead of Foreground Scale, and completely independent of it (its own "
+                              "separate file, its own separate state -- all 4 scene logs can be on at "
+                              "once without colliding). Works in BOTH --edge-dilation-mode constant "
+                              "(every scene logs the same single --edge-dilation pair; constant never "
+                              "varies, so there's no [Wide/Mid/Close-Up] tag) and shot_lock (each scene "
+                              "is also tagged with which of --edge-dilation-lock-wide/-mid/-closeup it "
+                              "locked in, by exact match -- Edge Fix is SNAP ONLY, never a blend). Gets "
+                              "real per-scene boundaries even with --scene-detect off -- it scans for "
+                              "scene cuts on its own just for this log, same as "
+                              "--foreground-scale-scene-log. Writes live, not just at the end "
+                              "(ADR-405-style), for video jobs only (no effect on single images, which "
+                              "have no \"scene\")."))
 
     parser.add_argument("--inpaint-model", type=str, default=None, choices=list(INPAINT_MODELS.keys()),
                         help="inpaint model name defined in iw3/inpaint_models.yml")
@@ -10548,15 +10937,17 @@ class _PauseVramSuspendEvent():
 def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspend_event=None, stage_fn=None,
                    output_sink=None):
     if getattr(args, "combined_scene_log", False):
-        # ADR-456: "Combine Scene Logs" merges the 3 independent per-scene logs
-        # (3D Strength / Convergence / Foreground Scale) into one file -- forcing
-        # all 3 underlying flags on here, in ONE place, means every caller only
-        # ever has to set combined_scene_log itself. Each of the 3 individual
-        # writers skips its own disk write when this is on (see each one's own
-        # guard below) so only the merged file is ever produced.
+        # ADR-456/459: "Combine Scene Logs" merges 4 independent per-scene logs
+        # (3D Strength / Convergence / Foreground Scale / Edge Fix) into one
+        # file -- forcing all 4 underlying flags on here, in ONE place, means
+        # every caller only ever has to set combined_scene_log itself. Each of
+        # the 4 individual writers skips its own disk write when this is on
+        # (see each one's own guard below) so only the merged file is ever
+        # produced.
         args.auto_divergence_scene_log = True
         args.convergence_scene_log = True
         args.foreground_scale_scene_log = True
+        args.edge_dilation_scene_log = True
     if depth_model is None:
         depth_model = create_depth_model(args.depth_model)
     depth_model.enable_refine(getattr(args, "depth_refine", False),

@@ -173,6 +173,16 @@ LAYOUT_MODE_TABS = "tabs"
 LAYOUT_MODE_SINGLE_PAGE = "single_page"
 LAYOUT_MODE_CHOICES = (LAYOUT_MODE_TABS, LAYOUT_MODE_SINGLE_PAGE)
 
+# ADR-460: Experience Level -- the 3-way Basic/Advanced/Expert visibility tier that
+# replaces chk_stereo_show_advanced's old 2-way "Show Advanced Settings" checkbox
+# (ADR-216). Cumulative: Advanced = Basic + more, Expert = everything (functionally
+# identical to the full GUI with no filtering). A pure visibility filter, never a
+# value filter -- see apply_experience_level()'s own docstring.
+EXPERIENCE_LEVEL_BASIC = "basic"
+EXPERIENCE_LEVEL_ADVANCED = "advanced"
+EXPERIENCE_LEVEL_EXPERT = "expert"
+EXPERIENCE_LEVEL_CHOICES = (EXPERIENCE_LEVEL_BASIC, EXPERIENCE_LEVEL_ADVANCED, EXPERIENCE_LEVEL_EXPERT)
+
 
 def _load_layout_mode(config_path):
     if path.exists(config_path):
@@ -1484,23 +1494,34 @@ class MainFrame(wx.Frame):
 
         self.grp_stereo = wx.StaticBox(self.tab_stereo, label=T("Stereo Generation"))
 
-        # ADR-216: pure visibility toggle for the ~11 fine-tuning settings this tab shows even though most
-        # conversions never need to touch them -- Show()/Hide() + Layout()/Fit(), the exact same mechanism
-        # already used and proven here for update_inpaint_options()/update_rife_interpolate()/
-        # update_waifu2x_upscale()/update_nt_auto_divergence(), never a sizer restructure. A hidden control
-        # keeps its real value and keeps taking part in parse_args()/get_cli_command() exactly as before --
-        # this only ever changes what is SHOWN, never what is saved, exported, or actually used by a
-        # conversion, so switching it off and back on again loses nothing.
-        self.chk_stereo_show_advanced = wx.CheckBox(self.grp_stereo, label=T("Show Advanced Settings"),
-                                                     name="chk_stereo_show_advanced")
-        self.chk_stereo_show_advanced.SetToolTip(
-            T("What it's for: hides the fine-tuning settings on this tab that most conversions never need "
-              "to touch, so the first thing you see is a short, focused list instead of everything at "
-              "once.\n"
+        # ADR-460: 3-way Basic/Advanced/Expert visibility tier, replacing ADR-216's old
+        # 2-way "Show Advanced Settings" checkbox -- Show()/Hide() + Layout()/Fit(), the
+        # exact same mechanism already used and proven here for update_inpaint_options()/
+        # update_rife_interpolate()/update_waifu2x_upscale()/update_nt_auto_divergence(),
+        # never a sizer restructure. A hidden control keeps its real value and keeps
+        # taking part in parse_args()/get_cli_command() exactly as before -- this only
+        # ever changes what is SHOWN, never what is saved, exported, or actually used by
+        # a conversion, so switching tiers loses nothing. See apply_experience_level().
+        self.lbl_experience_level = wx.StaticText(self.grp_stereo, label=T("Experience Level"))
+        self.cbo_experience_level = wx.ComboBox(self.grp_stereo, name="cbo_experience_level")
+        self.cbo_experience_level.SetEditable(False)
+        self.cbo_experience_level.Append(T("Basic"), EXPERIENCE_LEVEL_BASIC)
+        self.cbo_experience_level.Append(T("Advanced"), EXPERIENCE_LEVEL_ADVANCED)
+        self.cbo_experience_level.Append(T("Expert"), EXPERIENCE_LEVEL_EXPERT)
+        self.cbo_experience_level.SetSelection(0)
+        self.cbo_experience_level.SetToolTip(
+            T("What it's for: hides the settings most conversions never need to touch, so the first thing "
+              "you see is a short, focused list instead of everything at once.\n"
+              "Basic: just the everyday settings -- 3D Strength, Convergence, Method, Depth Model/"
+              "Resolution, Stereo Format, and similar.\n"
+              "Advanced: adds the fine-tuning features -- Auto 3D Strength, Shot Lock clusters, Depth "
+              "Detail Refinement, Sharpen, in-pipeline RIFE, Video Decoding, Standalone Tools, and more.\n"
+              "Expert: everything, with nothing hidden -- Pop-Out Limit/Boost, Protect Faces, Depth Pop, "
+              "Dual-Pass Depth Blend, Object Stability, and every other deep setting.\n"
               "How it works: purely visual. Anything hidden keeps whatever value you set for it, and it's "
-              "still used exactly the same when you click Start -- ticking this box back on just shows it "
-              "again, nothing is lost or reset in between.\n"
-              "Recommended: off (the default) if you mainly use the everyday settings; on if you tune "
+              "still used exactly the same when you click Start -- raising the tier just shows it again, "
+              "nothing is lost or reset in between.\n"
+              "Recommended: Basic if you mainly use the everyday settings; Advanced or Expert if you tune "
               "things like Auto 3D Strength, Pop-Out Boost or Protect Faces regularly."))
 
         self.lbl_divergence = wx.StaticText(self.grp_stereo, label=T("3D Strength"))
@@ -1735,7 +1756,7 @@ class MainFrame(wx.Frame):
         self.chk_nt_auto_div_invert.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_nt_auto_div_invert)
         self.btn_nt_scan_strength.Bind(wx.EVT_BUTTON, self.on_click_btn_nt_scan_strength)
         self.update_nt_auto_divergence()
-        self.chk_stereo_show_advanced.Bind(wx.EVT_CHECKBOX, self.on_changed_chk_stereo_show_advanced)
+        self.cbo_experience_level.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_experience_level)
 
         self.lbl_convergence = wx.StaticText(self.grp_stereo, label=T("Convergence Plane"))
         self.cbo_convergence_mode = wx.ComboBox(
@@ -4212,7 +4233,8 @@ class MainFrame(wx.Frame):
         layout.SetEmptyCellSize((0, 0))
 
         i = 0
-        layout.Add(self.chk_stereo_show_advanced, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_experience_level, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_experience_level, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add((0, 6), (i := i + 1, 0))
         layout.Add(wx.StaticLine(self.grp_stereo), (i := i + 1, 0), (0, 3), flag=wx.EXPAND)
         layout.Add((0, 6), (i := i + 1, 0))
@@ -10724,6 +10746,12 @@ class MainFrame(wx.Frame):
     def _on_video_encoding_changed(self, event):
         event.Skip()
         self.update_preserve_dowi()
+        # ADR-460: VideoEncodingBox's own handler knows nothing about Experience Level
+        # -- it will happily re-show Limit Bitrate for an NVENC codec even at Basic
+        # tier. CallAfter (not a direct call) for the same reason _repin_options_min_size
+        # already needs one below: this handler can run BEFORE VideoEncodingBox's own,
+        # not reliably after, so the re-clamp must be deferred too.
+        wx.CallAfter(self._apply_video_encoding_tier_visibility)
         # CallAfter so VideoEncodingBox's own handler has already shown/hidden its rows.
         wx.CallAfter(self._repin_options_min_size)
 
@@ -11102,8 +11130,12 @@ class MainFrame(wx.Frame):
         self.update_edge_dilation_mode()
         self.update_scene_segment()
         self.update_nt_auto_divergence()
-        self.update_stereo_advanced_visibility()
+        self.apply_experience_level()
         self.grp_video.update_controls()
+        # ADR-460: grp_video.update_controls() (VideoEncodingBox's own, codec-driven
+        # Show/Hide, no notion of tier) just ran AFTER apply_experience_level() above --
+        # re-clamp Limit Bitrate back down if the tier itself says no.
+        self._apply_video_encoding_tier_visibility()
 
         self.update_divergence_warning()
         self.update_preserve_screen_border()
@@ -12477,44 +12509,264 @@ class MainFrame(wx.Frame):
     def on_changed_chk_waifu2x_upscale(self, event):
         self.update_waifu2x_upscale()
 
-    def update_stereo_advanced_visibility(self):
-        # ADR-216: pure Show()/Hide() + Layout()/Fit(), same mechanism as every other conditional-visibility
-        # method in this file. Deliberately excludes Anaglyph Method / Depth Only / Resize to fit -- those
-        # already have their own correct, narrower conditional visibility (update_anaglyph_state(),
-        # update_export_option_state(), tied to Stereo Format) and must stay the only thing controlling them,
-        # or picking "Anaglyph" with this box unchecked would hide the very control that format needs.
-        advanced = (
+    def get_experience_level(self):
+        sel = self.cbo_experience_level.GetSelection()
+        if sel == wx.NOT_FOUND:
+            return EXPERIENCE_LEVEL_BASIC
+        return self.cbo_experience_level.GetClientData(sel)
+
+    def set_experience_level(self, level):
+        for i in range(self.cbo_experience_level.GetCount()):
+            if self.cbo_experience_level.GetClientData(i) == level:
+                self.cbo_experience_level.SetSelection(i)
+                return
+
+    def _apply_video_encoding_tier_visibility(self):
+        """ADR-460: Limit Bitrate (and the Bitrate value box/Preview Peak Bitrate button
+        it gates) is promoted out of Basic into Advanced for the Video Encoding box
+        (VideoEncodingBox, nunif/gui/video_encoding_box.py -- shared with waifu2x's GUI,
+        never modified itself). That component's own update_video_codec()/
+        update_bitrate_cap_visibility() re-Show()/Hide() these same controls purely by
+        codec, with no notion of tier -- every codec/format change re-runs that logic
+        (see _on_video_encoding_changed() below) and would otherwise re-reveal Limit
+        Bitrate for an NVENC codec even at Basic tier. Call the component's own update
+        first (it is authoritative at Advanced/Expert), then clamp back down here if the
+        tier itself says no -- never touches any control's VALUE, only Show()/Hide()."""
+        self.grp_video.update_video_codec()
+        if self.get_experience_level() == EXPERIENCE_LEVEL_BASIC:
+            self.grp_video.chk_limit_bitrate.Hide()
+            self.grp_video.lbl_bitrate.Hide()
+            self.grp_video.cbo_bitrate.Hide()
+            if self.grp_video.btn_preview_peak_bitrate is not None:
+                self.grp_video.btn_preview_peak_bitrate.Hide()
+
+    def _experience_level_advanced_widgets(self):
+        """ADR-460: every widget hidden only at Basic, shown starting at Advanced.
+        A future ADR adds one field here (or to _experience_level_expert_widgets()/
+        _experience_level_expert_only_panes() below) without re-deriving the whole
+        scheme. See apply_experience_level()'s own docstring for what is deliberately
+        excluded and why."""
+        return (
+            # Auto 3D Strength -- entire feature block (ADR-213 and friends)
             self.chk_nt_auto_div, self.cbo_nt_auto_div_mode,
             self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
             self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
-            self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_overlay,
-            self.chk_nt_auto_div_scene_log, self.lbl_nt_closeup, self.cbo_nt_closeup,
-            self.lbl_nt_wide, self.cbo_nt_wide,
+            self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_invert,
+            self.lbl_nt_closeup, self.cbo_nt_closeup, self.lbl_nt_wide, self.cbo_nt_wide,
             self.lbl_nt_wide_floor, self.cbo_nt_wide_floor,
             self.lbl_nt_wide_floor_cutoff, self.cbo_nt_wide_floor_cutoff,
-            self.lbl_resolution_preset, self.cbo_resolution_preset,
-            self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
-            self.lbl_convergence_smoothing, self.cbo_convergence_smoothing, self.sld_stereo_convergence_smoothing,
-            self.chk_convergence_scene_hold, self.lbl_convergence_cut_smooth, self.cbo_convergence_cut_smooth,
+            self.chk_nt_auto_div_overlay, self.chk_nt_auto_div_scene_log,
+            self.btn_nt_scan_strength, self.chk_nt_scan_fast,
+            # Convergence: the non-constant-mode feature set (Convergence Mode/value
+            # box themselves are Basic, gated elsewhere)
+            self.lbl_convergence_smoothing, self.cbo_convergence_smoothing,
+            self.sld_stereo_convergence_smoothing,
+            self.chk_convergence_scene_hold,
+            self.lbl_convergence_cut_smooth, self.cbo_convergence_cut_smooth,
             self.lbl_convergence_subject_lock, self.cbo_convergence_subject_lock,
             self.lbl_sod_track_update_interval, self.cbo_sod_track_update_interval,
             self.chk_convergence_overlay, self.chk_convergence_scene_log,
+            self.lbl_convergence_lock_wide, self.cbo_convergence_lock_wide,
+            self.lbl_convergence_lock_mid, self.cbo_convergence_lock_mid,
+            self.lbl_convergence_lock_closeup, self.cbo_convergence_lock_closeup,
+            self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch,
+            self.lbl_convergence_lock_decide_speed, self.cbo_convergence_lock_decide_speed,
+            self.lbl_convergence_lock_signal, self.cbo_convergence_lock_signal,
+            self.lbl_convergence_lock_strength_threshold, self.cbo_convergence_lock_strength_threshold,
+            self.lbl_convergence_lock_strength_threshold_low, self.cbo_convergence_lock_strength_threshold_low,
+            self.lbl_convergence_lock_threshold_mode, self.cbo_convergence_lock_threshold_mode,
+            self.lbl_convergence_lock_strength_threshold_mid, self.cbo_convergence_lock_strength_threshold_mid,
+            self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
+            # Edge Fix Shot Lock cluster (ADR-458/459)
+            self.lbl_edge_dilation_mode, self.cbo_edge_dilation_mode,
+            self.lbl_edge_dilation_lock_wide, self.cbo_edge_dilation_lock_wide, self.cbo_edge_dilation_lock_wide_y,
+            self.lbl_edge_dilation_lock_mid, self.cbo_edge_dilation_lock_mid, self.cbo_edge_dilation_lock_mid_y,
+            self.lbl_edge_dilation_lock_closeup, self.cbo_edge_dilation_lock_closeup,
+            self.cbo_edge_dilation_lock_closeup_y,
+            self.lbl_edge_dilation_lock_threshold_high, self.cbo_edge_dilation_lock_threshold_high,
+            self.lbl_edge_dilation_lock_threshold_low, self.cbo_edge_dilation_lock_threshold_low,
+            self.chk_edge_dilation_scene_log,
+            # Foreground Scale Shot Lock cluster (ADR-452/455)
+            self.lbl_foreground_scale_mode, self.cbo_foreground_scale_mode,
+            self.lbl_foreground_scale_lock_wide, self.cbo_foreground_scale_lock_wide,
+            self.lbl_foreground_scale_lock_mid, self.cbo_foreground_scale_lock_mid,
+            self.lbl_foreground_scale_lock_closeup, self.cbo_foreground_scale_lock_closeup,
+            self.lbl_foreground_scale_lock_threshold_high, self.cbo_foreground_scale_lock_threshold_high,
+            self.lbl_foreground_scale_lock_threshold_low, self.cbo_foreground_scale_lock_threshold_low,
+            self.lbl_foreground_scale_lock_switch, self.cbo_foreground_scale_lock_switch,
+            self.lbl_foreground_scale_lock_smoothing, self.cbo_foreground_scale_lock_smoothing,
+            self.chk_foreground_scale_scene_log,
+            # Combine Scene Logs (ADR-456), the 5th per-scene log checkbox
+            self.chk_combined_scene_log,
+            # Depth detail refinement (bilateral depth-smoothing -- NOT chk_depth_aa,
+            # a separate Basic-tier feature)
+            self.chk_depth_refine, self.cbo_depth_refine_strength, self.sld_stereo_depth_refine_strength,
+            # In-pipeline Sharpen (NOT the standalone Sharpen tool, Standalone Tools tab)
+            self.chk_sharpen, self.cbo_sharpen_strength, self.sld_stereo_sharpen_strength,
+            # Video Filter tab
+            self.chk_preserve_dowi, self.chk_hdr_to_sdr, self.lbl_upgrade_pix_fmt, self.cbo_upgrade_pix_fmt,
+            self.chk_auto_resume,
+            # In-pipeline RIFE (NOT the standalone RIFE tool, Standalone Tools tab)
+            self.chk_rife_interpolate, self.cbo_rife_model, self.cbo_rife_mode, self.txt_rife_target_fps,
+            self.lbl_rife_gpu, self.cbo_rife_gpu, self.chk_rife_fp16,
+            self.lbl_rife_scale, self.cbo_rife_scale,
+            self.chk_rife_hybrid_framerate, self.lbl_rife_hybrid_percent, self.txt_rife_hybrid_percent,
+            self.lbl_rife_dv_frame_count_tolerance, self.txt_rife_dv_frame_count_tolerance,
+            self.chk_rife_dv_skip_frame_check,
+            # Restore Audio & Subtitles (ADR-172) / Restore Dual-Eye Subtitles (ADR-254)
+            self.chk_restore_audio_subtitles, self.chk_restore_dual_eye_subtitles,
+        )
+
+    def _experience_level_expert_widgets(self):
+        """ADR-460: every widget hidden at Basic AND Advanced, shown only at Expert."""
+        return (
+            self.lbl_resolution_preset, self.cbo_resolution_preset,
+            self.lbl_convergence_bias_preset, self.cbo_convergence_bias_preset,
             self.lbl_max_negative_parallax, self.cbo_max_negative_parallax, self.sld_stereo_max_negative_parallax,
             self.lbl_face_protect, self.cbo_face_protect,
-            self.lbl_ipd_offset, self.sld_ipd_offset,
-            self.lbl_synthetic_view, self.cbo_synthetic_view,
             self.chk_stereo_mode_tag,
-            self.lbl_splat_blend_temperature, self.cbo_splat_blend_temperature, self.sld_stereo_splat_blend_temperature,
+            self.lbl_splat_blend_temperature, self.cbo_splat_blend_temperature,
+            self.sld_stereo_splat_blend_temperature,
+            # Inpainting Settings pane's own fields -- the pane header itself always
+            # stays visible (Stereo Processing Width, a Basic field, lives in it too)
+            self.lbl_inpaint_model, self.cbo_inpaint_model,
+            self.lbl_overlap_frames, self.cbo_overlap_frames_pre, self.cbo_overlap_frames_post,
+            self.lbl_mask_dilation, self.cbo_mask_inner_dilation, self.cbo_mask_outer_dilation,
+            self.lbl_inpaint_max_width, self.cbo_inpaint_max_width,
+            # Depth Pop's own direct fields -- Foreground/Midground/Background Pop live
+            # in their own entirely-Expert sub-panes, gated separately below
+            self.lbl_pop_feather, self.cbo_pop_feather, self.sld_stereo_pop_feather,
+            self.lbl_edge_repair, self.cbo_edge_repair, self.sld_stereo_edge_repair,
+            # Object Stability (experimental)
+            self.chk_temporal_stabilize, self.cbo_temporal_stabilize_strength,
+            self.sld_stereo_temporal_stabilize_strength,
+            self.lbl_temporal_stabilize_max_shift, self.cbo_temporal_stabilize_max_shift,
+            self.lbl_temporal_stabilize_flat_boost, self.cbo_temporal_stabilize_flat_boost,
+            self.lbl_temporal_stabilize_edge_protect, self.cbo_temporal_stabilize_edge_protect,
+            self.lbl_temporal_stabilize_quality, self.cbo_temporal_stabilize_quality,
+            # Flicker Reduction's Motion-Adaptive Smoothing -- separate from the plain
+            # Decay Rate/Buffer fields, which are Basic
+            self.chk_ema_motion_adaptive, self.cbo_ema_motion_spread, self.sld_stereo_ema_motion_spread,
+            # Scene Batch Auto EMA / Genre Preset quick-fill
+            self.chk_scene_batch_auto_ema, self.cbo_scene_batch_auto_ema_model,
+            self.btn_scene_batch_auto_ema_edit, self.lbl_genre_preset, self.cbo_genre_preset,
+            # waifu2x upscale post-process option
+            self.chk_waifu2x_upscale, self.cbo_waifu2x_method, self.cbo_waifu2x_noise_level,
+            self.cbo_waifu2x_style, self.cbo_waifu2x_target,
+            # 3D Blu-ray MVC Output cluster (ADR-182..291) -- not in decker's explicit
+            # field list at all; classified Expert by omission, same as every other
+            # omitted niche cluster here. NOT the standalone "SBS to 3D Blu-ray MVC"
+            # tool (Standalone Tools tab, already gated by that whole tab unlocking at
+            # Advanced) -- this is the in-pipeline "run it automatically on this job's
+            # own output" version.
+            self.lbl_mvc_mode, self.cbo_mvc_mode,
+            self.lbl_mvc_output_type, self.cbo_mvc_output_type, self.txt_mvc_bitrate,
+            self.chk_convert_to_mvc_hdr_to_sdr, self.chk_mvc_makemkv_to_mkv,
+            self.lbl_mvc_autocrop, self.cbo_mvc_autocrop,
+            self.lbl_mvc_fill_mode, self.cbo_mvc_fill_mode,
+            self.chk_mvc_allow_lossless_eac3,
+            # Video Filter tab: Denoise/Preview Mode -- not in decker's explicit field
+            # list at all; classified Expert by omission, same as every other omitted
+            # niche field here.
+            self.chk_denoise, self.chk_preview,
+            # Processor tab: Free GPU memory while paused/idle -- same reasoning.
+            self.chk_pause_frees_vram,
         )
-        show = self.chk_stereo_show_advanced.GetValue()
-        for w in advanced:
-            w.Show(show)
+
+    def _experience_level_expert_only_panes(self):
+        """ADR-460: whole wx.CollapsiblePane widgets (header + body) whose ENTIRE
+        content is Expert-only -- hidden the same way, not left visible-but-empty.
+        Also includes the small colored indicator square next to a pane's own header
+        (its own plain wx.Panel, not part of the CollapsiblePane itself) where one
+        exists, so it never gets left orphaned next to a hidden pane."""
+        return (
+            # Depth Pop sub-panes
+            self.cpn_stereo_foreground_pop, self.cpn_stereo_midground_pop, self.cpn_stereo_background_pop,
+            # Automated Scene Batch (Video Filter tab) -- entirely Expert
+            self.cpn_video_filter_scene_batch, self.pnl_video_filter_scene_batch_dot,
+            # Dual-Pass Depth Blend tab -- entirely Expert (its one "Settings" pane
+            # holds every field in the group, including the master enable checkbox,
+            # per ADR-102's own comment, so hiding this one pane empties the whole tab)
+            self.cpn_depth_blend, self.pnl_depth_blend_dot,
+        )
+
+    def _experience_level_standalone_tool_boxes(self):
+        """ADR-460: Standalone Tools tab unlocks at Advanced -- except Quick Convert,
+        kept visible at every tier since it is just a navigation shortcut
+        ("Take Me There") to another tab, not a tool itself (decker did not explicitly
+        address this one; judgment call, flagged in ADR-460)."""
+        return (
+            self.grp_hdr_reinject, self.grp_subsearch, self.grp_submux, self.grp_audiomux,
+            self.grp_audiorestore, self.grp_stereotag, self.grp_sharpen, self.grp_rife_standalone,
+            self.grp_bitrate_cap_standalone, self.grp_bluray, self.grp_sbs2mvc, self.grp_hdr_to_sdr,
+            self.grp_makemkv, self.grp_vobsub, self.grp_upscale, self.grp_fxoverlay,
+            self.grp_standalone_log,
+        )
+
+    def apply_experience_level(self):
+        """ADR-460: the 3-way Basic/Advanced/Expert visibility tier that replaces
+        chk_stereo_show_advanced's old 2-way "Show Advanced Settings" checkbox
+        (ADR-216). Cumulative: Advanced = Basic + more, Expert = everything. Same
+        Show()/Hide() + Layout()/Fit() mechanism as every other conditional-visibility
+        method in this file (update_edge_dilation_mode()/update_foreground_scale_mode()/
+        etc.) -- a hidden control keeps its real value and keeps taking part in
+        parse_args()/get_cli_command() exactly as before, this only ever changes what
+        is SHOWN, never what is saved, exported, or actually used by a conversion.
+        Deliberately excludes Anaglyph Method / Depth Only / Resize to fit -- those
+        already have their own correct, narrower conditional visibility
+        (update_anaglyph_state(), update_export_option_state(), tied to Stereo Format)
+        and must stay the only thing controlling them.
+
+        advanced_or_higher: hidden only at Basic, shown at Advanced and Expert.
+        expert_only: hidden at Basic AND Advanced, shown only at Expert.
+        expert_only_panes: whole wx.CollapsiblePane widgets (header + body) whose
+        ENTIRE content is Expert-only -- hidden the same way, not left
+        visible-but-empty. cpn_stereo_inpainting_depth ("Inpainting Settings") and
+        cpn_stereo_stability_flicker ("Stability && Flicker") are NOT in this list even
+        though most of their content is Advanced/Expert -- each also holds a real Basic
+        field (Stereo Processing Width; Edge Fix/Foreground Scale plain boxes, Flicker
+        Reduction, Depth Anti-aliasing, Scene Boundary Detection, Preserve Screen
+        Border), so their pane header always stays visible and only their individual
+        child fields are gated below."""
+        level = self.get_experience_level()
+        show_advanced = level in (EXPERIENCE_LEVEL_ADVANCED, EXPERIENCE_LEVEL_EXPERT)
+        show_expert = level == EXPERIENCE_LEVEL_EXPERT
+
+        for w in self._experience_level_advanced_widgets():
+            w.Show(show_advanced)
+
+        for w in self._experience_level_expert_widgets():
+            w.Show(show_expert)
+
+        for pane in self._experience_level_expert_only_panes():
+            pane.Show(show_expert)
+
+        # Video Decoding tab (VideoDecodingBox, nunif/gui/video_decoding_box.py -- shared
+        # with waifu2x's GUI, never modified itself; this tab is just that one box) --
+        # unlocks at Advanced.
+        self.grp_video_dec.grp_video_dec.Show(show_advanced)
+
+        # Post-Processing box (Processor tab): waifu2x upscale, in-pipeline RIFE,
+        # Restore Audio & Subtitles/Dual-Eye, and the 3D Blu-ray MVC Output cluster --
+        # every one of them Advanced or Expert (see the two tuples above), nothing in
+        # this box is Basic. Hide the whole box at Basic, the same reasoning as Video
+        # Decoding above, so Basic tier never shows an empty "Post-Processing" shell.
+        self.grp_postprocess.Show(show_advanced)
+
+        # Video Encoding box: Limit Bitrate is promoted out of Basic into Advanced.
+        self._apply_video_encoding_tier_visibility()
+
+        # Standalone Tools tab unlocks at Advanced -- except Quick Convert (see
+        # _experience_level_standalone_tool_boxes()'s own docstring).
+        for box in self._experience_level_standalone_tool_boxes():
+            box.Show(show_advanced)
+
         self.Layout()
         self.Fit()
         self._clamp_frame_to_screen()
 
-    def on_changed_chk_stereo_show_advanced(self, event):
-        self.update_stereo_advanced_visibility()
+    def on_changed_cbo_experience_level(self, event):
+        self.apply_experience_level()
 
     def update_nt_auto_divergence(self):
         # Rowan's Auto 3D Strength (nt_auto3d, ADR-213). No-op harmlessly if the add-on isn't installed --
@@ -14241,6 +14493,13 @@ class MainFrame(wx.Frame):
             # with the Compile checkbox/Device selector.
             self.chk_compile.SetValue(True)
 
+            # ADR-460: this preset's own codec SetStringSelection()/update_video_codec()
+            # call above fires no change event (same reason preset/config restore
+            # doesn't either) and bypasses _on_video_encoding_changed()'s own tier
+            # re-clamp -- re-apply it directly so Limit Bitrate never gets left visible
+            # for a Basic-tier user who clicks this quick preset.
+            self._apply_video_encoding_tier_visibility()
+
             self.SetStatusText(T("Applied preset: 3DECKER Preferred"))
 
     def save_preset(self, name=None):
@@ -14342,6 +14601,7 @@ class MainFrame(wx.Frame):
             persistent_manager_restore_all(manager, exclude_names)
             if path.exists(config_file):
                 self._migrate_legacy_mvc_checkboxes(manager)
+                self._migrate_legacy_show_advanced_checkbox(manager)
             persistent_manager_unregister_all(manager)
         finally:
             if not restore_path:
@@ -14385,6 +14645,35 @@ class MainFrame(wx.Frame):
             manager.Unregister(shim_direct)
             shim_convert.Destroy()
             shim_direct.Destroy()
+
+    def _migrate_legacy_show_advanced_checkbox(self, manager):
+        """ADR-460: real existing users' saved iw3-gui.cfg (or a saved preset) can
+        still carry the old, pre-consolidation "chk_stereo_show_advanced" checkbox's
+        state (ADR-216's 2-way "Show Advanced Settings" toggle) -- it was replaced by
+        the 3-way cbo_experience_level (Basic/Advanced/Expert), so that widget no
+        longer exists to register/restore into. The old key is never written again by
+        this build, so this only ever sees a frozen pre-upgrade snapshot -- read
+        through a real, disposable shim CheckBox bound to the SAME manager/file just
+        restored above, reusing the real, already-tested CheckBoxHandler restore path
+        instead of hand-parsing the config file's own serialization. Only applied when
+        cbo_experience_level has no saved selection of its own in this same file yet,
+        so a real choice made with the new control after upgrading can never be
+        clobbered on a later restart. Previously checked (Show Advanced Settings was
+        on) maps to Advanced; previously unchecked maps to Basic."""
+        if manager.GetPersistenceFile().Read("Persistence_Options/ComboBox/cbo_experience_level/Selection"):
+            return
+        shim_show_advanced = wx.CheckBox(self, name="chk_stereo_show_advanced")
+        try:
+            shim_show_advanced.Hide()
+            manager.Register(shim_show_advanced)
+            manager.Restore(shim_show_advanced)
+            if shim_show_advanced.GetValue():
+                self.set_experience_level(EXPERIENCE_LEVEL_ADVANCED)
+            else:
+                self.set_experience_level(EXPERIENCE_LEVEL_BASIC)
+        finally:
+            manager.Unregister(shim_show_advanced)
+            shim_show_advanced.Destroy()
 
     def delete_preset(self, name=None):
         if not name:
@@ -40013,6 +40302,290 @@ def _self_test_foreground_scale_lock_switch_gui_and_cli():
     print("_self_test_foreground_scale_lock_switch_gui_and_cli: PASS")
 
 
+def _self_test_experience_level_default_and_migration():
+    """ADR-460: Experience Level (cbo_experience_level, Basic/Advanced/Expert) replaces
+    chk_stereo_show_advanced's old 2-way "Show Advanced Settings" checkbox (ADR-216).
+
+    Covers: (a) a brand-new install with no saved config defaults to Basic, and the
+    config migration from the old checkbox -- modeled directly on
+    _self_test_mvc_mode_checkbox_config_migration's own real approach: write the OLD
+    checkbox's state through a real, disposable shim CheckBox registered with the real
+    AGW PersistenceManager (the same library load_preset()/save_preset() use), not a
+    hand-crafted config string, then confirm _migrate_legacy_show_advanced_checkbox()
+    reads it back correctly and never clobbers a real choice the new control already
+    saved for itself. No GPU or real movie file needed."""
+    import tempfile
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        # (a) fresh frame, nothing restored from any config file -- must default Basic.
+        assert frame.get_experience_level() == EXPERIENCE_LEVEL_BASIC, \
+            f"fresh install must default to Basic, got {frame.get_experience_level()}"
+
+        combos = [
+            (False, EXPERIENCE_LEVEL_BASIC),
+            (True, EXPERIENCE_LEVEL_ADVANCED),
+        ]
+        for old_checked, expected_level in combos:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config_file = path.join(tmpdir, "legacy.cfg")
+
+                write_manager = persist.PersistenceManager.Get()
+                write_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+                write_manager.SetPersistenceFile(config_file)
+                shim_show_advanced = wx.CheckBox(frame, name="chk_stereo_show_advanced")
+                try:
+                    shim_show_advanced.SetValue(old_checked)
+                    write_manager.Register(shim_show_advanced)
+                    write_manager.SaveAndUnregister()
+                finally:
+                    shim_show_advanced.Destroy()
+
+                frame.set_experience_level(EXPERIENCE_LEVEL_EXPERT)  # must get overwritten below
+                read_manager = persist.PersistenceManager.Get()
+                read_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+                read_manager.SetPersistenceFile(config_file)
+                frame._migrate_legacy_show_advanced_checkbox(read_manager)
+
+                assert frame.get_experience_level() == expected_level, (
+                    f"old Show Advanced Settings checked={old_checked} -> expected "
+                    f"{expected_level}, got {frame.get_experience_level()}")
+
+        # A real choice the new control already saved for itself (post-upgrade) must
+        # never be clobbered by a frozen pre-upgrade checkbox snapshot, even if the old
+        # key is still sitting in the same file.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = path.join(tmpdir, "already_migrated.cfg")
+
+            write_manager = persist.PersistenceManager.Get()
+            write_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+            write_manager.SetPersistenceFile(config_file)
+            shim_show_advanced = wx.CheckBox(frame, name="chk_stereo_show_advanced")
+            frame.set_experience_level(EXPERIENCE_LEVEL_EXPERT)
+            try:
+                shim_show_advanced.SetValue(False)  # would map to Basic if migration ran
+                write_manager.Register(shim_show_advanced)
+                write_manager.Register(frame.cbo_experience_level)
+                write_manager.SaveAndUnregister()
+            finally:
+                shim_show_advanced.Destroy()
+
+            frame.set_experience_level(EXPERIENCE_LEVEL_BASIC)
+            read_manager = persist.PersistenceManager.Get()
+            read_manager.SetManagerStyle(persist.PM_DEFAULT_STYLE)
+            read_manager.SetPersistenceFile(config_file)
+            frame._migrate_legacy_show_advanced_checkbox(read_manager)
+            assert frame.get_experience_level() == EXPERIENCE_LEVEL_BASIC, (
+                "migration must not run at all once cbo_experience_level has its own "
+                f"saved selection in this file -- got {frame.get_experience_level()}")
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_experience_level_default_and_migration: PASS")
+
+
+def _self_test_experience_level_visibility_and_live_switch():
+    """ADR-460: covers (b) Basic hides every Advanced/Expert-only widget and shows
+    every Basic widget, and (c) switching tiers live updates visibility correctly, in
+    both directions. Checks a representative widget from every tier/tab this change
+    touches, plus the two whole-box cases (Video Decoding tab, Standalone Tools tab)
+    and the one Quick Convert exception. No GPU or real movie file needed."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+
+        basic_widgets = (
+            frame.cbo_divergence, frame.cbo_convergence_mode, frame.cbo_convergence,
+            frame.sld_ipd_offset, frame.cbo_synthetic_view, frame.cbo_method,
+            frame.cbo_stereo_width, frame.cbo_depth_model, frame.cbo_resolution,
+            frame.chk_limit_resolution, frame.cbo_foreground_scale, frame.cbo_edge_dilation,
+            frame.chk_ema_normalize, frame.cbo_ema_decay, frame.cbo_ema_buffer,
+            frame.chk_depth_aa, frame.chk_scene_detect, frame.chk_scene_detect_cache,
+            frame.chk_preserve_screen_border, frame.cbo_stereo_format,
+            frame.grp_video.cbo_fps, frame.grp_video.cbo_video_codec, frame.grp_video.cbo_crf,
+            frame.chk_start_time, frame.cbo_rotate, frame.cbo_autocrop, frame.cbo_max_output_size,
+            frame.cbo_device, frame.cbo_batch_size, frame.cbo_max_workers, frame.chk_low_vram,
+            frame.chk_tta, frame.chk_fp16, frame.chk_compile,
+            frame.grp_quick_convert,
+        )
+
+        def assert_all_shown(widgets, label):
+            for w in widgets:
+                assert w.IsShown(), f"{label}: {w.GetName()} should be shown"
+
+        def assert_all_hidden(widgets, label):
+            for w in widgets:
+                assert not w.IsShown(), f"{label}: {w.GetName()} should be hidden"
+
+        # Basic: every Basic widget shown, every Advanced/Expert widget hidden.
+        frame.set_experience_level(EXPERIENCE_LEVEL_BASIC)
+        frame.apply_experience_level()
+        assert_all_shown(basic_widgets, "Basic")
+        assert_all_hidden(frame._experience_level_advanced_widgets(), "Basic")
+        assert_all_hidden(frame._experience_level_expert_widgets(), "Basic")
+        assert_all_hidden(frame._experience_level_expert_only_panes(), "Basic")
+        assert not frame.grp_video_dec.grp_video_dec.IsShown(), "Video Decoding tab must be hidden at Basic"
+        assert not frame.grp_postprocess.IsShown(), "Post-Processing box must be hidden at Basic"
+        assert_all_hidden(frame._experience_level_standalone_tool_boxes(), "Basic")
+
+        # Advanced: Basic + Advanced widgets shown, Expert-only still hidden.
+        frame.set_experience_level(EXPERIENCE_LEVEL_ADVANCED)
+        frame.apply_experience_level()
+        assert_all_shown(basic_widgets, "Advanced")
+        assert_all_shown(frame._experience_level_advanced_widgets(), "Advanced")
+        assert_all_hidden(frame._experience_level_expert_widgets(), "Advanced")
+        assert_all_hidden(frame._experience_level_expert_only_panes(), "Advanced")
+        assert frame.grp_video_dec.grp_video_dec.IsShown(), "Video Decoding tab must unlock at Advanced"
+        assert frame.grp_postprocess.IsShown(), "Post-Processing box must unlock at Advanced"
+        assert_all_shown(frame._experience_level_standalone_tool_boxes(), "Advanced")
+
+        # Expert: everything shown.
+        frame.set_experience_level(EXPERIENCE_LEVEL_EXPERT)
+        frame.apply_experience_level()
+        assert_all_shown(basic_widgets, "Expert")
+        assert_all_shown(frame._experience_level_advanced_widgets(), "Expert")
+        assert_all_shown(frame._experience_level_expert_widgets(), "Expert")
+        assert_all_shown(frame._experience_level_expert_only_panes(), "Expert")
+        assert frame.grp_video_dec.grp_video_dec.IsShown()
+        assert_all_shown(frame._experience_level_standalone_tool_boxes(), "Expert")
+
+        # Live switch back down to Basic must re-hide everything again (round trip).
+        frame.set_experience_level(EXPERIENCE_LEVEL_BASIC)
+        frame.on_changed_cbo_experience_level(wx.CommandEvent())
+        assert_all_hidden(frame._experience_level_advanced_widgets(), "back to Basic")
+        assert_all_hidden(frame._experience_level_expert_widgets(), "back to Basic")
+        assert_all_shown(basic_widgets, "back to Basic")
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_experience_level_visibility_and_live_switch: PASS")
+
+
+def _self_test_experience_level_limit_bitrate_tier_and_codec_compose():
+    """ADR-460: Limit Bitrate is promoted out of Basic into Advanced for the Video
+    Encoding box, but that control's own Show/Hide is also driven by the current codec
+    (VideoEncodingBox.update_video_codec(), unmodified, shared with waifu2x's GUI).
+    Confirms the two compose correctly in both directions: a codec change at Basic
+    tier must never re-reveal it, and raising the tier at a codec that supports it
+    must reveal it again -- without ever touching its checked VALUE."""
+    import av
+
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        assert "hevc_nvenc" in av.codec.codecs_available, \
+            "hevc_nvenc is not offered on this machine, so Limit Bitrate cannot be checked"
+
+        frame.set_experience_level(EXPERIENCE_LEVEL_BASIC)
+        frame.apply_experience_level()
+
+        # The real event path (same ProcessEvent approach as
+        # _self_test_limit_bitrate_survives_codec_repopulate): VideoEncodingBox's own
+        # internal handler (bound first, in its own __init__) runs and would normally
+        # re-show Limit Bitrate for an NVENC codec -- _on_video_encoding_changed(),
+        # bound after it, must re-clamp it back down for Basic tier.
+        frame.grp_video.cbo_video_codec.SetValue("hevc_nvenc")
+        frame.grp_video.cbo_video_codec.GetEventHandler().ProcessEvent(
+            wx.CommandEvent(wx.wxEVT_TEXT, frame.grp_video.cbo_video_codec.GetId()))
+        wx.SafeYield()
+        assert not frame.grp_video.chk_limit_bitrate.IsShown(), \
+            "a live codec change at Basic tier must not re-reveal Limit Bitrate"
+
+        # update_controls() (what a settings/preset restore calls) also runs
+        # grp_video.update_controls() -- must not re-reveal it either.
+        frame.update_controls(probe_compile=False)
+        assert not frame.grp_video.chk_limit_bitrate.IsShown(), \
+            "update_controls() at Basic tier must not re-reveal Limit Bitrate"
+
+        frame.set_experience_level(EXPERIENCE_LEVEL_ADVANCED)
+        frame.apply_experience_level()
+        assert frame.grp_video.chk_limit_bitrate.IsShown(), \
+            "Limit Bitrate must unlock at Advanced for a codec that supports it"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_experience_level_limit_bitrate_tier_and_codec_compose: PASS")
+
+
+def _self_test_experience_level_preserves_hidden_values():
+    """ADR-460 CRITICAL INVARIANT: hiding a widget must NEVER change what value gets
+    passed into parse_args()/get_cli_command() -- Experience Level is a VISIBILITY
+    filter only, never a VALUE filter. Sets real values on Advanced- and Expert-tier
+    fields at Expert tier, drops to Basic (hiding those same fields), and confirms
+    parse_args() and get_cli_command() still carry the exact values set earlier,
+    exactly as ADR-216's chk_stereo_show_advanced already guaranteed for its own
+    narrower set of fields. No GPU or real movie file needed."""
+    app = None
+    frame = None
+    try:
+        app = wx.App()
+        frame = MainFrame()
+        frame.set_experience_level(EXPERIENCE_LEVEL_EXPERT)
+        frame.apply_experience_level()
+
+        # An Advanced-tier field (Auto 3D Strength) ...
+        frame.chk_nt_auto_div.SetValue(True)
+        frame.on_changed_chk_nt_auto_div(wx.CommandEvent())
+        frame.cbo_nt_auto_div_mode.SetValue("cuts")
+        # ... and an Expert-tier field (Pop-Out Limit/Boost) ...
+        frame.cbo_max_negative_parallax.SetValue("0.1")
+        # ... and an Expert-tier field living inside an entirely-Expert sub-pane
+        # (Foreground Pop, inside the Depth Pop pane) -- collapsed by default, so its
+        # own IsShown() is governed by that pre-existing collapse state, not tier; only
+        # its VALUE is this invariant's concern.
+        frame.cbo_foreground_pop.SetValue("0.5")
+
+        assert frame.chk_nt_auto_div.IsShown() and frame.cbo_max_negative_parallax.IsShown(), \
+            "sanity check: these fields must actually be visible at Expert before hiding them"
+
+        # Drop to Basic -- hides chk_nt_auto_div, cbo_nt_auto_div_mode and
+        # cbo_max_negative_parallax.
+        frame.set_experience_level(EXPERIENCE_LEVEL_BASIC)
+        frame.apply_experience_level()
+        assert not frame.chk_nt_auto_div.IsShown()
+        assert not frame.cbo_max_negative_parallax.IsShown()
+
+        args = frame.parse_args(skip_set_state=True)
+        assert args.auto_divergence is True, \
+            f"hidden chk_nt_auto_div's value must still reach parse_args(), got {args.auto_divergence}"
+        assert args.auto_divergence_mode == "cuts", args.auto_divergence_mode
+        assert abs(args.max_negative_parallax - 0.1) < 1e-6, args.max_negative_parallax
+        assert abs(args.foreground_pop - 0.5) < 1e-6, args.foreground_pop
+
+        cmd = frame.get_cli_command()
+        assert "--auto-divergence" in cmd, cmd
+        assert "--max-negative-parallax" in cmd and "0.1" in cmd, cmd
+        assert "--foreground-pop" in cmd, cmd
+    finally:
+        if frame is not None:
+            frame.Destroy()
+            wx.SafeYield()
+        if app is not None:
+            app.Destroy()
+
+    print("_self_test_experience_level_preserves_hidden_values: PASS")
+
+
 def _run_self_tests():
     """Runs every registered self-test and reports a complete pass/fail summary.
 
@@ -40279,6 +40852,10 @@ def _run_self_tests():
         _self_test_combined_scene_log_gui_and_metadata,
         _self_test_combined_scene_log_merge,
         _self_test_foreground_scale_lock_switch_gui_and_cli,
+        _self_test_experience_level_default_and_migration,
+        _self_test_experience_level_visibility_and_live_switch,
+        _self_test_experience_level_limit_bitrate_tier_and_codec_compose,
+        _self_test_experience_level_preserves_hidden_values,
     ]
     failures = []
     for test in tests:

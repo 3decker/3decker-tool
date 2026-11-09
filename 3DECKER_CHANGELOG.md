@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 8, 2026
+## Latest Update — November 9, 2026
+
+**Added: Edge Fix can now automatically get sharper/softer per shot type (Wide/Mid/Close-up), matching whatever Auto 3D Strength already decided for that scene, instead of being one fixed number for the whole movie.** Edge Fix's own tooltip has always said it should roughly track 3D Strength (Divergence) -- "~2.0-2.25 pairs with 2/1, ~3.0-3.5 pairs with 3/2" -- but until now you had to remember to go change it by hand every time 3D Strength changed. New "Edge Fix Mode" dropdown next to Edge Fix: leave it on "Constant" (default, unchanged) or switch it to "Shot Lock" and set your own Wide/Mid/Close-Up X/Y value pairs plus your own High/Low strength thresholds -- same idea as the Shot Lock already available for Convergence Plane and Foreground Scale, just for Edge Fix. One real difference: this one is "snap only" -- it jumps straight to the new pair at a scene change rather than easing into it, because Edge Fix's numbers are whole-number counts that can't glide smoothly the way Convergence Plane's and Foreground Scale's numbers can. Only means something with Auto 3D Strength actually turned on.
+
+## Update — November 8, 2026
 
 **Added: a "Combine all 3 scene logs into one file" checkbox, so you don't have to open 3 separate files to compare 3D Strength, Convergence, and Foreground Scale.** Normally, turning on all 3 scene-log checkboxes ("Log 3D Strength per Scene," "Log Convergence Value per Scene," "Log Foreground Scale Value per Scene") gives you 3 separate text files. Check this new box instead and you get ONE file, with all 3 numbers on every scene's line -- and it automatically turns logging on for all 3 of those features for you, even if their own checkboxes are left unchecked. While this box is checked, you get the one combined file *instead of* the 3 separate ones, not an extra 4th file. Just like the other scene logs, it writes live, scene by scene, as the movie converts (clearly marked "IN PROGRESS" until it finishes) -- so cancelling or a crash partway through still leaves a real, readable record of every scene that finished. Needs "Auto 3D Strength" turned on too, or there's no 3D Strength number to show.
 

@@ -104,6 +104,17 @@ DEFAULT_FOREGROUND_SCALE_LOCK_THRESHOLD_HIGH = 4.0
 DEFAULT_FOREGROUND_SCALE_LOCK_SWITCH = "snap"
 DEFAULT_FOREGROUND_SCALE_LOCK_SMOOTHING = 0.9
 
+# Edge Fix's own shot_lock defaults (ADR-458) -- entirely separate from
+# Convergence Plane's/Foreground Scale's shot_lock defaults above, matching
+# iw3/utils.py create_parser()'s --edge-dilation-lock-* defaults. SNAP only --
+# there is no switch/smoothing default here, unlike Foreground Scale's own
+# (ADR-455): an integer dilation loop count can't glide the way a continuous
+# float can, see edge_dilation_estimator.py's module docstring.
+DEFAULT_EDGE_DILATION_LOCK_WIDE = (3, 2)
+DEFAULT_EDGE_DILATION_LOCK_MID = (2, 1)
+DEFAULT_EDGE_DILATION_LOCK_CLOSEUP = (1, 1)
+DEFAULT_EDGE_DILATION_LOCK_THRESHOLD_HIGH = 4.0
+
 
 IMAGE_EXTENSIONS = extension_list_to_wildcard(LOADER_SUPPORTED_EXTENSIONS)
 VIDEO_EXTENSIONS = extension_list_to_wildcard(KNOWN_VIDEO_EXTENSIONS)
@@ -3531,6 +3542,159 @@ class MainFrame(wx.Frame):
               "fully symmetric). Vertical seams usually matter less for a left/right eye shift, so this is "
               "typically kept lower than X. Recommended: 1 as a starting point (paired with X=2)."))
 
+        # Edge Fix shot-lock (ADR-458): its own independent per-shot lock, parallel
+        # to Convergence Plane's (ADR-420) and Foreground Scale's (ADR-452) own
+        # shot_lock above but for Edge Fix instead -- separate Mode combo, separate
+        # Wide/Mid/Close-Up X/Y value boxes, separate Threshold (High/Low) boxes.
+        # None of these widgets share state with cbo_convergence_lock_*/
+        # cbo_foreground_scale_lock_* above. SNAP ONLY -- deliberately no Switch
+        # Style/Smoothing combo here (see edge_dilation_estimator.py's module
+        # docstring for why: an integer dilation loop count can't glide the way a
+        # continuous float can).
+        self.lbl_edge_dilation_mode = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Edge Fix Mode"))
+        self.cbo_edge_dilation_mode = wx.ComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), name="cbo_edge_dilation_mode")
+        self.cbo_edge_dilation_mode.SetEditable(False)
+        self.cbo_edge_dilation_mode.Append(T("Constant"), "constant")
+        self.cbo_edge_dilation_mode.Append(T("Shot Lock"), "shot_lock")
+        self.cbo_edge_dilation_mode.SetSelection(0)
+        self.cbo_edge_dilation_mode.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_edge_dilation_mode)
+        self.cbo_edge_dilation_mode.SetToolTip(
+            T("What it's for: lets Edge Fix above switch automatically between shots instead of using one "
+              "fixed [X, Y] pair for the whole video -- its own separate per-shot system, completely "
+              "independent of Convergence Plane's/Foreground Scale's own shot_lock Mode/values elsewhere "
+              "(different setting, different thresholds, different locked values -- none of them share "
+              "state).\n"
+              "Constant (default): Edge Fix above always applies unchanged for the whole video.\n"
+              "Shot Lock: each scene's own 3D Strength (divergence) decides which of the three [X, Y] "
+              "pairs below it locks in for that scene -- Wide Shot Value above Strength Threshold (High), "
+              "Close-Up Value at or below Strength Threshold (Low) (or below Strength Threshold (High), if "
+              "Strength Threshold (Low) is left empty), Mid Shot Value in between. Directly motivated by "
+              "Edge Fix's own tooltip above (\"Divergence ~2.0-2.25 pairs with 2/1, ~3.0-3.5 pairs with "
+              "3/2\") -- this makes that pairing automatic instead of something you have to remember to "
+              "adjust by hand every time 3D Strength changes.\n"
+              "Con: SNAP ONLY -- unlike Convergence Plane's/Foreground Scale's own shot_lock, there is no "
+              "\"ease\" glide option here. An integer loop count can't glide through a fractional value, "
+              "so every scene change jumps straight to its new [X, Y] pair. In practice this only matters "
+              "on the single frame right at a cut, which is already visually disrupted by the cut itself.\n"
+              "Recommended: Constant unless you specifically want Edge Fix to track 3D Strength per scene "
+              "-- try your own footage and judge by eye."))
+
+        self.lbl_edge_dilation_lock_wide = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Wide Shot Value"))
+        self.cbo_edge_dilation_lock_wide = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["2", "3", "4"],
+            size=self.FromDIP((90, -1)), name="cbo_edge_dilation_lock_wide")
+        self.cbo_edge_dilation_lock_wide_y = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["1", "2", "3"],
+            name="cbo_edge_dilation_lock_wide_y")
+        self.cbo_edge_dilation_lock_wide.SetValue(str(DEFAULT_EDGE_DILATION_LOCK_WIDE[0]))
+        self.cbo_edge_dilation_lock_wide_y.SetValue(str(DEFAULT_EDGE_DILATION_LOCK_WIDE[1]))
+        self.cbo_edge_dilation_lock_wide.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. The Edge Fix [X, Y] pair locked in for every scene "
+              "whose 3D Strength is ABOVE Strength Threshold (High) below -- its own independent pair, "
+              "not shared with the plain Edge Fix boxes above or with Convergence Plane's/Foreground "
+              "Scale's own Wide Shot Value.\n"
+              "X value, same meaning as the plain Edge Fix X box above. Recommended: 3 as a starting "
+              "point, matching Edge Fix's own tooltip (\"Divergence ~3.0-3.5 pairs with 3/2\") -- wide "
+              "shots tend to run at higher 3D Strength, which needs more edge protection."))
+        self.cbo_edge_dilation_lock_wide_y.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. Y value for Wide Shot Value, same meaning as the "
+              "plain Edge Fix Y box above (left blank = same as X). Recommended: 2 as a starting point "
+              "(paired with X=3)."))
+
+        self.lbl_edge_dilation_lock_mid = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Mid Shot Value"))
+        self.cbo_edge_dilation_lock_mid = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["", "1", "2", "3"],
+            size=self.FromDIP((90, -1)), name="cbo_edge_dilation_lock_mid")
+        self.cbo_edge_dilation_lock_mid_y = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["", "0", "1", "2"],
+            name="cbo_edge_dilation_lock_mid_y")
+        self.cbo_edge_dilation_lock_mid.SetValue(str(DEFAULT_EDGE_DILATION_LOCK_MID[0]))
+        self.cbo_edge_dilation_lock_mid_y.SetValue(str(DEFAULT_EDGE_DILATION_LOCK_MID[1]))
+        self.cbo_edge_dilation_lock_mid.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. The Edge Fix [X, Y] pair used on scenes whose 3D "
+              "Strength falls between Strength Threshold (Low) and Strength Threshold (High) below. "
+              "Filled in by default (matching the plain Edge Fix default of 2/1) -- clear this X box "
+              "(leave it empty) to turn the middle tier off entirely instead: every scene then gets a "
+              "plain above/below decision at Strength Threshold (High) instead.\n"
+              "Independent of Convergence Plane's/Foreground Scale's own Mid Shot Value -- the two "
+              "settings never share a box or a threshold.\n"
+              "Recommended: 2 (default), matching Edge Fix's own tooltip (\"Divergence ~2.0-2.25 pairs "
+              "with 2/1\") -- try your own footage and judge by eye."))
+        self.cbo_edge_dilation_lock_mid_y.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. Y value for Mid Shot Value, same meaning as the "
+              "plain Edge Fix Y box above (left blank = same as X). Recommended: 1 as a starting point "
+              "(paired with X=2)."))
+
+        self.lbl_edge_dilation_lock_closeup = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Close-Up Value"))
+        self.cbo_edge_dilation_lock_closeup = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["0", "1", "2"],
+            size=self.FromDIP((90, -1)), name="cbo_edge_dilation_lock_closeup")
+        self.cbo_edge_dilation_lock_closeup_y = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["", "0", "1"],
+            name="cbo_edge_dilation_lock_closeup_y")
+        self.cbo_edge_dilation_lock_closeup.SetValue(str(DEFAULT_EDGE_DILATION_LOCK_CLOSEUP[0]))
+        self.cbo_edge_dilation_lock_closeup_y.SetValue(str(DEFAULT_EDGE_DILATION_LOCK_CLOSEUP[1]))
+        self.cbo_edge_dilation_lock_closeup.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. The Edge Fix [X, Y] pair locked in for every scene "
+              "whose 3D Strength is AT OR BELOW Strength Threshold (Low) below (or at or below Strength "
+              "Threshold (High), if Strength Threshold (Low) is left empty) -- its own independent pair, "
+              "not shared with the plain Edge Fix boxes above or with Convergence Plane's/Foreground "
+              "Scale's own Close-Up Value.\n"
+              "X value, same meaning as the plain Edge Fix X box above. Recommended: 1 as a starting "
+              "point -- close-up scenes tend to run at lower 3D Strength, which needs less edge "
+              "protection."))
+        self.cbo_edge_dilation_lock_closeup_y.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. Y value for Close-Up Value, same meaning as the "
+              "plain Edge Fix Y box above (left blank = same as X). Recommended: 1 as a starting point "
+              "(paired with X=1)."))
+
+        self.lbl_edge_dilation_lock_threshold_high = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Strength Threshold (High)"))
+        self.cbo_edge_dilation_lock_threshold_high = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["3.5", "4.0", "4.5", "5.0"],
+            name="cbo_edge_dilation_lock_threshold_high")
+        self.cbo_edge_dilation_lock_threshold_high.SetValue(
+            f"{DEFAULT_EDGE_DILATION_LOCK_THRESHOLD_HIGH:.2f}")
+        self.cbo_edge_dilation_lock_threshold_high.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. The HIGH cutoff line on the 3D Strength scale -- "
+              "scenes using a 3D Strength ABOVE this number lock in Wide Shot Value. Everything at or "
+              "below it locks in Close-Up Value, UNLESS Strength Threshold (Low) below is also set -- "
+              "then it locks in Mid Shot Value instead, down to that second cutoff.\n"
+              "Entirely separate from Convergence Plane's/Foreground Scale's own Strength Threshold "
+              "(High) -- the two settings compare against the same kind of 3D Strength number but keep "
+              "their own independent cutoff.\n"
+              "IMPORTANT: \"above this = Wide\" assumes Auto 3D Strength's own Invert option is ON (wide "
+              "shots then land at the HIGH end of your 3D Strength numbers). With Invert OFF, it's the "
+              "opposite -- close-ups land at the high end -- so check your own 3D Strength log file for "
+              "which shots actually sit above vs. below this number before relying on the Wide/Close-Up "
+              "labels.\n"
+              "Recommended: pick a number that actually sits between the 3D Strength values your own "
+              "footage tends to use -- check your own 3D Strength log file to see the real numbers."))
+
+        self.lbl_edge_dilation_lock_threshold_low = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Strength Threshold (Low)"))
+        self.cbo_edge_dilation_lock_threshold_low = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["", "3.0", "3.5", "4.0"],
+            name="cbo_edge_dilation_lock_threshold_low")
+        self.cbo_edge_dilation_lock_threshold_low.SetValue("")
+        self.cbo_edge_dilation_lock_threshold_low.SetToolTip(
+            T("Only affects Shot Lock Edge Fix Mode. A SECOND cutoff line, turning the plain above/below "
+              "split into a 3-way one -- scenes using a 3D Strength AT OR BELOW this number lock in "
+              "Close-Up Value; scenes BETWEEN this and Strength Threshold (High) above lock in Mid Shot "
+              "Value instead. Leave empty (default) to keep the plain 2-way split.\n"
+              "Entirely separate from Convergence Plane's/Foreground Scale's own Strength Threshold "
+              "(Low).\n"
+              "Example: Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 2/1 -- anything over "
+              "3.9 uses Wide Shot Value, anything from 3.7 up to 3.9 uses 2/1, anything under 3.7 uses "
+              "Close-Up Value.\n"
+              "Same Invert caveat as Strength Threshold (High) above: \"at or below this = Close-Up\" "
+              "assumes Auto 3D Strength's Invert option is ON."))
+
         self.chk_ema_normalize = wx.CheckBox(self.cpn_stereo_stability_flicker.GetPane(),
                                              label=T("Flicker Reduction"),
                                              name="chk_ema_normalize")
@@ -4204,6 +4368,23 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.lbl_edge_dilation, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_edge_dilation, (k, 1), flag=wx.EXPAND)
         pane_layout_stability.Add(self.cbo_edge_dilation_y, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_edge_dilation_mode, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_edge_dilation_mode, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_edge_dilation_lock_wide, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_wide, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_wide_y, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_edge_dilation_lock_mid, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_mid, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_mid_y, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_edge_dilation_lock_closeup, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_closeup, (k, 1), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_closeup_y, (k, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_edge_dilation_lock_threshold_high,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_threshold_high, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_edge_dilation_lock_threshold_low,
+                                  (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_edge_dilation_lock_threshold_low, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_depth_aa, (k := k + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_depth_refine, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_depth_refine_strength, (k, 1), flag=wx.EXPAND)
@@ -10877,6 +11058,7 @@ class MainFrame(wx.Frame):
         self.update_temporal_stabilize()
         self.update_convergence_mode()
         self.update_foreground_scale_mode()
+        self.update_edge_dilation_mode()
         self.update_scene_segment()
         self.update_nt_auto_divergence()
         self.update_stereo_advanced_visibility()
@@ -11497,6 +11679,14 @@ class MainFrame(wx.Frame):
             self.cbo_stereo_width,
             self.cbo_edge_dilation,
             self.cbo_edge_dilation_y,
+            self.cbo_edge_dilation_lock_wide,
+            self.cbo_edge_dilation_lock_wide_y,
+            self.cbo_edge_dilation_lock_mid,
+            self.cbo_edge_dilation_lock_mid_y,
+            self.cbo_edge_dilation_lock_closeup,
+            self.cbo_edge_dilation_lock_closeup_y,
+            self.cbo_edge_dilation_lock_threshold_high,
+            self.cbo_edge_dilation_lock_threshold_low,
             self.cbo_mask_outer_dilation,
             self.cbo_mask_inner_dilation,
             self.cbo_inpaint_max_width,
@@ -12013,6 +12203,27 @@ class MainFrame(wx.Frame):
 
     def on_changed_cbo_foreground_scale_lock_switch(self, event):
         self.update_foreground_scale_lock_switch()
+
+    def update_edge_dilation_mode(self):
+        """Edge Fix's own shot-lock enable/disable (ADR-458) -- a separate code
+        path from update_foreground_scale_mode()/update_convergence_mode() above,
+        keyed off cbo_edge_dilation_mode instead, and only ever touching the
+        edge_dilation_lock_* widgets. No Switch Style/Smoothing gate to chain
+        into here, unlike update_foreground_scale_mode() -- Edge Fix shot_lock is
+        SNAP only, see edge_dilation_estimator.py's module docstring."""
+        mode = self.cbo_edge_dilation_mode.GetClientData(self.cbo_edge_dilation_mode.GetSelection())
+        for c in (self.lbl_edge_dilation_lock_wide, self.cbo_edge_dilation_lock_wide,
+                  self.cbo_edge_dilation_lock_wide_y,
+                  self.lbl_edge_dilation_lock_mid, self.cbo_edge_dilation_lock_mid,
+                  self.cbo_edge_dilation_lock_mid_y,
+                  self.lbl_edge_dilation_lock_closeup, self.cbo_edge_dilation_lock_closeup,
+                  self.cbo_edge_dilation_lock_closeup_y,
+                  self.lbl_edge_dilation_lock_threshold_high, self.cbo_edge_dilation_lock_threshold_high,
+                  self.lbl_edge_dilation_lock_threshold_low, self.cbo_edge_dilation_lock_threshold_low):
+            c.Enable(mode == "shot_lock")
+
+    def on_changed_cbo_edge_dilation_mode(self, event):
+        self.update_edge_dilation_mode()
 
     def update_convergence_cut_smooth(self):
         # Meaningful in two unrelated cases: (1) Hold Steady Per Scene is checked (any AI
@@ -12833,6 +13044,38 @@ class MainFrame(wx.Frame):
         if not validate_number(self.cbo_foreground_scale_lock_smoothing.GetValue(), 0.0, 0.999):
             self.show_validation_error_message(T("Smoothing"), 0.0, 0.999)
             return None
+        if not validate_number(self.cbo_edge_dilation_lock_wide.GetValue(), 0, 20, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Wide Shot Value"), 0, 20)
+            return None
+        if not validate_number(self.cbo_edge_dilation_lock_wide_y.GetValue(), 0, 20, is_int=True, allow_empty=True):
+            self.show_validation_error_message(T("Wide Shot Value"), 0, 20)
+            return None
+        if not validate_number(self.cbo_edge_dilation_lock_closeup.GetValue(), 0, 20, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Close-Up Value"), 0, 20)
+            return None
+        if not validate_number(self.cbo_edge_dilation_lock_closeup_y.GetValue(), 0, 20, is_int=True, allow_empty=True):
+            self.show_validation_error_message(T("Close-Up Value"), 0, 20)
+            return None
+        # ADR-458: Mid Shot Value's X box left empty is how the GUI asks to turn
+        # the whole middle tier off (see _edge_dilation_lock_mid_pair() in
+        # iw3/utils.py) -- same idiom as Foreground Scale's own Mid Shot Value
+        # above, allow_empty=True here, not for Wide/Close-Up above.
+        if not validate_number(self.cbo_edge_dilation_lock_mid.GetValue(), 0, 20, is_int=True, allow_empty=True):
+            self.show_validation_error_message(T("Mid Shot Value"), 0, 20)
+            return None
+        if not validate_number(self.cbo_edge_dilation_lock_mid_y.GetValue(), 0, 20, is_int=True, allow_empty=True):
+            self.show_validation_error_message(T("Mid Shot Value"), 0, 20)
+            return None
+        if not validate_number(self.cbo_edge_dilation_lock_threshold_high.GetValue(), 0.0, 100.0,
+                               allow_empty=False):
+            self.show_validation_error_message(T("Strength Threshold (High)"), 0.0, 100.0)
+            return None
+        # Strength Threshold (Low) is also allowed empty (the default -- keep the
+        # plain 2-way split).
+        if not validate_number(self.cbo_edge_dilation_lock_threshold_low.GetValue(), 0.0, 100.0,
+                               allow_empty=True):
+            self.show_validation_error_message(T("Strength Threshold (Low)"), 0.0, 100.0)
+            return None
 
         resolution = self.cbo_resolution.GetValue()
         if resolution == "Default" or resolution == "":
@@ -13052,6 +13295,29 @@ class MainFrame(wx.Frame):
         else:
             edge_dilation = int(self.cbo_edge_dilation.GetValue())
 
+        # ADR-458: same [x, y]-or-bare-int idiom as plain edge_dilation above, for
+        # each of Edge Fix shot_lock's own Wide/Mid/Close-Up value boxes.
+        if self.cbo_edge_dilation_lock_wide_y.GetValue():
+            edge_dilation_lock_wide = [int(self.cbo_edge_dilation_lock_wide.GetValue()),
+                                       int(self.cbo_edge_dilation_lock_wide_y.GetValue())]
+        else:
+            edge_dilation_lock_wide = int(self.cbo_edge_dilation_lock_wide.GetValue())
+        if self.cbo_edge_dilation_lock_closeup_y.GetValue():
+            edge_dilation_lock_closeup = [int(self.cbo_edge_dilation_lock_closeup.GetValue()),
+                                          int(self.cbo_edge_dilation_lock_closeup_y.GetValue())]
+        else:
+            edge_dilation_lock_closeup = int(self.cbo_edge_dilation_lock_closeup.GetValue())
+        if not self.cbo_edge_dilation_lock_mid.GetValue().strip():
+            # Mid Shot Value's X box left empty -- None disables the whole middle
+            # tier, same idiom as Convergence Plane's/Foreground Scale's own Mid
+            # Shot Value above.
+            edge_dilation_lock_mid = None
+        elif self.cbo_edge_dilation_lock_mid_y.GetValue():
+            edge_dilation_lock_mid = [int(self.cbo_edge_dilation_lock_mid.GetValue()),
+                                      int(self.cbo_edge_dilation_lock_mid_y.GetValue())]
+        else:
+            edge_dilation_lock_mid = int(self.cbo_edge_dilation_lock_mid.GetValue())
+
         if self.lbl_inpaint_model.IsShown():
             inpaint_model = self.cbo_inpaint_model.GetValue()
             mask_inner_dilation = int(self.cbo_mask_inner_dilation.GetValue())
@@ -13209,6 +13475,16 @@ class MainFrame(wx.Frame):
             sharpen_strength=float(self.cbo_sharpen_strength.GetValue()),
             depth_aa=depth_aa,
             edge_dilation=edge_dilation,
+            edge_dilation_mode=self.cbo_edge_dilation_mode.GetClientData(
+                self.cbo_edge_dilation_mode.GetSelection()),
+            edge_dilation_lock_wide=edge_dilation_lock_wide,
+            edge_dilation_lock_mid=edge_dilation_lock_mid,
+            edge_dilation_lock_closeup=edge_dilation_lock_closeup,
+            edge_dilation_lock_threshold_high=float(
+                self.cbo_edge_dilation_lock_threshold_high.GetValue()),
+            # an empty box means "plain 2-way split" -- None, not a parsed float.
+            edge_dilation_lock_threshold_low=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_edge_dilation_lock_threshold_low.GetValue()),
             inpaint_model=inpaint_model,
             inpaint_overlap_frames=inpaint_overlap_frames,
             mask_inner_dilation=mask_inner_dilation,
@@ -14639,6 +14915,52 @@ class MainFrame(wx.Frame):
         edge_dilation = args.edge_dilation if isinstance(args.edge_dilation, list) else [args.edge_dilation]
         _apply_combo_value(self.cbo_edge_dilation, edge_dilation[0])
         _apply_combo_value(self.cbo_edge_dilation_y, edge_dilation[1] if len(edge_dilation) > 1 else "")
+
+        # ADR-458: Edge Fix's own shot_lock restore -- same [x, y]-or-bare-value
+        # idiom as plain edge_dilation just above, for each of Wide/Mid/Close-Up.
+        def _restore_edge_dilation_pair(x_box, y_box, raw, default_pair):
+            pair = raw if raw is not None else default_pair
+            pair = pair if isinstance(pair, (list, tuple)) else [pair]
+            _apply_combo_value(x_box, pair[0])
+            _apply_combo_value(y_box, pair[1] if len(pair) > 1 else "")
+
+        _edl_mode_value = getattr(args, "edge_dilation_mode", "constant") or "constant"
+        for i in range(self.cbo_edge_dilation_mode.GetCount()):
+            if self.cbo_edge_dilation_mode.GetClientData(i) == _edl_mode_value:
+                self.cbo_edge_dilation_mode.SetSelection(i)
+                break
+        else:
+            self.cbo_edge_dilation_mode.SetSelection(0)
+        _restore_edge_dilation_pair(self.cbo_edge_dilation_lock_wide, self.cbo_edge_dilation_lock_wide_y,
+                                    getattr(args, "edge_dilation_lock_wide", None),
+                                    DEFAULT_EDGE_DILATION_LOCK_WIDE)
+        _restore_edge_dilation_pair(self.cbo_edge_dilation_lock_closeup, self.cbo_edge_dilation_lock_closeup_y,
+                                    getattr(args, "edge_dilation_lock_closeup", None),
+                                    DEFAULT_EDGE_DILATION_LOCK_CLOSEUP)
+        # None (disabled) must restore to an empty box, not the literal text
+        # "None" _apply_combo_value's plain str() would otherwise produce (same
+        # idiom as Foreground Scale's own foreground_scale_lock_mid restore
+        # above). A CLI-produced [None] (--edge-dilation-lock-mid none) collapses
+        # to the same "disabled" meaning as a bare None here -- same two-shape
+        # handling as _edge_dilation_lock_mid_pair() in iw3/utils.py.
+        _edl_mid_restore = getattr(args, "edge_dilation_lock_mid", None)
+        if isinstance(_edl_mid_restore, (list, tuple)) and any(v is None for v in _edl_mid_restore):
+            _edl_mid_restore = None
+        if _edl_mid_restore is None:
+            self.cbo_edge_dilation_lock_mid.SetValue("")
+            self.cbo_edge_dilation_lock_mid_y.SetValue("")
+        else:
+            _restore_edge_dilation_pair(self.cbo_edge_dilation_lock_mid, self.cbo_edge_dilation_lock_mid_y,
+                                        _edl_mid_restore, DEFAULT_EDGE_DILATION_LOCK_MID)
+        _apply_combo_value(
+            self.cbo_edge_dilation_lock_threshold_high,
+            getattr(args, "edge_dilation_lock_threshold_high", DEFAULT_EDGE_DILATION_LOCK_THRESHOLD_HIGH))
+        _edl_threshold_low_restore = getattr(args, "edge_dilation_lock_threshold_low", None)
+        if _edl_threshold_low_restore is None:
+            self.cbo_edge_dilation_lock_threshold_low.SetValue("")
+        else:
+            _apply_combo_value(self.cbo_edge_dilation_lock_threshold_low, _edl_threshold_low_restore)
+        self.update_edge_dilation_mode()
 
         if args.inpaint_model:
             _apply_combo_value(self.cbo_inpaint_model, args.inpaint_model)
@@ -38950,6 +39272,198 @@ def _self_test_foreground_scale_lock_mid_disabled():
     print("_self_test_foreground_scale_lock_mid_disabled: PASS")
 
 
+def _self_test_edge_dilation_lock_gui_and_cli():
+    """ADR-458: Edge Fix's own shot_lock mode (parallel to, but completely
+    independent from, Convergence Plane's/Foreground Scale's existing
+    shot_lock) -- its Mode combo must be a real dropdown mapping display
+    labels to edge_dilation_mode CLI values ("constant"/"shot_lock"); its
+    Wide/Mid/Close-Up X/Y value boxes and Strength Threshold High/Low boxes
+    must enable ONLY for Shot Lock and must never be affected by, or affect,
+    Convergence Plane's/Foreground Scale's own separate shot-lock widgets;
+    and all fields must round-trip through parse_args()/the CLI command and
+    restore."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        mode_items = [frame.cbo_edge_dilation_mode.GetClientData(i)
+                      for i in range(frame.cbo_edge_dilation_mode.GetCount())]
+        assert mode_items == ["constant", "shot_lock"], mode_items
+
+        frame.cbo_edge_dilation_mode.SetSelection(0)  # Constant
+        frame.update_edge_dilation_mode()
+        assert not frame.cbo_edge_dilation_lock_wide.IsEnabled()
+        assert not frame.cbo_edge_dilation_lock_wide_y.IsEnabled()
+        assert not frame.cbo_edge_dilation_lock_mid.IsEnabled()
+        assert not frame.cbo_edge_dilation_lock_mid_y.IsEnabled()
+        assert not frame.cbo_edge_dilation_lock_closeup.IsEnabled()
+        assert not frame.cbo_edge_dilation_lock_closeup_y.IsEnabled()
+        assert not frame.cbo_edge_dilation_lock_threshold_high.IsEnabled()
+        assert not frame.cbo_edge_dilation_lock_threshold_low.IsEnabled()
+
+        frame.cbo_edge_dilation_mode.SetSelection(1)  # Shot Lock
+        frame.update_edge_dilation_mode()
+        assert frame.cbo_edge_dilation_lock_wide.IsEnabled()
+        assert frame.cbo_edge_dilation_lock_wide_y.IsEnabled()
+        assert frame.cbo_edge_dilation_lock_mid.IsEnabled()
+        assert frame.cbo_edge_dilation_lock_mid_y.IsEnabled()
+        assert frame.cbo_edge_dilation_lock_closeup.IsEnabled()
+        assert frame.cbo_edge_dilation_lock_closeup_y.IsEnabled()
+        assert frame.cbo_edge_dilation_lock_threshold_high.IsEnabled()
+        assert frame.cbo_edge_dilation_lock_threshold_low.IsEnabled()
+
+        # Independence from Convergence Plane's/Foreground Scale's own
+        # shot_lock: switching this Mode must never touch their widgets.
+        frame.cbo_convergence_mode.SetValue("constant")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_lock_wide.IsEnabled(), \
+            "Edge Fix Mode must never enable Convergence Plane's own shot-lock widgets"
+        frame.cbo_foreground_scale_mode.SetSelection(0)  # Constant
+        frame.update_foreground_scale_mode()
+        assert not frame.cbo_foreground_scale_lock_wide.IsEnabled(), \
+            "Edge Fix Mode must never enable Foreground Scale's own shot-lock widgets"
+
+        frame.cbo_edge_dilation_lock_wide.SetValue("4")
+        frame.cbo_edge_dilation_lock_wide_y.SetValue("3")
+        frame.cbo_edge_dilation_lock_mid.SetValue("2")
+        frame.cbo_edge_dilation_lock_mid_y.SetValue("0")
+        frame.cbo_edge_dilation_lock_closeup.SetValue("1")
+        frame.cbo_edge_dilation_lock_closeup_y.SetValue("0")
+        frame.cbo_edge_dilation_lock_threshold_high.SetValue("4.5")
+        frame.cbo_edge_dilation_lock_threshold_low.SetValue("3.2")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.edge_dilation_mode == "shot_lock"
+        assert args.edge_dilation_lock_wide == [4, 3], args.edge_dilation_lock_wide
+        assert args.edge_dilation_lock_mid == [2, 0], args.edge_dilation_lock_mid
+        assert args.edge_dilation_lock_closeup == [1, 0], args.edge_dilation_lock_closeup
+        assert args.edge_dilation_lock_threshold_high == 4.5
+        assert args.edge_dilation_lock_threshold_low == 3.2
+
+        cmd = frame.get_cli_command()
+        assert "--edge-dilation-mode" in cmd and "shot_lock" in cmd, cmd
+        assert "--edge-dilation-lock-wide" in cmd, cmd
+        assert "--edge-dilation-lock-mid" in cmd, cmd
+        assert "--edge-dilation-lock-closeup" in cmd, cmd
+        assert "--edge-dilation-lock-threshold-high" in cmd, cmd
+        assert "--edge-dilation-lock-threshold-low" in cmd, cmd
+
+        frame.cbo_edge_dilation_lock_wide.SetValue("0")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_edge_dilation_lock_wide.GetValue() == "4", \
+            "restore must bring the value back"
+        assert frame.cbo_edge_dilation_mode.GetClientData(
+            frame.cbo_edge_dilation_mode.GetSelection()) == "shot_lock"
+        assert frame.cbo_edge_dilation_lock_wide.IsEnabled(), \
+            "restore must re-apply the enable state for the restored mode"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # Round-trip through the real CLI parser too, not just the in-memory args object.
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args([
+        "-i", "a.mp4", "-o", "o",
+        "--edge-dilation-mode", "shot_lock",
+        "--edge-dilation-lock-wide", "4", "3",
+        "--edge-dilation-lock-mid", "2", "0",
+        "--edge-dilation-lock-closeup", "1", "0",
+        "--edge-dilation-lock-threshold-high", "4.5",
+        "--edge-dilation-lock-threshold-low", "3.2",
+    ])
+    assert reparsed.edge_dilation_mode == "shot_lock"
+    assert reparsed.edge_dilation_lock_wide == [4, 3]
+    assert reparsed.edge_dilation_lock_mid == [2, 0]
+    assert reparsed.edge_dilation_lock_closeup == [1, 0]
+    assert reparsed.edge_dilation_lock_threshold_high == 4.5
+    assert reparsed.edge_dilation_lock_threshold_low == 3.2
+
+    print("_self_test_edge_dilation_lock_gui_and_cli: PASS")
+
+
+def _self_test_edge_dilation_lock_mid_disabled():
+    """ADR-458: Edge Fix's own Mid Shot Value and Strength Threshold (Low)
+    must each be independently leavable empty, mirroring Foreground Scale's
+    own foreground_scale_lock_mid/foreground_scale_lock_threshold_low
+    behavior but through this feature's completely separate fields -- an
+    empty Mid X box must validate (not error), parse to None, round-trip
+    through the real CLI parser, and restore back to an empty box rather
+    than the literal text "None"."""
+    import wx
+    from . import utils as U
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_edge_dilation_mode.SetSelection(1)  # Shot Lock
+        frame.update_edge_dilation_mode()
+
+        frame.cbo_edge_dilation_lock_wide.SetValue("3")
+        frame.cbo_edge_dilation_lock_wide_y.SetValue("2")
+        frame.cbo_edge_dilation_lock_mid.SetValue("")  # left empty
+        frame.cbo_edge_dilation_lock_mid_y.SetValue("")
+        frame.cbo_edge_dilation_lock_closeup.SetValue("1")
+        frame.cbo_edge_dilation_lock_closeup_y.SetValue("1")
+        frame.cbo_edge_dilation_lock_threshold_high.SetValue("4.2")
+        frame.cbo_edge_dilation_lock_threshold_low.SetValue("")  # left empty
+        args = frame.parse_args(skip_set_state=True)
+        assert args.edge_dilation_lock_mid is None, \
+            f"empty Mid Shot Value box must parse to None, got {args.edge_dilation_lock_mid!r}"
+        assert args.edge_dilation_lock_threshold_low is None, \
+            f"empty Strength Threshold (Low) box must parse to None, got {args.edge_dilation_lock_threshold_low!r}"
+
+        cmd = frame.get_cli_command()
+        # Unlike Foreground Scale's own Mid Shot Value (default None, so leaving
+        # it disabled never deviates from default and the flag is omitted
+        # entirely), Edge Fix's default Mid tier is a real pair ([2, 1], matching
+        # the plain Edge Fix default) -- disabling it is a real deviation from
+        # that default, so the flag MUST still appear (carrying the literal
+        # "None" token) for the command line to round-trip back to "disabled".
+        assert "--edge-dilation-lock-mid" in cmd, cmd
+        assert "--edge-dilation-lock-threshold-low" not in cmd, cmd
+        reparsed_from_cmd, err = frame.parse_cli_command_text(cmd)
+        assert err is None, err
+        assert reparsed_from_cmd.edge_dilation_lock_mid in (None, [None]), \
+            reparsed_from_cmd.edge_dilation_lock_mid
+
+        # Restoring a None value must blank the boxes, not type the literal word "None".
+        frame.cbo_edge_dilation_lock_mid.SetValue("2")
+        frame.cbo_edge_dilation_lock_threshold_low.SetValue("3.0")
+        frame.apply_parsed_args_to_gui(args)
+        assert frame.cbo_edge_dilation_lock_mid.GetValue() == "", \
+            (f"restoring a disabled Mid Shot Value must leave the box empty, got "
+             f"{frame.cbo_edge_dilation_lock_mid.GetValue()!r}")
+        assert frame.cbo_edge_dilation_lock_threshold_low.GetValue() == "", \
+            (f"restoring a disabled Strength Threshold (Low) must leave the box empty, got "
+             f"{frame.cbo_edge_dilation_lock_threshold_low.GetValue()!r}")
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # Round-trip the real command line back through the parser (not just
+    # checking string content) -- confirms the None really survives a save/
+    # restore of a command line, not just this one in-memory args object.
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args([
+        "-i", "a.mp4", "-o", "o",
+        "--edge-dilation-mode", "shot_lock",
+        "--edge-dilation-lock-wide", "3", "2",
+        "--edge-dilation-lock-mid", "none",
+        "--edge-dilation-lock-closeup", "1", "1",
+        "--edge-dilation-lock-threshold-high", "4.2",
+        "--edge-dilation-lock-threshold-low", "none",
+    ])
+    assert reparsed.edge_dilation_lock_mid == [None]
+    assert reparsed.edge_dilation_lock_threshold_low is None
+
+    print("_self_test_edge_dilation_lock_mid_disabled: PASS")
+
+
 def _self_test_foreground_scale_scene_log_gui_and_cli():
     """ADR-453: chk_foreground_scale_scene_log must round-trip through
     parse_args()/the CLI command/restore, default to off, and -- unlike the
@@ -39600,6 +40114,8 @@ def _run_self_tests():
         _self_test_postprocess_image_always_even,
         _self_test_foreground_scale_lock_gui_and_cli,
         _self_test_foreground_scale_lock_mid_disabled,
+        _self_test_edge_dilation_lock_gui_and_cli,
+        _self_test_edge_dilation_lock_mid_disabled,
         _self_test_foreground_scale_scene_log_gui_and_cli,
         _self_test_combined_scene_log_gui_and_metadata,
         _self_test_combined_scene_log_merge,

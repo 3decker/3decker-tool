@@ -35,7 +35,7 @@ from nunif.device import create_device, device_is_cuda, mps_is_available, xpu_is
 from nunif.models.data_parallel import DeviceSwitchInference
 from . import export_config
 from . import face_protect as FACEP
-from .dilation import dilate_edge, edge_dilation_is_enabled
+from .dilation import dilate_edge, edge_dilation_is_enabled, edge_dilation_parse
 from .forward_warp import apply_divergence_forward_warp, SPLAT_BLEND_TEMPERATURE
 from .anaglyph import apply_anaglyph_redcyan
 from .mapper import get_mapper, resolve_mapper_name, MAPPER_ALL
@@ -3996,6 +3996,31 @@ def make_output_filename(input_filename, args, video=False):
         else:
             fsl_tag = ""
 
+        # ADR-458: --edge-dilation-mode shot_lock -- entirely separate feature/
+        # state from Convergence Plane's/Foreground Scale's own shot_lock tags
+        # above, see edge_dilation_estimator.py. Prefix "edl" so a renamed file
+        # can never collide with the plain "di<edge_dilation>" constant-mode tag
+        # already embedded just below. SNAP only (no "ease" segment -- see that
+        # module's docstring for why this feature never gets one).
+        if getattr(args, "edge_dilation_mode", "constant") == "shot_lock":
+            edl_wide = edge_dilation_parse(getattr(args, "edge_dilation_lock_wide", [3, 2]))
+            edl_mid_raw = _edge_dilation_lock_mid_pair(args)
+            edl_mid = edge_dilation_parse(edl_mid_raw) if edl_mid_raw is not None else None
+            edl_closeup = edge_dilation_parse(getattr(args, "edge_dilation_lock_closeup", [1, 1]))
+            edl_thresh_high = getattr(args, "edge_dilation_lock_threshold_high", 4.0)
+            edl_thresh_low = getattr(args, "edge_dilation_lock_threshold_low", None)
+            # ADR-434's own convention: no "M..." segment at all when the Mid Shot
+            # Value box was left empty (disabled).
+            edl_mid_tag = f"M{edl_mid[0]}x{edl_mid[1]}" if edl_mid is not None else ""
+            edlsl_tag = (f"_edlockW{edl_wide[0]}x{edl_wide[1]}"
+                         f"{edl_mid_tag}"
+                         f"C{edl_closeup[0]}x{edl_closeup[1]}"
+                         f"_sigdiv{to_deciaml(edl_thresh_high, 100, 2)}")
+            if edl_thresh_low is not None:
+                edlsl_tag += f"lo{to_deciaml(edl_thresh_low, 100, 2)}"
+        else:
+            edlsl_tag = ""
+
         metadata = (f"_{args.depth_model}_{resolution}{tta}{daa}{args.method}_"
                     f"d{to_deciaml(args.divergence, 10, 2)}{auto3d_tag}_"
                     # ADR-457: Foreground Scale Shot Lock's own Wide/Mid/Close-up/
@@ -4009,7 +4034,13 @@ def make_output_filename(input_filename, args, video=False):
                     # (_build_iw3_comment_metadata() has no length cap). The cap only
                     # ever keeps a PREFIX of this string, so whichever tag sits
                     # earliest survives -- this is the fix, not a smarter truncator.
-                    f"fs{args.foreground_scale}{fsl_tag}_"
+                    # ADR-458: edlsl_tag (Edge Fix Shot Lock) is the same kind of
+                    # optional, can-get-long tag and sits here for the identical
+                    # reason -- the alternative (its original spot, in the
+                    # "di<edge_dilation>" segment much later in this string) is
+                    # exactly the vulnerable position this same ADR-457 fix moved
+                    # fsl_tag away from.
+                    f"fs{args.foreground_scale}{fsl_tag}{edlsl_tag}_"
                     f"{convergence_name}{to_deciaml(args.convergence, 10, 2)}"
                     f"{convergence_smoothing}_"
                     f"di{edge_dilation}{fp}{bp}{mp}{pf}{po}_"
@@ -4255,6 +4286,30 @@ def _build_iw3_comment_metadata(args, video=True):
         comment_parts.append(f"iw3_edge_dilation={'x'.join(str(v) for v in args.edge_dilation)}")
     else:
         comment_parts.append(f"iw3_edge_dilation={args.edge_dilation}")
+    # ADR-458: --edge-dilation-mode shot_lock -- entirely separate feature/state
+    # from Convergence Plane's/Foreground Scale's own shot_lock comment tags, see
+    # edge_dilation_estimator.py. Omitted entirely for the default "constant"
+    # mode, same "only shown when meaningful" convention as every other optional
+    # tag here.
+    if getattr(args, "edge_dilation_mode", "constant") == "shot_lock":
+        comment_parts.append("iw3_edge_dilation_mode=shot_lock")
+        edl_wide_val = edge_dilation_parse(getattr(args, "edge_dilation_lock_wide", [3, 2]))
+        comment_parts.append(
+            f"iw3_edge_dilation_lock_wide={'x'.join(str(v) for v in edl_wide_val)}")
+        edl_mid_val = _edge_dilation_lock_mid_pair(args)
+        if edl_mid_val is not None:
+            comment_parts.append(
+                f"iw3_edge_dilation_lock_mid="
+                f"{'x'.join(str(v) for v in edge_dilation_parse(edl_mid_val))}")
+        edl_closeup_val = edge_dilation_parse(getattr(args, "edge_dilation_lock_closeup", [1, 1]))
+        comment_parts.append(
+            f"iw3_edge_dilation_lock_closeup={'x'.join(str(v) for v in edl_closeup_val)}")
+        comment_parts.append(
+            f"iw3_edge_dilation_lock_threshold_high="
+            f"{getattr(args, 'edge_dilation_lock_threshold_high', 4.0)}")
+        edl_thresh_low_val = getattr(args, "edge_dilation_lock_threshold_low", None)
+        if edl_thresh_low_val is not None:
+            comment_parts.append(f"iw3_edge_dilation_lock_threshold_low={edl_thresh_low_val}")
     comment_parts.append(f"iw3_foreground_scale={args.foreground_scale}")
     # ADR-452: --foreground-scale-mode shot_lock -- entirely separate feature/state
     # from Convergence Plane's own shot_lock comment tags above, see
@@ -5537,6 +5592,17 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         # BCHW
         pass
 
+    # ADR-458: unconditionally persisted BEFORE anything else below -- the one
+    # generic, add-on-agnostic "real divergence for this call" value that Edge
+    # Fix's own shot_lock (_resolve_edge_dilation(), called from every live
+    # depth_model.infer()/infer_with_normalize()/flush_with_normalize() site,
+    # which all run strictly BEFORE this function for the same frame/batch) reads
+    # one call behind, since no real, non-stale value exists yet at that earlier
+    # point in the pipeline. See edge_dilation_estimator.py's module docstring
+    # for the full rationale. Cheap and harmless either way: with Auto 3D
+    # Strength off, this is just the single static --divergence value every call.
+    args.state["_last_applied_divergence"] = getattr(args, "divergence", None)
+
     # ADR-452: a single mapper_fn resolved once, used at every call site below.
     # --foreground-scale-mode shot_lock (entirely separate state/thresholds from
     # Convergence Plane's own shot_lock -- see foreground_scale_estimator.py)
@@ -6038,6 +6104,25 @@ def debug_depth_image(depth, args):
     return out
 
 
+def _resolve_edge_dilation(args):
+    """ADR-458: resolves the real --edge-dilation ("Edge Fix") value for a live
+    depth_model.infer()/infer_with_normalize()/flush_with_normalize() call.
+    --edge-dilation-mode constant (default, unchanged): always args.edge_dilation
+    itself, exactly what every one of those call sites passed before this feature
+    existed. --edge-dilation-mode shot_lock: classifies args.state[
+    "_last_applied_divergence"] (set by apply_divergence() -- see
+    edge_dilation_estimator.py's module docstring for why it has to be that,
+    one-call-behind value rather than the live in-flight args.divergence) via
+    args.state["edge_dilation_model"]. Does NOT apply to the export/reconstruct
+    special cases (skip_edge_dilation / the forced edge_dilation=0 paths) -- those
+    call depth_model.infer()/dilate_edge() directly with their own values for a
+    different reason (depth export/reconstruction) and must stay untouched."""
+    model = args.state.get("edge_dilation_model") if isinstance(args.state, dict) else None
+    if model is not None:
+        return model(divergence=args.state.get("_last_applied_divergence"))
+    return args.edge_dilation
+
+
 def process_image(x, args, depth_model, side_model, skip_autocrop=None, autocrop_uncrop=False):
     assert depth_model.get_ema_buffer_size() == 1
 
@@ -6051,7 +6136,7 @@ def process_image(x, args, depth_model, side_model, skip_autocrop=None, autocrop
         x = autocrop.crop(x)
         depth = depth_model.infer(x, tta=args.tta, low_vram=args.low_vram,
                                   enable_amp=not args.disable_amp,
-                                  edge_dilation=args.edge_dilation,
+                                  edge_dilation=_resolve_edge_dilation(args),
                                   depth_aa=args.depth_aa)
         depth = depth_model.minmax_normalize_chw(depth, rgb=x)
 
@@ -6222,7 +6307,7 @@ def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene
 
         depth = depth_model.infer(x, tta=args.tta, low_vram=args.low_vram,
                                   enable_amp=not args.disable_amp,
-                                  edge_dilation=args.edge_dilation,
+                                  edge_dilation=_resolve_edge_dilation(args),
                                   depth_aa=args.depth_aa)
         depth = depth_model.minmax_normalize_chw(depth, rgb=x)
         depths = [depth] if depth is not None else []
@@ -6337,7 +6422,7 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_
             with depth_lock:
                 depth_batch = depth_model.infer(x, tta=args.tta, low_vram=args.low_vram,
                                                 enable_amp=not args.disable_amp,
-                                                edge_dilation=args.edge_dilation,
+                                                edge_dilation=_resolve_edge_dilation(args),
                                                 depth_aa=args.depth_aa)
             return depth_batch, dequeue_ticket_id
 
@@ -6461,7 +6546,7 @@ def bind_vda_frame_callback(depth_model, side_model, segment_pts, args, scene_em
         depth_list = depth_model.infer_with_normalize(
             x, pts_queue, segment_pts,
             enable_amp=not args.disable_amp,
-            edge_dilation=args.edge_dilation,
+            edge_dilation=_resolve_edge_dilation(args),
             depth_aa=args.depth_aa,
             tta=args.tta,
             ema_updates=scene_ema_settings or None)
@@ -6481,7 +6566,7 @@ def bind_vda_frame_callback(depth_model, side_model, segment_pts, args, scene_em
                 yield from _batch_infer()
             depth_list = depth_model.flush_with_normalize(
                 enable_amp=not args.disable_amp,
-                edge_dilation=args.edge_dilation,
+                edge_dilation=_resolve_edge_dilation(args),
                 depth_aa=args.depth_aa)
             yield from _postprocess(depth_list, flush=True)
             return
@@ -9212,6 +9297,58 @@ def _parse_optional_foreground_scale_threshold_low(value):
     return float(value)
 
 
+def _parse_optional_edge_dilation_value(value):
+    """argparse type= for EACH token of --edge-dilation-lock-mid, ADR-458: same
+    "none"/empty (case-insensitive) convention as _parse_optional_mid/
+    _parse_optional_foreground_scale_mid above, adapted for a multi-int
+    (nargs="+") field -- argparse applies `type=` per TOKEN, not to the whole
+    list, so a single "none" token parses to a single None inside the resulting
+    list (e.g. ["none"] -> [None]), not a bare None for the field itself.
+    _edge_dilation_lock_mid_pair() below is what actually treats any None found
+    anywhere in that list as "the Mid tier is disabled" and normalizes the whole
+    field down to a real None before it ever reaches EdgeDilationEstimator."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return int(value)
+
+
+def _parse_optional_edge_dilation_threshold_low(value):
+    """argparse type= for --edge-dilation-lock-threshold-low, ADR-458: a plain
+    float, or "none"/empty (case-insensitive) to keep Edge Fix shot_lock's plain
+    2-way wide/close-up split -- same shape as
+    _parse_optional_foreground_scale_threshold_low/_parse_optional_strength_
+    threshold_low above, kept separate since all three belong to entirely
+    separate features with entirely separate state."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("none", ""):
+        return None
+    return float(value)
+
+
+def _edge_dilation_lock_mid_pair(args):
+    """ADR-458: normalizes --edge-dilation-lock-mid's raw parsed value into
+    either None (the Mid tier disabled) or the real edge_dilation-style value.
+    Two distinct callers produce two distinct shapes here, both handled: the CLI
+    (nargs="+", parsed token-by-token via _parse_optional_edge_dilation_value()
+    above) always produces a LIST, where "disabled" shows up as any token having
+    parsed to None (e.g. ["none"] -> [None]); the GUI (gui.py's
+    build_processor_args(), same idiom as foreground_scale_lock_mid) sets this
+    directly to a bare None (box left empty), a bare int (X filled, Y left
+    blank), or an [x, y] list. Shared by the filename tag, the mkv comment
+    metadata, and the EdgeDilationEstimator build in iw3_main(), so all three
+    treat "disabled" identically."""
+    raw = getattr(args, "edge_dilation_lock_mid", None)
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        if not raw or any(v is None for v in raw):
+            return None
+    return raw
+
+
 def create_parser(required_true=True):
     class Range(object):
         def __init__(self, start, end):
@@ -10118,6 +10255,49 @@ def create_parser(required_true=True):
 
     parser.add_argument("--edge-dilation", type=int, nargs="+", default=[2, 1],
                         help="loop count of edge dilation. <x> <y> or <xy>")
+    parser.add_argument("--edge-dilation-mode", type=str, choices=["constant", "shot_lock"],
+                        default="constant",
+                        help="ADR-458: constant (default): always use the single --edge-dilation "
+                             "value above, unchanged. shot_lock: replicates Convergence Plane's/"
+                             "Foreground Scale's own shot_lock mode (ADR-420/452), but for "
+                             "--edge-dilation (\"Edge Fix\") instead -- the real per-scene Auto 3D "
+                             "Strength divergence value picks one of --edge-dilation-lock-wide/-mid/"
+                             "-closeup via --edge-dilation-lock-threshold-high/-low, independently of "
+                             "(and runnable at the same time as) Convergence Plane's/Foreground "
+                             "Scale's own shot_lock settings. SNAP ONLY -- there is no \"ease\"/switch "
+                             "option: an integer dilation loop count can't glide the way a continuous "
+                             "float (Convergence/Foreground Scale) can. Only means something with Auto "
+                             "3D Strength actually enabled (otherwise --divergence is just one static "
+                             "number for the whole movie, so there's nothing to classify against).")
+    parser.add_argument("--edge-dilation-lock-wide", type=int, nargs="+", default=[3, 2],
+                        help="--edge-dilation-mode shot_lock only: the --edge-dilation [x, y] pair "
+                             "used on scenes whose real Auto 3D Strength divergence is above "
+                             "--edge-dilation-lock-threshold-high. <x> <y> or <xy>, same shape as "
+                             "--edge-dilation itself.")
+    parser.add_argument("--edge-dilation-lock-mid", type=_parse_optional_edge_dilation_value,
+                        nargs="+", default=[2, 1],
+                        help="--edge-dilation-mode shot_lock only: the --edge-dilation [x, y] pair "
+                             "used on scenes whose divergence falls between --edge-dilation-lock-"
+                             "threshold-low and --edge-dilation-lock-threshold-high. Leave unset "
+                             "(default, \"none\") to disable this tier -- a plain 2-way wide/close-up "
+                             "split instead.")
+    parser.add_argument("--edge-dilation-lock-closeup", type=int, nargs="+", default=[1, 1],
+                        help="--edge-dilation-mode shot_lock only: the --edge-dilation [x, y] pair "
+                             "used on scenes whose real Auto 3D Strength divergence is at or below "
+                             "--edge-dilation-lock-threshold-high (or, with --edge-dilation-lock-"
+                             "threshold-low also set, at or below that lower threshold).")
+    parser.add_argument("--edge-dilation-lock-threshold-high", type=float, default=4.0,
+                        help="--edge-dilation-mode shot_lock only: the HIGH cutoff line on the Auto "
+                             "3D Strength scale. Above this locks --edge-dilation-lock-wide for the "
+                             "scene; at or below it locks --edge-dilation-lock-closeup, UNLESS "
+                             "--edge-dilation-lock-threshold-low is also set (see that flag).")
+    parser.add_argument("--edge-dilation-lock-threshold-low",
+                        type=_parse_optional_edge_dilation_threshold_low, default=None,
+                        help="--edge-dilation-mode shot_lock only: a second, LOW cutoff line, turning "
+                             "the plain 2-way split above into a 3-way one -- at or below this locks "
+                             "--edge-dilation-lock-closeup, the band between this and --edge-dilation-"
+                             "lock-threshold-high locks --edge-dilation-lock-mid instead. Leave unset "
+                             "(default, \"none\") to disable this tier entirely.")
 
     parser.add_argument("--inpaint-model", type=str, default=None, choices=list(INPAINT_MODELS.keys()),
                         help="inpaint model name defined in iw3/inpaint_models.yml")
@@ -10523,6 +10703,12 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
         # (--foreground-scale-mode shot_lock only) -- None here is the default,
         # unchanged "constant" behavior.
         "foreground_scale_model": None,
+        # ADR-458: built below in iw3_main(), right next to foreground_scale_model
+        # above (--edge-dilation-mode shot_lock only) -- None here is the default,
+        # unchanged "constant" behavior. Unlike foreground_scale_model, this one
+        # needs no is_metric()/mapper_type, but is still built there (not here) so
+        # both shot_lock builds stay easy to find together.
+        "edge_dilation_model": None,
         "device": create_device(args.gpu),
         "devices": [create_device(gpu_id) for gpu_id in args.gpu],
     }
@@ -10666,15 +10852,28 @@ def iw3_main(args):
                 metric_depth=is_metric, mapper_type=args.mapper_type,
                 switch=getattr(args, "foreground_scale_lock_switch", "snap"),
                 decay=getattr(args, "foreground_scale_lock_smoothing", 0.9))
+        # ADR-458: --edge-dilation-mode shot_lock only -- see
+        # edge_dilation_estimator.py for the full rationale. Placed right next to
+        # the foreground_scale_model build above so both shot_lock builds are easy
+        # to find together; unlike that one, this needs no is_metric/mapper_type.
+        if getattr(args, "edge_dilation_mode", "constant") == "shot_lock":
+            from .edge_dilation_estimator import EdgeDilationEstimator
+            args.state["edge_dilation_model"] = EdgeDilationEstimator(
+                wide_value=getattr(args, "edge_dilation_lock_wide", [3, 2]),
+                mid_value=_edge_dilation_lock_mid_pair(args),
+                closeup_value=getattr(args, "edge_dilation_lock_closeup", [1, 1]),
+                threshold_high=getattr(args, "edge_dilation_lock_threshold_high", 4.0),
+                threshold_low=getattr(args, "edge_dilation_lock_threshold_low", None))
     else:
         depth_model = None
         # specified args.mapper never used in process_config_*
         args.mapper = "none"
-        # ADR-452: this pipeline (YAML-config-input / export-reconstruct) already
+        # ADR-452/458: this pipeline (YAML-config-input / export-reconstruct) already
         # ignores the base --foreground-scale value above (args.mapper is forced to
-        # "none" instead) -- Foreground Scale shot_lock intentionally does not apply
-        # here either, so args.state["foreground_scale_model"] stays at its
-        # set_state_args() default of None.
+        # "none" instead) -- Foreground Scale shot_lock and Edge Fix shot_lock both
+        # intentionally do not apply here either, so args.state["foreground_scale_model"]
+        # and args.state["edge_dilation_model"] stay at their set_state_args() default
+        # of None.
 
     if args.export:
         export_main(args)

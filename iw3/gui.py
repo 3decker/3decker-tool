@@ -1513,9 +1513,9 @@ class MainFrame(wx.Frame):
             T("What it's for: hides the settings most conversions never need to touch, so the first thing "
               "you see is a short, focused list instead of everything at once.\n"
               "Basic: just the everyday settings -- 3D Strength, Convergence, Method, Depth Model/"
-              "Resolution, Stereo Format, and similar.\n"
+              "Resolution, Stereo Format, Sharpen, and similar.\n"
               "Advanced: adds the fine-tuning features -- Auto 3D Strength, Shot Lock clusters, Depth "
-              "Detail Refinement, Sharpen, in-pipeline RIFE, Video Decoding, Standalone Tools, and more.\n"
+              "Detail Refinement, in-pipeline RIFE, Video Decoding, Standalone Tools, and more.\n"
               "Expert: everything, with nothing hidden -- Pop-Out Limit/Boost, Protect Faces, Depth Pop, "
               "Dual-Pass Depth Blend, Object Stability, and every other deep setting.\n"
               "How it works: purely visual. Anything hidden keeps whatever value you set for it, and it's "
@@ -12601,8 +12601,6 @@ class MainFrame(wx.Frame):
             # Depth detail refinement (bilateral depth-smoothing -- NOT chk_depth_aa,
             # a separate Basic-tier feature)
             self.chk_depth_refine, self.cbo_depth_refine_strength, self.sld_stereo_depth_refine_strength,
-            # In-pipeline Sharpen (NOT the standalone Sharpen tool, Standalone Tools tab)
-            self.chk_sharpen, self.cbo_sharpen_strength, self.sld_stereo_sharpen_strength,
             # Video Filter tab
             self.chk_preserve_dowi, self.chk_hdr_to_sdr, self.lbl_upgrade_pix_fmt, self.cbo_upgrade_pix_fmt,
             self.chk_auto_resume,
@@ -40412,6 +40410,7 @@ def _self_test_experience_level_visibility_and_live_switch():
             frame.chk_ema_normalize, frame.cbo_ema_decay, frame.cbo_ema_buffer,
             frame.chk_depth_aa, frame.chk_scene_detect, frame.chk_scene_detect_cache,
             frame.chk_preserve_screen_border, frame.cbo_stereo_format,
+            frame.chk_sharpen, frame.cbo_sharpen_strength, frame.sld_stereo_sharpen_strength,
             frame.grp_video.cbo_fps, frame.grp_video.cbo_video_codec, frame.grp_video.cbo_crf,
             frame.chk_start_time, frame.cbo_rotate, frame.cbo_autocrop, frame.cbo_max_output_size,
             frame.cbo_device, frame.cbo_batch_size, frame.cbo_max_workers, frame.chk_low_vram,

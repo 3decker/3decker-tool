@@ -10095,11 +10095,14 @@ class MainFrame(wx.Frame):
         # call is genuinely slow on this GUI's large control count (measured 2.6-5+
         # real seconds per call on dev hardware), and it runs on the main GUI thread, so
         # every tick froze the whole app for that long -- exactly the real "freezes for
-        # about 2 sec while choosing settings" report. 90 seconds keeps the same
-        # real crash/force-kill protection ADR-428 was built for (losing at most the
-        # last ~90s of changes instead of everything since the last clean close) while
-        # making that unavoidable freeze six times rarer.
-        self.autosave_timer.Start(90000)
+        # about 2 sec while choosing settings" report. Bumped 15s -> 90s -> 900s over two
+        # rounds of the same complaint (decker, 2026-11-10): the freeze itself is
+        # unavoidable without rewriting save_preset() off the main thread, so the only
+        # lever here is frequency. 900 seconds (15 min) keeps the same real crash/
+        # force-kill protection ADR-428 was built for (losing at most the last ~15
+        # minutes of changes instead of everything since the last clean close, which is
+        # still far better than nothing) while making the freeze happen a tenth as often.
+        self.autosave_timer.Start(900000)
         # ADR-249: real user request -- load_preset() above restores every registered
         # control's value from last session's saved iw3-gui.cfg, and these Standalone
         # Tools log boxes get swept into that same generic mechanism with no exception

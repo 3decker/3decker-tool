@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — November 10, 2026
 
+**Changed: the background autosave now runs every 15 minutes instead of every 90 seconds.** This is the quiet safety-net save that keeps your settings from being lost if the app crashes or gets force-closed mid-job — it was never a button you click, just a timer running in the background. Saving briefly freezes the whole window for a couple of seconds while it writes, so a shorter interval means that freeze happens more often. 15 minutes still protects you against losing everything since your last clean close, just with the freeze happening a lot less frequently.
+
 **Added: Combine Scene Logs now also shows a table of how many scenes used each 3D Strength value.** Right under the 3 "average" lines at the bottom of the combined log file, you'll now see a breakdown like "3.6 -- 23 scenes, 3.8 -- 12 scenes, ..." -- most-used value first -- so you can see at a glance how a movie's 3D Strength actually spread out, without counting it yourself scene by scene. Only appears when Auto 3D Strength has data to show.
 
 ## Update — November 9, 2026

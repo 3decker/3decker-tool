@@ -5635,6 +5635,19 @@ def _combined_scene_log_paths(args, input_path, output_path):
     return output, base + "_combined_scene_log.txt"
 
 
+def _tally_combined_strength_values(scene_records):
+    """[(value, how many scenes used it)], most-common first (ties broken by
+    the higher value). Deliberately a SEPARATE, local copy of autodiv.py's own
+    _tally_scene_values() -- see _format_combined_scene_log()'s docstring for
+    why core iw3/utils.py must not import that add-on function. Same rounding
+    rule as that function and as this log's own per-scene ".1f" display:
+    round to 1 decimal BEFORE tallying, so what the user sees is what gets
+    counted (two scenes that both display "3.7" must tally as one row, even
+    if their raw running-average floats differ by a few ULPs)."""
+    counts = collections.Counter(round(mean, 1) for _, _, _, mean, _ in scene_records)
+    return sorted(counts.items(), key=lambda kv: (-kv[1], -kv[0]))
+
+
 def _format_combined_scene_log(strength_state, conv_state, fg_state, output_filename, fps, in_progress=False,
                                edl_state=None):
     """One text block merging the 3 independent per-scene logs above, by plain
@@ -5784,6 +5797,13 @@ def _format_combined_scene_log(strength_state, conv_state, fg_state, output_file
         lines.append(f"Average 3D Strength for whole movie (time-weighted): {s_overall:.2f}")
         lines.append(f"Average Convergence for whole movie (time-weighted): {c_overall:.2f}")
         lines.append(f"Average Foreground Scale for whole movie (time-weighted): {fg_overall:.2f}")
+
+    if n and strength_records:
+        lines.append("")
+        lines.append(f"3D Strength values used{so_far}, most common first ({n} scene(s)):")
+        for value, count in _tally_combined_strength_values(strength_records[:n]):
+            scene_word = "scene" if count == 1 else "scenes"
+            lines.append(f"  {value:.1f}  --  {count} {scene_word}")
 
     if c_lock_values is not None and n:
         mid_part = f"{shot_counts_conv['Mid']} mid, " if c_lock_values[1] is not None else ""

@@ -40035,6 +40035,13 @@ def _self_test_combined_scene_log_merge():
     assert "Average 3D Strength for whole movie (time-weighted): 5.70" in lines, lines
     assert "Average Convergence for whole movie (time-weighted): 0.46" in lines, lines
     assert "Average Foreground Scale for whole movie (time-weighted): 0.95" in lines, lines
+    # decker's own request: a tally of how many scenes used each 3D Strength
+    # value, most-common first (ties broken by the higher value) -- all 3
+    # values here are used by exactly 1 scene, so they sort purely by value.
+    assert "3D Strength values used, most common first (3 scene(s)):" in lines, lines
+    assert "  10.0  --  1 scene" in lines, lines
+    assert "  6.0  --  1 scene" in lines, lines
+    assert "  3.0  --  1 scene" in lines, lines
     assert "Convergence shot classification: 1 wide, 1 mid, 1 close-up (of 3 scene(s))" in lines, lines
     assert "Foreground Scale shot classification: 2 wide, 1 close-up (of 3 scene(s))" in lines, lines
 
@@ -40056,6 +40063,7 @@ def _self_test_combined_scene_log_merge():
                                              in_progress=True)
     assert "(IN PROGRESS -- conversion still running)" in text_live.splitlines()[0]
     assert "Average 3D Strength so far (time-weighted, 3 scene(s), conversion still running): 5.70" in text_live
+    assert "3D Strength values used so far, most common first (3 scene(s)):" in text_live, text_live
 
     # ADR-459: edl_state omitted entirely (every pre-ADR-459 caller) -> must
     # still be byte-for-byte the output already asserted above -- re-confirm

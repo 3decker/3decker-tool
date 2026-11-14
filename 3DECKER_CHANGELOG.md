@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 10, 2026
+## Latest Update — November 14, 2026
+
+**Fixed: a small leftover piece of Auto 3D Strength's memory wasn't being freed along with everything else by "Free GPU memory while paused/idle."** That checkbox already moved your depth/3D models off the graphics card when a job paused or finished — but Auto 3D Strength's own small shot-framing model (used to judge how close-up or wide a scene is) was being left behind every time, a little under 200MB that only came back once you closed the app completely. It's now included in the same cleanup, every time, with no setting to turn on — if you already have "Free GPU memory while paused/idle" checked, you'll just see slightly more memory come back.
+
+## Update — November 10, 2026
 
 **Changed: the background autosave now runs every 15 minutes instead of every 90 seconds.** This is the quiet safety-net save that keeps your settings from being lost if the app crashes or gets force-closed mid-job — it was never a button you click, just a timer running in the background. Saving briefly freezes the whole window for a couple of seconds while it writes, so a shorter interval means that freeze happens more often. 15 minutes still protects you against losing everything since your last clean close, just with the freeze happening a lot less frequently.
 

@@ -258,6 +258,22 @@ class Estimator:
                      f"using the depth-only estimate")
                 self.model = None
 
+    def to(self, device):
+        """Moves the CLIP image model plus the two small fixed tensors (prompt
+        embeddings, calibration values) to `device`. Wired into iw3's opt-in
+        "Free GPU memory while paused/idle" release/reload cycle (ADR-038/141) by
+        the patch added to _patch_utils() below -- previously had no way to reach
+        this add-on's own state at all, so this ~176MB model stayed GPU-resident
+        through every pause and every job finish (same bug class ADR-406/407
+        already fixed for core iw3's own convergence-model classes, just outside
+        where those fixes could reach -- see the layering note at the top of this
+        file for why core iw3 can't patch this the other way around)."""
+        if self.model is not None:
+            self.model = self.model.to(device)
+        self.text = self.text.to(device)
+        self.values = self.values.to(device)
+        return self
+
     def _views(self, rgb):
         """Left, centre and right squares of the frame (one if it is square).
         A centre crop of a 16:9 frame drops 22% off each side, and whatever
@@ -1404,6 +1420,32 @@ def _patch_utils(U):
             BI.BaseInpaint.reset = reset
     except Exception:                                              # noqa: BLE001
         pass
+
+    # Same VRAM-release/reload cycle ADR-038/141 already wired up for iw3's own
+    # depth/side/convergence models ("Free GPU memory while paused/idle") -- this
+    # add-on's own CLIP shot-framing model (Estimator.to(), ~176MB) was invisible
+    # to it, since core iw3 has no import of nt_auto3d to reach it directly (see
+    # the layering note at the top of this file); patched from this side instead.
+    orig_release = U._release_pause_vram
+    orig_reload = U._reload_pause_vram
+
+    def _release_pause_vram(args):
+        orig_release(args)
+        st = args.state.get("nt_autodiv") if isinstance(args.state, dict) else None
+        if st is not None:
+            st.estimator.to("cpu")
+
+    def _reload_pause_vram(args):
+        orig_reload(args)
+        st = args.state.get("nt_autodiv") if isinstance(args.state, dict) else None
+        device = args.state.get("device") if isinstance(args.state, dict) else None
+        if st is not None and device is not None:
+            st.estimator.to(device)
+
+    _release_pause_vram._nt_autodiv = True
+    _reload_pause_vram._nt_autodiv = True
+    U._release_pause_vram = _release_pause_vram
+    U._reload_pause_vram = _reload_pause_vram
 
     orig_parser = U.create_parser
 

@@ -3799,6 +3799,8 @@ def make_output_filename(input_filename, args, video=False):
                 tstab += f"ep{to_deciaml(ts_edge_protect, 100, 2)}"
             if getattr(args, "temporal_stabilize_fast", False):
                 tstab += "f"
+            if getattr(args, "temporal_stabilize_flow_engine", "farneback") == "raft":
+                tstab += "raft"
         else:
             tstab = ""
         if getattr(args, "depth_blend", False):
@@ -4464,6 +4466,8 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_temporal_stabilize_edge_protection={ts_edge_protect}")
         if getattr(args, "temporal_stabilize_fast", False):
             comment_parts.append("iw3_temporal_stabilize_fast=1")
+        if getattr(args, "temporal_stabilize_flow_engine", "farneback") == "raft":
+            comment_parts.append("iw3_temporal_stabilize_flow_engine=raft")
     if args.ema_normalize and video:
         if _scene_auto_ema_active(args, args.ema_normalize, video):
             auto_model = getattr(args, "scene_batch_auto_ema_model", None) or "3DECKER VDA_L"
@@ -10768,7 +10772,18 @@ def create_parser(required_true=True):
                               "computation (fewer pyramid levels/iterations) -- real, measurable speedup "
                               "(this feature's optical flow step runs on CPU, no CUDA build available), "
                               "trading some motion-tracking precision for it. Default (unset) is the "
-                              "original, unchanged accurate computation."))
+                              "original, unchanged accurate computation. Has no effect when "
+                              "--temporal-stabilize-flow-engine is \"raft\"."))
+    parser.add_argument("--temporal-stabilize-flow-engine", type=str, default="farneback",
+                        choices=["farneback", "raft"],
+                        help=("for --temporal-stabilize: which optical flow computation tracks motion "
+                              "between frames. \"farneback\" (default): the original, unchanged CPU-only "
+                              "computation this feature has always used -- see --temporal-stabilize-fast "
+                              "for its own speed/accuracy tradeoff. \"raft\": a pretrained AI motion-"
+                              "tracking network (RAFT, via torchvision, auto-downloaded once on first use) "
+                              "run on the GPU instead -- tracks fast/complex motion more accurately than "
+                              "Farneback, which can reduce the lag/smear Farneback shows behind a moving "
+                              "object, at the cost of extra GPU memory and time per frame."))
     parser.add_argument("--max-workers", type=int, default=0, choices=[0, 1, 2, 3, 4, 8, 16],
                         help="max inference worker threads for video processing. 0 is disabled")
     parser.add_argument("--video-format", "-vf", type=str, default="mp4", choices=["mp4", "mkv", "avi"],
@@ -10978,7 +10993,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             max_shift_velocity=getattr(args, "temporal_stabilize_max_shift_velocity", None),
             flat_region_boost=getattr(args, "temporal_stabilize_flat_region_boost", 0.0) or 0.0,
             edge_protection=getattr(args, "temporal_stabilize_edge_protection", 0.0) or 0.0,
-            fast=getattr(args, "temporal_stabilize_fast", False))
+            fast=getattr(args, "temporal_stabilize_fast", False),
+            flow_engine=getattr(args, "temporal_stabilize_flow_engine", "farneback") or "farneback")
     else:
         depth_model.disable_temporal_stabilize()
 

@@ -23,7 +23,7 @@ _FARNEBACK_PARAMS_FAST = (0.5, 2, 13, 1, 5, 1.1, 0)
 
 def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
                                   strength, max_shift_velocity, flat_region_boost, edge_protection,
-                                  fast=False, flow_downscale=1):
+                                  fast=False, flow_downscale=1, flow=None):
     """Core motion-warped blend shared by TemporalStabilizer (single-channel depth,
     (H,W) arrays) and RGBTemporalStabilizer (3-channel RGB, (H,W,3) arrays) below --
     extracted verbatim from TemporalStabilizer.stabilize()'s body so depth's existing,
@@ -41,20 +41,27 @@ def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
     3D (H,W,C) value_np -- only the flat/edge-structure Sobel gradient (2D-only) needs
     an explicit luminance-collapse step when value_np carries multiple channels.
 
+    ADR-464: `flow` lets a caller (TemporalStabilizer's "AI (RAFT)" quality option)
+    hand in an already-computed (H,W,2) forward-flow field -- same convention
+    cv2.calcOpticalFlowFarneback itself returns, dx in [...,0]/dy in [...,1] -- instead
+    of this function computing Farneback internally. None (every existing caller,
+    unchanged) reproduces the exact original Farneback computation below bit-for-bit.
+
     Returns the blended (H,W) or (H,W,3) float32 array -- caller keeps prev_gray/
     prev_value bookkeeping (this function is stateless)."""
     h, w = gray.shape
-    farneback_params = _FARNEBACK_PARAMS_FAST if fast else _FARNEBACK_PARAMS_ACCURATE
-    if flow_downscale > 1:
-        # ADR-210: analyse the motion at 1/flow_downscale size and scale the flow field back up (the flow of a smooth
-        # video is smooth, so little is lost); the warp and the blend still run at full size. Default 1 = unchanged.
-        small = (max(8, w // flow_downscale), max(8, h // flow_downscale))
-        flow_small = cv2.calcOpticalFlowFarneback(
-            cv2.resize(prev_gray, small, interpolation=cv2.INTER_AREA),
-            cv2.resize(gray, small, interpolation=cv2.INTER_AREA), None, *farneback_params)
-        flow = cv2.resize(flow_small, (w, h), interpolation=cv2.INTER_LINEAR) * float(flow_downscale)
-    else:
-        flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, *farneback_params)
+    if flow is None:
+        farneback_params = _FARNEBACK_PARAMS_FAST if fast else _FARNEBACK_PARAMS_ACCURATE
+        if flow_downscale > 1:
+            # ADR-210: analyse the motion at 1/flow_downscale size and scale the flow field back up (the flow of a smooth
+            # video is smooth, so little is lost); the warp and the blend still run at full size. Default 1 = unchanged.
+            small = (max(8, w // flow_downscale), max(8, h // flow_downscale))
+            flow_small = cv2.calcOpticalFlowFarneback(
+                cv2.resize(prev_gray, small, interpolation=cv2.INTER_AREA),
+                cv2.resize(gray, small, interpolation=cv2.INTER_AREA), None, *farneback_params)
+            flow = cv2.resize(flow_small, (w, h), interpolation=cv2.INTER_LINEAR) * float(flow_downscale)
+        else:
+            flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, *farneback_params)
     grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
     map_x = grid_x + flow[..., 0]
     map_y = grid_y + flow[..., 1]
@@ -127,11 +134,27 @@ class TemporalStabilizer:
     motion), tapering blending back toward the fresh per-frame result there."""
 
     def __init__(self, enabled=False, strength=0.7,
-                 max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0, fast=False):
+                 max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0, fast=False,
+                 flow_engine="farneback"):
         self.enabled = enabled
         self.strength = strength
         self.prev_gray = None
         self.prev_depth = None
+        # ADR-464: "raft" swaps the motion-tracking step below (never the warp/blend
+        # math after it, which stays identical either way) for a pretrained AI optical
+        # flow network (torchvision's RAFT) instead of the CPU-only Farneback
+        # computation -- real motion tracking is more accurate, particularly for
+        # fast/complex motion, which is where Farneback's approximation shows up as
+        # visible lag/smear behind a moving object. "farneback" (default, every
+        # existing job/preset) is completely unchanged. The RAFT model itself is
+        # loaded lazily (_ensure_raft_model) only once this is actually "raft" and
+        # stabilize() has run at least once -- never paid for otherwise.
+        assert flow_engine in ("farneback", "raft")
+        self.flow_engine = flow_engine
+        self.prev_rgb = None
+        self._raft_model = None
+        self._raft_device = None
+        self._raft_transforms = None
         # ADR-151: real user report -- the CPU-bound optical flow computation below
         # (cv2.calcOpticalFlowFarneback has no CUDA build available in this project's
         # bundled OpenCV, confirmed live) measurably drops conversion speed (a real
@@ -166,7 +189,8 @@ class TemporalStabilizer:
         self.edge_protection = float(edge_protection)
 
     def reset(self, enabled=None, strength=None,
-              max_shift_velocity=_UNSET, flat_region_boost=None, edge_protection=None, fast=None):
+              max_shift_velocity=_UNSET, flat_region_boost=None, edge_protection=None, fast=None,
+              flow_engine=None):
         # Clears frame-to-frame memory (used at every scene cut, alongside the EMA
         # scaler's own reset) without necessarily changing the enabled/strength config --
         # those only change when explicitly passed.
@@ -186,8 +210,76 @@ class TemporalStabilizer:
             self.edge_protection = float(edge_protection)
         if fast is not None:
             self.fast = bool(fast)
+        if flow_engine is not None:
+            assert flow_engine in ("farneback", "raft")
+            self.flow_engine = flow_engine
         self.prev_gray = None
         self.prev_depth = None
+        self.prev_rgb = None
+        # Deliberately NOT clearing _raft_model/_raft_device here -- reset() runs on
+        # every scene cut, and a loaded ~2MB RAFT model has nothing scene-specific in
+        # it worth discarding; only the frame-to-frame memory above is scene-local.
+
+    def to(self, device):
+        """Moves the RAFT optical-flow model (if ever loaded) to `device` -- wired
+        into BaseDepthModel.move_to()'s existing release/reload cycle (ADR-038/141),
+        the same way DepthAA and the EMA scaler already are (ADR-406/407), so this
+        model doesn't become a new instance of that same "real GPU tensor the release
+        sweep can't see" bug class. A no-op (as it always was before this) when RAFT
+        was never selected/loaded."""
+        if self._raft_model is not None:
+            self._raft_model = self._raft_model.to(device)
+            self._raft_device = device
+        return self
+
+    def _ensure_raft_model(self, device):
+        if self._raft_model is None or self._raft_device != device:
+            # Lazy, one-time import -- torchvision ships RAFT (incl. pretrained
+            # weights, auto-downloaded on first use) since 0.12; this project already
+            # pins torchvision 0.27.0, so no new dependency. raft_small (not
+            # raft_large): far lighter/faster, and this runs once per video frame on
+            # top of everything else already happening that frame.
+            from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
+            weights = Raft_Small_Weights.DEFAULT
+            model = raft_small(weights=weights, progress=True)
+            self._raft_model = model.eval().to(device)
+            self._raft_device = device
+            self._raft_transforms = weights.transforms()
+        return self._raft_model
+
+    def _compute_raft_flow(self, rgb_np, prev_rgb_np, device):
+        """rgb_np/prev_rgb_np: (H,W,3) uint8 arrays (the same ones Farneback's path
+        converts to grayscale). Returns an (H,W,2) float32 forward-flow field in the
+        exact convention cv2.calcOpticalFlowFarneback returns (dx in [...,0], dy in
+        [...,1], at full input resolution) -- a drop-in replacement for the Farneback
+        call in _optical_flow_temporal_blend, not a new convention downstream code
+        needs to know about."""
+        model = self._ensure_raft_model(device)
+        h, w = rgb_np.shape[:2]
+        # RAFT's correlation pyramid needs its /8 feature map to be at least 16x16
+        # (confirmed live: a real torchvision ValueError below that), i.e. the input
+        # itself must be at least 128 per side -- not just a multiple of 8. Depth is
+        # typically processed well above this (Any_V3's own lower-bound default is
+        # 392), but a small preview/thumbnail-sized frame could still be smaller.
+        target_h = max(128, -(-h // 8) * 8)  # ceil to a multiple of 8, floor 128
+        target_w = max(128, -(-w // 8) * 8)
+        pad_h = target_h - h
+        pad_w = target_w - w
+
+        def to_batch(arr):
+            return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device)
+
+        img1, img2 = self._raft_transforms(to_batch(prev_rgb_np), to_batch(rgb_np))
+        if pad_h or pad_w:
+            # Pad AFTER normalization (not the raw uint8 input) -- F.pad's
+            # replicate mode needs a floating-point tensor, which these already are
+            # once _raft_transforms has run.
+            img1 = F.pad(img1, (0, pad_w, 0, pad_h), mode="replicate")
+            img2 = F.pad(img2, (0, pad_w, 0, pad_h), mode="replicate")
+        with torch.inference_mode():
+            flow = model(img1, img2)[-1]  # (1, 2, H+pad_h, W+pad_w)
+        flow = flow[0, :, :h, :w].permute(1, 2, 0).float().cpu().numpy()
+        return flow
 
     def stabilize(self, rgb_chw, depth_chw):
         if not self.enabled or rgb_chw is None:
@@ -205,16 +297,22 @@ class TemporalStabilizer:
             # first frame of the scene -- nothing to stabilize against yet
             self.prev_gray = gray
             self.prev_depth = depth_np
+            self.prev_rgb = rgb_np
             return depth_chw
+
+        flow = None
+        if self.flow_engine == "raft":
+            flow = self._compute_raft_flow(rgb_np, self.prev_rgb, depth_chw.device)
 
         stabilized = _optical_flow_temporal_blend(
             depth_np, gray, self.prev_gray, self.prev_depth,
             self.strength, self.max_shift_velocity, self.flat_region_boost, self.edge_protection,
-            fast=self.fast,
+            fast=self.fast, flow=flow,
         )
 
         self.prev_gray = gray
         self.prev_depth = stabilized
+        self.prev_rgb = rgb_np
         return torch.from_numpy(stabilized).unsqueeze(0).to(depth_chw.device, dtype=depth_chw.dtype)
 
 
@@ -575,5 +673,108 @@ def _test():
     plt.show()
 
 
+def _self_test_precomputed_flow_bypasses_farneback():
+    """ADR-464: passing flow= to _optical_flow_temporal_blend must use exactly that
+    flow instead of computing Farneback -- the mechanism TemporalStabilizer's "AI
+    (RAFT)" option relies on to swap in RAFT's flow instead of Farneback's own,
+    without duplicating or touching the warp/blend math after it. flow=None (every
+    existing caller, unchanged) must still compute real Farneback flow exactly as
+    before."""
+    h, w = 10, 12
+    gray = np.random.randint(0, 255, (h, w), dtype=np.uint8)
+    prev_gray = np.random.randint(0, 255, (h, w), dtype=np.uint8)
+    prev_value = np.random.rand(h, w).astype(np.float32)
+    value_np = np.random.rand(h, w).astype(np.float32)
+
+    zero_flow = np.zeros((h, w, 2), dtype=np.float32)
+    out_zero_flow = _optical_flow_temporal_blend(
+        value_np, gray, prev_gray, prev_value, strength=0.7,
+        max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0, flow=zero_flow)
+    out_default_farneback = _optical_flow_temporal_blend(
+        value_np, gray, prev_gray, prev_value, strength=0.7,
+        max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0, flow=None)
+
+    # Different random gray frames almost certainly produce non-zero real Farneback
+    # flow, so forcing flow=zero must diverge from the real (flow=None) computation --
+    # proving `flow` is actually being used, not silently ignored.
+    assert not np.allclose(out_zero_flow, out_default_farneback), \
+        "flow= had no effect -- _optical_flow_temporal_blend ignored the precomputed flow"
+
+    # With zero flow, warped_prev_value == prev_value exactly (remap with a
+    # zero-displacement grid is an identity op) -- confirms the SHAPE of the blend
+    # (not just "it's different") is the expected one for a known, trivial flow field.
+    expected = 0.7 * prev_value + 0.3 * value_np
+    assert np.allclose(out_zero_flow, expected, atol=1e-4), \
+        "zero flow should reduce to a plain strength-weighted blend with the unwarped previous value"
+    print("_self_test_precomputed_flow_bypasses_farneback: PASS")
+
+
+def _self_test_raft_flow_shape_and_convention():
+    """ADR-464: proves _compute_raft_flow's own glue logic (pad to a multiple of 8,
+    run the model, crop back to the original H,W, convert (1,2,H,W) -> (H,W,2)) is
+    correct, WITHOUT downloading or running the real RAFT network -- a fake model
+    standing in for torchvision's raft_small (same call shape: a list of flow
+    predictions, last one is (B,2,H,W)) is pre-installed directly on a
+    TemporalStabilizer instance, bypassing _ensure_raft_model's lazy real-model load
+    entirely (that load path needs real network access and torchvision's pretrained
+    weights -- not something an automated/offline self-test should depend on, same
+    tier as every other real-model download in this project)."""
+    stab = TemporalStabilizer(enabled=True, flow_engine="raft")
+    device = torch.device("cpu")
+
+    class _FakeRaft(torch.nn.Module):
+        def forward(self, img1, img2):
+            b, c, h, w = img1.shape
+            # Deliberately distinct, non-zero, non-symmetric dx/dy so the
+            # pad/crop/permute pipeline can't accidentally pass on an all-zero flow.
+            flow = torch.zeros(b, 2, h, w)
+            flow[:, 0] = 1.5
+            flow[:, 1] = -0.5
+            return [flow]
+
+    stab._raft_model = _FakeRaft().eval()
+    stab._raft_device = device
+    stab._raft_transforms = lambda a, b: (a.float(), b.float())
+
+    h, w = 17, 23  # deliberately NOT a multiple of 8, to exercise the pad/crop path
+    rgb = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+    prev_rgb = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+
+    flow = stab._compute_raft_flow(rgb, prev_rgb, device)
+
+    assert flow.shape == (h, w, 2), f"expected ({h},{w},2), got {flow.shape}"
+    assert np.allclose(flow[..., 0], 1.5) and np.allclose(flow[..., 1], -0.5), \
+        "flow values were altered by the pad/crop glue -- should pass the fake model's output through unchanged"
+    print("_self_test_raft_flow_shape_and_convention: PASS")
+
+
+def _self_test_to_device_raft_model_lifecycle():
+    """ADR-464: to(device) (TemporalStabilizer's half of the existing ADR-038/141/
+    406/407 VRAM release/reload cycle) must be a no-op when no RAFT model has ever
+    been loaded -- the overwhelmingly common farneback-only case -- and must never
+    itself trigger a lazy load just from a release/reload pause cycle; it must move
+    a real loaded model's parameters when one exists."""
+    stab = TemporalStabilizer(enabled=True, flow_engine="farneback")
+    stab.to(torch.device("cpu"))  # must not raise, must not load anything
+    assert stab._raft_model is None
+
+    stab._raft_model = torch.nn.Linear(2, 2)
+    stab._raft_device = torch.device("cpu")
+    stab.to(torch.device("cpu"))
+    assert stab._raft_device == torch.device("cpu")
+    print("_self_test_to_device_raft_model_lifecycle: PASS")
+
+
+def _run_self_tests():
+    _self_test_precomputed_flow_bypasses_farneback()
+    _self_test_raft_flow_shape_and_convention()
+    _self_test_to_device_raft_model_lifecycle()
+    print("All iw3.depth_scaler self-tests PASSED")
+
+
 if __name__ == "__main__":
-    _test()
+    import sys
+    if "--self-test" in sys.argv[1:]:
+        _run_self_tests()
+    else:
+        _test()

@@ -196,6 +196,12 @@ class BaseDepthModel(metaclass=ABCMeta):
         depth_aa = getattr(self, "depth_aa", None)
         if depth_aa is not None:
             self.depth_aa = depth_aa.to(device)
+        # ADR-464: Object Stability's optional "AI (RAFT)" motion-tracking model is a
+        # real GPU-resident network once loaded -- same "release sweep can't see a
+        # plain attribute" bug class ADR-406/407/409 already fixed elsewhere.
+        # TemporalStabilizer.to() is a no-op when RAFT was never selected/loaded, so
+        # this is always safe to call.
+        self.temporal_stabilizer.to(device)
         return self
 
     def compile(self):
@@ -242,12 +248,12 @@ class BaseDepthModel(metaclass=ABCMeta):
 
     def enable_temporal_stabilize(self, strength=0.7,
                                    max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0,
-                                   fast=False):
+                                   fast=False, flow_engine="farneback"):
         self.temporal_stabilizer.reset(enabled=True, strength=strength,
                                         max_shift_velocity=max_shift_velocity,
                                         flat_region_boost=flat_region_boost,
                                         edge_protection=edge_protection,
-                                        fast=fast)
+                                        fast=fast, flow_engine=flow_engine)
 
     def disable_temporal_stabilize(self):
         self.temporal_stabilizer.reset(enabled=False)

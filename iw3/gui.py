@@ -2972,21 +2972,24 @@ class MainFrame(wx.Frame):
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Speed"))
         self.cbo_temporal_stabilize_quality = wx.ComboBox(
             self.cpn_stereo_stability_flicker.GetPane(),
-            choices=[T("Accurate"), T("Fast")],
+            choices=[T("Accurate"), T("Fast"), T("AI (RAFT)")],
             name="cbo_temporal_stabilize_quality")
         self.cbo_temporal_stabilize_quality.SetEditable(False)
         self.cbo_temporal_stabilize_quality.SetSelection(0)
         self.cbo_temporal_stabilize_quality.SetToolTip(
             T("What it's for: Object Stability's motion tracking runs a real optical flow "
-              "computation on the CPU every frame (no GPU acceleration is available for this step "
-              "in this build) -- this controls how much work that computation does.\n"
-              "Accurate (default): the original, unchanged computation this feature has always used.\n"
+              "computation every frame -- this controls what does that tracking.\n"
+              "Accurate (default): the original, unchanged CPU computation this feature has always used.\n"
               "Fast: fewer passes over the image -- a real, meaningful speedup (exact amount depends on "
               "your content/hardware), at the cost of somewhat less precise motion tracking -- fast/"
               "complex motion may be followed a little less accurately.\n"
+              "AI (RAFT): a pretrained AI motion-tracking network run on the GPU instead of the CPU "
+              "computation above -- tracks fast/complex motion more accurately, which can reduce the "
+              "lag/smear the other two options can show behind a moving object. Costs extra GPU memory "
+              "and time per frame, and downloads a small (~20MB) model the first time it's used.\n"
               "Recommended: Accurate unless conversion speed with Object Stability on is a real "
-              "bottleneck for you; Fast is a reasonable tradeoff to try first before turning Object "
-              "Stability off entirely."))
+              "bottleneck for you (try Fast first); try AI (RAFT) specifically if you've found Object "
+              "Stability's lag/smear on moving objects distracting even with Accurate/Fast."))
 
         self.grp_depth_blend = wx.StaticBox(self.tab_depth_blend, label=T("Dual-Pass Depth Blend"))
 
@@ -13812,6 +13815,8 @@ class MainFrame(wx.Frame):
             temporal_stabilize_flat_region_boost=float(self.cbo_temporal_stabilize_flat_boost.GetValue()),
             temporal_stabilize_edge_protection=float(self.cbo_temporal_stabilize_edge_protect.GetValue()),
             temporal_stabilize_fast=(self.cbo_temporal_stabilize_quality.GetValue() == T("Fast")),
+            temporal_stabilize_flow_engine=(
+                "raft" if self.cbo_temporal_stabilize_quality.GetValue() == T("AI (RAFT)") else "farneback"),
             **depth_blend_options,
             waifu2x_upscale=self.chk_waifu2x_upscale.GetValue(),
             waifu2x_method=self.cbo_waifu2x_method.GetValue(),
@@ -15358,8 +15363,11 @@ class MainFrame(wx.Frame):
             self.cbo_temporal_stabilize_flat_boost, getattr(args, "temporal_stabilize_flat_region_boost", 0.0))
         _apply_combo_value(
             self.cbo_temporal_stabilize_edge_protect, getattr(args, "temporal_stabilize_edge_protection", 0.0))
-        self.cbo_temporal_stabilize_quality.SetValue(
-            T("Fast") if getattr(args, "temporal_stabilize_fast", False) else T("Accurate"))
+        if getattr(args, "temporal_stabilize_flow_engine", "farneback") == "raft":
+            self.cbo_temporal_stabilize_quality.SetValue(T("AI (RAFT)"))
+        else:
+            self.cbo_temporal_stabilize_quality.SetValue(
+                T("Fast") if getattr(args, "temporal_stabilize_fast", False) else T("Accurate"))
 
         # depth_blend_* fields (feather blur, bilateral +d/sigma-color/sigma-space,
         # CLAHE +clip/tile, align +decay, edge suppression, edge hard-cutoff) all now

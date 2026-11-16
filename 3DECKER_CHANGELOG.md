@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 14, 2026
+## Latest Update — November 16, 2026
+
+**Fixed: Object Stability's new "AI (RAFT)" option (added November 14) could crash a job partway through with "Inference tensors do not track version counter."** This only affected the brand-new "AI (RAFT)" choice, not "Accurate" or "Fast" — it happened because of how/when the AI motion tracker loaded itself the first time it was needed during a job. It's fixed now and passes all existing automated checks, but hasn't yet been confirmed on a full real conversion — if you still see this exact crash with "AI (RAFT)" selected, please report it back.
+
+## Update — November 14, 2026
 
 **Fixed: a small leftover piece of Auto 3D Strength's memory wasn't being freed along with everything else by "Free GPU memory while paused/idle."** That checkbox already moved your depth/3D models off the graphics card when a job paused or finished — but Auto 3D Strength's own small shot-framing model (used to judge how close-up or wide a scene is) was being left behind every time, a little under 200MB that only came back once you closed the app completely. It's now included in the same cleanup, every time, with no setting to turn on — if you already have "Free GPU memory while paused/idle" checked, you'll just see slightly more memory come back.
 

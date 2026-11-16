@@ -228,7 +228,12 @@ class TemporalStabilizer:
         sweep can't see" bug class. A no-op (as it always was before this) when RAFT
         was never selected/loaded."""
         if self._raft_model is not None:
-            self._raft_model = self._raft_model.to(device)
+            # Same inference-tensor hazard as _ensure_raft_model: this can be called
+            # while an ambient inference_mode is active (VRAM release/reload cycle
+            # runs inside the same per-frame inference_mode scope), and .to() on a
+            # tensor under that context produces a new inference-tensor copy.
+            with torch.inference_mode(False):
+                self._raft_model = self._raft_model.to(device)
             self._raft_device = device
         return self
 
@@ -241,8 +246,16 @@ class TemporalStabilizer:
             # top of everything else already happening that frame.
             from torchvision.models.optical_flow import raft_small, Raft_Small_Weights
             weights = Raft_Small_Weights.DEFAULT
-            model = raft_small(weights=weights, progress=True)
-            self._raft_model = model.eval().to(device)
+            # Force construction outside inference_mode: this is called lazily from
+            # inside _frame_callback, which the video pipeline wraps in
+            # @torch.inference_mode(). A model built while that's ambient has its
+            # weights permanently marked as "inference tensors", which crashes later
+            # conv2d calls with "Inference tensors do not track version counter" --
+            # confirmed live on a real job (RuntimeError, iw3-gui-crash.log 2026-11-16).
+            with torch.inference_mode(False):
+                model = raft_small(weights=weights, progress=True)
+                model = model.eval().to(device)
+            self._raft_model = model
             self._raft_device = device
             self._raft_transforms = weights.transforms()
         return self._raft_model

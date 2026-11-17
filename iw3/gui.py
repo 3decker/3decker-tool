@@ -629,8 +629,9 @@ class DepthCurveCalibrateDialog(wx.Dialog):
 
     def __init__(self, parent, source_model, target_model_choices, default_target_model):
         super().__init__(parent, title=T("Calibrate Depth Curve"),
-                          size=parent.FromDIP((640, 480)),
+                          size=parent.FromDIP((640, 520)),
                           style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        from .depth_curve_match import DEFAULT_CURVE_PATH
         self.source_model = source_model
         self._running = False
 
@@ -644,8 +645,28 @@ class DepthCurveCalibrateDialog(wx.Dialog):
             self.cbo_target_model.SetValue(default_target_model)
         elif target_model_choices:
             self.cbo_target_model.SetSelection(0)
-        self.txt_start_time = wx.TextCtrl(self, value="00:01:00")
-        self.txt_end_time = wx.TextCtrl(self, value="00:02:30")
+        self.lbl_clips = wx.StaticText(self, label=T("Sample Clips (one per line, START-END)"))
+        self.txt_clips = wx.TextCtrl(
+            self, value="00:01:00-00:02:30", style=wx.TE_MULTILINE,
+            size=parent.FromDIP((300, 70)))
+        self.txt_clips.SetToolTip(
+            T("One time range per line, as START-END (e.g. 00:02:00-00:03:30). Add a few "
+              "lines covering DIFFERENT kinds of moments (a wide shot, a close-up, a flatter "
+              "scene, a busy scene) rather than one long stretch from a single scene -- a "
+              "curve built from more variety reshapes more of the movie well, instead of "
+              "fitting just whatever one scene happened to look like. Keep each individual "
+              "clip short (60-120 seconds is plenty); add more LINES for more variety rather "
+              "than making one line longer."))
+        self.lbl_output = wx.StaticText(self, label=T("Save Curve As"))
+        self.txt_output = wx.TextCtrl(self, value=DEFAULT_CURVE_PATH)
+        self.txt_output.SetToolTip(
+            T("Where to save this curve. This is the DEFAULT path every real job automatically "
+              "loads from -- leave it as-is to replace your current curve.\n"
+              "To keep your current curve AND try a new one side by side (e.g. to compare a "
+              "multi-clip calibration against your old single-clip one), change the filename "
+              "here first (e.g. add \"_v2\") so this run saves to a SEPARATE file instead of "
+              "overwriting the one already in use."))
+        self.btn_output = wx.Button(self, label=T("Save As..."))
         self.btn_run = wx.Button(self, label=T("Calibrate"))
         self.btn_close = wx.Button(self, id=wx.ID_CLOSE, label=T("Close"))
         self.txt_log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
@@ -658,18 +679,18 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         top.Add(self.lbl_target_model, flag=wx.ALIGN_CENTER_VERTICAL)
         top.Add(self.cbo_target_model, flag=wx.EXPAND)
         top.Add((0, 0))
-        top.Add(wx.StaticText(self, label=T("Start Time")), flag=wx.ALIGN_CENTER_VERTICAL)
-        top.Add(self.txt_start_time, flag=wx.EXPAND)
+        top.Add(self.lbl_clips, flag=wx.ALIGN_TOP | wx.TOP, border=4)
+        top.Add(self.txt_clips, flag=wx.EXPAND)
         top.Add((0, 0))
-        top.Add(wx.StaticText(self, label=T("End Time")), flag=wx.ALIGN_CENTER_VERTICAL)
-        top.Add(self.txt_end_time, flag=wx.EXPAND)
-        top.Add((0, 0))
+        top.Add(self.lbl_output, flag=wx.ALIGN_CENTER_VERTICAL)
+        top.Add(self.txt_output, flag=wx.EXPAND)
+        top.Add(self.btn_output)
 
         hint = wx.StaticText(self, label=T(
-            "A short clip is enough -- a minute or two of real, varied content (some near "
-            "objects, some far background) gives a better curve than the whole movie. This "
-            "runs your Depth Model AND the model you pick below, one at a time, only over "
-            "this short range."))
+            "Keep each clip short -- a minute or two of real content is plenty. This runs "
+            "your Depth Model AND the model you pick above, one at a time, once per clip "
+            "line (each model is only loaded once and reused across every clip, not reloaded "
+            "per line)."))
         hint.Wrap(parent.FromDIP(600))
 
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -686,6 +707,7 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         self.SetSizer(layout)
 
         self.btn_input.Bind(wx.EVT_BUTTON, self.on_click_browse)
+        self.btn_output.Bind(wx.EVT_BUTTON, self.on_click_browse_output)
         self.btn_run.Bind(wx.EVT_BUTTON, self.on_click_run)
         self.btn_close.Bind(wx.EVT_BUTTON, lambda event: self.Close())
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -698,6 +720,15 @@ class DepthCurveCalibrateDialog(wx.Dialog):
                 dlg.SetPath(self.txt_input.GetValue())
             if dlg.ShowModal() == wx.ID_OK:
                 self.txt_input.SetValue(dlg.GetPath())
+
+    def on_click_browse_output(self, event):
+        with wx.FileDialog(self, message=T("Save Curve As"),
+                           wildcard="JSON files (*.json)|*.json|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if self.txt_output.GetValue():
+                dlg.SetPath(self.txt_output.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_output.SetValue(dlg.GetPath())
 
     def on_close(self, event):
         if self._running:
@@ -725,16 +756,35 @@ class DepthCurveCalibrateDialog(wx.Dialog):
                              "to reshape toward if it's the same as your own Depth Model."),
                           T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
             return
+
+        from .depth_curve_calibrate_cli import parse_clip_spec
+        clip_lines = [line.strip() for line in self.txt_clips.GetValue().splitlines() if line.strip()]
+        if not clip_lines:
+            wx.MessageBox(T("Enter at least one sample clip (one per line, START-END)."),
+                          T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
+            return
+        try:
+            for raw in clip_lines:
+                parse_clip_spec(raw)
+        except ValueError as e:
+            wx.MessageBox(str(e), T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
+            return
+
+        from .depth_curve_match import DEFAULT_CURVE_PATH
+        output_path = self.txt_output.GetValue().strip() or DEFAULT_CURVE_PATH
+
         cmd = [sys.executable, "-m", "iw3.depth_curve_calibrate_cli",
                "--input", input_path,
                "--source-model", self.source_model,
                "--target-model", target_model,
-               "--start-time", self.txt_start_time.GetValue().strip() or "00:01:00",
-               "--end-time", self.txt_end_time.GetValue().strip() or "00:02:30"]
-        self.txt_log.SetValue(T("Running -- this takes a couple of minutes (two short passes, "
-                                 "one per model)...") + "\n")
+               "--output", output_path]
+        for raw in clip_lines:
+            cmd += ["--clip", raw]
+        self.txt_log.SetValue(T("Running -- this takes a few minutes (two short passes per "
+                                 "clip, one per model)...") + "\n")
         self.btn_run.Disable()
         self._running = True
+        self._output_path = output_path
         threading.Thread(target=self._run_thread, args=(cmd,), daemon=True).start()
 
     def _run_thread(self, cmd):
@@ -753,11 +803,19 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         wx.CallAfter(self._on_run_finished, returncode)
 
     def _on_run_finished(self, returncode):
+        from .depth_curve_match import DEFAULT_CURVE_PATH
         self.btn_run.Enable()
         self._running = False
         if returncode == 0:
-            self.append("\n" + T("Done -- curve saved. Close this window and enable \"Depth Curve "
-                                  "Match\" to use it.") + "\n")
+            if path.normpath(self._output_path) == path.normpath(DEFAULT_CURVE_PATH):
+                self.append("\n" + T("Done -- curve saved. Close this window and enable \"Depth "
+                                      "Curve Match\" to use it.") + "\n")
+            else:
+                self.append(
+                    "\n" + T("Done -- saved to {}.\nThis is a SEPARATE file, not the one real "
+                              "jobs load automatically -- it won't replace your current curve "
+                              "until you rename/copy it over the default file yourself.")
+                    .format(self._output_path) + "\n")
         else:
             wx.MessageBox(T("Calibration failed -- see the log above for the exact reason."),
                           T("Calibrate Depth Curve"), wx.OK | wx.ICON_ERROR)

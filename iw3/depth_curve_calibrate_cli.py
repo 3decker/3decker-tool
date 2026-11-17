@@ -9,19 +9,30 @@ iw3.sharpen_cli -- see docs/ai/CODING_STANDARDS.md CS-SUBPROCESS-001), run ONCE
 (or occasionally, if decker wants to re-calibrate against different content) --
 not part of every normal conversion job.
 
-What it actually does: runs a SHORT sample clip (not the whole movie -- a minute
-or two is plenty, see --start-time/--end-time) through BOTH models, one at a time
-(same sequential-load-then-release VRAM discipline as depth_blend.py's Dual-Pass
-Depth Blend -- the two models are never resident at once), using iw3's own
-existing --export --export-depth-only machinery (export_main in iw3/utils.py) --
-no new video-reading code. It then samples a modest number of random pixels per
-exported frame from each model's depth output (full-frame, not a full pixel dump
--- plenty for a stable percentile curve, see --pixels-per-frame), builds a
-histogram-specification LUT (iw3.depth_curve_match.build_curve_lut) mapping the
-SOURCE model's typical values onto the TARGET model's typical values at the same
-percentile rank, and saves it to --output (a small JSON file, default
-iw3.depth_curve_match.DEFAULT_CURVE_PATH) for the main pipeline's
-DepthCurveMatcher to load automatically on every future job.
+What it actually does: runs one or more SHORT sample clips (not the whole movie --
+see --clip, repeatable) through BOTH models, one model at a time (same
+sequential-load-then-release VRAM discipline as depth_blend.py's Dual-Pass Depth
+Blend -- the two models are never resident at once, and each model is loaded ONCE
+and reused across every clip, not reloaded per clip), using iw3's own existing
+--export --export-depth-only machinery (export_main in iw3/utils.py) -- no new
+video-reading code. It then samples a modest number of random pixels per exported
+frame from each model's depth output (full-frame, not a full pixel dump -- plenty
+for a stable percentile curve, see --pixels-per-frame), pools the samples across
+every clip, builds a histogram-specification LUT
+(iw3.depth_curve_match.build_curve_lut) mapping the SOURCE model's typical values
+onto the TARGET model's typical values at the same percentile rank, and saves it
+to --output (a small JSON file, default iw3.depth_curve_match.DEFAULT_CURVE_PATH)
+for the main pipeline's DepthCurveMatcher to load automatically on every future
+job.
+
+Multiple clips (--clip, repeatable) exist because a single curve is a fixed,
+averaged shape -- a real, known trade-off noticed on live footage (decker
+reported some moments still looking flat/under-reshaped at Strength 1.0): a clip
+sampled from only ONE kind of shot produces a curve that fits that shot type well
+but under-serves very different shots elsewhere in the movie. Sampling a FEW
+separate, varied moments (a wide shot, a close-up, a flatter scene, etc.) and
+pooling them into one curve gives a more generally-useful result than one longer
+continuous stretch from a single scene.
 
 See docs/ai/AI_DECISIONS.md ADR-467 for the research/reasoning this feature is
 built on.
@@ -51,14 +62,21 @@ def _pass_depth_dir(output_dir, input_path):
 
 
 def _run_export_pass(input_path, model_name, pass_dir, start_time, end_time,
-                      gpu, resolution, limit_resolution):
+                      gpu, resolution, limit_resolution, depth_model=None):
     """Runs one depth-only export pass with one model, using iw3's own real
     argument parser + export pipeline (the same `create_parser() ->
     set_state_args() -> export_main()` sequence iw3.cli.main() uses for a normal
     job -- see CLAUDE.md's Architecture section) rather than hand-building a
-    partial args object. Fully releases the model before returning, same
-    discipline as depth_blend.py's sequential pass_a/pass_b export."""
-    from .utils import create_parser, set_state_args, export_main, gc_collect
+    partial args object.
+
+    If `depth_model` is given (an already-loaded model returned from a PREVIOUS
+    call for this same model_name), reuses it instead of constructing a fresh one
+    -- this is what lets a multi-clip calibration load each model exactly ONCE
+    and export every clip's range with it, rather than paying a reload per clip.
+    Returns the (now loaded) depth_model, for the caller to pass into the next
+    clip's call, and to release once (see _release_model) after the LAST clip for
+    this model."""
+    from .utils import create_parser, set_state_args, export_main
 
     argv = [
         "-i", input_path, "-o", pass_dir,
@@ -77,13 +95,27 @@ def _run_export_pass(input_path, model_name, pass_dir, start_time, end_time,
         argv += ["--limit-resolution"]
 
     pass_args = create_parser().parse_args(argv)
-    pass_args = set_state_args(pass_args)
+    pass_args = set_state_args(pass_args, depth_model=depth_model)
     depth_model = pass_args.state["depth_model"]
-    depth_model.load(gpu=pass_args.gpu, resolution=pass_args.resolution,
-                      limit_resolution=pass_args.limit_resolution)
+    if not depth_model.loaded():
+        depth_model.load(gpu=pass_args.gpu, resolution=pass_args.resolution,
+                          limit_resolution=pass_args.limit_resolution)
+    else:
+        # ADR-141-style reuse: already loaded from a previous clip in this same
+        # calibration run -- just confirm it's on the right device.
+        depth_model.move_to(depth_model.device)
     export_main(pass_args)
-    depth_model.model = None
-    gc_collect()
+    return depth_model
+
+
+def _release_model(depth_model):
+    """Fully releases a model loaded by _run_export_pass -- same `model = None` +
+    gc_collect() discipline as depth_blend.py's own sequential pass release,
+    called once after ALL clips for one model are done, not per clip."""
+    from .utils import gc_collect
+    if depth_model is not None:
+        depth_model.model = None
+        gc_collect()
 
 
 def _sample_pixels_from_dir(depth_dir, pixels_per_frame=4000, seed=0):
@@ -113,74 +145,121 @@ def _sample_pixels_from_dir(depth_dir, pixels_per_frame=4000, seed=0):
     return np.concatenate(samples), len(samples)
 
 
-def calibrate(input_path, source_model, target_model, start_time, end_time,
+def calibrate(input_path, source_model, target_model, clips,
               gpu=0, resolution=None, limit_resolution=False,
               pixels_per_frame=4000, num_points=512, output_path=None,
               work_dir=None, log=print):
-    """Full calibration run: export both models over the same short clip, sample
-    pixels from each, build the LUT, save it. Returns the saved file path."""
+    """Full calibration run over one or more clips: export both models over
+    EVERY clip (each model loaded once, reused across all its clips), sample
+    pixels from each clip/side, pool every clip's samples together, build the
+    LUT from the pooled data, save it. `clips` is a list of (start_time,
+    end_time) tuples. Returns the saved file path."""
+    if not clips:
+        raise ValueError("calibrate() requires at least one clip")
     output_path = output_path or DEFAULT_CURVE_PATH
     own_work_dir = work_dir is None
     work_dir = work_dir or tempfile.mkdtemp(prefix="iw3_depth_curve_calibrate_")
     try:
-        pass_a_dir = path.join(work_dir, "pass_source")
-        pass_b_dir = path.join(work_dir, "pass_target")
+        pass_dirs = [[None, None] for _ in clips]
 
         log(f"[depth-curve-calibrate] [1/3] exporting depth with source model "
-            f"({source_model}) over {start_time or 'start'}-{end_time or 'end'}...")
-        _run_export_pass(input_path, source_model, pass_a_dir, start_time, end_time,
-                          gpu, resolution, limit_resolution)
+            f"({source_model}) over {len(clips)} clip(s)...")
+        model_obj = None
+        for i, (start_time, end_time) in enumerate(clips):
+            log(f"  clip {i + 1}/{len(clips)}: {start_time or 'start'}-{end_time or 'end'}")
+            pass_a_dir = path.join(work_dir, f"clip{i}_source")
+            model_obj = _run_export_pass(input_path, source_model, pass_a_dir, start_time, end_time,
+                                          gpu, resolution, limit_resolution, depth_model=model_obj)
+            pass_dirs[i][0] = pass_a_dir
+        _release_model(model_obj)
 
         log(f"[depth-curve-calibrate] [2/3] exporting depth with target model "
-            f"({target_model}) over the same clip...")
-        _run_export_pass(input_path, target_model, pass_b_dir, start_time, end_time,
-                          gpu, resolution, limit_resolution)
+            f"({target_model}) over the same {len(clips)} clip(s)...")
+        model_obj = None
+        for i, (start_time, end_time) in enumerate(clips):
+            log(f"  clip {i + 1}/{len(clips)}: {start_time or 'start'}-{end_time or 'end'}")
+            pass_b_dir = path.join(work_dir, f"clip{i}_target")
+            model_obj = _run_export_pass(input_path, target_model, pass_b_dir, start_time, end_time,
+                                          gpu, resolution, limit_resolution, depth_model=model_obj)
+            pass_dirs[i][1] = pass_b_dir
+        _release_model(model_obj)
 
-        source_depth_dir = _pass_depth_dir(pass_a_dir, input_path)
-        target_depth_dir = _pass_depth_dir(pass_b_dir, input_path)
+        log(f"[depth-curve-calibrate] [3/3] sampling pixels and building the curve...")
+        source_values_all, target_values_all = [], []
+        total_frame_count = 0
+        for i, (pass_a_dir, pass_b_dir) in enumerate(pass_dirs):
+            source_depth_dir = _pass_depth_dir(pass_a_dir, input_path)
+            target_depth_dir = _pass_depth_dir(pass_b_dir, input_path)
+            source_values, source_frame_count = _sample_pixels_from_dir(
+                source_depth_dir, pixels_per_frame, seed=i * 2)
+            target_values, target_frame_count = _sample_pixels_from_dir(
+                target_depth_dir, pixels_per_frame, seed=i * 2 + 1)
+            if source_frame_count != target_frame_count:
+                start_time, end_time = clips[i]
+                raise RuntimeError(
+                    f"clip {i + 1} ({start_time}-{end_time}): source model exported "
+                    f"{source_frame_count} frame(s) but target model exported "
+                    f"{target_frame_count} -- the two passes must cover the exact same frame "
+                    f"range to build a valid curve. This usually means this clip's start/end "
+                    f"time landed on a different frame count for each model (rare), or one "
+                    f"pass was interrupted. Try a slightly different time range for this clip.")
+            source_values_all.append(source_values)
+            target_values_all.append(target_values)
+            total_frame_count += source_frame_count
 
-        source_values, source_frame_count = _sample_pixels_from_dir(
-            source_depth_dir, pixels_per_frame)
-        target_values, target_frame_count = _sample_pixels_from_dir(
-            target_depth_dir, pixels_per_frame)
-
-        if source_frame_count != target_frame_count:
-            raise RuntimeError(
-                f"source model exported {source_frame_count} frame(s) but target model "
-                f"exported {target_frame_count} -- the two passes must cover the exact "
-                f"same frame range to build a valid curve. This usually means the clip's "
-                f"start/end time landed on a different frame count for each model (rare), "
-                f"or one pass was interrupted. Try a different --start-time/--end-time.")
-
-        log(f"[depth-curve-calibrate] [3/3] building curve from {source_frame_count} "
-            f"sampled frame(s) ({len(source_values)} pixels each side)...")
+        source_values = np.concatenate(source_values_all)
+        target_values = np.concatenate(target_values_all)
         lut_x, lut_y = build_curve_lut(source_values, target_values, num_points=num_points)
 
         meta = {
             "source_model": source_model,
             "target_model": target_model,
             "input": path.basename(input_path),
-            "start_time": start_time,
-            "end_time": end_time,
-            "frame_count": source_frame_count,
+            "clips": [f"{s}-{e}" for s, e in clips],
+            "frame_count": total_frame_count,
             "pixels_per_frame": pixels_per_frame,
             "calibrated_at": datetime.now().isoformat(timespec="seconds"),
         }
         save_curve(output_path, lut_x, lut_y, meta=meta)
         log(f"[depth-curve-calibrate] done -- wrote {output_path} "
-            f"({source_model} -> {target_model}, {source_frame_count} frames)")
+            f"({source_model} -> {target_model}, {total_frame_count} frames across "
+            f"{len(clips)} clip(s))")
         return output_path
     finally:
         if own_work_dir and path.exists(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def parse_clip_spec(raw):
+    """Parses one --clip value ("START-END", e.g. "00:02:00-00:05:30") into a
+    (start, end) tuple of strings. Splits on the FIRST "-" only -- HH:MM:SS itself
+    never contains one, so this is unambiguous."""
+    if "-" not in raw:
+        raise ValueError(
+            f"--clip value must be START-END (e.g. 00:02:00-00:05:30), got {raw!r}")
+    start, end = raw.split("-", 1)
+    start, end = start.strip(), end.strip()
+    if not start or not end:
+        raise ValueError(f"--clip value must have both a start and an end, got {raw!r}")
+    return start, end
+
+
+def resolve_clips(args):
+    """Returns the list of (start, end) clips to calibrate from: every --clip
+    value if any were given (repeatable -- see create_parser), otherwise a
+    single clip from --start-time/--end-time (the original, single-range
+    behavior, unchanged for anyone not using --clip)."""
+    if getattr(args, "clip", None):
+        return [parse_clip_spec(raw) for raw in args.clip]
+    return [(args.start_time, args.end_time)]
+
+
 def create_parser():
     parser = argparse.ArgumentParser(
         prog="python -m iw3.depth_curve_calibrate_cli",
         description=(
-            "Build the Depth Curve Match LUT: runs a short sample clip through both "
-            "--source-model and --target-model, and saves a lookup table that lets the "
+            "Build the Depth Curve Match LUT: runs one or more short sample clips through "
+            "both --source-model and --target-model, and saves a lookup table that lets the "
             "main pipeline reshape --source-model's depth output to resemble "
             "--target-model's distinctive distribution, without running --target-model on "
             "every real job. Run this once (or whenever you want to re-calibrate against "
@@ -188,9 +267,7 @@ def create_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--input", "-i", type=str, required=True,
-                         help="Path to a representative source video to calibrate from. "
-                              "A short, visually varied clip (some near content, some far "
-                              "background) gives a better curve than a static shot.")
+                         help="Path to a representative source video to calibrate from.")
     parser.add_argument("--source-model", type=str, required=True,
                          help="The depth model you actually use for real jobs (e.g. VDA_L) "
                               "-- the one whose output will be reshaped at conversion time.")
@@ -198,13 +275,22 @@ def create_parser():
                          help="The depth model whose distinctive look you want to borrow "
                               "(e.g. Any_V3_Metric_Large) -- never actually run during real "
                               "jobs after this, only here during calibration.")
+    parser.add_argument("--clip", action="append", default=None, metavar="START-END",
+                         help="One sample range as START-END (HH:MM:SS-HH:MM:SS), e.g. "
+                              "00:02:00-00:05:30. Repeat --clip to sample SEVERAL separate "
+                              "moments from the movie instead of one continuous stretch -- "
+                              "a curve built from more VARIETY (a wide shot, a close-up, a "
+                              "flatter scene, a busy scene) reshapes more of the movie well "
+                              "than one that only ever saw one kind of shot. If given at "
+                              "least once, --start-time/--end-time below are ignored.")
     parser.add_argument("--start-time", type=str, default="00:01:00",
-                         help="Start of the sample clip (HH:MM:SS). Default skips the first "
-                              "minute (often titles/black frames).")
+                         help="Start of the sample clip (HH:MM:SS). Only used when --clip is "
+                              "never given. Default skips the first minute (often titles/"
+                              "black frames).")
     parser.add_argument("--end-time", type=str, default="00:02:30",
-                         help="End of the sample clip (HH:MM:SS). Keep this short -- 60-120 "
-                              "seconds of real, varied content is plenty; this runs twice "
-                              "(once per model), not once per whole movie.")
+                         help="End of the sample clip (HH:MM:SS). Only used when --clip is "
+                              "never given. Keep any one clip short -- 60-120 seconds of "
+                              "real, varied content is plenty.")
     parser.add_argument("--gpu", "-g", type=int, default=0,
                          help="GPU device index. -1 forces CPU.")
     parser.add_argument("--resolution", type=int, default=None,
@@ -221,7 +307,7 @@ def create_parser():
                          help=f"Where to save the curve file. Default: {DEFAULT_CURVE_PATH} "
                               f"(the same path the main pipeline auto-loads from).")
     parser.add_argument("--work-dir", type=str, default=None,
-                         help="Temp directory for the two export passes. Default: a fresh "
+                         help="Temp directory for the export passes. Default: a fresh "
                               "system temp directory, deleted automatically when done.")
     return parser
 
@@ -235,9 +321,13 @@ def run(args):
               "nothing to reshape toward if they're the same model.", file=sys.stderr)
         return 1
     try:
+        clips = resolve_clips(args)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    try:
         calibrate(
-            args.input, args.source_model, args.target_model,
-            args.start_time, args.end_time,
+            args.input, args.source_model, args.target_model, clips,
             gpu=args.gpu, resolution=args.resolution, limit_resolution=args.limit_resolution,
             pixels_per_frame=args.pixels_per_frame, num_points=args.num_points,
             output_path=args.output, work_dir=args.work_dir,
@@ -280,11 +370,54 @@ def _self_test_pass_depth_dir_layout():
     print("_self_test_pass_depth_dir_layout: PASS")
 
 
+def _self_test_parse_clip_spec_and_resolve_clips():
+    assert parse_clip_spec("00:02:00-00:05:30") == ("00:02:00", "00:05:30")
+    assert parse_clip_spec(" 00:02:00 - 00:05:30 ") == ("00:02:00", "00:05:30")
+    for bad in ("no dash here", "-00:05:30", "00:02:00-"):
+        try:
+            parse_clip_spec(bad)
+            assert False, f"expected parse_clip_spec to reject {bad!r}"
+        except ValueError:
+            pass
+
+    args_no_clip = argparse.Namespace(clip=None, start_time="00:01:00", end_time="00:02:30")
+    assert resolve_clips(args_no_clip) == [("00:01:00", "00:02:30")]
+
+    args_with_clips = argparse.Namespace(
+        clip=["00:02:00-00:05:30", "00:20:00-00:21:30"],
+        start_time="00:01:00", end_time="00:02:30")
+    assert resolve_clips(args_with_clips) == [("00:02:00", "00:05:30"), ("00:20:00", "00:21:30")], \
+        "when --clip is given, --start-time/--end-time must be ignored"
+
+    print("_self_test_parse_clip_spec_and_resolve_clips: PASS")
+
+
+def _fake_export_pass_for_tests(input_path, model_name, pass_dir, start_time, end_time,
+                                 gpu, resolution, limit_resolution, depth_model=None):
+    """Shared fake export used by both calibrate() self-tests below -- writes real,
+    correctly-shaped PNG files (so the real sampling/LUT code runs unmocked), without
+    any GPU or real model. "source" model samples narrow around 0.5, "target" model
+    samples wide around 0.5 -- same scenario depth_curve_match's own self-tests use.
+    Returns a tiny stand-in object with a `.model` attribute so _release_model(...)
+    (which only ever does `depth_model.model = None`) has something valid to call."""
+    import types
+    depth_dir = _pass_depth_dir(pass_dir, input_path)
+    os.makedirs(depth_dir, exist_ok=True)
+    rng = np.random.default_rng(0 if "source" in model_name else 1)
+    scale = 0.08 if "source" in model_name else 0.30
+    for i in range(6):
+        value = float(np.clip(rng.normal(0.5, scale), 0.0, 1.0))
+        _make_fake_depth_png(path.join(depth_dir, f"{i:06d}.png"), value)
+    return depth_model or types.SimpleNamespace(model="fake", loaded=lambda: True,
+                                                 move_to=lambda device: None)
+
+
 def _self_test_calibrate_end_to_end_with_fake_passes():
     """Mocks ONLY the GPU-dependent export step (_run_export_pass) -- everything else
     (directory layout, pixel sampling, LUT building, saving) is the real code, proven
     against real fake-but-correctly-shaped PNG files on disk, same "mock the heavy step,
-    test the real plumbing" pattern as sharpen_cli._self_test_run_gating."""
+    test the real plumbing" pattern as sharpen_cli._self_test_run_gating. Single clip,
+    same scenario as before multi-clip support existed."""
     import tempfile as _tempfile
     from unittest.mock import patch
 
@@ -295,22 +428,10 @@ def _self_test_calibrate_end_to_end_with_fake_passes():
         work_dir = path.join(tmpdir, "work")
         output_path = path.join(tmpdir, "curve.json")
 
-        def _fake_export_pass(input_path, model_name, pass_dir, start_time, end_time,
-                               gpu, resolution, limit_resolution):
-            depth_dir = _pass_depth_dir(pass_dir, input_path)
-            os.makedirs(depth_dir, exist_ok=True)
-            # "source" model (narrow spread) vs "target" model (wide spread) --
-            # same scenario depth_curve_match's own self-tests use.
-            rng = np.random.default_rng(0 if "source" in model_name else 1)
-            scale = 0.08 if "source" in model_name else 0.30
-            for i in range(6):
-                value = float(np.clip(rng.normal(0.5, scale), 0.0, 1.0))
-                _make_fake_depth_png(path.join(depth_dir, f"{i:06d}.png"), value)
-
-        with patch(f"{__name__}._run_export_pass", side_effect=_fake_export_pass):
+        with patch(f"{__name__}._run_export_pass", side_effect=_fake_export_pass_for_tests):
             result_path = calibrate(
                 input_path, "fake_source_model", "fake_target_model",
-                "00:00:00", "00:00:10",
+                [("00:00:00", "00:00:10")],
                 pixels_per_frame=200, num_points=64,
                 output_path=output_path, work_dir=work_dir, log=lambda msg: None)
 
@@ -321,6 +442,7 @@ def _self_test_calibrate_end_to_end_with_fake_passes():
         assert meta["source_model"] == "fake_source_model"
         assert meta["target_model"] == "fake_target_model"
         assert meta["frame_count"] == 6
+        assert meta["clips"] == ["00:00:00-00:00:10"]
         x_spread = float(lut_x[-1] - lut_x[0])
         y_spread = float(lut_y[-1] - lut_y[0])
         assert y_spread > x_spread, (
@@ -334,9 +456,61 @@ def _self_test_calibrate_end_to_end_with_fake_passes():
     print("_self_test_calibrate_end_to_end_with_fake_passes: PASS")
 
 
+def _self_test_calibrate_pools_multiple_clips():
+    """The real reason multi-clip support exists: confirms calibrate() with several
+    --clip ranges actually POOLS every clip's samples into the frame_count/meta
+    (not just the last one), and that each model is loaded/reused across clips
+    rather than re-created per clip (model identity stays the same object across
+    calls for the same side)."""
+    import tempfile as _tempfile
+    from unittest.mock import patch
+
+    seen_model_objs = {"source": [], "target": []}
+
+    def _tracking_fake_export_pass(input_path, model_name, pass_dir, start_time, end_time,
+                                    gpu, resolution, limit_resolution, depth_model=None):
+        side = "source" if "source" in model_name else "target"
+        result = _fake_export_pass_for_tests(input_path, model_name, pass_dir, start_time, end_time,
+                                              gpu, resolution, limit_resolution, depth_model=depth_model)
+        seen_model_objs[side].append(result)
+        return result
+
+    with _tempfile.TemporaryDirectory(prefix="iw3_curve_calib_selftest_") as tmpdir:
+        input_path = path.join(tmpdir, "Clip.mkv")
+        with open(input_path, "wb") as f:
+            f.write(b"0")
+        work_dir = path.join(tmpdir, "work")
+        output_path = path.join(tmpdir, "curve.json")
+        clips = [("00:02:00", "00:03:00"), ("00:20:00", "00:21:00"), ("01:00:00", "01:01:00")]
+
+        with patch(f"{__name__}._run_export_pass", side_effect=_tracking_fake_export_pass):
+            calibrate(
+                input_path, "fake_source_model", "fake_target_model", clips,
+                pixels_per_frame=200, num_points=64,
+                output_path=output_path, work_dir=work_dir, log=lambda msg: None)
+
+        from .depth_curve_match import load_curve
+        _, _, meta = load_curve(output_path)
+        # 6 fake frames per clip x 3 clips = 18 total, not just one clip's 6.
+        assert meta["frame_count"] == 18, meta["frame_count"]
+        assert meta["clips"] == ["00:02:00-00:03:00", "00:20:00-00:21:00", "01:00:00-01:01:00"]
+
+        # Each side's model object is the SAME instance reused across all 3 of
+        # that side's calls (first call gets depth_model=None and returns a fresh
+        # object; every later call must be handed that exact object back in).
+        assert len(seen_model_objs["source"]) == 3
+        assert seen_model_objs["source"][0] is seen_model_objs["source"][1] is seen_model_objs["source"][2]
+        assert len(seen_model_objs["target"]) == 3
+        assert seen_model_objs["target"][0] is seen_model_objs["target"][1] is seen_model_objs["target"][2]
+        assert seen_model_objs["source"][0] is not seen_model_objs["target"][0]
+
+    print("_self_test_calibrate_pools_multiple_clips: PASS")
+
+
 def _self_test_run_gating():
     """Synthetic test of run()'s pre-flight checks -- missing input, same source/target
-    model -- proves both refuse before any export pass is attempted."""
+    model, and a malformed --clip value -- proves each refuses before any export pass
+    is attempted."""
     from unittest.mock import patch
     import tempfile as _tempfile
 
@@ -348,7 +522,7 @@ def _self_test_run_gating():
 
         def _args(**overrides):
             base = dict(input=missing, source_model="VDA_L", target_model="Any_V3_Metric_Large",
-                        start_time="00:00:00", end_time="00:00:10", gpu=0, resolution=None,
+                        clip=None, start_time="00:00:00", end_time="00:00:10", gpu=0, resolution=None,
                         limit_resolution=False, pixels_per_frame=100, num_points=64,
                         output=None, work_dir=None)
             base.update(overrides)
@@ -363,10 +537,19 @@ def _self_test_run_gating():
             assert rc == 1, rc
             mock_calibrate.assert_not_called()
 
+            # malformed --clip -- refused before any export pass is attempted
+            rc = run(_args(input=existing, clip=["totally garbled no dash at all"]))
+            assert rc == 1, rc
+            mock_calibrate.assert_not_called()
+            rc = run(_args(input=existing, clip=["00:02:00-"]))  # dash present but no end
+            assert rc == 1, rc
+            mock_calibrate.assert_not_called()
+
             mock_calibrate.return_value = "curve.json"
             rc = run(_args(input=existing))
             assert rc == 0, rc
             mock_calibrate.assert_called_once()
+            assert mock_calibrate.call_args[0][3] == [("00:00:00", "00:00:10")]
 
     print("_self_test_run_gating: PASS")
 
@@ -374,7 +557,9 @@ def _self_test_run_gating():
 def _run_self_tests():
     _self_test_pass_depth_dir_layout()
     _self_test_sample_pixels_from_dir()
+    _self_test_parse_clip_spec_and_resolve_clips()
     _self_test_calibrate_end_to_end_with_fake_passes()
+    _self_test_calibrate_pools_multiple_clips()
     _self_test_run_gating()
     print("All depth_curve_calibrate_cli self-tests PASSED")
 

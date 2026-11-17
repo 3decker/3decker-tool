@@ -627,16 +627,19 @@ class DepthCurveCalibrateDialog(wx.Dialog):
     while a run is actually in progress, same guard as RunUpdateDialog, so decker
     can't lose the log or think it finished early."""
 
-    def __init__(self, parent, source_model, target_model_choices, default_target_model):
+    def __init__(self, parent, source_model, target_model_choices, default_target_model,
+                 model_settings_argv=None):
         super().__init__(parent, title=T("Calibrate Depth Curve"),
-                          size=parent.FromDIP((640, 520)),
+                          size=parent.FromDIP((640, 540)),
                           style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         from .depth_curve_match import DEFAULT_CURVE_PATH
         self.source_model = source_model
+        self.model_settings_argv = model_settings_argv or []
         self._running = False
 
         self.lbl_source_model = wx.StaticText(
             self, label=T("Your Depth Model (what gets reshaped): {}").format(source_model))
+        self.lbl_model_settings = wx.StaticText(self, label=self._describe_model_settings_argv())
         self.txt_input = wx.TextCtrl(self)
         self.btn_input = wx.Button(self, label=T("Browse..."))
         self.lbl_target_model = wx.StaticText(self, label=T("Borrow Curve From"))
@@ -700,6 +703,7 @@ class DepthCurveCalibrateDialog(wx.Dialog):
 
         layout = wx.BoxSizer(wx.VERTICAL)
         layout.Add(self.lbl_source_model, 0, wx.ALL, 8)
+        layout.Add(self.lbl_model_settings, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         layout.Add(hint, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         layout.Add(top, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
         layout.Add(self.txt_log, 1, wx.EXPAND | wx.ALL, 8)
@@ -711,6 +715,25 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         self.btn_run.Bind(wx.EVT_BUTTON, self.on_click_run)
         self.btn_close.Bind(wx.EVT_BUTTON, lambda event: self.Close())
         self.Bind(wx.EVT_CLOSE, self.on_close)
+
+    def _describe_model_settings_argv(self):
+        """Plain-language summary of which depth-model-level settings (see
+        ADR-469) this run will carry over from your main settings, so it's never
+        a silent, invisible thing happening in the background."""
+        labels = []
+        if "--depth-refine" in self.model_settings_argv:
+            labels.append(T("Depth Detail Refinement"))
+        if "--temporal-stabilize" in self.model_settings_argv:
+            labels.append(T("Object Stability"))
+        if "--ema-normalize" in self.model_settings_argv:
+            labels.append(T("EMA Normalize"))
+        if "--depth-aa" in self.model_settings_argv:
+            labels.append(T("Depth Anti-aliasing"))
+        if not labels:
+            return T("None of your Depth Detail Refinement/Object Stability/EMA Normalize/"
+                      "Depth Anti-aliasing settings are currently on -- calibration will use "
+                      "the plain depth model.")
+        return T("Matching your current settings: {}").format(", ".join(labels))
 
     def on_click_browse(self, event):
         with wx.FileDialog(self, message=T("Select a representative sample video"),
@@ -780,6 +803,7 @@ class DepthCurveCalibrateDialog(wx.Dialog):
                "--output", output_path]
         for raw in clip_lines:
             cmd += ["--clip", raw]
+        cmd += list(self.model_settings_argv)
         self.txt_log.SetValue(T("Running -- this takes a few minutes (two short passes per "
                                  "clip, one per model)...") + "\n")
         self.btn_run.Disable()
@@ -18048,6 +18072,40 @@ class MainFrame(wx.Frame):
             self.lbl_depth_curve_match_status.SetLabel(T("No curve calibrated yet"))
         self.lbl_depth_curve_match_status.GetContainingSizer().Layout()
 
+    def _depth_model_settings_argv(self):
+        """ADR-469: the SAME depth-MODEL-level settings (Object Stability, Depth
+        Detail Refinement, EMA Normalize, Depth Anti-aliasing) your real jobs use
+        right now, built as raw CLI flags for depth_curve_calibrate_cli.py -- so
+        calibration measures the depth models the way they actually behave for
+        you, not a bare/default configuration. Convergence/Divergence/Pop/Max
+        Negative Parallax/Edge Repair/Sharpen/Foreground Scale are deliberately
+        NOT read here -- those only ever run during the later stereo-render step,
+        which calibration's depth-only export never reaches at all, so there is
+        nothing real to forward for them (see ADR-469's research)."""
+        argv = []
+        if self.chk_depth_refine.GetValue():
+            argv += ["--depth-refine", "--depth-refine-strength", self.cbo_depth_refine_strength.GetValue()]
+        if self.chk_temporal_stabilize.GetValue():
+            argv += ["--temporal-stabilize",
+                     "--temporal-stabilize-strength", self.cbo_temporal_stabilize_strength.GetValue(),
+                     "--temporal-stabilize-flat-region-boost", self.cbo_temporal_stabilize_flat_boost.GetValue(),
+                     "--temporal-stabilize-edge-protection", self.cbo_temporal_stabilize_edge_protect.GetValue(),
+                     "--temporal-stabilize-flow-engine", ({
+                         T("AI (RAFT)"): "raft",
+                         T("AI (RAFT) + Occlusion Check"): "raft_fb",
+                     }.get(self.cbo_temporal_stabilize_quality.GetValue(), "farneback"))]
+            if self.cbo_temporal_stabilize_max_shift.GetValue().strip():
+                argv += ["--temporal-stabilize-max-shift-velocity",
+                         self.cbo_temporal_stabilize_max_shift.GetValue()]
+            if self.cbo_temporal_stabilize_quality.GetValue() == T("Fast"):
+                argv += ["--temporal-stabilize-fast"]
+        if self.chk_ema_normalize.GetValue():
+            argv += ["--ema-normalize", "--ema-decay", self.cbo_ema_decay.GetValue(),
+                     "--ema-buffer", self.cbo_ema_buffer.GetValue()]
+        if self.chk_depth_aa.GetValue():
+            argv += ["--depth-aa"]
+        return argv
+
     def on_click_btn_depth_curve_match_calibrate(self, event):
         source_model = self.cbo_depth_model.GetValue()
         target_choices = [m for m in self.get_depth_models() if m != source_model]
@@ -18057,7 +18115,8 @@ class MainFrame(wx.Frame):
             default_target = target_choices[0]
         else:
             default_target = ""
-        dlg = DepthCurveCalibrateDialog(self, source_model, target_choices, default_target)
+        dlg = DepthCurveCalibrateDialog(self, source_model, target_choices, default_target,
+                                         self._depth_model_settings_argv())
         dlg.ShowModal()
         dlg.Destroy()
         self._refresh_depth_curve_match_status()

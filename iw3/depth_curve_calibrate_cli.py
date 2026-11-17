@@ -62,7 +62,7 @@ def _pass_depth_dir(output_dir, input_path):
 
 
 def _run_export_pass(input_path, model_name, pass_dir, start_time, end_time,
-                      gpu, resolution, limit_resolution, depth_model=None):
+                      gpu, resolution, limit_resolution, depth_model=None, extra_argv=None):
     """Runs one depth-only export pass with one model, using iw3's own real
     argument parser + export pipeline (the same `create_parser() ->
     set_state_args() -> export_main()` sequence iw3.cli.main() uses for a normal
@@ -75,7 +75,17 @@ def _run_export_pass(input_path, model_name, pass_dir, start_time, end_time,
     and export every clip's range with it, rather than paying a reload per clip.
     Returns the (now loaded) depth_model, for the caller to pass into the next
     clip's call, and to release once (see _release_model) after the LAST clip for
-    this model."""
+    this model.
+
+    `extra_argv` (ADR-469): extra raw CLI flags appended as-is (e.g.
+    ["--ema-normalize", "--ema-decay", "0.75", "--depth-aa"]) -- these are the
+    depth-MODEL-level settings (Object Stability, Depth Refine, EMA Normalize,
+    Depth Anti-aliasing) that genuinely change what the model outputs, as
+    opposed to stereo-render-only settings (Convergence, Pop, Divergence, etc.)
+    which never run during a depth-only export regardless. Without this, every
+    one of those model-level settings silently defaults to OFF here even when
+    decker's real jobs have them on, so the calibrated curve would be measuring
+    a different (bare) depth output than his real jobs actually produce."""
     from .utils import create_parser, set_state_args, export_main
 
     argv = [
@@ -93,6 +103,8 @@ def _run_export_pass(input_path, model_name, pass_dir, start_time, end_time,
         argv += ["--resolution", str(resolution)]
     if limit_resolution:
         argv += ["--limit-resolution"]
+    if extra_argv:
+        argv += list(extra_argv)
 
     pass_args = create_parser().parse_args(argv)
     pass_args = set_state_args(pass_args, depth_model=depth_model)
@@ -148,12 +160,14 @@ def _sample_pixels_from_dir(depth_dir, pixels_per_frame=4000, seed=0):
 def calibrate(input_path, source_model, target_model, clips,
               gpu=0, resolution=None, limit_resolution=False,
               pixels_per_frame=4000, num_points=512, output_path=None,
-              work_dir=None, log=print):
+              work_dir=None, log=print, extra_argv=None):
     """Full calibration run over one or more clips: export both models over
     EVERY clip (each model loaded once, reused across all its clips), sample
     pixels from each clip/side, pool every clip's samples together, build the
     LUT from the pooled data, save it. `clips` is a list of (start_time,
-    end_time) tuples. Returns the saved file path."""
+    end_time) tuples. `extra_argv` (ADR-469) is forwarded unchanged to every
+    export pass -- see _run_export_pass's own docstring for why this exists.
+    Returns the saved file path."""
     if not clips:
         raise ValueError("calibrate() requires at least one clip")
     output_path = output_path or DEFAULT_CURVE_PATH
@@ -169,7 +183,8 @@ def calibrate(input_path, source_model, target_model, clips,
             log(f"  clip {i + 1}/{len(clips)}: {start_time or 'start'}-{end_time or 'end'}")
             pass_a_dir = path.join(work_dir, f"clip{i}_source")
             model_obj = _run_export_pass(input_path, source_model, pass_a_dir, start_time, end_time,
-                                          gpu, resolution, limit_resolution, depth_model=model_obj)
+                                          gpu, resolution, limit_resolution, depth_model=model_obj,
+                                          extra_argv=extra_argv)
             pass_dirs[i][0] = pass_a_dir
         _release_model(model_obj)
 
@@ -180,7 +195,8 @@ def calibrate(input_path, source_model, target_model, clips,
             log(f"  clip {i + 1}/{len(clips)}: {start_time or 'start'}-{end_time or 'end'}")
             pass_b_dir = path.join(work_dir, f"clip{i}_target")
             model_obj = _run_export_pass(input_path, target_model, pass_b_dir, start_time, end_time,
-                                          gpu, resolution, limit_resolution, depth_model=model_obj)
+                                          gpu, resolution, limit_resolution, depth_model=model_obj,
+                                          extra_argv=extra_argv)
             pass_dirs[i][1] = pass_b_dir
         _release_model(model_obj)
 
@@ -309,7 +325,62 @@ def create_parser():
     parser.add_argument("--work-dir", type=str, default=None,
                          help="Temp directory for the export passes. Default: a fresh "
                               "system temp directory, deleted automatically when done.")
+
+    group = parser.add_argument_group(
+        "depth-model settings",
+        "ADR-469: these change what the depth model actually outputs (unlike Convergence/"
+        "Divergence/Pop/etc., which only affect the later stereo-render step and never run "
+        "during calibration at all). Pass the SAME values your real jobs use here, so the "
+        "calibrated curve measures the depth models the way they actually behave for you, "
+        "not a bare/default configuration. Same flag names/meanings as the main pipeline.")
+    group.add_argument("--depth-refine", action="store_true")
+    group.add_argument("--depth-refine-strength", type=float, default=1.0)
+    group.add_argument("--temporal-stabilize", action="store_true")
+    group.add_argument("--temporal-stabilize-strength", type=float, default=0.7)
+    group.add_argument("--temporal-stabilize-max-shift-velocity", type=float, default=None)
+    group.add_argument("--temporal-stabilize-flat-region-boost", type=float, default=0.0)
+    group.add_argument("--temporal-stabilize-edge-protection", type=float, default=0.0)
+    group.add_argument("--temporal-stabilize-fast", action="store_true")
+    group.add_argument("--temporal-stabilize-flow-engine", type=str, default="farneback",
+                        choices=["farneback", "raft", "raft_fb"])
+    group.add_argument("--ema-normalize", action="store_true")
+    group.add_argument("--ema-decay", type=float, default=0.75)
+    group.add_argument("--ema-buffer", type=int, default=30)
+    group.add_argument("--depth-aa", action="store_true")
     return parser
+
+
+def model_settings_argv(args):
+    """Builds the extra argv (see _run_export_pass's docstring) from this tool's own
+    depth-model-settings group above -- only emits a flag when it differs from that
+    flag's own default, so a caller who passes none of them gets the exact same bare
+    argv as before this existed (byte-for-byte backward compatible)."""
+    argv = []
+    if getattr(args, "depth_refine", False):
+        argv += ["--depth-refine"]
+        if getattr(args, "depth_refine_strength", 1.0) != 1.0:
+            argv += ["--depth-refine-strength", str(args.depth_refine_strength)]
+    if getattr(args, "temporal_stabilize", False):
+        argv += ["--temporal-stabilize",
+                 "--temporal-stabilize-strength", str(getattr(args, "temporal_stabilize_strength", 0.7)),
+                 "--temporal-stabilize-flat-region-boost",
+                 str(getattr(args, "temporal_stabilize_flat_region_boost", 0.0)),
+                 "--temporal-stabilize-edge-protection",
+                 str(getattr(args, "temporal_stabilize_edge_protection", 0.0)),
+                 "--temporal-stabilize-flow-engine",
+                 str(getattr(args, "temporal_stabilize_flow_engine", "farneback") or "farneback")]
+        max_shift = getattr(args, "temporal_stabilize_max_shift_velocity", None)
+        if max_shift is not None:
+            argv += ["--temporal-stabilize-max-shift-velocity", str(max_shift)]
+        if getattr(args, "temporal_stabilize_fast", False):
+            argv += ["--temporal-stabilize-fast"]
+    if getattr(args, "ema_normalize", False):
+        argv += ["--ema-normalize",
+                 "--ema-decay", str(getattr(args, "ema_decay", 0.75)),
+                 "--ema-buffer", str(getattr(args, "ema_buffer", 30))]
+    if getattr(args, "depth_aa", False):
+        argv += ["--depth-aa"]
+    return argv
 
 
 def run(args):
@@ -332,6 +403,7 @@ def run(args):
             pixels_per_frame=args.pixels_per_frame, num_points=args.num_points,
             output_path=args.output, work_dir=args.work_dir,
             log=lambda msg: print(msg, file=sys.stderr),
+            extra_argv=model_settings_argv(args),
         )
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -392,8 +464,59 @@ def _self_test_parse_clip_spec_and_resolve_clips():
     print("_self_test_parse_clip_spec_and_resolve_clips: PASS")
 
 
+def _self_test_model_settings_argv():
+    """Pure, GPU-free argparse test: confirms model_settings_argv() only emits flags
+    for settings that are actually ON/non-default (byte-for-byte unchanged bare argv
+    for anyone passing none of them), AND -- the real point of this test -- that every
+    flag name it emits is spelled exactly right by feeding the built argv into the
+    REAL iw3.utils.create_parser() (not a stand-in), which would raise on any typo'd
+    or unrecognized flag name."""
+    from .utils import create_parser
+
+    base_args = argparse.Namespace(
+        depth_refine=False, depth_refine_strength=1.0,
+        temporal_stabilize=False, temporal_stabilize_strength=0.7,
+        temporal_stabilize_max_shift_velocity=None, temporal_stabilize_flat_region_boost=0.0,
+        temporal_stabilize_edge_protection=0.0, temporal_stabilize_fast=False,
+        temporal_stabilize_flow_engine="farneback",
+        ema_normalize=False, ema_decay=0.75, ema_buffer=30, depth_aa=False)
+    assert model_settings_argv(base_args) == [], "all-default settings must produce an empty argv"
+
+    on_args = argparse.Namespace(
+        depth_refine=True, depth_refine_strength=0.8,
+        temporal_stabilize=True, temporal_stabilize_strength=0.5,
+        temporal_stabilize_max_shift_velocity=12.0, temporal_stabilize_flat_region_boost=0.2,
+        temporal_stabilize_edge_protection=0.3, temporal_stabilize_fast=True,
+        temporal_stabilize_flow_engine="raft_fb",
+        ema_normalize=True, ema_decay=0.9, ema_buffer=50, depth_aa=True)
+    extra_argv = model_settings_argv(on_args)
+    for expected in ("--depth-refine", "--depth-refine-strength", "--temporal-stabilize",
+                      "--temporal-stabilize-strength", "--temporal-stabilize-max-shift-velocity",
+                      "--temporal-stabilize-flat-region-boost", "--temporal-stabilize-edge-protection",
+                      "--temporal-stabilize-fast", "--temporal-stabilize-flow-engine",
+                      "--ema-normalize", "--ema-decay", "--ema-buffer", "--depth-aa"):
+        assert expected in extra_argv, f"{expected!r} missing from {extra_argv}"
+
+    # The real point: these flag names must be exactly what iw3.utils.create_parser()
+    # (the REAL main parser, not a stand-in) actually recognizes.
+    base_argv = ["-i", "in.mp4", "-o", "out", "--depth-model", "VDA_L"]
+    parsed = create_parser(required_true=False).parse_args(base_argv + extra_argv)
+    assert parsed.depth_refine is True
+    assert parsed.depth_refine_strength == 0.8
+    assert parsed.temporal_stabilize is True
+    assert parsed.temporal_stabilize_strength == 0.5
+    assert parsed.temporal_stabilize_max_shift_velocity == 12.0
+    assert parsed.temporal_stabilize_flow_engine == "raft_fb"
+    assert parsed.ema_normalize is True
+    assert parsed.ema_decay == 0.9
+    assert parsed.ema_buffer == 50
+    assert parsed.depth_aa is True
+
+    print("_self_test_model_settings_argv: PASS")
+
+
 def _fake_export_pass_for_tests(input_path, model_name, pass_dir, start_time, end_time,
-                                 gpu, resolution, limit_resolution, depth_model=None):
+                                 gpu, resolution, limit_resolution, depth_model=None, extra_argv=None):
     """Shared fake export used by both calibrate() self-tests below -- writes real,
     correctly-shaped PNG files (so the real sampling/LUT code runs unmocked), without
     any GPU or real model. "source" model samples narrow around 0.5, "target" model
@@ -468,7 +591,7 @@ def _self_test_calibrate_pools_multiple_clips():
     seen_model_objs = {"source": [], "target": []}
 
     def _tracking_fake_export_pass(input_path, model_name, pass_dir, start_time, end_time,
-                                    gpu, resolution, limit_resolution, depth_model=None):
+                                    gpu, resolution, limit_resolution, depth_model=None, extra_argv=None):
         side = "source" if "source" in model_name else "target"
         result = _fake_export_pass_for_tests(input_path, model_name, pass_dir, start_time, end_time,
                                               gpu, resolution, limit_resolution, depth_model=depth_model)
@@ -558,6 +681,7 @@ def _run_self_tests():
     _self_test_pass_depth_dir_layout()
     _self_test_sample_pixels_from_dir()
     _self_test_parse_clip_spec_and_resolve_clips()
+    _self_test_model_settings_argv()
     _self_test_calibrate_end_to_end_with_fake_passes()
     _self_test_calibrate_pools_multiple_clips()
     _self_test_run_gating()

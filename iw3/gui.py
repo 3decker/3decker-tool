@@ -2972,7 +2972,7 @@ class MainFrame(wx.Frame):
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Speed"))
         self.cbo_temporal_stabilize_quality = wx.ComboBox(
             self.cpn_stereo_stability_flicker.GetPane(),
-            choices=[T("Accurate"), T("Fast"), T("AI (RAFT)")],
+            choices=[T("Accurate"), T("Fast"), T("AI (RAFT)"), T("AI (RAFT) + Occlusion Check")],
             name="cbo_temporal_stabilize_quality")
         self.cbo_temporal_stabilize_quality.SetEditable(False)
         self.cbo_temporal_stabilize_quality.SetSelection(0)
@@ -2987,9 +2987,17 @@ class MainFrame(wx.Frame):
               "computation above -- tracks fast/complex motion more accurately, which can reduce the "
               "lag/smear the other two options can show behind a moving object. Costs extra GPU memory "
               "and time per frame, and downloads a small (~20MB) model the first time it's used.\n"
+              "AI (RAFT) + Occlusion Check: the same AI tracker, but it also double-checks its own work "
+              "every frame by tracking motion backward as well as forward and comparing the two -- when "
+              "they don't agree, that's a real sign something got hidden/revealed or moved unpredictably, "
+              "and smoothing is pulled back specifically there instead of guessing blindly. Aimed at "
+              "random-looking glitches on tricky movements that plain AI (RAFT) can still show, at the "
+              "cost of running the AI tracker twice per frame instead of once.\n"
               "Recommended: Accurate unless conversion speed with Object Stability on is a real "
-              "bottleneck for you (try Fast first); try AI (RAFT) specifically if you've found Object "
-              "Stability's lag/smear on moving objects distracting even with Accurate/Fast."))
+              "bottleneck for you (try Fast first); try AI (RAFT) if you've found Object Stability's "
+              "lag/smear on moving objects distracting even with Accurate/Fast; try AI (RAFT) + Occlusion "
+              "Check specifically if plain AI (RAFT) still shows odd, localized glitches on certain "
+              "movements rather than a steady lag."))
 
         self.grp_depth_blend = wx.StaticBox(self.tab_depth_blend, label=T("Dual-Pass Depth Blend"))
 
@@ -13815,8 +13823,10 @@ class MainFrame(wx.Frame):
             temporal_stabilize_flat_region_boost=float(self.cbo_temporal_stabilize_flat_boost.GetValue()),
             temporal_stabilize_edge_protection=float(self.cbo_temporal_stabilize_edge_protect.GetValue()),
             temporal_stabilize_fast=(self.cbo_temporal_stabilize_quality.GetValue() == T("Fast")),
-            temporal_stabilize_flow_engine=(
-                "raft" if self.cbo_temporal_stabilize_quality.GetValue() == T("AI (RAFT)") else "farneback"),
+            temporal_stabilize_flow_engine=({
+                T("AI (RAFT)"): "raft",
+                T("AI (RAFT) + Occlusion Check"): "raft_fb",
+            }.get(self.cbo_temporal_stabilize_quality.GetValue(), "farneback")),
             **depth_blend_options,
             waifu2x_upscale=self.chk_waifu2x_upscale.GetValue(),
             waifu2x_method=self.cbo_waifu2x_method.GetValue(),
@@ -15363,8 +15373,11 @@ class MainFrame(wx.Frame):
             self.cbo_temporal_stabilize_flat_boost, getattr(args, "temporal_stabilize_flat_region_boost", 0.0))
         _apply_combo_value(
             self.cbo_temporal_stabilize_edge_protect, getattr(args, "temporal_stabilize_edge_protection", 0.0))
-        if getattr(args, "temporal_stabilize_flow_engine", "farneback") == "raft":
+        ts_flow_engine = getattr(args, "temporal_stabilize_flow_engine", "farneback")
+        if ts_flow_engine == "raft":
             self.cbo_temporal_stabilize_quality.SetValue(T("AI (RAFT)"))
+        elif ts_flow_engine == "raft_fb":
+            self.cbo_temporal_stabilize_quality.SetValue(T("AI (RAFT) + Occlusion Check"))
         else:
             self.cbo_temporal_stabilize_quality.SetValue(
                 T("Fast") if getattr(args, "temporal_stabilize_fast", False) else T("Accurate"))

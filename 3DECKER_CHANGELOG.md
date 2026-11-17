@@ -15,7 +15,9 @@ it matters.
 
 ## Latest Update — November 16, 2026
 
-**Fixed: Object Stability's new "AI (RAFT)" option (added November 14) could crash a job partway through with "Inference tensors do not track version counter."** This only affected the brand-new "AI (RAFT)" choice, not "Accurate" or "Fast" — it happened because of how/when the AI motion tracker loaded itself the first time it was needed during a job. It's fixed now and passes all existing automated checks, but hasn't yet been confirmed on a full real conversion — if you still see this exact crash with "AI (RAFT)" selected, please report it back.
+**Added: Object Stability's "Speed" dropdown now has a 4th option, "AI (RAFT) + Occlusion Check."** After real testing showed plain "AI (RAFT)" could still show random, localized glitches on certain tricky movements (something passing behind something else, fast or unpredictable motion), this new option has the AI tracker double-check its own work every frame — it tracks motion both forward and backward and compares the two, and pulls back smoothing specifically wherever they disagree, instead of guessing blindly. Costs more GPU time than plain "AI (RAFT)" since the tracker now runs twice per frame instead of once. "Accurate" stays the default — nothing changes unless you pick a new option yourself. Not yet confirmed on real footage whether this fixes the specific glitches you may have seen.
+
+**Fixed: Object Stability's "AI (RAFT)" option (added November 14) could crash a job partway through with "Inference tensors do not track version counter."** This only affected the "AI (RAFT)" choices, not "Accurate" or "Fast" — it happened because of how/when the AI motion tracker loaded itself the first time it was needed during a job. It's fixed now and passes all existing automated checks, but hasn't yet been confirmed on a full real conversion — if you still see this exact crash, please report it back.
 
 ## Update — November 14, 2026
 

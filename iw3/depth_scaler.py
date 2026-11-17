@@ -23,7 +23,7 @@ _FARNEBACK_PARAMS_FAST = (0.5, 2, 13, 1, 5, 1.1, 0)
 
 def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
                                   strength, max_shift_velocity, flat_region_boost, edge_protection,
-                                  fast=False, flow_downscale=1, flow=None):
+                                  fast=False, flow_downscale=1, flow=None, distrust_mask=None):
     """Core motion-warped blend shared by TemporalStabilizer (single-channel depth,
     (H,W) arrays) and RGBTemporalStabilizer (3-channel RGB, (H,W,3) arrays) below --
     extracted verbatim from TemporalStabilizer.stabilize()'s body so depth's existing,
@@ -46,6 +46,15 @@ def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
     cv2.calcOpticalFlowFarneback itself returns, dx in [...,0]/dy in [...,1] -- instead
     of this function computing Farneback internally. None (every existing caller,
     unchanged) reproduces the exact original Farneback computation below bit-for-bit.
+
+    ADR-466: `distrust_mask` lets a caller hand in an extra (H,W) float array in
+    [0,1] of per-pixel reasons not to trust the warp, beyond the existing flow-
+    magnitude heuristic below -- "AI (RAFT) + Occlusion Check" uses this for a
+    forward-backward flow consistency check (a real tracking failure, e.g.
+    something getting occluded/revealed, rather than just "the motion was fast").
+    Combined with the magnitude-based distrust via max() -- either reason alone is
+    enough to taper blending back toward the fresh per-frame value. None (every
+    other caller, unchanged) reproduces the exact original behavior.
 
     Returns the blended (H,W) or (H,W,3) float32 array -- caller keeps prev_gray/
     prev_value bookkeeping (this function is stateless)."""
@@ -73,6 +82,8 @@ def _optical_flow_temporal_blend(value_np, gray, prev_gray, prev_value,
     # the fresh per-frame value rather than assume the warp is still accurate.
     flow_mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
     distrust = np.clip(flow_mag / 15.0, 0.0, 1.0)
+    if distrust_mask is not None:
+        distrust = np.clip(np.maximum(distrust, distrust_mask), 0.0, 1.0)
     local_alpha = strength * (1.0 - distrust)
 
     if flat_region_boost > 0.0 or edge_protection > 0.0:
@@ -149,7 +160,7 @@ class TemporalStabilizer:
         # existing job/preset) is completely unchanged. The RAFT model itself is
         # loaded lazily (_ensure_raft_model) only once this is actually "raft" and
         # stabilize() has run at least once -- never paid for otherwise.
-        assert flow_engine in ("farneback", "raft")
+        assert flow_engine in ("farneback", "raft", "raft_fb")
         self.flow_engine = flow_engine
         self.prev_rgb = None
         self._raft_model = None
@@ -211,7 +222,7 @@ class TemporalStabilizer:
         if fast is not None:
             self.fast = bool(fast)
         if flow_engine is not None:
-            assert flow_engine in ("farneback", "raft")
+            assert flow_engine in ("farneback", "raft", "raft_fb")
             self.flow_engine = flow_engine
         self.prev_gray = None
         self.prev_depth = None
@@ -260,13 +271,26 @@ class TemporalStabilizer:
             self._raft_transforms = weights.transforms()
         return self._raft_model
 
-    def _compute_raft_flow(self, rgb_np, prev_rgb_np, device):
+    def _compute_raft_flow(self, rgb_np, prev_rgb_np, device, need_backward=False):
         """rgb_np/prev_rgb_np: (H,W,3) uint8 arrays (the same ones Farneback's path
         converts to grayscale). Returns an (H,W,2) float32 forward-flow field in the
         exact convention cv2.calcOpticalFlowFarneback returns (dx in [...,0], dy in
         [...,1], at full input resolution) -- a drop-in replacement for the Farneback
         call in _optical_flow_temporal_blend, not a new convention downstream code
-        needs to know about."""
+        needs to know about.
+
+        ADR-466: when need_backward=True (the "AI (RAFT) + Occlusion Check" engine),
+        also runs RAFT in the reverse direction (current -> previous) and returns
+        (flow, fb_distrust) instead of just flow. fb_distrust is an (H,W) float array
+        in [0,1]: follow the forward flow from a point, then the backward flow from
+        there -- on coherent, correctly-tracked motion that round trip lands back
+        close to where you started; wherever it doesn't, the tracker genuinely lost
+        that point (occluded, revealed, or moved too erratically to follow), which is
+        a more precise failure signal than the existing flow-magnitude-only distrust
+        heuristic in _optical_flow_temporal_blend (that one only catches "the guess
+        was big", not "the guess was wrong"). Costs a second RAFT inference pass per
+        frame -- real, deliberate extra GPU time/memory, opt-in via its own engine
+        choice rather than folded into the plain "raft" engine."""
         model = self._ensure_raft_model(device)
         h, w = rgb_np.shape[:2]
         # RAFT's correlation pyramid needs its /8 feature map to be at least 16x16
@@ -290,9 +314,28 @@ class TemporalStabilizer:
             img1 = F.pad(img1, (0, pad_w, 0, pad_h), mode="replicate")
             img2 = F.pad(img2, (0, pad_w, 0, pad_h), mode="replicate")
         with torch.inference_mode():
-            flow = model(img1, img2)[-1]  # (1, 2, H+pad_h, W+pad_w)
-        flow = flow[0, :, :h, :w].permute(1, 2, 0).float().cpu().numpy()
-        return flow
+            flow_fwd_t = model(img1, img2)[-1]  # (1, 2, H+pad_h, W+pad_w)
+            if need_backward:
+                flow_bwd_t = model(img2, img1)[-1]
+        flow = flow_fwd_t[0, :, :h, :w].permute(1, 2, 0).float().cpu().numpy()
+        if not need_backward:
+            return flow
+
+        flow_bwd = flow_bwd_t[0, :, :h, :w].permute(1, 2, 0).float().cpu().numpy()
+        grid_y, grid_x = np.mgrid[0:h, 0:w].astype(np.float32)
+        map_x = grid_x + flow[..., 0]
+        map_y = grid_y + flow[..., 1]
+        flow_bwd_at_target = cv2.remap(flow_bwd, map_x, map_y,
+                                        interpolation=cv2.INTER_LINEAR,
+                                        borderMode=cv2.BORDER_REPLICATE)
+        round_trip_error = flow + flow_bwd_at_target
+        round_trip_mag = np.sqrt(round_trip_error[..., 0] ** 2 + round_trip_error[..., 1] ** 2)
+        # Round-trip error in pixels -- same simple constant-threshold style as the
+        # existing flow-magnitude distrust in _optical_flow_temporal_blend (3px of
+        # disagreement is already a lot for an otherwise sub-pixel-accurate tracker
+        # on genuinely coherent motion).
+        fb_distrust = np.clip(round_trip_mag / 3.0, 0.0, 1.0)
+        return flow, fb_distrust
 
     def stabilize(self, rgb_chw, depth_chw):
         if not self.enabled or rgb_chw is None:
@@ -314,13 +357,17 @@ class TemporalStabilizer:
             return depth_chw
 
         flow = None
+        distrust_mask = None
         if self.flow_engine == "raft":
             flow = self._compute_raft_flow(rgb_np, self.prev_rgb, depth_chw.device)
+        elif self.flow_engine == "raft_fb":
+            flow, distrust_mask = self._compute_raft_flow(
+                rgb_np, self.prev_rgb, depth_chw.device, need_backward=True)
 
         stabilized = _optical_flow_temporal_blend(
             depth_np, gray, self.prev_gray, self.prev_depth,
             self.strength, self.max_shift_velocity, self.flat_region_boost, self.edge_protection,
-            fast=self.fast, flow=flow,
+            fast=self.fast, flow=flow, distrust_mask=distrust_mask,
         )
 
         self.prev_gray = gray
@@ -778,10 +825,86 @@ def _self_test_to_device_raft_model_lifecycle():
     print("_self_test_to_device_raft_model_lifecycle: PASS")
 
 
+def _self_test_fb_consistency_distrust_mask():
+    """ADR-466: proves _compute_raft_flow(need_backward=True)'s forward-backward
+    consistency math is correct glue (not a claim about RAFT's own real accuracy) --
+    a fake model whose forward() returns a different constant flow on its 1st call
+    (forward: prev->current) vs 2nd call (backward: current->prev), matching
+    _compute_raft_flow's own call order, exercises the round-trip math without the
+    real network."""
+    device = torch.device("cpu")
+    h, w = 20, 24  # not a multiple of 8, exercises pad/crop too
+
+    class _FakeRaftFB(torch.nn.Module):
+        def __init__(self, fwd, bwd):
+            super().__init__()
+            self.fwd, self.bwd, self.calls = fwd, bwd, 0
+
+        def forward(self, img1, img2):
+            b, c, hh, ww = img1.shape
+            dx, dy = self.fwd if self.calls == 0 else self.bwd
+            self.calls += 1
+            flow = torch.zeros(b, 2, hh, ww)
+            flow[:, 0] = dx
+            flow[:, 1] = dy
+            return [flow]
+
+    def run(fwd, bwd):
+        stab = TemporalStabilizer(enabled=True, flow_engine="raft_fb")
+        stab._raft_model = _FakeRaftFB(fwd, bwd).eval()
+        stab._raft_device = device
+        stab._raft_transforms = lambda a, b: (a.float(), b.float())
+        rgb = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+        prev_rgb = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+        return stab._compute_raft_flow(rgb, prev_rgb, device, need_backward=True)
+
+    flow, distrust = run((2.0, 0.0), (-2.0, 0.0))  # perfectly consistent round trip
+    assert flow.shape == (h, w, 2) and distrust.shape == (h, w)
+    assert np.allclose(distrust, 0.0, atol=1e-5), \
+        f"consistent forward/backward flow should give ~0 distrust, got max {distrust.max()}"
+
+    _, distrust_bad = run((2.0, 0.0), (2.0, 0.0))  # does NOT cancel out -- real disagreement
+    assert np.allclose(distrust_bad, 1.0), \
+        f"inconsistent forward/backward flow should saturate distrust, got min {distrust_bad.min()}"
+
+    print("_self_test_fb_consistency_distrust_mask: PASS")
+
+
+def _self_test_distrust_mask_tapers_blend():
+    """ADR-466: proves `distrust_mask` in _optical_flow_temporal_blend actually
+    tapers blending back toward the fresh value, same as the existing flow-
+    magnitude distrust already does -- full (1.0) distrust everywhere must return
+    the fresh value_np essentially unchanged, regardless of strength."""
+    h, w = 12, 16
+    gray = np.random.randint(0, 255, (h, w), dtype=np.uint8)
+    prev_gray = gray.copy()
+    value_np = np.random.rand(h, w).astype(np.float32)
+    prev_value = np.random.rand(h, w).astype(np.float32)
+    flow = np.zeros((h, w, 2), dtype=np.float32)  # no motion -- isolates distrust_mask itself
+
+    out_no_mask = _optical_flow_temporal_blend(
+        value_np, gray, prev_gray, prev_value, strength=0.9,
+        max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0, flow=flow)
+    assert not np.allclose(out_no_mask, value_np), \
+        "sanity check: with no distrust_mask, strength=0.9 should visibly blend toward prev_value"
+
+    full_distrust = np.ones((h, w), dtype=np.float32)
+    out_full_distrust = _optical_flow_temporal_blend(
+        value_np, gray, prev_gray, prev_value, strength=0.9,
+        max_shift_velocity=None, flat_region_boost=0.0, edge_protection=0.0,
+        flow=flow, distrust_mask=full_distrust)
+    assert np.allclose(out_full_distrust, value_np, atol=1e-5), \
+        "full distrust_mask should fall back to the fresh value_np regardless of strength"
+
+    print("_self_test_distrust_mask_tapers_blend: PASS")
+
+
 def _run_self_tests():
     _self_test_precomputed_flow_bypasses_farneback()
     _self_test_raft_flow_shape_and_convention()
     _self_test_to_device_raft_model_lifecycle()
+    _self_test_fb_consistency_distrust_mask()
+    _self_test_distrust_mask_tapers_blend()
     print("All iw3.depth_scaler self-tests PASSED")
 
 

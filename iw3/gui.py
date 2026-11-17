@@ -718,9 +718,14 @@ class DepthCurveCalibrateDialog(wx.Dialog):
 
     def _describe_model_settings_argv(self):
         """Plain-language summary of which depth-model-level settings (see
-        ADR-469) this run will carry over from your main settings, so it's never
-        a silent, invisible thing happening in the background."""
+        ADR-469/470) this run will carry over from your main settings, so it's
+        never a silent, invisible thing happening in the background."""
         labels = []
+        if "--resolution" in self.model_settings_argv:
+            idx = self.model_settings_argv.index("--resolution")
+            labels.append(T("Depth Resolution ({})").format(self.model_settings_argv[idx + 1]))
+        if "--limit-resolution" in self.model_settings_argv:
+            labels.append(T("Limit to source"))
         if "--depth-refine" in self.model_settings_argv:
             labels.append(T("Depth Detail Refinement"))
         if "--temporal-stabilize" in self.model_settings_argv:
@@ -730,9 +735,10 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         if "--depth-aa" in self.model_settings_argv:
             labels.append(T("Depth Anti-aliasing"))
         if not labels:
-            return T("None of your Depth Detail Refinement/Object Stability/EMA Normalize/"
-                      "Depth Anti-aliasing settings are currently on -- calibration will use "
-                      "the plain depth model.")
+            return T("Depth Resolution is at \"Default\", and none of your Depth Detail "
+                      "Refinement/Object Stability/EMA Normalize/Depth Anti-aliasing settings "
+                      "are currently on -- calibration will use the plain depth model at its "
+                      "own native resolution.")
         return T("Matching your current settings: {}").format(", ".join(labels))
 
     def on_click_browse(self, event):
@@ -18073,15 +18079,21 @@ class MainFrame(wx.Frame):
         self.lbl_depth_curve_match_status.GetContainingSizer().Layout()
 
     def _depth_model_settings_argv(self):
-        """ADR-469: the SAME depth-MODEL-level settings (Object Stability, Depth
-        Detail Refinement, EMA Normalize, Depth Anti-aliasing) your real jobs use
-        right now, built as raw CLI flags for depth_curve_calibrate_cli.py -- so
-        calibration measures the depth models the way they actually behave for
-        you, not a bare/default configuration. Convergence/Divergence/Pop/Max
-        Negative Parallax/Edge Repair/Sharpen/Foreground Scale are deliberately
-        NOT read here -- those only ever run during the later stereo-render step,
-        which calibration's depth-only export never reaches at all, so there is
-        nothing real to forward for them (see ADR-469's research)."""
+        """ADR-469/470: the SAME depth-MODEL-level settings (Object Stability, Depth
+        Detail Refinement, EMA Normalize, Depth Anti-aliasing, Depth Resolution/Limit
+        to source) your real jobs use right now, built as raw CLI flags for
+        depth_curve_calibrate_cli.py -- so calibration measures the depth models the
+        way they actually behave for you, not a bare/default configuration.
+        Convergence/Divergence/Pop/Max Negative Parallax/Edge Repair/Sharpen/
+        Foreground Scale are deliberately NOT read here -- those only ever run during
+        the later stereo-render step, which calibration's depth-only export never
+        reaches at all, so there is nothing real to forward for them (see ADR-469's
+        research). Depth Resolution is read as-is (whatever cbo_resolution currently
+        holds, even if disabled for a fixed-resolution model like Metric3D/MoGe-3) --
+        same "just pass the field through, the model itself ignores what it can't
+        use" behavior as the main pipeline's own args-building block. Caller
+        (on_click_btn_depth_curve_match_calibrate) validates it the same way the main
+        pipeline does BEFORE calling this, so an invalid value never reaches here."""
         argv = []
         if self.chk_depth_refine.GetValue():
             argv += ["--depth-refine", "--depth-refine-strength", self.cbo_depth_refine_strength.GetValue()]
@@ -18104,9 +18116,19 @@ class MainFrame(wx.Frame):
                      "--ema-buffer", self.cbo_ema_buffer.GetValue()]
         if self.chk_depth_aa.GetValue():
             argv += ["--depth-aa"]
+        resolution = self.cbo_resolution.GetValue()
+        if resolution not in ("Default", ""):
+            argv += ["--resolution", resolution]
+        if self.chk_limit_resolution.GetValue():
+            argv += ["--limit-resolution"]
         return argv
 
     def on_click_btn_depth_curve_match_calibrate(self, event):
+        resolution = self.cbo_resolution.GetValue()
+        if resolution not in ("Default", "") and not validate_number(
+                resolution, 224, 8190, is_int=True, allow_empty=False):
+            self.show_validation_error_message(T("Depth") + " " + T("Resolution"), 224, 8190)
+            return
         source_model = self.cbo_depth_model.GetValue()
         target_choices = [m for m in self.get_depth_models() if m != source_model]
         if "Any_V3_Metric_Large" in target_choices:

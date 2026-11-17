@@ -62,6 +62,7 @@ from .shot_lock_estimator import (ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
+from .depth_curve_match import DepthCurveMatcher
 
 
 ROW_FLOW_V2_MAX_DIVERGENCE = 2.5
@@ -6146,6 +6147,22 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             rp_for_log = [False] * convergence.shape[0]
         scene_log_state.pending.extend(zip(convergence.flatten().tolist(), rp_for_log))
 
+    # ADR-467: Depth Curve Match -- reshapes this job's depth distribution to
+    # resemble another model's distinctive curve, using a LUT built ahead of time
+    # (see depth_curve_calibrate_cli.py), BEFORE the Pop effects below so Pop
+    # sliders still act on top of the reshaped curve for further manual tweaks.
+    # The matcher is cached on args.state (same lazy-singleton pattern as every
+    # other per-job model/estimator here) so the small curve file is only read
+    # from disk once per job, not once per frame.
+    depth_curve_match_strength = getattr(args, "depth_curve_match_strength", 0.0) or 0.0
+    if depth_curve_match_strength > 0.0:
+        matcher = args.state.get("_depth_curve_matcher")
+        if matcher is None:
+            matcher = DepthCurveMatcher(getattr(args, "depth_curve_match_path", None))
+            args.state["_depth_curve_matcher"] = matcher
+        if matcher.enabled:
+            depth = matcher.to(depth.device).apply(depth, strength=depth_curve_match_strength)
+
     # Depth pop effects -- all three (Foreground/Midground/Background Pop) are
     # fully symmetric: one shared primitive (DE.apply_depth_band_pop), called
     # here directly for each zone with its own signed strength (-1.0 to 1.0:
@@ -10132,6 +10149,18 @@ def create_parser(required_true=True):
                              "line at the sharp edge of a restricted band (confirmed on real footage even "
                              "at modest strength). 0.0-0.5, 0.0=off (default, original hard-edge behavior, "
                              "unchanged)")
+    parser.add_argument("--depth-curve-match-strength", type=float, default=0.0,
+                        help=("ADR-467: reshapes this job's depth output to resemble another model's "
+                              "distinctive value distribution, using a lookup table built once ahead of time "
+                              "(see python -m iw3.depth_curve_calibrate_cli). 0.0=off (default, zero cost), "
+                              "1.0=fully reshaped to the target curve. A true no-op whenever no curve file "
+                              "exists at --depth-curve-match-path, regardless of this value. Applied BEFORE "
+                              "Foreground/Midground/Background Pop, so Pop sliders still act on top of the "
+                              "reshaped curve if you want further manual tweaks."))
+    parser.add_argument("--depth-curve-match-path", type=str, default=None,
+                        help=("path to the curve file built by python -m iw3.depth_curve_calibrate_cli. "
+                              "Default: iw3.depth_curve_match.DEFAULT_CURVE_PATH (nunif/tmp/"
+                              "depth_curve_match.json) -- the same default location that tool saves to."))
     parser.add_argument("--edge-repair-strength", type=float, default=0.0,
                         help=("final cleanup pass on the RENDERED stereo output (after whichever stereo "
                               "method made it), gently smoothing only a thin band right around real depth "
@@ -10902,6 +10931,13 @@ def _release_pause_vram(args):
         # it here, rather than reaching into .model directly as before, is what
         # actually moves that extra state instead of silently skipping it.
         convergence_model.to("cpu")
+    depth_curve_matcher = state.get("_depth_curve_matcher")
+    if depth_curve_matcher is not None and hasattr(depth_curve_matcher, "to"):
+        # ADR-467: tiny (a few KB) LUT tensors, but same "every small GPU-resident
+        # state gets moved too" discipline ADR-406/407 established for every other
+        # cached per-job estimator here -- never assume something this small isn't
+        # worth the one-line fix just because its own VRAM footprint is negligible.
+        depth_curve_matcher.to("cpu")
     gc_collect()
 
 
@@ -10930,6 +10966,9 @@ def _reload_pause_vram(args):
     convergence_model = state.get("convergence_model")
     if convergence_model is not None and hasattr(convergence_model, "to"):
         convergence_model.to(getattr(convergence_model, "device", device) or device)
+    depth_curve_matcher = state.get("_depth_curve_matcher")
+    if depth_curve_matcher is not None and hasattr(depth_curve_matcher, "to"):
+        depth_curve_matcher.to(device)
 
 
 class _PauseVramSuspendEvent():

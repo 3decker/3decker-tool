@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 16, 2026
+## Latest Update — November 17, 2026
+
+**Added: "Depth Curve Match" — a new, Expert-only option that lets a flatter-looking depth model borrow the "big pop" look of a punchier one, without the cost of running both models on every job.** If you switch your Depth Model to something more stable frame-to-frame (like VDA_L) but miss the bigger near/far separation another model (like Any_V3_Metric_Large) used to give you, this reshapes the new model's depth so its overall "spread" resembles the other one's — not just stretching the same numbers like the Foreground/Midground/Background Pop sliders already do, but genuinely borrowing the other model's distinctive look. You set it up once with a new "Calibrate..." button, which runs a short minute-or-two sample clip (not your whole movie) through both models one time and saves the result — every job after that just loads the saved result automatically, with nothing to look up or type in by hand. Off by default, zero cost unless you calibrate and turn it on.
+
+## Update — November 16, 2026
 
 **Added: Object Stability's "Speed" dropdown now has a 4th option, "AI (RAFT) + Occlusion Check."** After real testing showed plain "AI (RAFT)" could still show random, localized glitches on certain tricky movements (something passing behind something else, fast or unpredictable motion), this new option has the AI tracker double-check its own work every frame — it tracks motion both forward and backward and compares the two, and pulls back smoothing specifically wherever they disagree, instead of guessing blindly. Costs more GPU time than plain "AI (RAFT)" since the tracker now runs twice per frame instead of once. "Accurate" stays the default — nothing changes unless you pick a new option yourself. Not yet confirmed on real footage whether this fixes the specific glitches you may have seen.
 

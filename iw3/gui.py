@@ -618,6 +618,151 @@ class RunUpdateDialog(wx.Dialog):
         self.btn_close.Enable()
 
 
+class DepthCurveCalibrateDialog(wx.Dialog):
+    """ADR-467: collects the few real inputs python -m iw3.depth_curve_calibrate_cli
+    needs (a representative sample clip, a short time range, which second model to
+    borrow a curve from) and runs it as a subprocess, live-streaming its output into
+    a log box -- same "separate subprocess, never sharing state with the main app"
+    convention as the Sharpen/RIFE standalone tools (run_sharpen). Close is vetoed
+    while a run is actually in progress, same guard as RunUpdateDialog, so decker
+    can't lose the log or think it finished early."""
+
+    def __init__(self, parent, source_model, target_model_choices, default_target_model):
+        super().__init__(parent, title=T("Calibrate Depth Curve"),
+                          size=parent.FromDIP((640, 480)),
+                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self.source_model = source_model
+        self._running = False
+
+        self.lbl_source_model = wx.StaticText(
+            self, label=T("Your Depth Model (what gets reshaped): {}").format(source_model))
+        self.txt_input = wx.TextCtrl(self)
+        self.btn_input = wx.Button(self, label=T("Browse..."))
+        self.lbl_target_model = wx.StaticText(self, label=T("Borrow Curve From"))
+        self.cbo_target_model = wx.ComboBox(self, choices=target_model_choices, style=wx.CB_READONLY)
+        if default_target_model in target_model_choices:
+            self.cbo_target_model.SetValue(default_target_model)
+        elif target_model_choices:
+            self.cbo_target_model.SetSelection(0)
+        self.txt_start_time = wx.TextCtrl(self, value="00:01:00")
+        self.txt_end_time = wx.TextCtrl(self, value="00:02:30")
+        self.btn_run = wx.Button(self, label=T("Calibrate"))
+        self.btn_close = wx.Button(self, id=wx.ID_CLOSE, label=T("Close"))
+        self.txt_log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
+
+        top = wx.FlexGridSizer(cols=3, vgap=6, hgap=6)
+        top.AddGrowableCol(1)
+        top.Add(wx.StaticText(self, label=T("Sample Clip")), flag=wx.ALIGN_CENTER_VERTICAL)
+        top.Add(self.txt_input, flag=wx.EXPAND)
+        top.Add(self.btn_input)
+        top.Add(self.lbl_target_model, flag=wx.ALIGN_CENTER_VERTICAL)
+        top.Add(self.cbo_target_model, flag=wx.EXPAND)
+        top.Add((0, 0))
+        top.Add(wx.StaticText(self, label=T("Start Time")), flag=wx.ALIGN_CENTER_VERTICAL)
+        top.Add(self.txt_start_time, flag=wx.EXPAND)
+        top.Add((0, 0))
+        top.Add(wx.StaticText(self, label=T("End Time")), flag=wx.ALIGN_CENTER_VERTICAL)
+        top.Add(self.txt_end_time, flag=wx.EXPAND)
+        top.Add((0, 0))
+
+        hint = wx.StaticText(self, label=T(
+            "A short clip is enough -- a minute or two of real, varied content (some near "
+            "objects, some far background) gives a better curve than the whole movie. This "
+            "runs your Depth Model AND the model you pick below, one at a time, only over "
+            "this short range."))
+        hint.Wrap(parent.FromDIP(600))
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_row.Add(self.btn_run, 0, wx.RIGHT, 8)
+        btn_row.AddStretchSpacer()
+        btn_row.Add(self.btn_close)
+
+        layout = wx.BoxSizer(wx.VERTICAL)
+        layout.Add(self.lbl_source_model, 0, wx.ALL, 8)
+        layout.Add(hint, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        layout.Add(top, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+        layout.Add(self.txt_log, 1, wx.EXPAND | wx.ALL, 8)
+        layout.Add(btn_row, 0, wx.EXPAND | wx.ALL, 8)
+        self.SetSizer(layout)
+
+        self.btn_input.Bind(wx.EVT_BUTTON, self.on_click_browse)
+        self.btn_run.Bind(wx.EVT_BUTTON, self.on_click_run)
+        self.btn_close.Bind(wx.EVT_BUTTON, lambda event: self.Close())
+        self.Bind(wx.EVT_CLOSE, self.on_close)
+
+    def on_click_browse(self, event):
+        with wx.FileDialog(self, message=T("Select a representative sample video"),
+                           wildcard=VIDEO_EXTENSIONS,
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if self.txt_input.GetValue():
+                dlg.SetPath(self.txt_input.GetValue())
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_input.SetValue(dlg.GetPath())
+
+    def on_close(self, event):
+        if self._running:
+            event.Veto()
+            return
+        event.Skip()
+
+    def append(self, text):
+        self.txt_log.AppendText(text)
+        self.txt_log.ShowPosition(self.txt_log.GetLastPosition())
+
+    def on_click_run(self, event):
+        input_path = self.txt_input.GetValue().strip()
+        if not input_path or not path.exists(input_path):
+            wx.MessageBox(T("Select a valid sample video first."), T("Calibrate Depth Curve"),
+                          wx.OK | wx.ICON_WARNING)
+            return
+        target_model = self.cbo_target_model.GetValue()
+        if not target_model:
+            wx.MessageBox(T("Pick a model to borrow a curve from."), T("Calibrate Depth Curve"),
+                          wx.OK | wx.ICON_WARNING)
+            return
+        if target_model == self.source_model:
+            wx.MessageBox(T("Pick a DIFFERENT model to borrow a curve from -- there is nothing "
+                             "to reshape toward if it's the same as your own Depth Model."),
+                          T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
+            return
+        cmd = [sys.executable, "-m", "iw3.depth_curve_calibrate_cli",
+               "--input", input_path,
+               "--source-model", self.source_model,
+               "--target-model", target_model,
+               "--start-time", self.txt_start_time.GetValue().strip() or "00:01:00",
+               "--end-time", self.txt_end_time.GetValue().strip() or "00:02:30"]
+        self.txt_log.SetValue(T("Running -- this takes a couple of minutes (two short passes, "
+                                 "one per model)...") + "\n")
+        self.btn_run.Disable()
+        self._running = True
+        threading.Thread(target=self._run_thread, args=(cmd,), daemon=True).start()
+
+    def _run_thread(self, cmd):
+        # Runs on a background thread -- never touch GUI widgets directly here, only
+        # via wx.CallAfter, same discipline as run_sharpen's own subprocess draining.
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, bufsize=1)
+            for line in proc.stdout:
+                wx.CallAfter(self.append, line)
+            proc.wait()
+            returncode = proc.returncode
+        except Exception as e:
+            wx.CallAfter(self.append, f"\nERROR: {e}\n")
+            returncode = 1
+        wx.CallAfter(self._on_run_finished, returncode)
+
+    def _on_run_finished(self, returncode):
+        self.btn_run.Enable()
+        self._running = False
+        if returncode == 0:
+            self.append("\n" + T("Done -- curve saved. Close this window and enable \"Depth Curve "
+                                  "Match\" to use it.") + "\n")
+        else:
+            wx.MessageBox(T("Calibration failed -- see the log above for the exact reason."),
+                          T("Calibrate Depth Curve"), wx.OK | wx.ICON_ERROR)
+
+
 def _is_self_locked_update_failure(log_text):
     """Detects one specific, real update failure mode (real user report, 2026-11-02):
     "Install Update Now" launches update-3decker.bat as a
@@ -1004,6 +1149,7 @@ STEREO_SLIDER_FIELDS = [
     ("cbo_midground_threshold_low", "sld_stereo_midground_threshold_low", 0, 50, 1, True, None),
     ("cbo_midground_threshold_high", "sld_stereo_midground_threshold_high", 50, 100, 1, True, None),
     ("cbo_pop_feather", "sld_stereo_pop_feather", 0, 25, 1, True, None),
+    ("cbo_depth_curve_match_strength", "sld_stereo_depth_curve_match_strength", 0.0, 1.0, 100, False, None),
     ("cbo_edge_repair", "sld_stereo_edge_repair", 0.0, 1.0, 100, False, None),
     ("cbo_sharpen_strength", "sld_stereo_sharpen_strength", 0.25, 1.0, 100, False, None),
     ("cbo_ema_decay", "sld_stereo_ema_decay", 0.0, 0.99, 100, False, None),
@@ -3535,6 +3681,64 @@ class MainFrame(wx.Frame):
         self.sld_stereo_background_pop_threshold_high = _build_stereo_slider(
             self.cpn_stereo_background_pop.GetPane(), self.cbo_background_pop_threshold_high, 0, 50, 1)
 
+        # ADR-467: real request -- decker switched his main Depth Model to VDA_L for its
+        # genuinely better frame-to-frame stability, but found its depth noticeably flatter/
+        # less "punchy" than Any_V3_Metric_Large's distinctive near/far separation.
+        # Foreground/Midground/Background Pop above only stretch VDA_L's OWN existing
+        # values -- they can't manufacture separation that isn't there, and decker found
+        # them subtle/artifact-prone when pushed hard. This reshapes the WHOLE depth
+        # distribution toward another model's typical shape instead, using a small lookup
+        # table built once ahead of time (see the Calibrate button below) rather than
+        # running that second model on every real job -- see docs/ai/AI_DECISIONS.md ADR-467.
+        self.cpn_depth_curve_match = wx.CollapsiblePane(
+            self.cpn_stereo_pop_divergence.GetPane(), label=T("Depth Curve Match"), name="cpn_depth_curve_match")
+        self.cpn_depth_curve_match.Collapse(True)
+        self.cpn_depth_curve_match.Bind(wx.EVT_COLLAPSIBLEPANE_CHANGED,
+                                        self.on_toggled_stereo_collapsible_pane)
+        self.cpn_depth_curve_match.GetPane().SetName("cpn_depth_curve_match_pane")
+
+        self.lbl_depth_curve_match_strength = wx.StaticText(
+            self.cpn_depth_curve_match.GetPane(), label=T("Depth Curve Match"))
+        self.cbo_depth_curve_match_strength = EditableComboBox(
+            self.cpn_depth_curve_match.GetPane(),
+            choices=["0.0", "0.5", "0.75", "1.0"],
+            name="cbo_depth_curve_match_strength")
+        self.cbo_depth_curve_match_strength.SetSelection(0)
+        self.cbo_depth_curve_match_strength.SetToolTip(
+            T("What it's for: reshapes THIS depth model's whole value spread to resemble another "
+              "model's distinctive curve -- a real shape transplant, not a stretch of the same "
+              "numbers (that's what Foreground/Midground/Background Pop do above).\n"
+              "Requires calibrating a curve first with the \"Calibrate...\" button below -- with no "
+              "curve calibrated yet, this is a true no-op at any value (zero cost).\n"
+              "Values: 0.0 = off (default). 1.0 = fully reshaped to the calibrated target curve. "
+              "In between blends partway toward it.\n"
+              "Con: a curve calibrated from one movie's content may not fit a very different movie "
+              "equally well -- re-calibrate from different content if results look off.\n"
+              "Recommended: 1.0 once you have a calibrated curve; lower it if you want a softer "
+              "version of the transplant."))
+        self.sld_stereo_depth_curve_match_strength = _build_stereo_slider(
+            self.cpn_depth_curve_match.GetPane(), self.cbo_depth_curve_match_strength, 0.0, 1.0, 100)
+
+        self.lbl_depth_curve_match_status = wx.StaticText(
+            self.cpn_depth_curve_match.GetPane(), label=T("No curve calibrated yet"))
+        self.lbl_depth_curve_match_status.SetToolTip(
+            T("Shows which curve is currently calibrated (source model -> target model, how many "
+              "sample frames it was built from, and when) -- there is nothing to type in by hand; "
+              "the \"Calibrate...\" button builds this automatically from a short real sample clip."))
+
+        self.btn_depth_curve_match_calibrate = wx.Button(
+            self.cpn_depth_curve_match.GetPane(), label=T("Calibrate..."))
+        self.btn_depth_curve_match_calibrate.SetToolTip(
+            T("Opens a small tool that runs a short sample clip (a minute or two, not the whole "
+              "movie) through your current Depth Model AND a second model you pick, then saves a "
+              "curve that lets every future job reshape toward that second model's look -- a "
+              "one-time (or occasional) setup step, not part of every normal job."))
+        self.btn_depth_curve_match_calibrate.Bind(wx.EVT_BUTTON, self.on_click_btn_depth_curve_match_calibrate)
+        # Deferred to the next idle event -- this runs mid-__init__, before the
+        # surrounding sizers are fully built/laid out, so GetContainingSizer()
+        # inside _refresh_depth_curve_match_status() would not be safe to call yet.
+        wx.CallAfter(self._refresh_depth_curve_match_status)
+
         self.lbl_edge_repair = wx.StaticText(self.cpn_stereo_pop_divergence.GetPane(), label=T("Edge Repair"))
         self.cbo_edge_repair = EditableComboBox(self.cpn_stereo_pop_divergence.GetPane(),
                                                 choices=["0.0", "0.25", "0.5", "0.75", "1.0"],
@@ -4573,6 +4777,17 @@ class MainFrame(wx.Frame):
         bg_layout.Add(self.sld_stereo_background_pop_threshold_high, (bk := bk + 1, 1), (1, 2), flag=wx.EXPAND)
         self.cpn_stereo_background_pop.GetPane().SetSizer(bg_layout)
         pane_layout.Add(self.cpn_stereo_background_pop, (k := k + 1, 0), (1, 3), flag=wx.EXPAND)
+
+        dcm_layout = wx.GridBagSizer(vgap=4, hgap=4)
+        dcm_layout.SetEmptyCellSize((0, 0))
+        dk = 0
+        dcm_layout.Add(self.lbl_depth_curve_match_strength, (dk, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        dcm_layout.Add(self.cbo_depth_curve_match_strength, (dk, 1), (1, 2), flag=wx.EXPAND)
+        dcm_layout.Add(self.sld_stereo_depth_curve_match_strength, (dk := dk + 1, 1), (1, 2), flag=wx.EXPAND)
+        dcm_layout.Add(self.lbl_depth_curve_match_status, (dk := dk + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        dcm_layout.Add(self.btn_depth_curve_match_calibrate, (dk := dk + 1, 0), (1, 3), flag=wx.EXPAND)
+        self.cpn_depth_curve_match.GetPane().SetSizer(dcm_layout)
+        pane_layout.Add(self.cpn_depth_curve_match, (k := k + 1, 0), (1, 3), flag=wx.EXPAND)
 
         pane_layout.Add(self.lbl_edge_repair, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout.Add(self.cbo_edge_repair, (k, 1), (1, 2), flag=wx.EXPAND)
@@ -11104,6 +11319,7 @@ class MainFrame(wx.Frame):
         for cpn in (
             self.cpn_stereo_pop_divergence,
             self.cpn_stereo_foreground_pop, self.cpn_stereo_midground_pop, self.cpn_stereo_background_pop,
+            self.cpn_depth_curve_match,
             self.cpn_stereo_inpainting_depth,
             self.cpn_stereo_stability_flicker, self.cpn_video_filter_scene_batch,
             self.cpn_depth_blend, self.cpn_hdr_reinject, self.cpn_subsearch,
@@ -11299,6 +11515,7 @@ class MainFrame(wx.Frame):
         sliders = [getattr(self, slider_attr) for _, slider_attr, *_ in STEREO_SLIDER_FIELDS]
         pane_attrs = ("cpn_stereo_pop_divergence",
                       "cpn_stereo_foreground_pop", "cpn_stereo_midground_pop", "cpn_stereo_background_pop",
+                      "cpn_depth_curve_match",
                       "cpn_stereo_stability_flicker", "cpn_stereo_inpainting_depth", "cpn_stereo_advanced")
         panes = [p for p in (getattr(self, name, None) for name in pane_attrs) if p is not None]
         return sliders + panes
@@ -11814,6 +12031,7 @@ class MainFrame(wx.Frame):
             self.cbo_midground_threshold_low,
             self.cbo_midground_threshold_high,
             self.cbo_pop_feather,
+            self.cbo_depth_curve_match_strength,
             self.cbo_edge_repair,
             self.cbo_sharpen_strength,
             self.cbo_pad,
@@ -12694,6 +12912,9 @@ class MainFrame(wx.Frame):
         return (
             # Depth Pop sub-panes
             self.cpn_stereo_foreground_pop, self.cpn_stereo_midground_pop, self.cpn_stereo_background_pop,
+            # Depth Curve Match -- requires a separately-run calibration tool, same
+            # Expert-only tier as the Depth Pop sub-panes above
+            self.cpn_depth_curve_match,
             # Automated Scene Batch (Video Filter tab) -- entirely Expert
             self.cpn_video_filter_scene_batch, self.pnl_video_filter_scene_batch_dot,
             # Dual-Pass Depth Blend tab -- entirely Expert (its one "Settings" pane
@@ -13775,6 +13996,7 @@ class MainFrame(wx.Frame):
             midground_threshold_low=float(self.cbo_midground_threshold_low.GetValue()) / 100.0,
             midground_threshold_high=float(self.cbo_midground_threshold_high.GetValue()) / 100.0,
             pop_feather=float(self.cbo_pop_feather.GetValue()) / 100.0,
+            depth_curve_match_strength=float(self.cbo_depth_curve_match_strength.GetValue()),
             edge_repair_strength=float(self.cbo_edge_repair.GetValue()),
             sharpen=self.chk_sharpen.GetValue(),
             sharpen_strength=float(self.cbo_sharpen_strength.GetValue()),
@@ -15255,6 +15477,8 @@ class MainFrame(wx.Frame):
         _apply_combo_value(
             self.cbo_midground_threshold_high, getattr(args, "midground_threshold_high", 0.85) * 100.0)
         _apply_combo_value(self.cbo_pop_feather, getattr(args, "pop_feather", 0.0) * 100.0)
+        _apply_combo_value(self.cbo_depth_curve_match_strength,
+                            getattr(args, "depth_curve_match_strength", 0.0) or 0.0)
         _apply_combo_value(self.cbo_edge_repair, args.edge_repair_strength)
         self.chk_sharpen.SetValue(bool(args.sharpen))
         _apply_combo_value(self.cbo_sharpen_strength, args.sharpen_strength)
@@ -17747,6 +17971,38 @@ class MainFrame(wx.Frame):
         self.btn_sharpen_clear.Disable()
         self.SetStatusText(T("Applying Sharpen..."))
         startWorker(self.on_exit_sharpen_worker, self.run_sharpen, wargs=(cmd,))
+
+    # --- Depth Curve Match calibration (ADR-467, standalone tool) ---
+
+    def _refresh_depth_curve_match_status(self):
+        """Reads whatever curve file currently exists (if any) and updates the
+        status label in the Depth Curve Match pane -- the real answer to "where do
+        I find the curve values": nowhere to type in by hand, just this readout."""
+        from .depth_curve_match import DepthCurveMatcher
+        matcher = DepthCurveMatcher()
+        if matcher.enabled and matcher.meta:
+            meta = matcher.meta
+            self.lbl_depth_curve_match_status.SetLabel(
+                T("Calibrated: {} -> {} ({} frames, {})").format(
+                    meta.get("source_model", "?"), meta.get("target_model", "?"),
+                    meta.get("frame_count", "?"), meta.get("calibrated_at", "?")))
+        else:
+            self.lbl_depth_curve_match_status.SetLabel(T("No curve calibrated yet"))
+        self.lbl_depth_curve_match_status.GetContainingSizer().Layout()
+
+    def on_click_btn_depth_curve_match_calibrate(self, event):
+        source_model = self.cbo_depth_model.GetValue()
+        target_choices = [m for m in self.get_depth_models() if m != source_model]
+        if "Any_V3_Metric_Large" in target_choices:
+            default_target = "Any_V3_Metric_Large"
+        elif target_choices:
+            default_target = target_choices[0]
+        else:
+            default_target = ""
+        dlg = DepthCurveCalibrateDialog(self, source_model, target_choices, default_target)
+        dlg.ShowModal()
+        dlg.Destroy()
+        self._refresh_depth_curve_match_status()
 
     # --- RIFE Frame Interpolation (standalone tool) ---
 

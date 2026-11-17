@@ -731,7 +731,9 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         if "--temporal-stabilize" in self.model_settings_argv:
             labels.append(T("Object Stability"))
         if "--ema-normalize" in self.model_settings_argv:
-            labels.append(T("EMA Normalize"))
+            decay = self.model_settings_argv[self.model_settings_argv.index("--ema-decay") + 1]
+            buffer_size = self.model_settings_argv[self.model_settings_argv.index("--ema-buffer") + 1]
+            labels.append(T("EMA Normalize (decay {}, buffer {})").format(decay, buffer_size))
         if "--depth-aa" in self.model_settings_argv:
             labels.append(T("Depth Anti-aliasing"))
         if not labels:

@@ -512,11 +512,19 @@ class Tracker:
         self.ramp_from = None     # cut_smooth: value being eased away from
         self.ramp_left = 0        # cut_smooth: frames left in the current ramp
         self.last_cuts = []       # which frames of the last run() call started a new scene
+        # ADR-441 (core iw3 side): per-frame "has `out` actually finished
+        # moving toward this scene's real value yet" -- consumed by
+        # ShotLockEstimator's own opt-in wait_for_settle (see
+        # _patch_utils.apply_divergence() below, which is what actually
+        # passes this across the iw3-core/add-on boundary). Not used for
+        # anything else in this file.
+        self.last_settled = []
 
     def run(self, scores, embs, reset_pts, own_cuts, curve):
         out = []
         cuts = []                 # same per-frame "new scene" flag `out` was built from -- the
                                    # single source of truth for the scene log (see _RunState._scene_record)
+        settled = []              # ADR-441: see self.last_settled above
         p = self.p
         for i, sc in enumerate(scores):
             cut = self.cut_pending
@@ -563,7 +571,16 @@ class Tracker:
                         self.out, self.moving = target, False
             out.append(self.out)
             cuts.append(cut)
+            # ADR-441: `out` is still visibly moving toward this scene's real
+            # value while a cut_smooth ease is in progress (ramp_left > 0) or
+            # a deadband-triggered glide is underway (self.moving) -- neither
+            # means "settled" yet. For `smooth` mode there's no settle/lock
+            # concept at all (see module docstring/the branch above), so it's
+            # always considered settled -- nothing to wait for.
+            settled.append(self.mode == "smooth"
+                           or (self.n > p["settle"] and self.ramp_left == 0 and not self.moving))
         self.last_cuts = cuts
+        self.last_settled = settled
         return out
 
 
@@ -578,6 +595,7 @@ class _RunState:
                                getattr(args, "auto_divergence_cut_smooth", 0))
         self.last_depth = None    # the depth tensor of the last call, held so its id stays unique
         self.last_divs = None
+        self.last_settled_list = []  # ADR-441: parallel to last_divs -- see divergences()
         self.repeat = False       # this call is iw3's alpha pass over the same frames
         # strengths of frames handed to iw3 but not yet given back: the inpaint
         # methods hold frames in a queue and return them several calls later,
@@ -751,6 +769,13 @@ class _RunState:
                                 lambda c: strength_curve(c, lo, typical, hi, closeup, wide,
                                                           wide_floor, wide_floor_cutoff))
         divs = [round(d / STEP) * STEP for d in used]
+        # ADR-441: cached alongside last_divs below -- _patch_utils.apply_divergence()
+        # reads this right after calling here to stamp args._divergence_settled per
+        # sub-batch. Correct on the `repeat` early-return path too (just below) since
+        # that path returns before this line ever runs again, leaving whatever this
+        # attribute already held from the real computation -- exactly the same
+        # reasoning self.last_divs already relies on for that path.
+        self.last_settled_list = self.tracker.last_settled
         if self.verbose or not self.announced:
             self.announced = True
             _say(f"{self.tracker.mode}, {lo:g}-{hi:g} around {typical:g}"
@@ -1317,11 +1342,25 @@ def _patch_utils(U):
             # all -- those still intentionally run on the CLIP-similarity fallback
             # whenever Scene Detection is off, exactly as before.
             divs = st.divergences(i4, d4, args, reset_pts, same_obj=depth, log_reset_pts=log_reset_pts)
+            # ADR-441: per-frame "has Auto 3D Strength actually finished settling
+            # for this scene yet" -- see Tracker.last_settled's own docstring.
+            # Defensive fallback (all True = "already settled") for a settled_list
+            # that's shorter than divs (shouldn't happen, same length by
+            # construction in Tracker.run(), but this is cheap insurance against
+            # ever stalling a real job over a length mismatch) or simply absent
+            # (an older _RunState instance from before this attribute existed).
+            settled_list = getattr(st, "last_settled_list", None) or [True] * len(divs)
+            if len(settled_list) < len(divs):
+                settled_list = settled_list + [True] * (len(divs) - len(settled_list))
         overlay = _overlay_on(args) and not st.repeat
 
-        def run(d, x, value, count, rp, lrp):
+        def run(d, x, value, settled, count, rp, lrp):
             a = copy.copy(args)                # args.state is shared, as it should be
             a.divergence = value
+            # ADR-441: consumed by ShotLockEstimator's own opt-in wait_for_settle
+            # (iw3/shot_lock_estimator.py) via iw3/utils.py's getattr() of this same
+            # name -- a complete no-op for every caller/mode that never reads it.
+            a._divergence_settled = settled
             left, right = orig(d, x, a, side_model, reset_pts=rp, log_reset_pts=lrp)
             if overlay:
                 st.pending.extend([value] * count)
@@ -1332,18 +1371,24 @@ def _patch_utils(U):
             return left, right
 
         if not batch:
-            return run(depth, im, divs[0], 1, reset_pts, log_reset_pts)
+            return run(depth, im, divs[0], settled_list[0], 1, reset_pts, log_reset_pts)
         lefts, rights = [], []
         i, n = 0, len(divs)
         while i < n:
             j = i + 1
-            while j < n and divs[j] == divs[i]:
+            # ADR-441: also split on a settled-state change, not just a divergence-
+            # VALUE change -- two consecutive frames can share the same (rounded)
+            # divergence value while one is still mid-glide and the next has
+            # genuinely settled (a real, if narrow, possibility right at the
+            # moment a glide finishes), and each sub-batch needs exactly one
+            # settled flag to stamp via run() above.
+            while j < n and divs[j] == divs[i] and settled_list[j] == settled_list[i]:
                 j += 1
             rp = None if reset_pts is None else list(reset_pts[i:j])
             lrp = None if log_reset_pts is None else list(log_reset_pts[i:j])
             if i == 0 and j == n:
-                return run(depth, im, divs[i], n, rp, lrp)
-            left, right = run(depth[i:j], im[i:j], divs[i], j - i, rp, lrp)
+                return run(depth, im, divs[i], settled_list[i], n, rp, lrp)
+            left, right = run(depth[i:j], im[i:j], divs[i], settled_list[i], j - i, rp, lrp)
             lefts.append(left)
             rights.append(right)
             i = j

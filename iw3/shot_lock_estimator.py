@@ -190,6 +190,43 @@ empty (Mid, or even Low) is simply never a candidate -- with only the High
 reference set at all (the ADR-437 base case), there is nothing to compare
 distances against, so this falls back to that same single-cutoff rule
 instead of being undefined.
+
+ADR-441: real follow-up, after decker reported a genuinely confusing real
+scene log -- the same scene's Convergence column locked "Mid" while
+Foreground Scale's own, separate shot_lock (foreground_scale_estimator.py)
+locked "Wide" for the exact same real 3D Strength number. Traced the real
+mechanism: Auto 3D Strength's own per-frame value doesn't always reach its
+final, settled number by the time this class's OWN settle-then-lock decision
+window (`_decide_settle`) closes -- it can still be climbing/gliding. This
+class makes exactly ONE decision per scene then locks it for the rest of the
+scene (by design, to avoid flicker -- see the module docstring's opening),
+so if that one decision landed during Auto 3D Strength's own still-settling
+window, it locks a number that doesn't match what the scene's real strength
+later becomes. Foreground Scale's shot_lock has no such lock (re-evaluates
+every call, see that module's own docstring), so it isn't affected by this
+at all -- confirmed by tracing both modules' real code, not assumed.
+
+Opt-in fix (OFF by default -- today's exact behavior is unchanged unless
+turned on): `wait_for_settle` (--convergence-lock-wait-for-settle), only
+meaningful with `signal="divergence"`. When on, and the real per-call
+`divergence_settled` flag (passed in from Auto 3D Strength's own Tracker --
+see nt_auto3d/nt_autostrength/autodiv.py's `Tracker.last_settled`/
+`_patch_utils`'s `apply_divergence()` wrapper, which stamps
+`args._divergence_settled` per sub-batch) says the real strength is STILL
+settling once `_decide_settle` is reached, the decision is deliberately
+DELAYED -- the running average used for `_classify()` is restarted from that
+point, so the eventual decision reflects only settled (or capped) readings,
+not a blend of early noisy ones with the real settled value. Bounded by
+`settle_wait_max` (--convergence-lock-settle-wait-max, frames, default
+DEFAULT_SETTLE_WAIT_MAX) measured from the scene's own start, so it can
+never wait indefinitely -- once that cap is hit, it locks in with whatever
+it has, exactly like `_decide_settle` already does today.
+`divergence_settled=None` (the default on every call site that doesn't know
+better -- `signal="clip"`, Auto 3D Strength not active, or an older
+nt_auto3d build that never passes this at all) is treated as "already
+settled," so this feature is a safe no-op whenever that real information
+isn't actually available -- it can never make anything wait that wasn't
+already going to be decided anyway.
 """
 import torch
 
@@ -216,6 +253,10 @@ DEFAULT_STRENGTH_THRESHOLD = 4.0
 # picks whichever one the real divergence value is closest to.
 THRESHOLD_MODES = ("range", "nearest")
 DEFAULT_THRESHOLD_MODE = "range"
+# ADR-441: hard cap (frames) on how much longer wait_for_settle will wait past
+# _decide_settle for Auto 3D Strength to report it's done settling, before
+# locking in anyway -- see module docstring.
+DEFAULT_SETTLE_WAIT_MAX = 60
 
 
 class ShotLockEstimator():
@@ -223,7 +264,8 @@ class ShotLockEstimator():
                  decay=0.9, cut_smooth=0, mid_value=None, decide_speed=None,
                  signal=DEFAULT_SIGNAL, strength_threshold=DEFAULT_STRENGTH_THRESHOLD,
                  strength_threshold_low=None, threshold_mode=DEFAULT_THRESHOLD_MODE,
-                 strength_threshold_mid=None):
+                 strength_threshold_mid=None, wait_for_settle=False,
+                 settle_wait_max=DEFAULT_SETTLE_WAIT_MAX):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
@@ -249,6 +291,9 @@ class ShotLockEstimator():
         # see module docstring and _closeness_for_divergence().
         self.threshold_mode = threshold_mode if threshold_mode in THRESHOLD_MODES else DEFAULT_THRESHOLD_MODE
         self.strength_threshold_mid = None if strength_threshold_mid is None else float(strength_threshold_mid)
+        # ADR-441: off by default -- see module docstring and _decide_or_hold().
+        self.wait_for_settle = bool(wait_for_settle)
+        self.settle_wait_max = max(1, int(settle_wait_max or DEFAULT_SETTLE_WAIT_MAX))
         # Composition, not inheritance -- see module docstring. convergence=0.5 and
         # the ema/scene_hold/cut_smooth args passed here are irrelevant: only
         # `_closeness()` is ever called on this instance, never `__call__()`.
@@ -273,6 +318,10 @@ class ShotLockEstimator():
         self._scene_running_c = None
         self._scene_n = 0
         self._scene_locked_value = None
+        # ADR-441: total frames since the scene STARTED (never restarted by the
+        # wait-for-settle re-averaging below, unlike _scene_n) -- the actual
+        # counter settle_wait_max is measured against. See _decide_or_hold().
+        self._scene_elapsed = 0
         self._recompute_decide_settle()
 
     def to(self, device):
@@ -312,6 +361,7 @@ class ShotLockEstimator():
         self._scene_running_c = None
         self._scene_n = 0
         self._scene_locked_value = None
+        self._scene_elapsed = 0
 
     def _classify(self, c):
         """ADR-429: 3-way pick along the same close/wide spectrum the original
@@ -416,7 +466,8 @@ class ShotLockEstimator():
             return 0.5
         return 1.0
 
-    def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None, divergence=None):
+    def __call__(self, rgb, depth, reset_pts=None, log_reset_pts=None, divergence=None,
+                 divergence_settled=None):
         B = depth.shape[0]
         reset_pts = reset_pts if reset_pts is not None else [False] * B
         # ADR-422: log_reset_pts (when supplied) is the real, independently-scanned
@@ -461,6 +512,7 @@ class ShotLockEstimator():
                     self._scene_running_c = None
                     self._scene_n = 0
                     self._scene_locked_value = None
+                    self._scene_elapsed = 0
                     self._pending_scene_reset = False
                 # ADR-435: `ease` makes exactly the same locked decision as snap/
                 # snap_ramp below -- only the FINAL step (how the output value moves
@@ -475,7 +527,28 @@ class ShotLockEstimator():
                                              else self._scene_running_c
                                              + (c - self._scene_running_c) / (self._scene_n + 1))
                     self._scene_n += 1
-                    if self._scene_n >= self._decide_settle:
+                    self._scene_elapsed += 1
+                    ready = self._scene_n >= self._decide_settle
+                    # ADR-441: still not ready to decide (see module docstring) --
+                    # only when wait_for_settle is on, this is a divergence-signal
+                    # call, and the real Auto 3D Strength value is explicitly
+                    # reported as NOT settled yet (None/True are both treated as
+                    # "proceed as before", so this is a true opt-in no-op whenever
+                    # that information isn't actually available).
+                    if (ready and self.wait_for_settle and self.signal == "divergence"
+                            and divergence_settled is False):
+                        if self._scene_elapsed < self.settle_wait_max:
+                            ready = False
+                            # Restart the average from here -- the eventual decision
+                            # should reflect only settled (or capped) readings, not a
+                            # blend with the early, still-climbing ones already
+                            # folded into _scene_running_c above.
+                            self._scene_running_c = None
+                            self._scene_n = 0
+                        # else: hard cap reached -- fall through and lock with
+                        # whatever's been accumulated since the last restart, same
+                        # as _decide_settle already does today.
+                    if ready:
                         self._scene_locked_value = self._classify(self._scene_running_c)
                         if self.switch != "ease":
                             self.tracker.mark_cut()  # the one clean transition into the decision

@@ -58,7 +58,8 @@ from .sod_track_estimator import SodTrackEstimator
 from .shot_lock_estimator import (ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE,
                                   DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH,
                                   DEFAULT_SIGNAL, DEFAULT_STRENGTH_THRESHOLD,
-                                  DEFAULT_THRESHOLD_MODE, THRESHOLD_MODES)
+                                  DEFAULT_THRESHOLD_MODE, THRESHOLD_MODES,
+                                  DEFAULT_SETTLE_WAIT_MAX)
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
@@ -3713,6 +3714,13 @@ def make_output_filename(input_filename, args, video=False):
                         lock_threshold_mid = getattr(args, "convergence_lock_strength_threshold_mid", None)
                         if lock_threshold_mid is not None:
                             convergence_smoothing += f"mid{to_deciaml(lock_threshold_mid, 100, 2)}"
+                    # ADR-441: only shown when actually turned on.
+                    if getattr(args, "convergence_lock_wait_for_settle", False):
+                        convergence_smoothing += "_waitsettle"
+                        lock_settle_wait_max = getattr(args, "convergence_lock_settle_wait_max",
+                                                        DEFAULT_SETTLE_WAIT_MAX)
+                        if lock_settle_wait_max != DEFAULT_SETTLE_WAIT_MAX:
+                            convergence_smoothing += f"{int(lock_settle_wait_max)}"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4278,6 +4286,14 @@ def _build_iw3_comment_metadata(args, video=True):
                     if lock_threshold_mid_val is not None:
                         comment_parts.append(
                             f"iw3_convergence_lock_strength_threshold_mid={lock_threshold_mid_val}")
+                # ADR-441: omitted entirely when off (the default).
+                if getattr(args, "convergence_lock_wait_for_settle", False):
+                    comment_parts.append("iw3_convergence_lock_wait_for_settle=true")
+                    lock_settle_wait_max_val = getattr(args, "convergence_lock_settle_wait_max",
+                                                        DEFAULT_SETTLE_WAIT_MAX)
+                    if lock_settle_wait_max_val != DEFAULT_SETTLE_WAIT_MAX:
+                        comment_parts.append(
+                            f"iw3_convergence_lock_settle_wait_max={lock_settle_wait_max_val}")
         if args.convergence_mode == "clip_shot":
             if getattr(args, "clip_shot_symmetric", False):
                 comment_parts.append("iw3_clip_shot_symmetric=1")
@@ -6055,9 +6071,15 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             # args object right before calling through to here; with that add-on
             # off it's just the single static --divergence number. Harmless to
             # pass even when shot_lock's own signal is "clip" (simply unused).
+            # ADR-441: args._divergence_settled is an OPTIONAL extra -- only a
+            # patched nt_auto3d (with --convergence-lock-wait-for-settle on)
+            # ever actually sets it; everyone else's getattr() default of None
+            # is read by ShotLockEstimator as "already settled", a complete
+            # no-op (see that class's own docstring).
             convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts,
                                                            log_reset_pts=log_reset_pts,
-                                                           divergence=getattr(args, "divergence", None))
+                                                           divergence=getattr(args, "divergence", None),
+                                                           divergence_settled=getattr(args, "_divergence_settled", None))
             depth = mapper_fn(depth)
             # ADR-423: real confirmed bug -- unlike sod_v1/face_detect/depth_percentile/
             # clip_shot/sod_track (whose convergence value comes from
@@ -9923,6 +9945,23 @@ def create_parser(required_true=True):
                              "divergence only, --convergence-lock-threshold-mode nearest only: the Mid "
                              "reference point candidate. Leave unset (default, \"none\") to leave Mid out "
                              "of the nearest-match comparison entirely.")
+    parser.add_argument("--convergence-lock-wait-for-settle", action="store_true",
+                        help="ADR-441: --convergence-mode shot_lock only, --convergence-lock-signal "
+                             "divergence only: off by default (today's unchanged behavior) -- when Auto 3D "
+                             "Strength is active, its own number doesn't always reach its final, settled "
+                             "value by the time shot_lock's own decision window closes; with this on, "
+                             "shot_lock waits for Auto 3D Strength to report it has genuinely finished "
+                             "settling for this scene before locking its Wide/Mid/Close-Up decision, instead "
+                             "of possibly deciding on a still-climbing number. Bounded by "
+                             "--convergence-lock-settle-wait-max so it can never wait indefinitely. No effect "
+                             "at all with Auto 3D Strength off, or with --convergence-lock-signal clip.")
+    parser.add_argument("--convergence-lock-settle-wait-max", type=int, default=DEFAULT_SETTLE_WAIT_MAX,
+                        help="ADR-441: --convergence-mode shot_lock only, --convergence-lock-signal "
+                             "divergence only, --convergence-lock-wait-for-settle only: the hard cap, in "
+                             "frames, on how much longer shot_lock will wait past its normal decision window "
+                             "for Auto 3D Strength to settle before locking in anyway with whatever number "
+                             "it has by then. Keeps the extra wait bounded and predictable instead of "
+                             "open-ended.")
     parser.add_argument("--clip-shot-symmetric", action="store_true",
                         help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
                              "recede) by the same amount close-ups get pushed down, instead of staying "
@@ -11125,7 +11164,9 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
                                        DEFAULT_STRENGTH_THRESHOLD),
             strength_threshold_low=getattr(args, "convergence_lock_strength_threshold_low", None),
             threshold_mode=getattr(args, "convergence_lock_threshold_mode", DEFAULT_THRESHOLD_MODE),
-            strength_threshold_mid=getattr(args, "convergence_lock_strength_threshold_mid", None))
+            strength_threshold_mid=getattr(args, "convergence_lock_strength_threshold_mid", None),
+            wait_for_settle=getattr(args, "convergence_lock_wait_for_settle", False),
+            settle_wait_max=getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
 
     if args.export_disparity:
         args.export = True

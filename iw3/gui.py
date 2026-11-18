@@ -90,7 +90,7 @@ from .shot_lock_estimator import (
     DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE, DEFAULT_CLOSEUP_VALUE,
     DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH,
     DEFAULT_SIGNAL as DEFAULT_SHOT_LOCK_SIGNAL,
-    DEFAULT_STRENGTH_THRESHOLD, DEFAULT_THRESHOLD_MODE)
+    DEFAULT_STRENGTH_THRESHOLD, DEFAULT_THRESHOLD_MODE, DEFAULT_SETTLE_WAIT_MAX)
 
 # Foreground Scale's own shot_lock defaults (ADR-452) -- entirely separate from
 # Convergence Plane's shot_lock defaults above, matching iw3/utils.py
@@ -2397,6 +2397,42 @@ class MainFrame(wx.Frame):
               "Recommended: a number that sits between your High and Low reference points, close to what "
               "your own footage's 3D Strength actually looks like for a medium shot."))
 
+        self.chk_convergence_lock_wait_for_settle = wx.CheckBox(
+            self.grp_stereo, label=T("Wait for Auto 3D Strength to Settle"),
+            name="chk_convergence_lock_wait_for_settle")
+        self.chk_convergence_lock_wait_for_settle.SetValue(False)
+        self.chk_convergence_lock_wait_for_settle.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence. Off by "
+              "default -- today's unchanged behavior.\n"
+              "Auto 3D Strength doesn't always reach its real, final number for a scene by the time this "
+              "feature's own decision window closes -- it can still be climbing. With this on, the "
+              "decision waits for Auto 3D Strength to report it has genuinely finished settling for this "
+              "scene before locking in Wide/Mid/Close-Up, instead of possibly deciding on a number that "
+              "hasn't finished changing yet. Bounded by Max Extra Wait below, so it can never wait "
+              "indefinitely.\n"
+              "No effect at all with Auto 3D Strength off, or with Classify By set to clip.\n"
+              "Recommended: turn this on if you've seen the Convergence and Foreground Scale columns of "
+              "a scene log disagree on Wide/Mid/Close-Up for the same real 3D Strength number."))
+        self.chk_convergence_lock_wait_for_settle.Bind(
+            wx.EVT_CHECKBOX, self.on_changed_chk_convergence_lock_wait_for_settle)
+
+        self.lbl_convergence_lock_settle_wait_max = wx.StaticText(
+            self.grp_stereo, label=T("Max Extra Wait (frames)"))
+        self.cbo_convergence_lock_settle_wait_max = EditableComboBox(
+            self.grp_stereo, choices=["30", "60", "90", "120"],
+            name="cbo_convergence_lock_settle_wait_max")
+        self.cbo_convergence_lock_settle_wait_max.SetValue(f"{DEFAULT_SETTLE_WAIT_MAX}")
+        self.cbo_convergence_lock_settle_wait_max.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence and Wait "
+              "for Auto 3D Strength to Settle turned on. The hard cap, in frames, on how much longer the "
+              "decision will wait past its normal window for Auto 3D Strength to settle before locking in "
+              "anyway with whatever number it has by then -- keeps the extra wait bounded and predictable "
+              "instead of open-ended.\n"
+              f"Default is {DEFAULT_SETTLE_WAIT_MAX} frames (roughly 2 seconds at 30fps, a little longer at "
+              "24fps). Lower it if you'd rather risk an early decision than a longer freeze on the previous "
+              "scene's value after a hard cut; raise it if your footage uses a high Auto Stability setting "
+              "and you still see mismatches."))
+
         self.chk_clip_shot_symmetric = wx.CheckBox(
             self.grp_stereo, label=T("Also Push Wide Shots Up (clip_shot)"), name="chk_clip_shot_symmetric")
         self.chk_clip_shot_symmetric.SetValue(False)
@@ -4644,6 +4680,9 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_threshold_mode, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_strength_threshold_mid, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_strength_threshold_mid, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_convergence_lock_wait_for_settle, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.lbl_clip_shot_bias_strength, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_clip_shot_bias_strength, (i, 1), (1, 2), flag=wx.EXPAND)
@@ -12094,6 +12133,7 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_strength_threshold,
             self.cbo_convergence_lock_strength_threshold_low,
             self.cbo_convergence_lock_strength_threshold_mid,
+            self.cbo_convergence_lock_settle_wait_max,
             self.cbo_clip_shot_bias_strength,
             self.cbo_face_protect,
             self.cbo_resolution,
@@ -12583,6 +12623,13 @@ class MainFrame(wx.Frame):
         self.cbo_convergence_lock_threshold_mode.Enable(is_divergence)
         self.lbl_convergence_lock_strength_threshold_mid.Enable(is_nearest)
         self.cbo_convergence_lock_strength_threshold_mid.Enable(is_nearest)
+        # ADR-441: Wait for Auto 3D Strength to Settle enables only for the
+        # divergence signal (same gating as the threshold fields above); its own
+        # Max Extra Wait field further requires the checkbox itself to be on.
+        self.chk_convergence_lock_wait_for_settle.Enable(is_divergence)
+        is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
+        self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
+        self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.lbl_convergence_lock_wide.SetLabel(
             T("High Strength Value") if is_divergence else T("Wide Shot Value"))
         self.lbl_convergence_lock_closeup.SetLabel(
@@ -12590,6 +12637,9 @@ class MainFrame(wx.Frame):
         self.Layout()
 
     def on_changed_cbo_convergence_lock_threshold_mode(self, event):
+        self.update_shot_lock_signal()
+
+    def on_changed_chk_convergence_lock_wait_for_settle(self, event):
         self.update_shot_lock_signal()
 
     def update_foreground_scale_mode(self):
@@ -12925,6 +12975,8 @@ class MainFrame(wx.Frame):
             self.lbl_convergence_lock_strength_threshold_low, self.cbo_convergence_lock_strength_threshold_low,
             self.lbl_convergence_lock_threshold_mode, self.cbo_convergence_lock_threshold_mode,
             self.lbl_convergence_lock_strength_threshold_mid, self.cbo_convergence_lock_strength_threshold_mid,
+            self.chk_convergence_lock_wait_for_settle,
+            self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
             self.lbl_edge_dilation_mode, self.cbo_edge_dilation_mode,
@@ -13562,6 +13614,12 @@ class MainFrame(wx.Frame):
                                allow_empty=True):
             self.show_validation_error_message(T("Strength Threshold (Mid)"), 0.0, 100.0)
             return None
+        # ADR-441: not allowed empty -- always meaningful once Wait for Auto 3D
+        # Strength to Settle is on, so it always needs a real number.
+        if not validate_number(self.cbo_convergence_lock_settle_wait_max.GetValue(), 1, 600,
+                               allow_empty=False):
+            self.show_validation_error_message(T("Max Extra Wait (frames)"), 1, 600)
+            return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
@@ -14077,6 +14135,9 @@ class MainFrame(wx.Frame):
             # ADR-439: an empty box means "leave Mid out of the comparison" -- None.
             convergence_lock_strength_threshold_mid=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_convergence_lock_strength_threshold_mid.GetValue()),
+            # ADR-441: off by default -- see shot_lock_estimator.py's own docstring.
+            convergence_lock_wait_for_settle=self.chk_convergence_lock_wait_for_settle.GetValue(),
+            convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
             max_negative_parallax=float(self.cbo_max_negative_parallax.GetValue()),
@@ -15517,6 +15578,11 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_strength_threshold_mid.SetValue("")
         else:
             _apply_combo_value(self.cbo_convergence_lock_strength_threshold_mid, _threshold_mid_restore)
+        # ADR-441: off by default -- see shot_lock_estimator.py's own docstring.
+        self.chk_convergence_lock_wait_for_settle.SetValue(
+            bool(getattr(args, "convergence_lock_wait_for_settle", False)))
+        _apply_combo_value(self.cbo_convergence_lock_settle_wait_max,
+                           getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
         self.update_shot_lock_signal()
         self.chk_clip_shot_symmetric.SetValue(bool(getattr(args, "clip_shot_symmetric", False)))
         _apply_combo_value(self.cbo_clip_shot_bias_strength, getattr(args, "clip_shot_bias_strength", 0.25))
@@ -38126,6 +38192,8 @@ def _self_test_shot_lock_divergence_signal():
     est.strength_threshold = 3.85
     est.strength_threshold_low = None
     est.strength_threshold_mid = None
+    est.wait_for_settle = False
+    est.settle_wait_max = 60
     est._clip = None
     from .convergence_tracker import SceneHoldTracker
     est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
@@ -38136,6 +38204,7 @@ def _self_test_shot_lock_divergence_signal():
     est._scene_running_c = None
     est._scene_n = 0
     est._scene_locked_value = None
+    est._scene_elapsed = 0
     est._recompute_decide_settle()
 
     depth = torch.zeros(1, 1, 2, 2)
@@ -38259,6 +38328,8 @@ def _self_test_shot_lock_divergence_signal_three_way():
     est.strength_threshold = 3.9
     est.strength_threshold_low = 3.7
     est.strength_threshold_mid = None
+    est.wait_for_settle = False
+    est.settle_wait_max = 60
     est._clip = None
     est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
     est.blend_ema = None
@@ -38267,6 +38338,7 @@ def _self_test_shot_lock_divergence_signal_three_way():
     est._scene_running_c = None
     est._scene_n = 0
     est._scene_locked_value = None
+    est._scene_elapsed = 0
     est._recompute_decide_settle()
 
     depth = torch.zeros(1, 1, 2, 2)
@@ -38391,6 +38463,8 @@ def _self_test_shot_lock_divergence_nearest_mode():
     est.strength_threshold = 3.9
     est.strength_threshold_mid = 3.8
     est.strength_threshold_low = 3.2
+    est.wait_for_settle = False
+    est.settle_wait_max = 60
     est._clip = None
     est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
     est.blend_ema = None
@@ -38399,6 +38473,7 @@ def _self_test_shot_lock_divergence_nearest_mode():
     est._scene_running_c = None
     est._scene_n = 0
     est._scene_locked_value = None
+    est._scene_elapsed = 0
     est._recompute_decide_settle()
 
     depth = torch.zeros(1, 1, 2, 2)
@@ -38426,6 +38501,162 @@ def _self_test_shot_lock_divergence_nearest_mode():
     assert abs(lock_for(3.5) - 0.20) < 1e-5, "at/below High with nothing else set must still lock Low"
 
     print("_self_test_shot_lock_divergence_nearest_mode: PASS")
+
+
+def _self_test_shot_lock_wait_for_settle_gui_and_cli():
+    """ADR-441: real follow-up -- decker's own scene log showed Convergence lock
+    "Mid" while Foreground Scale (no lock at all) read "Wide" for the exact same
+    real 3D Strength number, because Auto 3D Strength's own value hadn't finished
+    climbing by the time Convergence's fixed decision window closed. "Wait for
+    Auto 3D Strength to Settle" (opt-in, off by default) and its "Max Extra Wait
+    (frames)" cap must: enable/disable correctly (only under the divergence
+    signal; the frames field only once the checkbox itself is also on); round-
+    trip through parse_args()/the CLI/create_parser()/restore; and the actual
+    decision must wait for a real `divergence_settled=False` signal instead of
+    locking early, while still being bounded by the cap so it can never wait
+    indefinitely."""
+    import torch
+    import wx
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator, DEFAULT_SETTLE_WAIT_MAX
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        assert not frame.chk_convergence_lock_wait_for_settle.IsEnabled(), \
+            "must stay off for the default clip signal"
+        assert frame.chk_convergence_lock_wait_for_settle.GetValue() is False, "must default to off"
+        assert frame.cbo_convergence_lock_settle_wait_max.GetValue() == f"{DEFAULT_SETTLE_WAIT_MAX}"
+
+        frame.cbo_convergence_lock_signal.SetValue("divergence")
+        frame.on_changed_cbo_convergence_lock_signal(wx.CommandEvent())
+        assert frame.chk_convergence_lock_wait_for_settle.IsEnabled()
+        assert not frame.cbo_convergence_lock_settle_wait_max.IsEnabled(), \
+            "Max Extra Wait must stay off until the checkbox itself is also on"
+
+        frame.chk_convergence_lock_wait_for_settle.SetValue(True)
+        frame.on_changed_chk_convergence_lock_wait_for_settle(wx.CommandEvent())
+        assert frame.cbo_convergence_lock_settle_wait_max.IsEnabled()
+
+        frame.cbo_convergence_lock_strength_threshold.SetValue("4.0")
+        frame.cbo_convergence_lock_settle_wait_max.SetValue("45")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_wait_for_settle is True
+        assert args.convergence_lock_settle_wait_max == 45
+
+        cmd = frame.get_cli_command()
+        assert "--convergence-lock-wait-for-settle" in cmd, cmd
+        assert "--convergence-lock-settle-wait-max" in cmd and "45" in cmd, cmd
+
+        # Restoring off (the default) must blank back to unchecked/disabled.
+        frame.apply_parsed_args_to_gui(
+            U.create_parser(required_true=False).parse_args(
+                ["-i", "a.mp4", "-o", "o", "--convergence-mode", "shot_lock",
+                 "--convergence-lock-signal", "divergence"]))
+        assert frame.chk_convergence_lock_wait_for_settle.GetValue() is False
+        assert not frame.cbo_convergence_lock_settle_wait_max.IsEnabled()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    # Round-trip through the real CLI parser too.
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args([
+        "-i", "a.mp4", "-o", "o", "--convergence-mode", "shot_lock",
+        "--convergence-lock-signal", "divergence", "--convergence-lock-wait-for-settle",
+        "--convergence-lock-settle-wait-max", "45",
+    ])
+    assert reparsed.convergence_lock_wait_for_settle is True
+    assert reparsed.convergence_lock_settle_wait_max == 45
+    reparsed_off = parser.parse_args(["-i", "a.mp4", "-o", "o"])
+    assert reparsed_off.convergence_lock_wait_for_settle is False
+    assert reparsed_off.convergence_lock_settle_wait_max == DEFAULT_SETTLE_WAIT_MAX
+
+    # Filename/metadata tags: present only when actually turned on.
+    args_off = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-signal", "divergence", "--convergence-lock-strength-threshold", "4.0"])
+    args_off.video_extension = ".mkv"
+    assert "waitsettle" not in U.make_output_filename("movie.mp4", args_off, video=True)
+    assert "iw3_convergence_lock_wait_for_settle" not in U._build_iw3_comment_metadata(args_off, video=True)
+    args_on = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-signal", "divergence", "--convergence-lock-strength-threshold", "4.0",
+         "--convergence-lock-wait-for-settle", "--convergence-lock-settle-wait-max", "45"])
+    args_on.video_extension = ".mkv"
+    name = U.make_output_filename("movie.mp4", args_on, video=True)
+    assert "waitsettle45" in name, name
+    meta = U._build_iw3_comment_metadata(args_on, video=True)
+    assert "iw3_convergence_lock_wait_for_settle=true" in meta
+    assert "iw3_convergence_lock_settle_wait_max=45" in meta
+
+    # The actual decision logic -- built via object.__new__(), bypassing __init__
+    # (no CLIP model needed for this signal, so nothing to bypass either way).
+    est = object.__new__(ShotLockEstimator)
+    est.wide_value, est.closeup_value, est.mid_value = 0.75, 0.20, None
+    est.switch = "snap"
+    est.decay = 0.95
+    est.decide_speed = None
+    est.signal = "divergence"
+    est.threshold_mode = "range"
+    est.strength_threshold = 4.0
+    est.strength_threshold_low = None
+    est.strength_threshold_mid = None
+    est._clip = None
+    est.tracker = SceneHoldTracker(decay=0.95, cut_smooth=0)
+    est.blend_ema = None
+    est.ease_value = None
+    est._last_raw = None
+    est._pending_scene_reset = True
+    est._scene_running_c = None
+    est._scene_n = 0
+    est._scene_locked_value = None
+    est._scene_elapsed = 0
+    est.wait_for_settle = True
+    est.settle_wait_max = 60
+    est._recompute_decide_settle()  # decide_settle = 23 frames at decay 0.95
+
+    depth = torch.zeros(1, 1, 2, 2)
+
+    def run_scene(div_seq, settled_seq):
+        v = None
+        for d, s in zip(div_seq, settled_seq):
+            v = est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False],
+                    divergence=d, divergence_settled=s).item()
+        return v
+
+    # Still below threshold through the normal decide window, then crosses it
+    # and is confirmed settled -- must wait and lock High, not lock early on
+    # the still-climbing reading decker's real scene hit.
+    est._pending_scene_reset = True
+    div_seq = [3.5] * 23 + [4.5] * 10
+    settled_seq = [False] * 23 + [True] * 10
+    assert abs(run_scene(div_seq, settled_seq) - 0.75) < 1e-5, \
+        "must wait for the real settled value and lock High, not the stale pre-settle reading"
+
+    # Never reports settled at all -- must still lock eventually once
+    # settle_wait_max (60 frames, measured from scene start) is hit, using
+    # whatever real divergence is in effect by then, not wait forever.
+    est._pending_scene_reset = True
+    div_seq2 = [3.5] * 23 + [4.5] * 40
+    settled_seq2 = [False] * 63
+    assert abs(run_scene(div_seq2, settled_seq2) - 0.75) < 1e-5, \
+        "must lock at the hard cap even if Auto 3D Strength never reports settled"
+
+    # Feature off (default) must be byte-for-byte unaffected by divergence_settled
+    # -- locks using whatever's accumulated at the normal decide_settle point,
+    # exactly like before this feature existed.
+    est.wait_for_settle = False
+    est._pending_scene_reset = True
+    assert abs(run_scene(div_seq, settled_seq) - 0.20) < 1e-5, \
+        "feature off must ignore divergence_settled and lock on the stale pre-settle average"
+
+    print("_self_test_shot_lock_wait_for_settle_gui_and_cli: PASS")
 
 
 def _self_test_clip_shot_symmetric_gui_and_cli():
@@ -41376,6 +41607,7 @@ def _run_self_tests():
         _self_test_shot_lock_divergence_signal,
         _self_test_shot_lock_divergence_signal_three_way,
         _self_test_shot_lock_divergence_nearest_mode,
+        _self_test_shot_lock_wait_for_settle_gui_and_cli,
         _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

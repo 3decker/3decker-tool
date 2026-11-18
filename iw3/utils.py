@@ -59,7 +59,7 @@ from .shot_lock_estimator import (ShotLockEstimator, DEFAULT_WIDE_VALUE, DEFAULT
                                   DEFAULT_CLOSEUP_VALUE, DEFAULT_SWITCH,
                                   DEFAULT_SIGNAL, DEFAULT_STRENGTH_THRESHOLD,
                                   DEFAULT_THRESHOLD_MODE, THRESHOLD_MODES,
-                                  DEFAULT_SETTLE_WAIT_MAX)
+                                  DEFAULT_SETTLE_WAIT_MAX, DEFAULT_GLIDE_DURATION)
 from . import frame_overlay as FO
 from . import depth_effects as DE
 from . import scene_boundary_cache as SceneBoundaryCache
@@ -3691,6 +3691,12 @@ def make_output_filename(input_filename, args, video=False):
                     shot_lock_cut_smooth = int(getattr(args, "convergence_cut_smooth", 0) or 0)
                     if shot_lock_cut_smooth > 0:
                         convergence_smoothing += f"_cutsm{shot_lock_cut_smooth}"
+                # ADR-442: only shown when actually overridden from the default.
+                if lock_switch == "glide":
+                    lock_glide_duration = getattr(args, "convergence_lock_glide_duration",
+                                                   DEFAULT_GLIDE_DURATION)
+                    if lock_glide_duration != DEFAULT_GLIDE_DURATION:
+                        convergence_smoothing += f"_glidedur{lock_glide_duration}"
                 # ADR-436: only shown when actually overridden -- same "only when
                 # meaningful" convention as every other optional tag here.
                 lock_decide_speed = getattr(args, "convergence_lock_decide_speed", None)
@@ -4260,6 +4266,13 @@ def _build_iw3_comment_metadata(args, video=True):
             if (getattr(args, "convergence_lock_switch", DEFAULT_SWITCH) == "snap_ramp"
                     and getattr(args, "convergence_cut_smooth", 0)):
                 comment_parts.append(f"iw3_convergence_cut_smooth={args.convergence_cut_smooth}")
+            # ADR-442: omitted entirely for any switch other than glide, or when left
+            # at the default duration -- same "only when meaningful" convention.
+            if getattr(args, "convergence_lock_switch", DEFAULT_SWITCH) == "glide":
+                lock_glide_duration_val = getattr(args, "convergence_lock_glide_duration",
+                                                   DEFAULT_GLIDE_DURATION)
+                if lock_glide_duration_val != DEFAULT_GLIDE_DURATION:
+                    comment_parts.append(f"iw3_convergence_lock_glide_duration={lock_glide_duration_val}")
             # ADR-436: omitted entirely when unset (None) -- same convention as the
             # Mid Shot Value tag just above.
             lock_decide_speed_val = getattr(args, "convergence_lock_decide_speed", None)
@@ -9887,13 +9900,19 @@ def create_parser(required_true=True):
                         help="--convergence-mode shot_lock only: the convergence value used on close-up/"
                              "short shots")
     parser.add_argument("--convergence-lock-switch", type=str,
-                        choices=["snap", "snap_ramp", "blend", "ease"], default=DEFAULT_SWITCH,
+                        choices=["snap", "snap_ramp", "blend", "ease", "glide"], default=DEFAULT_SWITCH,
                         help="--convergence-mode shot_lock only: snap (instant jump at the shot-type "
                              "change), snap_ramp (same jump, eased over --convergence-cut-smooth frames), "
                              "blend (no hard switch -- continuously interpolates by the raw CLIP score), "
                              "ease (ADR-435: same locked decision as snap/snap_ramp, but glides there with "
                              "a continuously-decaying chase using --convergence-smoothing's decay instead "
-                             "of a fixed-speed ramp -- --convergence-cut-smooth has no effect in this mode)")
+                             "of a fixed-speed ramp -- --convergence-cut-smooth has no effect in this mode), "
+                             "glide (ADR-442: same locked decision again, but glides there with a fixed-"
+                             "duration ease-in-out over --convergence-lock-glide-duration frames instead -- "
+                             "zero speed at both the start and the end, so the first visible step is much "
+                             "smaller than ease's and it finishes cleanly on a schedule instead of trailing "
+                             "off indefinitely; --convergence-smoothing/--convergence-cut-smooth have no "
+                             "effect in this mode)")
     parser.add_argument("--convergence-lock-decide-speed", type=_parse_optional_decide_speed, default=None,
                         help="ADR-436: --convergence-mode shot_lock only: overrides how many frames shot_lock "
                              "waits after a real cut before LOCKING its wide/mid/close-up decision in, "
@@ -9962,6 +9981,11 @@ def create_parser(required_true=True):
                              "for Auto 3D Strength to settle before locking in anyway with whatever number "
                              "it has by then. Keeps the extra wait bounded and predictable instead of "
                              "open-ended.")
+    parser.add_argument("--convergence-lock-glide-duration", type=int, default=DEFAULT_GLIDE_DURATION,
+                        help="ADR-442: --convergence-mode shot_lock only, --convergence-lock-switch glide "
+                             "only: how many frames the fixed-duration ease-in-out takes to land exactly on "
+                             "a newly-locked value. Independent of --convergence-smoothing -- raising or "
+                             "lowering this only changes glide's own speed, nothing else.")
     parser.add_argument("--clip-shot-symmetric", action="store_true",
                         help="ADR-424: --convergence-mode clip_shot only: also push wide shots UP (toward "
                              "recede) by the same amount close-ups get pushed down, instead of staying "
@@ -11166,7 +11190,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             threshold_mode=getattr(args, "convergence_lock_threshold_mode", DEFAULT_THRESHOLD_MODE),
             strength_threshold_mid=getattr(args, "convergence_lock_strength_threshold_mid", None),
             wait_for_settle=getattr(args, "convergence_lock_wait_for_settle", False),
-            settle_wait_max=getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
+            settle_wait_max=getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX),
+            glide_duration=getattr(args, "convergence_lock_glide_duration", DEFAULT_GLIDE_DURATION))
 
     if args.export_disparity:
         args.export = True

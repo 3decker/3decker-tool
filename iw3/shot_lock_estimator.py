@@ -227,13 +227,50 @@ nt_auto3d build that never passes this at all) is treated as "already
 settled," so this feature is a safe no-op whenever that real information
 isn't actually available -- it can never make anything wait that wasn't
 already going to be decided anyway.
+
+ADR-442: real follow-up, after decker asked why his own real Wide(0.50) ->
+Close-Up(0.0) cut still looked like a visible "snap" even with `ease` --
+traced the exact cause: `ease`'s own chase (`_ease_toward()`) is a plain
+exponential decay, which is mathematically ALWAYS fastest in its very first
+step and never truly finishes -- so the two symptoms ("the first jump feels
+sharp" and "it keeps visibly drifting afterward") trade off against each
+other through `decay` alone; raising `decay` only shrinks the first jump by
+making the lingering tail longer, it can never fix both at once (confirmed
+by simulating decker's real numbers: decay 0.95/0.98/0.99 all still show
+real, visible drift 2-3 seconds after the cut).
+
+New `glide` switch mode fixes both at once with a different CURVE shape, not
+just a different speed: a fixed-duration smoothstep ease-in-out
+(`t*t*(3-2*t)`, the standard zero-velocity-at-both-ends easing curve used
+for UI motion/camera moves) that starts at zero speed, is fastest in the
+MIDDLE of the glide, and decelerates back to zero speed exactly as it lands
+on the target -- confirmed by simulation: a 30-frame glide's first-frame
+step is ~15x smaller than `ease`'s at decay 0.95, AND it reaches the target
+EXACTLY at frame 30, with no lingering tail at all afterward. `ease` itself
+is left completely unchanged (not replaced) -- this is a new, separate
+switch choice, so decker's and anyone else's existing `ease` setup keeps
+behaving exactly as before unless they pick `glide` instead. `glide_duration`
+(--convergence-lock-glide-duration, frames, default DEFAULT_GLIDE_DURATION)
+is its own independent setting, with no relationship to --convergence-
+smoothing at all (unlike `ease`, which reuses that decay directly) -- same
+reasoning as ADR-436's decide_speed decoupling: a knob that exists for one
+specific purpose shouldn't have to share a dial with settings that serve
+other, unrelated purposes.
+
+Mid-glide retargeting (a scene shorter than glide_duration, so a new
+decision locks in before the previous glide finished): `_glide_toward()`
+starts a fresh leg from wherever the output CURRENTLY sits toward the new
+target, resetting its own elapsed-frame counter -- same "chase from here,
+not from the original start" principle `_ease_toward()` already uses, so a
+rapid run of cuts still glides continuously rather than jumping back to a
+stale starting point.
 """
 import torch
 
 from .clip_shot_estimator import ClipShotEstimator
 from .convergence_tracker import SceneHoldTracker, settle_frames_for_decay
 
-SWITCH_MODES = ("snap", "snap_ramp", "blend", "ease")
+SWITCH_MODES = ("snap", "snap_ramp", "blend", "ease", "glide")
 DEFAULT_SWITCH = "snap_ramp"
 DEFAULT_WIDE_VALUE = 0.75
 DEFAULT_MID_VALUE = 0.475
@@ -257,6 +294,9 @@ DEFAULT_THRESHOLD_MODE = "range"
 # _decide_settle for Auto 3D Strength to report it's done settling, before
 # locking in anyway -- see module docstring.
 DEFAULT_SETTLE_WAIT_MAX = 60
+# ADR-442: how many frames the `glide` switch's fixed-duration ease-in-out
+# takes to fully land on a new locked value -- see module docstring.
+DEFAULT_GLIDE_DURATION = 30
 
 
 class ShotLockEstimator():
@@ -265,7 +305,8 @@ class ShotLockEstimator():
                  signal=DEFAULT_SIGNAL, strength_threshold=DEFAULT_STRENGTH_THRESHOLD,
                  strength_threshold_low=None, threshold_mode=DEFAULT_THRESHOLD_MODE,
                  strength_threshold_mid=None, wait_for_settle=False,
-                 settle_wait_max=DEFAULT_SETTLE_WAIT_MAX):
+                 settle_wait_max=DEFAULT_SETTLE_WAIT_MAX,
+                 glide_duration=DEFAULT_GLIDE_DURATION):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
@@ -294,6 +335,8 @@ class ShotLockEstimator():
         # ADR-441: off by default -- see module docstring and _decide_or_hold().
         self.wait_for_settle = bool(wait_for_settle)
         self.settle_wait_max = max(1, int(settle_wait_max or DEFAULT_SETTLE_WAIT_MAX))
+        # ADR-442: `glide` switch only -- see module docstring and _glide_toward().
+        self.glide_duration = max(1, int(glide_duration or DEFAULT_GLIDE_DURATION))
         # Composition, not inheritance -- see module docstring. convergence=0.5 and
         # the ema/scene_hold/cut_smooth args passed here are irrelevant: only
         # `_closeness()` is ever called on this instance, never `__call__()`.
@@ -309,6 +352,13 @@ class ShotLockEstimator():
         self.tracker = SceneHoldTracker(decay, self.cut_smooth if self.switch == "snap_ramp" else 0)
         self.blend_ema = None
         self.ease_value = None  # ADR-435: `ease` switch only -- see _ease_toward()
+        # ADR-442: `glide` switch only -- see _glide_toward(). glide_value is the
+        # current output (mirrors ease_value); _glide_from/_glide_active_target/
+        # _glide_elapsed track the in-progress leg toward the current target.
+        self.glide_value = None
+        self._glide_from = None
+        self._glide_active_target = None
+        self._glide_elapsed = 0
         self._last_raw = None  # ADR-421 fallback path: last frame's classified value
         # ADR-422: per-real-scene settle-then-lock state (only used when the caller
         # supplies log_reset_pts). _pending_scene_reset mirrors SceneHoldTracker's own
@@ -356,6 +406,10 @@ class ShotLockEstimator():
         self._recompute_decide_settle()
         self.blend_ema = None
         self.ease_value = None
+        self.glide_value = None
+        self._glide_from = None
+        self._glide_active_target = None
+        self._glide_elapsed = 0
         self._last_raw = None
         self._pending_scene_reset = True
         self._scene_running_c = None
@@ -404,14 +458,50 @@ class ShotLockEstimator():
             self.ease_value += (target - self.ease_value) * (1.0 - self.decay)
         return self.ease_value
 
+    def _glide_toward(self, target):
+        """ADR-442: `glide` switch only -- a fixed-duration ease-in-out
+        (smoothstep: zero speed at both ends, fastest in the middle) toward the
+        currently locked `target`, landing on it EXACTLY after `glide_duration`
+        frames -- unlike `_ease_toward()`'s open-ended exponential chase, this
+        has no lingering tail, and its very first step is far smaller since
+        speed starts at zero instead of being fastest right away. See module
+        docstring for the real numbers behind this choice.
+
+        Retargeting mid-glide (a new decision locks in before the previous
+        glide finished, e.g. scenes shorter than glide_duration): starts a
+        fresh leg from wherever the output CURRENTLY sits -- same "chase from
+        here" principle _ease_toward() already uses -- rather than restarting
+        from the original scene's starting value."""
+        if self.glide_value is None:
+            self.glide_value = target
+            self._glide_from = target
+            self._glide_active_target = target
+            self._glide_elapsed = self.glide_duration  # already "arrived"
+            return self.glide_value
+        if target != self._glide_active_target:
+            self._glide_from = self.glide_value
+            self._glide_active_target = target
+            self._glide_elapsed = 0
+        self._glide_elapsed += 1
+        if self._glide_elapsed >= self.glide_duration:
+            self.glide_value = target
+        else:
+            t = self._glide_elapsed / self.glide_duration
+            eased = t * t * (3.0 - 2.0 * t)  # smoothstep
+            self.glide_value = self._glide_from + (target - self._glide_from) * eased
+        return self.glide_value
+
     def _advance_locked(self, locked_value):
-        """ADR-435: the one step snap/snap_ramp/ease actually differ on -- how the
-        output value moves toward a just-decided/already-locked `locked_value`.
-        snap/snap_ramp use SceneHoldTracker.update() (instant jump, or a fixed-
-        length linear ramp); `ease` uses the continuously-decaying chase instead
-        (see _ease_toward())."""
+        """ADR-435/442: the one step snap/snap_ramp/ease/glide actually differ
+        on -- how the output value moves toward a just-decided/already-locked
+        `locked_value`. snap/snap_ramp use SceneHoldTracker.update() (instant
+        jump, or a fixed-length linear ramp); `ease` uses the open-ended
+        exponential chase (_ease_toward()); `glide` uses the fixed-duration
+        ease-in-out instead (_glide_toward())."""
         if self.switch == "ease":
             return self._ease_toward(locked_value)
+        if self.switch == "glide":
+            return self._glide_toward(locked_value)
         return self.tracker.update(locked_value)
 
     def _closeness_for_divergence(self, divergence):
@@ -550,11 +640,16 @@ class ShotLockEstimator():
                         # as _decide_settle already does today.
                     if ready:
                         self._scene_locked_value = self._classify(self._scene_running_c)
-                        if self.switch != "ease":
+                        if self.switch not in ("ease", "glide"):
                             self.tracker.mark_cut()  # the one clean transition into the decision
                         value = self._advance_locked(self._scene_locked_value)
                     else:
-                        held = self.ease_value if self.switch == "ease" else self.tracker.out
+                        if self.switch == "ease":
+                            held = self.ease_value
+                        elif self.switch == "glide":
+                            held = self.glide_value
+                        else:
+                            held = self.tracker.out
                         if held is not None:
                             value = held  # hold the previous scene's value unchanged
                         else:
@@ -568,7 +663,7 @@ class ShotLockEstimator():
                     # takes effect starting next frame (mirrors SceneHoldTracker's own
                     # cut_pending and every other reset_pts/log_reset_pts use in iw3).
                     self._pending_scene_reset = True
-                if reset_pts[i] and self.switch != "ease":
+                if reset_pts[i] and self.switch not in ("ease", "glide"):
                     self.tracker.mark_cut()
             else:
                 # ADR-421 fallback: no real scene-boundary signal supplied at all for
@@ -578,6 +673,8 @@ class ShotLockEstimator():
                     # No discrete snap/ramp state to reset here -- a classification
                     # flip is just a new target the continuous chase moves toward.
                     value = self._ease_toward(raw)
+                elif self.switch == "glide":
+                    value = self._glide_toward(raw)
                 else:
                     if self._last_raw is not None and raw != self._last_raw:
                         self.tracker.mark_cut()

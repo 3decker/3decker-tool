@@ -90,7 +90,8 @@ from .shot_lock_estimator import (
     DEFAULT_WIDE_VALUE, DEFAULT_MID_VALUE, DEFAULT_CLOSEUP_VALUE,
     DEFAULT_SWITCH as DEFAULT_SHOT_LOCK_SWITCH,
     DEFAULT_SIGNAL as DEFAULT_SHOT_LOCK_SIGNAL,
-    DEFAULT_STRENGTH_THRESHOLD, DEFAULT_THRESHOLD_MODE, DEFAULT_SETTLE_WAIT_MAX)
+    DEFAULT_STRENGTH_THRESHOLD, DEFAULT_THRESHOLD_MODE, DEFAULT_SETTLE_WAIT_MAX,
+    DEFAULT_GLIDE_DURATION)
 
 # Foreground Scale's own shot_lock defaults (ADR-452) -- entirely separate from
 # Convergence Plane's shot_lock defaults above, matching iw3/utils.py
@@ -2241,7 +2242,8 @@ class MainFrame(wx.Frame):
         self.lbl_convergence_lock_switch = wx.StaticText(
             self.grp_stereo, label=T("Switch Style"))
         self.cbo_convergence_lock_switch = wx.ComboBox(
-            self.grp_stereo, choices=["snap", "snap_ramp", "blend", "ease"], name="cbo_convergence_lock_switch")
+            self.grp_stereo, choices=["snap", "snap_ramp", "blend", "ease", "glide"],
+            name="cbo_convergence_lock_switch")
         self.cbo_convergence_lock_switch.SetEditable(False)
         self.cbo_convergence_lock_switch.SetStringSelection(DEFAULT_SHOT_LOCK_SWITCH)
         self.cbo_convergence_lock_switch.SetToolTip(
@@ -2261,11 +2263,36 @@ class MainFrame(wx.Frame):
               "of your values, never in between -- but glides there with a smooth, continuously-tapering "
               "chase (using Convergence Smoothing's own decay above) instead of a fixed-speed ramp. No "
               "hard start/stop, so it reads as invisible the way depth_percentile/clip_shot's own "
-              "smoothing does. Cut Transition Smoothing has no effect in this mode.\n"
-              "Recommended: ease if you want the transition itself to be invisible; snap_ramp with Cut "
-              "Transition Smoothing around 6-12 frames if you don't mind a visible but gentler fade -- try "
-              "them on your own footage, since which looks best is genuinely content-dependent."))
+              "smoothing does. Cut Transition Smoothing has no effect in this mode. CAVEAT: this chase is "
+              "always fastest in its very FIRST step and never truly finishes -- raising Convergence "
+              "Smoothing shrinks that first step, but only by making it linger longer afterward (it can "
+              "never fix both at once). If your Wide/Close-Up values are far apart, that first step can "
+              "still be noticeable.\n"
+              "glide (ADR-442): the SAME locked decision again, but moves there on a FIXED schedule (Glide "
+              "Duration below) shaped like a smooth camera move -- starts at zero speed, picks up in the "
+              "middle, then slows back to zero speed exactly as it lands on the new value. Fixes ease's "
+              "caveat directly: the first step is much smaller (no fast start), and it finishes cleanly on "
+              "schedule instead of trailing off. Convergence Smoothing/Cut Transition Smoothing have no "
+              "effect in this mode.\n"
+              "Recommended: glide if ease's first step still feels like a snap, especially with Wide/"
+              "Close-Up values far apart; ease if you'd rather it never fully stop adjusting; snap_ramp "
+              "with Cut Transition Smoothing around 6-12 frames if you don't mind a visible but gentler "
+              "fade -- try them on your own footage, since which looks best is genuinely content-dependent."))
         self.cbo_convergence_lock_switch.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_convergence_lock_switch)
+
+        self.lbl_convergence_lock_glide_duration = wx.StaticText(
+            self.grp_stereo, label=T("Glide Duration (frames)"))
+        self.cbo_convergence_lock_glide_duration = EditableComboBox(
+            self.grp_stereo, choices=["15", "30", "45", "60"],
+            name="cbo_convergence_lock_glide_duration")
+        self.cbo_convergence_lock_glide_duration.SetValue(f"{DEFAULT_GLIDE_DURATION}")
+        self.cbo_convergence_lock_glide_duration.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode with Switch Style set to glide. How many "
+              "frames the glide takes to go from the old value to the newly-locked one, start to finish -- "
+              "completely independent of Convergence Smoothing, which has no effect on glide at all.\n"
+              f"Default is {DEFAULT_GLIDE_DURATION} frames (roughly 1 second at 30fps, a little longer at "
+              "24fps). Shorter finishes faster but with a bigger first step (closer to snap); longer gives "
+              "an even gentler first step, at the cost of the transition staying visible for a bit longer."))
 
         self.lbl_convergence_lock_decide_speed = wx.StaticText(
             self.grp_stereo, label=T("Cut Decision Speed"))
@@ -4668,6 +4695,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_mid, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_switch, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_switch, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.lbl_convergence_lock_glide_duration, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_convergence_lock_glide_duration, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_decide_speed, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_decide_speed, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_signal, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12129,6 +12158,7 @@ class MainFrame(wx.Frame):
             self.cbo_convergence_lock_wide,
             self.cbo_convergence_lock_mid,
             self.cbo_convergence_lock_closeup,
+            self.cbo_convergence_lock_glide_duration,
             self.cbo_convergence_lock_decide_speed,
             self.cbo_convergence_lock_strength_threshold,
             self.cbo_convergence_lock_strength_threshold_low,
@@ -12585,6 +12615,7 @@ class MainFrame(wx.Frame):
         self.lbl_clip_shot_bias_strength.Enable(mode == "clip_shot")
         self.cbo_clip_shot_bias_strength.Enable(mode == "clip_shot")
         self.update_convergence_cut_smooth()
+        self.update_convergence_lock_glide_duration()
         self.update_convergence_subject_lock()
         self.update_sod_track_update_interval()
         self.update_shot_lock_signal()
@@ -12594,6 +12625,7 @@ class MainFrame(wx.Frame):
 
     def on_changed_cbo_convergence_lock_switch(self, event):
         self.update_convergence_cut_smooth()
+        self.update_convergence_lock_glide_duration()
 
     def on_changed_cbo_convergence_lock_signal(self, event):
         self.update_shot_lock_signal()
@@ -12708,6 +12740,16 @@ class MainFrame(wx.Frame):
               or (mode == "shot_lock" and self.cbo_convergence_lock_switch.GetValue() == "snap_ramp"))
         self.lbl_convergence_cut_smooth.Enable(on)
         self.cbo_convergence_cut_smooth.Enable(on)
+
+    def update_convergence_lock_glide_duration(self):
+        """ADR-442: mirrors update_convergence_cut_smooth()'s own pattern -- Glide
+        Duration only means something for shot_lock mode with Switch Style set to
+        glide specifically, same "only enabled for the one switch that reads it"
+        convention as Cut Transition Smoothing's own gating on snap_ramp."""
+        mode = self.cbo_convergence_mode.GetValue()
+        on = mode == "shot_lock" and self.cbo_convergence_lock_switch.GetValue() == "glide"
+        self.lbl_convergence_lock_glide_duration.Enable(on)
+        self.cbo_convergence_lock_glide_duration.Enable(on)
 
     def on_changed_chk_convergence_scene_hold(self, event):
         self.update_convergence_cut_smooth()
@@ -12969,6 +13011,7 @@ class MainFrame(wx.Frame):
             self.lbl_convergence_lock_mid, self.cbo_convergence_lock_mid,
             self.lbl_convergence_lock_closeup, self.cbo_convergence_lock_closeup,
             self.lbl_convergence_lock_switch, self.cbo_convergence_lock_switch,
+            self.lbl_convergence_lock_glide_duration, self.cbo_convergence_lock_glide_duration,
             self.lbl_convergence_lock_decide_speed, self.cbo_convergence_lock_decide_speed,
             self.lbl_convergence_lock_signal, self.cbo_convergence_lock_signal,
             self.lbl_convergence_lock_strength_threshold, self.cbo_convergence_lock_strength_threshold,
@@ -13620,6 +13663,11 @@ class MainFrame(wx.Frame):
                                allow_empty=False):
             self.show_validation_error_message(T("Max Extra Wait (frames)"), 1, 600)
             return None
+        # ADR-442: not allowed empty -- always meaningful once Switch Style is glide.
+        if not validate_number(self.cbo_convergence_lock_glide_duration.GetValue(), 1, 600,
+                               allow_empty=False):
+            self.show_validation_error_message(T("Glide Duration (frames)"), 1, 600)
+            return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
@@ -14123,6 +14171,8 @@ class MainFrame(wx.Frame):
                 self.cbo_convergence_lock_mid.GetValue()),
             convergence_lock_closeup=float(self.cbo_convergence_lock_closeup.GetValue()),
             convergence_lock_switch=self.cbo_convergence_lock_switch.GetValue(),
+            # ADR-442: glide switch only -- see shot_lock_estimator.py's own docstring.
+            convergence_lock_glide_duration=int(self.cbo_convergence_lock_glide_duration.GetValue()),
             # ADR-436: an empty box means "inherit Convergence Smoothing" -- None.
             convergence_lock_decide_speed=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_convergence_lock_decide_speed.GetValue()),
@@ -15551,6 +15601,10 @@ class MainFrame(wx.Frame):
                            getattr(args, "convergence_lock_closeup", DEFAULT_CLOSEUP_VALUE))
         _apply_combo_value(self.cbo_convergence_lock_switch,
                            getattr(args, "convergence_lock_switch", DEFAULT_SHOT_LOCK_SWITCH))
+        # ADR-442: glide switch only -- see shot_lock_estimator.py's own docstring.
+        _apply_combo_value(self.cbo_convergence_lock_glide_duration,
+                           getattr(args, "convergence_lock_glide_duration", DEFAULT_GLIDE_DURATION))
+        self.update_convergence_lock_glide_duration()
         # ADR-436: None (inherit Convergence Smoothing) must restore to an empty
         # box, same reasoning as Mid Shot Value just above.
         _decide_speed_restore = getattr(args, "convergence_lock_decide_speed", None)
@@ -38004,6 +38058,135 @@ def _self_test_shot_lock_ease_switch():
     print("_self_test_shot_lock_ease_switch: PASS")
 
 
+def _self_test_shot_lock_glide_switch():
+    """ADR-442: real follow-up to ease -- decker's own real Wide(0.50)->Close-
+    Up(0.0) cut still looked like a visible "snap" even with ease, because
+    ease's exponential chase is always fastest in its very first step. `glide`
+    must be a real, selectable Switch Style with its own "Glide Duration
+    (frames)" field (enabled only for glide, independent of Convergence
+    Smoothing/Cut Transition Smoothing, both of which stay disabled for it);
+    must round-trip through parse_args()/the CLI/restore; and the actual
+    curve math (_glide_toward) must have a much smaller first step than
+    ease's, land EXACTLY on the target at the configured duration (no
+    lingering tail), and correctly retarget mid-glide from wherever the
+    output currently sits when a new decision locks in before the previous
+    glide finished."""
+    import torch
+    import wx
+    from . import utils as U
+    from .shot_lock_estimator import ShotLockEstimator, DEFAULT_GLIDE_DURATION
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert "glide" in list(frame.cbo_convergence_lock_switch.GetItems())
+
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        assert not frame.cbo_convergence_lock_glide_duration.IsEnabled(), \
+            "must stay off for the default switch (snap_ramp)"
+        assert frame.cbo_convergence_lock_glide_duration.GetValue() == f"{DEFAULT_GLIDE_DURATION}"
+
+        frame.cbo_convergence_lock_switch.SetValue("glide")
+        frame.on_changed_cbo_convergence_lock_switch(wx.CommandEvent())
+        assert frame.cbo_convergence_lock_glide_duration.IsEnabled()
+        assert not frame.cbo_convergence_cut_smooth.IsEnabled(), \
+            "Cut Transition Smoothing must stay off for glide too -- it has no effect in this mode"
+
+        frame.cbo_convergence_lock_glide_duration.SetValue("45")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_switch == "glide"
+        assert args.convergence_lock_glide_duration == 45
+
+        cmd = frame.get_cli_command()
+        assert "glide" in cmd, cmd
+        assert "--convergence-lock-glide-duration" in cmd and "45" in cmd, cmd
+
+        # Restoring the default duration must bring the box back to it.
+        frame.cbo_convergence_lock_glide_duration.SetValue("99")
+        frame.apply_parsed_args_to_gui(
+            U.create_parser(required_true=False).parse_args(
+                ["-i", "a.mp4", "-o", "o", "--convergence-mode", "shot_lock",
+                 "--convergence-lock-switch", "glide"]))
+        assert frame.cbo_convergence_lock_glide_duration.GetValue() == f"{DEFAULT_GLIDE_DURATION}"
+        assert frame.cbo_convergence_lock_glide_duration.IsEnabled()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    parser = U.create_parser(required_true=False)
+    reparsed = parser.parse_args(["-i", "a.mp4", "-o", "o", "--metadata", "filename",
+                                  "--convergence-mode", "shot_lock",
+                                  "--convergence-lock-switch", "glide",
+                                  "--convergence-lock-glide-duration", "45"])
+    assert reparsed.convergence_lock_switch == "glide"
+    assert reparsed.convergence_lock_glide_duration == 45
+
+    # Filename/metadata tags: the duration tag only appears when overridden.
+    args_default = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-switch", "glide"])
+    args_default.video_extension = ".mkv"
+    name_default = U.make_output_filename("movie.mp4", args_default, video=True)
+    assert "glide" in name_default and "glidedur" not in name_default, name_default
+    assert "iw3_convergence_lock_glide_duration" not in U._build_iw3_comment_metadata(args_default, video=True)
+    args_custom = U.create_parser(required_true=False).parse_args(
+        ["-i", "a.mp4", "-o", "o", "--metadata", "filename", "--convergence-mode", "shot_lock",
+         "--convergence-lock-switch", "glide", "--convergence-lock-glide-duration", "45"])
+    args_custom.video_extension = ".mkv"
+    name_custom = U.make_output_filename("movie.mp4", args_custom, video=True)
+    assert "glidedur45" in name_custom, name_custom
+    meta_custom = U._build_iw3_comment_metadata(args_custom, video=True)
+    assert "iw3_convergence_lock_glide_duration=45" in meta_custom
+
+    # The actual curve math -- decker's own real numbers (Wide 0.50 -> Close-Up
+    # 0.0), bypassing __init__ (no CLIP model needed for this pure-math check).
+    depth = torch.zeros(1, 1, 2, 2)
+    est = ShotLockEstimator(wide_value=0.50, closeup_value=0.0, device_id=-1,
+                             switch="glide", glide_duration=30, decide_speed=0.0,
+                             signal="divergence", strength_threshold=4.0,
+                             strength_threshold_low=3.7)
+    for _ in range(60):
+        v = est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=4.5).item()
+    assert abs(v - 0.50) < 1e-6, "must have settled at the Wide value before the cut"
+
+    est._pending_scene_reset = True
+    out = []
+    for _ in range(40):
+        out.append(est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False],
+                        divergence=3.0).item())
+    decide_at = est._decide_settle - 1  # 0-indexed: first frame the decision has landed
+    first_step = out[decide_at] - 0.50
+    assert abs(first_step) < 0.003, \
+        f"glide's first step must be much smaller than ease's (~-0.025 at decay 0.95), got {first_step}"
+    assert abs(out[-1] - 0.0) < 1e-6, \
+        f"must land EXACTLY on the target once glide_duration elapses, got {out[-1]}"
+
+    # Mid-glide retargeting: a new decision locks in before the previous glide
+    # finished -- must chase from wherever the output currently sits, not from
+    # the original scene's starting value (0.50) or the interrupted target (0.0).
+    est2 = ShotLockEstimator(wide_value=1.0, closeup_value=0.0, device_id=-1,
+                              switch="glide", glide_duration=30, decide_speed=0.0,
+                              signal="divergence", strength_threshold=4.0)
+    for _ in range(10):
+        est2(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=4.5)
+    est2._pending_scene_reset = True
+    mid_value = None
+    for _ in range(10):
+        mid_value = est2(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False],
+                          divergence=1.0).item()
+    assert 0.0 < mid_value < 1.0, f"should be partway through the glide toward 0.0, got {mid_value}"
+    est2._pending_scene_reset = True
+    retarget_first = est2(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False],
+                          divergence=4.5).item()
+    assert abs(retarget_first - mid_value) < 1e-9, \
+        "mid-glide retarget's held frames must stay exactly where the interrupted glide was"
+
+    print("_self_test_shot_lock_glide_switch: PASS")
+
+
 def _self_test_shot_lock_decide_speed():
     """ADR-436: real follow-up question -- "how can we make the switch between
     scenes instant but invisible?" The actual bottleneck was never the Switch
@@ -41608,6 +41791,7 @@ def _run_self_tests():
         _self_test_shot_lock_divergence_signal_three_way,
         _self_test_shot_lock_divergence_nearest_mode,
         _self_test_shot_lock_wait_for_settle_gui_and_cli,
+        _self_test_shot_lock_glide_switch,
         _self_test_clip_shot_symmetric_gui_and_cli,
         _self_test_make_output_filename_length_cap,
         _self_test_direct_mvc_output_folder_resolution,

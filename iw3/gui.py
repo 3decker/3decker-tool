@@ -3809,10 +3809,28 @@ class MainFrame(wx.Frame):
         self.sld_stereo_depth_curve_match_strength = _build_stereo_slider(
             self.cpn_depth_curve_match.GetPane(), self.cbo_depth_curve_match_strength, 0.0, 1.0, 100)
 
+        self.lbl_depth_curve_match_path = wx.StaticText(
+            self.cpn_depth_curve_match.GetPane(), label=T("Curve File"))
+        self.txt_depth_curve_match_path = wx.TextCtrl(
+            self.cpn_depth_curve_match.GetPane(), name="txt_depth_curve_match_path")
+        self.txt_depth_curve_match_path.SetToolTip(
+            T("Which saved curve file to use. Leave blank to use the default one the \"Calibrate...\" "
+              "button below saves to (nunif/tmp/depth_curve_match.json) -- that's what every job used "
+              "before this field existed, and still what an empty box means.\n"
+              "Only useful if you've calibrated more than one curve under different names (the "
+              "Calibrate dialog's \"Save Curve As\" field) and want to pick which one a job actually "
+              "uses, e.g. to compare two calibration attempts side by side.\n"
+              "Recommended: leave blank unless you specifically have more than one saved curve."))
+        self.txt_depth_curve_match_path.Bind(wx.EVT_TEXT, self.on_change_txt_depth_curve_match_path)
+        self.btn_depth_curve_match_browse = wx.Button(
+            self.cpn_depth_curve_match.GetPane(), label=T("Browse..."))
+        self.btn_depth_curve_match_browse.SetToolTip(T("Pick a previously saved curve .json file."))
+        self.btn_depth_curve_match_browse.Bind(wx.EVT_BUTTON, self.on_click_btn_depth_curve_match_browse)
+
         self.lbl_depth_curve_match_status = wx.StaticText(
             self.cpn_depth_curve_match.GetPane(), label=T("No curve calibrated yet"))
         self.lbl_depth_curve_match_status.SetToolTip(
-            T("Shows which curve is currently calibrated (source model -> target model, how many "
+            T("Shows which curve is currently selected above (source model -> target model, how many "
               "sample frames it was built from, and when) -- there is nothing to type in by hand; "
               "the \"Calibrate...\" button builds this automatically from a short real sample clip."))
 
@@ -4874,6 +4892,10 @@ class MainFrame(wx.Frame):
         dcm_layout.Add(self.lbl_depth_curve_match_strength, (dk, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         dcm_layout.Add(self.cbo_depth_curve_match_strength, (dk, 1), (1, 2), flag=wx.EXPAND)
         dcm_layout.Add(self.sld_stereo_depth_curve_match_strength, (dk := dk + 1, 1), (1, 2), flag=wx.EXPAND)
+        dcm_layout.Add(self.lbl_depth_curve_match_path, (dk := dk + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        dcm_layout.Add(self.txt_depth_curve_match_path, (dk, 1), flag=wx.EXPAND)
+        dcm_layout.Add(self.btn_depth_curve_match_browse, (dk, 2), flag=wx.EXPAND)
+        dcm_layout.AddGrowableCol(1)
         dcm_layout.Add(self.lbl_depth_curve_match_status, (dk := dk + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         dcm_layout.Add(self.btn_depth_curve_match_calibrate, (dk := dk + 1, 0), (1, 3), flag=wx.EXPAND)
         self.cpn_depth_curve_match.GetPane().SetSizer(dcm_layout)
@@ -14115,6 +14137,7 @@ class MainFrame(wx.Frame):
             midground_threshold_high=float(self.cbo_midground_threshold_high.GetValue()) / 100.0,
             pop_feather=float(self.cbo_pop_feather.GetValue()) / 100.0,
             depth_curve_match_strength=float(self.cbo_depth_curve_match_strength.GetValue()),
+            depth_curve_match_path=(self.txt_depth_curve_match_path.GetValue().strip() or None),
             edge_repair_strength=float(self.cbo_edge_repair.GetValue()),
             sharpen=self.chk_sharpen.GetValue(),
             sharpen_strength=float(self.cbo_sharpen_strength.GetValue()),
@@ -15599,6 +15622,8 @@ class MainFrame(wx.Frame):
         _apply_combo_value(self.cbo_pop_feather, getattr(args, "pop_feather", 0.0) * 100.0)
         _apply_combo_value(self.cbo_depth_curve_match_strength,
                             getattr(args, "depth_curve_match_strength", 0.0) or 0.0)
+        self.txt_depth_curve_match_path.SetValue(getattr(args, "depth_curve_match_path", None) or "")
+        self._refresh_depth_curve_match_status()
         _apply_combo_value(self.cbo_edge_repair, args.edge_repair_strength)
         self.chk_sharpen.SetValue(bool(args.sharpen))
         _apply_combo_value(self.cbo_sharpen_strength, args.sharpen_strength)
@@ -18095,11 +18120,12 @@ class MainFrame(wx.Frame):
     # --- Depth Curve Match calibration (ADR-467, standalone tool) ---
 
     def _refresh_depth_curve_match_status(self):
-        """Reads whatever curve file currently exists (if any) and updates the
-        status label in the Depth Curve Match pane -- the real answer to "where do
-        I find the curve values": nowhere to type in by hand, just this readout."""
+        """Reads whatever curve file is currently selected (the Curve File box, or
+        the default location when that's left blank) and updates the status label
+        in the Depth Curve Match pane -- the real answer to "where do I find the
+        curve values": nowhere to type in by hand, just this readout."""
         from .depth_curve_match import DepthCurveMatcher
-        matcher = DepthCurveMatcher()
+        matcher = DepthCurveMatcher(self.txt_depth_curve_match_path.GetValue().strip() or None)
         if matcher.enabled and matcher.meta:
             meta = matcher.meta
             self.lbl_depth_curve_match_status.SetLabel(
@@ -18109,6 +18135,20 @@ class MainFrame(wx.Frame):
         else:
             self.lbl_depth_curve_match_status.SetLabel(T("No curve calibrated yet"))
         self.lbl_depth_curve_match_status.GetContainingSizer().Layout()
+
+    def on_change_txt_depth_curve_match_path(self, event):
+        self._refresh_depth_curve_match_status()
+
+    def on_click_btn_depth_curve_match_browse(self, event):
+        from .depth_curve_match import DEFAULT_CURVE_PATH
+        with wx.FileDialog(self, message=T("Select Curve File"),
+                           wildcard="JSON (*.json)|*.json|" + T("All files") + " (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            current = self.txt_depth_curve_match_path.GetValue().strip() or DEFAULT_CURVE_PATH
+            if path.exists(path.dirname(current)):
+                dlg.SetDirectory(path.dirname(current))
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_depth_curve_match_path.SetValue(dlg.GetPath())
 
     def _depth_model_settings_argv(self):
         """ADR-469/470: the SAME depth-MODEL-level settings (Object Stability, Depth

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 17, 2026
+## Latest Update — November 18, 2026
+
+**Added: a "Curve File" box in Depth Curve Match, so you can choose which saved calibration a job actually uses.** Previously the setting always silently loaded the one fixed file every "Calibrate..." run would overwrite — there was no way to point a job at a different saved curve, even though the Calibrate dialog already let you save different attempts under different names for comparison. Now there's a text box with a "Browse..." button right above the status line: leave it blank to keep using the default file (exactly like before), or pick any other saved curve .json file to use that one instead. The status line, the pre-start warning, and the job log all follow whichever file you pick.
+
+## Update — November 17, 2026
 
 **Added: "Depth Curve Match" — a new, Expert-only option that lets a flatter-looking depth model borrow the "big pop" look of a punchier one, without the cost of running both models on every job.** If you switch your Depth Model to something more stable frame-to-frame (like VDA_L) but miss the bigger near/far separation another model (like Any_V3_Metric_Large) used to give you, this reshapes the new model's depth so its overall "spread" resembles the other one's — not just stretching the same numbers like the Foreground/Midground/Background Pop sliders already do, but genuinely borrowing the other model's distinctive look. You set it up once with a new "Calibrate..." button, which runs a short minute-or-two sample clip (not your whole movie) through both models one time and saves the result — every job after that just loads the saved result automatically, with nothing to look up or type in by hand. Off by default, zero cost unless you calibrate and turn it on.
 

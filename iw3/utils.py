@@ -6160,6 +6160,20 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         if matcher is None:
             matcher = DepthCurveMatcher(getattr(args, "depth_curve_match_path", None))
             args.state["_depth_curve_matcher"] = matcher
+            # ADR-471: this used to apply with zero trace in the job log -- the
+            # setting being on (--depth-curve-match-strength) never proved the
+            # curve file actually loaded. One line, once per job, same style as
+            # nt_auto3d's own "iw3 auto strength: ..." line.
+            if matcher.enabled and matcher.meta:
+                meta = matcher.meta
+                print(f"iw3 depth curve match: {meta.get('source_model', '?')} -> "
+                      f"{meta.get('target_model', '?')} ({meta.get('frame_count', '?')} frames, "
+                      f"{meta.get('calibrated_at', '?')}), strength {depth_curve_match_strength:.2f}",
+                      file=sys.stderr, flush=True)
+            else:
+                print(f"iw3 depth curve match: strength {depth_curve_match_strength:.2f} set but no "
+                      f"calibrated curve found at {matcher.file_path} -- no effect applied",
+                      file=sys.stderr, flush=True)
         if matcher.enabled:
             depth = matcher.to(depth.device).apply(depth, strength=depth_curve_match_strength)
 

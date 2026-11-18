@@ -13338,6 +13338,34 @@ class MainFrame(wx.Frame):
     def on_changed_chk_temporal_stabilize(self, event):
         self.update_temporal_stabilize()
 
+    def confirm_depth_curve_match(self, args):
+        """ADR-471: --depth-curve-match-strength can be left on with no curve
+        ever calibrated, or with a curve file that later went missing/corrupt
+        (e.g. tmp/ wiped, or a different "Save Curve As" path than the default
+        one iw3 actually reads at job time) -- previously this silently ran the
+        whole job with zero curve effect and zero warning anywhere, discoverable
+        only after the fact by reading the job log's new ADR-471 confirmation
+        line. Catches the same case here, before the job starts, with a real
+        popup -- by the time that log line would print, the user has already
+        walked away."""
+        depth_curve_match_strength = getattr(args, "depth_curve_match_strength", 0.0) or 0.0
+        if depth_curve_match_strength <= 0.0:
+            return True
+        from .depth_curve_match import DepthCurveMatcher
+        matcher = DepthCurveMatcher(getattr(args, "depth_curve_match_path", None))
+        if matcher.enabled:
+            return True
+        with wx.MessageDialog(
+                None,
+                message=T("Depth Curve Match is set to Strength {} but no calibrated curve "
+                           "file was found at:\n{}\n\n"
+                           "The job will run with the depth model's own raw output -- no curve "
+                           "matching will be applied.\n\nContinue anyway?").format(
+                               depth_curve_match_strength, matcher.file_path),
+                caption=T("Depth Curve Match not calibrated"),
+                style=wx.YES_NO | wx.ICON_WARNING) as dlg:
+            return dlg.ShowModal() == wx.ID_YES
+
     def confirm_overwrite(self, args):
         input_path = args.input
         output_path = args.output
@@ -14445,6 +14473,8 @@ class MainFrame(wx.Frame):
         if args is None:
             return
         if not self.confirm_overwrite(args):
+            return
+        if not self.confirm_depth_curve_match(args):
             return
 
         self.btn_autocrop_test.Disable()

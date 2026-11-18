@@ -136,8 +136,8 @@ through, so there's no ordering/staleness issue); with Auto 3D Strength off
 it's just the single static --divergence number for the whole movie, so
 there is nothing real to classify against (documented limitation, not a
 bug). `strength_threshold` (--convergence-lock-strength-threshold) is the
-single cutoff line: above it locks `wide_value` (relabeled "High Strength
-Value" in the GUI for this signal), at or below locks `closeup_value`
+single cutoff line: at or above it locks `wide_value` (relabeled "High
+Strength Value" in the GUI for this signal), below it locks `closeup_value`
 ("Low Strength Value"). Implemented as a pre-classification step that turns
 the real divergence value straight into a binary 0/1 "closeness" (see
 `__call__`) -- _classify()/_blend_value() need no changes at all, since a
@@ -157,8 +157,8 @@ fixed 1/3..2/3 zones. `strength_threshold_low` (--convergence-lock-
 strength-threshold-low, None/empty by default) is the second cutoff --
 ADR-437's existing `strength_threshold` is the HIGH one. With it unset
 (default), behavior is byte-for-byte unchanged from ADR-437 (a plain 2-way
-split: above `strength_threshold` -> wide_value, at or below ->
-closeup_value). Set it, and a 3-way split turns on: above
+split: at or above `strength_threshold` -> wide_value, below ->
+closeup_value). Set it, and a 3-way split turns on: at or above
 `strength_threshold` -> wide_value; at or below `strength_threshold_low`
 -> closeup_value; the band between the two -> `mid_value` (Mid Shot Value,
 no longer disabled for this signal -- it simply has no effect while this
@@ -365,12 +365,13 @@ class ShotLockEstimator():
         return self.tracker.update(locked_value)
 
     def _closeness_for_divergence(self, divergence):
-        """ADR-437/438/439: reduces the real divergence value to the same 0..1
+        """ADR-437/438/439/440: reduces the real divergence value to the same 0..1
         "closeness" _classify()/_blend_value() already expect -- see module
         docstring.
 
-        threshold_mode="range" (default, ADR-437/438 unchanged): above
-        strength_threshold -> 0.0 (wide_value, "High Strength Value"). With
+        threshold_mode="range" (default, ADR-437/438 unchanged; ADR-440 made
+        the High side inclusive): at or above strength_threshold -> 0.0
+        (wide_value, "High Strength Value"). With
         strength_threshold_low unset (ADR-437, a plain 2-way split): anything
         else -> 1.0 (closeup_value, "Low Strength Value"). With it set
         (ADR-438, 3-way): at or below it -> 1.0; the band between the two
@@ -384,7 +385,17 @@ class ShotLockEstimator():
         to the real divergence value and returns THAT candidate's own pseudo-
         closeness. With only the High reference available (nothing else set),
         falls back to the same single-cutoff rule "range" mode uses for that
-        same base case, since there's nothing to compare distances against."""
+        same base case, since there's nothing to compare distances against.
+
+        ADR-440: real user report -- "I noticed any scene that falls on 4.0
+        of 3D strength uses Mid, I thought it would fall on Wide. I want any
+        scene with 3D strength that falls on 4.0 or higher to fall on Wide."
+        The High threshold comparison was strict ">" (so a scene scanning at
+        exactly 4.0 with strength_threshold=4.0 fell through to Mid/Low, not
+        Wide) -- changed to ">=" on both the "range" cutoff line and the
+        "nearest" single-candidate fallback above, so the value typed into
+        "Strength Threshold (High)" is now itself the first value that counts
+        as Wide, matching how the GUI label reads."""
         if divergence is None:
             return 1.0
         divergence = float(divergence)
@@ -395,9 +406,9 @@ class ShotLockEstimator():
             if self.strength_threshold_low is not None:
                 candidates.append((self.strength_threshold_low, 1.0))
             if len(candidates) == 1:
-                return 0.0 if divergence > self.strength_threshold else 1.0
+                return 0.0 if divergence >= self.strength_threshold else 1.0
             return min(candidates, key=lambda pair: abs(divergence - pair[0]))[1]
-        if divergence > self.strength_threshold:
+        if divergence >= self.strength_threshold:
             return 0.0
         if self.strength_threshold_low is not None and divergence <= self.strength_threshold_low:
             return 1.0

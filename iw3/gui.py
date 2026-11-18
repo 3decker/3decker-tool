@@ -2324,17 +2324,17 @@ class MainFrame(wx.Frame):
         self.cbo_convergence_lock_strength_threshold.SetToolTip(
             T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence.\n"
               "With Strength Match Mode set to range (default): the HIGH cutoff line on the 3D Strength "
-              "scale -- scenes using a 3D Strength ABOVE this number lock in Wide/High Strength Value. "
-              "Everything at or below it locks in Close-Up/Low Strength Value, UNLESS Strength Threshold "
-              "(Low) below is also set -- then it locks in Mid Shot Value instead, down to that second "
-              "cutoff.\n"
+              "scale -- scenes using a 3D Strength AT OR ABOVE this number (so a scene scanning at exactly "
+              "this value counts as Wide too) lock in Wide/High Strength Value. Everything below it locks "
+              "in Close-Up/Low Strength Value, UNLESS Strength Threshold (Low) below is also set -- then "
+              "it locks in Mid Shot Value instead, down to that second cutoff.\n"
               "With Strength Match Mode set to nearest: this is the High reference point instead -- a "
               "scene's real 3D Strength picks whichever of High/Mid/Low it's numerically closest to.\n"
-              "IMPORTANT: \"above this = Wide\" assumes Auto 3D Strength's own Invert option is ON (wide "
-              "shots then land at the HIGH end of your 3D Strength numbers). With Invert OFF, it's the "
-              "opposite -- close-ups land at the high end -- so check your own 3D Strength log file for "
-              "which shots actually sit above vs. below this number before relying on the Wide/Close-Up "
-              "labels.\n"
+              "IMPORTANT: \"at or above this = Wide\" assumes Auto 3D Strength's own Invert option is ON "
+              "(wide shots then land at the HIGH end of your 3D Strength numbers). With Invert OFF, it's "
+              "the opposite -- close-ups land at the high end -- so check your own 3D Strength log file "
+              "for which shots actually sit above vs. below this number before relying on the Wide/"
+              "Close-Up labels.\n"
               "Recommended: pick a number that actually sits between the 3D Strength values your own "
               "footage tends to use -- for example, if close-up scenes usually land around 3.8 and wider "
               "scenes around 3.9 or higher, 3.85 would be a clean cutoff between them. Check your own "
@@ -2351,12 +2351,14 @@ class MainFrame(wx.Frame):
               "With Strength Match Mode set to range (default): a SECOND cutoff line, turning the plain "
               "above/below split into a 3-way one -- scenes using a 3D Strength AT OR BELOW this number "
               "lock in Close-Up/Low Strength Value; scenes BETWEEN this and Strength Threshold (High) "
-              "above lock in Mid Shot Value instead. Leave empty (default) to keep the plain 2-way split.\n"
+              "(not including this box's own number, since that's Close-Up, but including Strength "
+              "Threshold (High)'s own number, since that's Wide) lock in Mid Shot Value instead. Leave "
+              "empty (default) to keep the plain 2-way split.\n"
               "With Strength Match Mode set to nearest: this is the Low reference point instead -- leave "
               "empty to compare only against High (and Mid, if set).\n"
               "Example (range mode): Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.40 -- "
-              "anything over 3.9 uses your High Strength Value, anything from 3.7 up to 3.9 uses 0.40, "
-              "anything under 3.7 uses your Low Strength Value.\n"
+              "3.9 or higher uses your High Strength Value, anything from just above 3.7 up to 3.9 uses "
+              "0.40, 3.7 or under uses your Low Strength Value.\n"
               "Same Invert caveat as Strength Threshold (High) above: \"at or below this = Close-Up\" "
               "assumes Auto 3D Strength's Invert option is ON."))
 
@@ -2369,9 +2371,9 @@ class MainFrame(wx.Frame):
         self.cbo_convergence_lock_threshold_mode.SetToolTip(
             T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence. How the "
               "Strength Threshold boxes decide which value a scene gets.\n"
-              "range (default): draws cutoff LINES -- above Strength Threshold (High) uses High Strength "
-              "Value, at or below Strength Threshold (Low) uses Low Strength Value (if that box is set), "
-              "the band between uses Mid Shot Value.\n"
+              "range (default): draws cutoff LINES -- at or above Strength Threshold (High) uses High "
+              "Strength Value, at or below Strength Threshold (Low) uses Low Strength Value (if that box "
+              "is set), the band between uses Mid Shot Value.\n"
               "nearest: instead gives each value its OWN single reference number -- Strength Threshold "
               "(High), (Mid), and (Low) -- and picks whichever one the scene's real 3D Strength is "
               "numerically closest to. Example: High=3.9, Mid=3.8, Low=3.2 -- a scene at 3.6 is closest "
@@ -2927,17 +2929,18 @@ class MainFrame(wx.Frame):
             f"{DEFAULT_FOREGROUND_SCALE_LOCK_THRESHOLD_HIGH:.2f}")
         self.cbo_foreground_scale_lock_threshold_high.SetToolTip(
             T("Only affects Shot Lock Foreground Scale Mode. The HIGH cutoff line on the 3D Strength "
-              "scale -- scenes using a 3D Strength ABOVE this number lock in Wide Shot Value. Everything "
-              "at or below it locks in Close-Up Value, UNLESS Strength Threshold (Low) below is also "
-              "set -- then it locks in Mid Shot Value instead, down to that second cutoff.\n"
+              "scale -- scenes using a 3D Strength AT OR ABOVE this number (so a scene scanning at "
+              "exactly this value counts as Wide too) lock in Wide Shot Value. Everything below it "
+              "locks in Close-Up Value, UNLESS Strength Threshold (Low) below is also set -- then it "
+              "locks in Mid Shot Value instead, down to that second cutoff.\n"
               "Entirely separate from Convergence Plane's own Strength Threshold (High) -- the two "
               "settings compare against the same kind of 3D Strength number but keep their own "
               "independent cutoff.\n"
-              "IMPORTANT: \"above this = Wide\" assumes Auto 3D Strength's own Invert option is ON (wide "
-              "shots then land at the HIGH end of your 3D Strength numbers). With Invert OFF, it's the "
-              "opposite -- close-ups land at the high end -- so check your own 3D Strength log file for "
-              "which shots actually sit above vs. below this number before relying on the Wide/Close-Up "
-              "labels.\n"
+              "IMPORTANT: \"at or above this = Wide\" assumes Auto 3D Strength's own Invert option is "
+              "ON (wide shots then land at the HIGH end of your 3D Strength numbers). With Invert OFF, "
+              "it's the opposite -- close-ups land at the high end -- so check your own 3D Strength log "
+              "file for which shots actually sit above vs. below this number before relying on the "
+              "Wide/Close-Up labels.\n"
               "Recommended: pick a number that actually sits between the 3D Strength values your own "
               "footage tends to use -- check your own 3D Strength log file to see the real numbers."))
 
@@ -2950,11 +2953,13 @@ class MainFrame(wx.Frame):
         self.cbo_foreground_scale_lock_threshold_low.SetToolTip(
             T("Only affects Shot Lock Foreground Scale Mode. A SECOND cutoff line, turning the plain "
               "above/below split into a 3-way one -- scenes using a 3D Strength AT OR BELOW this number "
-              "lock in Close-Up Value; scenes BETWEEN this and Strength Threshold (High) above lock in "
-              "Mid Shot Value instead. Leave empty (default) to keep the plain 2-way split.\n"
+              "lock in Close-Up Value; scenes BETWEEN this and Strength Threshold (High) (not including "
+              "this box's own number, since that's Close-Up, but including Strength Threshold (High)'s "
+              "own number, since that's Wide) lock in Mid Shot Value instead. Leave empty (default) to "
+              "keep the plain 2-way split.\n"
               "Entirely separate from Convergence Plane's own Strength Threshold (Low).\n"
-              "Example: Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.0 -- anything over "
-              "3.9 uses Wide Shot Value, anything from 3.7 up to 3.9 uses 0.0, anything under 3.7 uses "
+              "Example: Strength Threshold (High) 3.9, this box 3.7, Mid Shot Value 0.0 -- 3.9 or higher "
+              "uses Wide Shot Value, anything from just above 3.7 up to 3.9 uses 0.0, 3.7 or under uses "
               "Close-Up Value.\n"
               "Same Invert caveat as Strength Threshold (High) above: \"at or below this = Close-Up\" "
               "assumes Auto 3D Strength's Invert option is ON."))
@@ -38141,15 +38146,25 @@ def _self_test_shot_lock_divergence_signal():
     assert abs(high_locked - 0.60) < 1e-5, \
         f"3.9 (above 3.85) must lock the high-strength value, got {high_locked}"
 
+    # ADR-440: the threshold value itself is now inclusive -- exactly 3.85 must
+    # also lock the high-strength value, not fall through to low/mid.
+    est._pending_scene_reset = True
+    at_threshold_locked = None
+    for _ in range(30):
+        v = est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=3.85).item()
+        at_threshold_locked = v
+    assert abs(at_threshold_locked - 0.60) < 1e-5, \
+        f"3.85 (exactly at the threshold) must lock the high-strength value (ADR-440), got {at_threshold_locked}"
+
     # A real new scene (log_reset_pts marks the end of the previous one) with a
-    # divergence value AT OR BELOW the threshold must lock the low-strength value.
+    # divergence value strictly BELOW the threshold must lock the low-strength value.
     est._pending_scene_reset = True
     low_locked = None
     for _ in range(30):
         v = est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=3.8).item()
         low_locked = v
     assert abs(low_locked - 0.10) < 1e-5, \
-        f"3.8 (at the threshold, not above it) must lock the low-strength value, got {low_locked}"
+        f"3.8 (below the threshold) must lock the low-strength value, got {low_locked}"
 
     print("_self_test_shot_lock_divergence_signal: PASS")
 
@@ -38264,7 +38279,9 @@ def _self_test_shot_lock_divergence_signal_three_way():
         return v
 
     assert abs(lock_for(4.9) - 0.60) < 1e-5, "well above the high threshold must lock the high value"
-    assert abs(lock_for(3.9) - 0.40) < 1e-5, "AT the high threshold (not above it) must lock the mid value"
+    # ADR-440: the high threshold is inclusive -- AT it now locks High, not Mid.
+    assert abs(lock_for(3.9) - 0.60) < 1e-5, "AT the high threshold must lock the high value (ADR-440)"
+    assert abs(lock_for(3.89) - 0.40) < 1e-5, "just under the high threshold must lock the mid value"
     assert abs(lock_for(3.8) - 0.40) < 1e-5, "between the two thresholds must lock the mid value"
     assert abs(lock_for(3.7) - 0.20) < 1e-5, "AT the low threshold (not above it) must lock the low value"
     assert abs(lock_for(3.2) - 0.20) < 1e-5, "well below the low threshold must lock the low value"
@@ -40026,6 +40043,35 @@ def _self_test_foreground_scale_lock_gui_and_cli():
     print("_self_test_foreground_scale_lock_gui_and_cli: PASS")
 
 
+def _self_test_foreground_scale_lock_classify_boundary():
+    """ADR-440: ForegroundScaleEstimator._classify() must treat threshold_high
+    as inclusive ("at or above" = Wide), not strictly "above" -- same fix,
+    same reasoning as ShotLockEstimator._closeness_for_divergence(), applied
+    separately here since this module deliberately doesn't share code with
+    that one (see module docstring)."""
+    from .foreground_scale_estimator import ForegroundScaleEstimator
+
+    est = object.__new__(ForegroundScaleEstimator)
+    est.wide_value, est.closeup_value, est.mid_value = 0.60, 0.20, 0.40
+    est.threshold_high = 3.9
+    est.threshold_low = 3.7
+
+    assert est._classify(4.9) == 0.60, "well above the high threshold must lock the high value"
+    assert est._classify(3.9) == 0.60, "AT the high threshold must lock the high value (ADR-440)"
+    assert est._classify(3.89) == 0.40, "just under the high threshold must lock the mid value"
+    assert est._classify(3.8) == 0.40, "between the two thresholds must lock the mid value"
+    assert est._classify(3.7) == 0.20, "AT the low threshold (not above it) must lock the low value"
+    assert est._classify(3.2) == 0.20, "well below the low threshold must lock the low value"
+
+    # 2-way split (threshold_low unset): the threshold itself is still inclusive.
+    est.threshold_low = None
+    est.mid_value = None
+    assert est._classify(3.9) == 0.60, "AT the high threshold must lock the high value even in the 2-way split"
+    assert est._classify(3.89) == 0.20, "just under the high threshold must lock the close-up value"
+
+    print("_self_test_foreground_scale_lock_classify_boundary: PASS")
+
+
 def _self_test_foreground_scale_lock_mid_disabled():
     """ADR-452: Foreground Scale's own Mid Shot Value and Strength Threshold
     (Low) must each be independently leavable empty, mirroring Convergence
@@ -41343,6 +41389,7 @@ def _run_self_tests():
         _self_test_postprocess_image_always_even,
         _self_test_foreground_scale_lock_gui_and_cli,
         _self_test_foreground_scale_lock_mid_disabled,
+        _self_test_foreground_scale_lock_classify_boundary,
         _self_test_edge_dilation_lock_gui_and_cli,
         _self_test_edge_dilation_lock_mid_disabled,
         _self_test_foreground_scale_scene_log_gui_and_cli,

@@ -48,6 +48,15 @@ already exact/non-stale for every call) -- there is nothing for them to fix
 here. With `switch="ease"`, `_mapper_fn_for_cache` is deliberately left
 empty/unused: the eased value is a continuously-varying float, so caching by
 value would only ever grow the dict by one new, never-reused entry per call.
+
+ADR-440: real user report, found on Convergence Plane's shot_lock first and
+then confirmed to apply here too, since this module was deliberately NOT a
+reuse of `ShotLockEstimator` (see above) -- a scene scanning at exactly
+`threshold_high` was falling through to Mid/Close-up instead of Wide, because
+`_classify()` used strict `divergence > self.threshold_high`. Changed to
+`>=`, so the typed-in High threshold value is itself the first value that
+counts as Wide, matching `ShotLockEstimator`'s own ADR-440 fix and the GUI
+tooltip wording.
 """
 from .mapper import resolve_mapper_name, get_mapper
 
@@ -82,11 +91,17 @@ class ForegroundScaleEstimator():
         """Same "range" rule as `ShotLockEstimator._closeness_for_divergence()` +
         `_classify()` combined (see those for the full rationale) -- no closeness
         indirection needed here since this module never supports the `clip`/
-        `nearest` modes those two methods exist to also cover."""
+        `nearest` modes those two methods exist to also cover.
+
+        ADR-440: the high threshold is inclusive -- a scene AT exactly
+        threshold_high counts as Wide, same fix and same reasoning as
+        ShotLockEstimator._closeness_for_divergence() (this module intentionally
+        doesn't share code with that one, so the strict ">" bug had to be fixed
+        here separately -- it was not automatically covered by that fix)."""
         if divergence is None:
             return self.closeup_value
         divergence = float(divergence)
-        if divergence > self.threshold_high:
+        if divergence >= self.threshold_high:
             return self.wide_value
         if self.threshold_low is not None and divergence <= self.threshold_low:
             return self.closeup_value

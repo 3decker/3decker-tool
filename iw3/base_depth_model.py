@@ -242,6 +242,13 @@ class BaseDepthModel(metaclass=ABCMeta):
     def get_ema_buffer_size(self):
         return self.scaler.buffer_size
 
+    def is_buffered(self) -> bool:
+        # Upstream cb8c2013 (nagadomi, 2026-11-07): True when this model holds back
+        # output frames internally, so the caller's source-frame queue grows and its
+        # frames should be offloaded to CPU memory. EMA buffering is one cause; models
+        # with their own internal frame window (VideoDepthAnythingModel) override this.
+        return self.get_ema_buffer_size() > 1
+
     def enable_refine(self, enabled=True, strength=1.0):
         self.refine_enabled = bool(enabled)
         self.refine_strength = float(strength) if strength is not None else 1.0

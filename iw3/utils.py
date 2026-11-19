@@ -6897,7 +6897,7 @@ def process_images(files, output_dir, args, depth_model, side_model, title=None)
 def bind_single_frame_callback(depth_model, side_model, segment_pts, args, scene_ema_settings=None,
                                scene_ema_report=None, log_segment_pts=None):
     src_queue = []
-    frame_cpu_offload = depth_model.get_ema_buffer_size() > 1
+    frame_cpu_offload = depth_model.is_buffered()
 
     def _postprocess(depths, flush):
         for depth in depths:
@@ -7001,7 +7001,7 @@ def bind_batch_frame_callback(depth_model, side_model, segment_pts, args, scene_
     dequeue_ticket_lock = TicketLock()
     streams = threading.local()
     src_queue = []
-    frame_cpu_offload = depth_model.get_ema_buffer_size() > 1
+    frame_cpu_offload = depth_model.is_buffered()
     use_16bit = VU.pix_fmt_requires_16bit(args.pix_fmt)
 
     def _postprocess(depth_batch, reset_ema, ema_updates, dequeue_ticket_id, flush, device):

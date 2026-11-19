@@ -171,6 +171,11 @@ class VideoDepthAnythingModel(BaseDepthModel):
         # same model weights without keeping a whole second copy of the model in VRAM.
         self._flip_state = _fresh_online_state()
 
+    def is_buffered(self) -> bool:
+        # Upstream cb8c2013: VDA's own temporal window delays output even with EMA
+        # off, so the source-frame queue must be CPU-offloaded regardless of EMA.
+        return True
+
     def _model_infer_tta(self, frame, use_amp):
         """
         Runs the model on `frame` normally, and if self.tta is enabled, also runs it on a

@@ -359,6 +359,13 @@ class ShotLockEstimator():
         self._glide_from = None
         self._glide_active_target = None
         self._glide_elapsed = 0
+        # ADR-475: the shot TYPE ('wide'/'mid'/'closeup') of the most recent locked
+        # decision, so Foreground Scale Shot Lock can follow this exact decision
+        # (--foreground-scale-lock-follow-convergence) instead of making its own,
+        # differently-timed one. Deliberately NOT cleared while a new scene is still
+        # deciding: Convergence's own output holds the previous value during that
+        # window too, so the follower holds the previous type with it.
+        self.locked_shot_type = None
         self._last_raw = None  # ADR-421 fallback path: last frame's classified value
         # ADR-422: per-real-scene settle-then-lock state (only used when the caller
         # supplies log_reset_pts). _pending_scene_reset mirrors SceneHoldTracker's own
@@ -410,6 +417,7 @@ class ShotLockEstimator():
         self._glide_from = None
         self._glide_active_target = None
         self._glide_elapsed = 0
+        self.locked_shot_type = None
         self._last_raw = None
         self._pending_scene_reset = True
         self._scene_running_c = None
@@ -429,6 +437,18 @@ class ShotLockEstimator():
         if c > MID_HIGH:
             return self.closeup_value
         return self.mid_value
+
+    def _classify_label(self, c):
+        """ADR-475: the same decision as _classify(), as a shot TYPE instead of a
+        convergence value -- so a follower never has to guess the type back from
+        the number (ambiguous whenever two of the user's values are equal)."""
+        if self.mid_value is None:
+            return "wide" if c < 0.5 else "closeup"
+        if c < MID_LOW:
+            return "wide"
+        if c > MID_HIGH:
+            return "closeup"
+        return "mid"
 
     def _blend_value(self, c):
         """ADR-429: continuous 3-point version of the same spectrum, for `blend`
@@ -640,6 +660,7 @@ class ShotLockEstimator():
                         # as _decide_settle already does today.
                     if ready:
                         self._scene_locked_value = self._classify(self._scene_running_c)
+                        self.locked_shot_type = self._classify_label(self._scene_running_c)  # ADR-475
                         if self.switch not in ("ease", "glide"):
                             self.tracker.mark_cut()  # the one clean transition into the decision
                         value = self._advance_locked(self._scene_locked_value)

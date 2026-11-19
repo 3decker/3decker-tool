@@ -3067,7 +3067,7 @@ class MainFrame(wx.Frame):
         self.lbl_foreground_scale_lock_switch = wx.StaticText(
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Switch Style"))
         self.cbo_foreground_scale_lock_switch = wx.ComboBox(
-            self.cpn_stereo_stability_flicker.GetPane(), choices=["snap", "ease"],
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["snap", "ease", "glide"],
             name="cbo_foreground_scale_lock_switch")
         self.cbo_foreground_scale_lock_switch.SetEditable(False)
         self.cbo_foreground_scale_lock_switch.SetStringSelection(DEFAULT_FOREGROUND_SCALE_LOCK_SWITCH)
@@ -3078,14 +3078,19 @@ class MainFrame(wx.Frame):
               "simplest, matches today's original behavior exactly, but can look like a visible pop.\n"
               "ease: the SAME locked decision as snap -- every scene still lands on exactly one of your "
               "values, never in between -- but glides there with a smooth, continuously-tapering chase "
-              "(speed set by Smoothing below) instead of jumping in one step.\n"
+              "(speed set by Smoothing below) instead of jumping in one step. Its first step is always "
+              "its biggest, and it keeps creeping for a while afterwards.\n"
+              "glide: same locked decision again, but moves like a smooth camera move -- starts gently, "
+              "speeds up in the middle, and lands exactly on the new value after Glide Duration frames, "
+              "with no sharp first step and no lingering tail. Same motion as Convergence Plane's own glide.\n"
               "Independent of Convergence Plane's own Switch Style above -- the two settings never share "
               "state. Unlike Convergence's menu, there's no snap_ramp or blend option here: those exist "
               "to smooth out noisy CLIP visual judgments before trusting a decision, and Foreground "
               "Scale's own decision (driven by the exact 3D Strength number in effect) never has that "
               "kind of noise to settle in the first place.\n"
-              "Recommended: ease if you want the transition itself to be invisible; snap (default) if "
-              "you're fine with an instant change at each scene cut."))
+              "Recommended: glide (about 30 frames) for the smoothest result, ideally matching Convergence "
+              "Plane's own glide so both move together; snap (default) if you're fine with an instant "
+              "change at each scene cut."))
         self.cbo_foreground_scale_lock_switch.Bind(wx.EVT_COMBOBOX, self.on_changed_cbo_foreground_scale_lock_switch)
 
         self.lbl_foreground_scale_lock_smoothing = wx.StaticText(
@@ -3102,6 +3107,44 @@ class MainFrame(wx.Frame):
               "No effect at all while Switch Style is snap (the default).\n"
               "Recommended: 0.9 (default) is a reasonable starting point -- try your own footage and "
               "judge by eye."))
+
+        # ADR-475: Foreground Scale's own glide duration (same motion as Convergence's ADR-442 glide).
+        self.lbl_foreground_scale_lock_glide_duration = wx.StaticText(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Glide Duration (frames)"))
+        self.cbo_foreground_scale_lock_glide_duration = EditableComboBox(
+            self.cpn_stereo_stability_flicker.GetPane(), choices=["15", "24", "30", "45", "60"],
+            name="cbo_foreground_scale_lock_glide_duration")
+        self.cbo_foreground_scale_lock_glide_duration.SetValue("30")
+        self.cbo_foreground_scale_lock_glide_duration.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode with Switch Style set to glide. How many frames "
+              "the glide takes to go from the old value to the new one, start to finish.\n"
+              "Shorter finishes faster but with a bigger first step (closer to snap); longer is gentler but "
+              "the change stays visible for longer.\n"
+              "Values: 1-600 frames. 30 frames is about 1.25 seconds at 24 fps.\n"
+              "Recommended: 30 (default), or the same number as Convergence Plane's own Glide Duration so "
+              "both settings move together."))
+
+        # ADR-475: follow Convergence shot_lock's own Wide/Mid/Close-Up decision.
+        self.chk_foreground_scale_lock_follow_convergence = wx.CheckBox(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Follow Convergence's Shot Decision"),
+            name="chk_foreground_scale_lock_follow_convergence")
+        self.chk_foreground_scale_lock_follow_convergence.SetValue(False)
+        self.chk_foreground_scale_lock_follow_convergence.SetToolTip(
+            T("Only affects Shot Lock Foreground Scale Mode, and only when Convergence Plane is also in "
+              "shot_lock mode.\n"
+              "What: instead of deciding Wide/Mid/Close-Up on its own, Foreground Scale uses exactly the "
+              "decision Convergence Plane's Shot Lock made for the same scene. Its own Strength Threshold "
+              "boxes are then ignored; its Wide/Mid/Close-Up Values are still used.\n"
+              "Why: the two features decide at different moments -- Foreground Scale instantly, Convergence "
+              "after its settle/wait time -- so they can disagree about the same scene (in a real Mario "
+              "run, 14% of scenes got e.g. Convergence 'Mid' with Foreground Scale 'Close-Up'). That mixes "
+              "two depth shapes neither preset was designed for, which can make a scene look odd.\n"
+              "Pros: both features always agree on the shot type.\n"
+              "Cons: Foreground Scale changes when Convergence decides, which can be a little later in the "
+              "scene than its own instant decision.\n"
+              "Values: on / off (default off = unchanged behavior). If Convergence Plane is not in shot_lock "
+              "mode, or hasn't decided anything yet, Foreground Scale uses its own thresholds as before.\n"
+              "Recommended: on, whenever both features use Shot Lock."))
 
         # ADR-453: Foreground Scale's own scene log, a direct analog of Convergence
         # Plane's "Log Convergence Value per Scene" (chk_convergence_scene_log) above
@@ -4854,6 +4897,9 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.cbo_foreground_scale_lock_switch, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.lbl_foreground_scale_lock_smoothing, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_foreground_scale_lock_smoothing, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.lbl_foreground_scale_lock_glide_duration, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        pane_layout_stability.Add(self.cbo_foreground_scale_lock_glide_duration, (k, 1), (1, 2), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.chk_foreground_scale_lock_follow_convergence, (k := k + 1, 0), (1, 3), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_foreground_scale_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_edge_dilation_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_combined_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12241,6 +12287,7 @@ class MainFrame(wx.Frame):
             self.cbo_foreground_scale_lock_threshold_high,
             self.cbo_foreground_scale_lock_threshold_low,
             self.cbo_foreground_scale_lock_smoothing,
+            self.cbo_foreground_scale_lock_glide_duration,
             self.cbo_foreground_pop,
             self.cbo_foreground_pop_threshold_low,
             self.cbo_foreground_pop_threshold_high,
@@ -12718,7 +12765,8 @@ class MainFrame(wx.Frame):
                   self.lbl_foreground_scale_lock_closeup, self.cbo_foreground_scale_lock_closeup,
                   self.lbl_foreground_scale_lock_threshold_high, self.cbo_foreground_scale_lock_threshold_high,
                   self.lbl_foreground_scale_lock_threshold_low, self.cbo_foreground_scale_lock_threshold_low,
-                  self.lbl_foreground_scale_lock_switch, self.cbo_foreground_scale_lock_switch):
+                  self.lbl_foreground_scale_lock_switch, self.cbo_foreground_scale_lock_switch,
+                  self.chk_foreground_scale_lock_follow_convergence):
             c.Enable(mode == "shot_lock")
         # ADR-455: Smoothing has its OWN extra gate (Switch Style == ease) on top
         # of this one -- re-evaluate it together whenever Mode changes.
@@ -12737,6 +12785,10 @@ class MainFrame(wx.Frame):
         on = (mode == "shot_lock" and switch == "ease")
         self.lbl_foreground_scale_lock_smoothing.Enable(on)
         self.cbo_foreground_scale_lock_smoothing.Enable(on)
+        # ADR-475: Glide Duration only means something with Switch Style == glide.
+        glide_on = (mode == "shot_lock" and switch == "glide")
+        self.lbl_foreground_scale_lock_glide_duration.Enable(glide_on)
+        self.cbo_foreground_scale_lock_glide_duration.Enable(glide_on)
 
     def on_changed_cbo_foreground_scale_lock_switch(self, event):
         self.update_foreground_scale_lock_switch()
@@ -13072,6 +13124,8 @@ class MainFrame(wx.Frame):
             self.lbl_foreground_scale_lock_threshold_low, self.cbo_foreground_scale_lock_threshold_low,
             self.lbl_foreground_scale_lock_switch, self.cbo_foreground_scale_lock_switch,
             self.lbl_foreground_scale_lock_smoothing, self.cbo_foreground_scale_lock_smoothing,
+            self.lbl_foreground_scale_lock_glide_duration, self.cbo_foreground_scale_lock_glide_duration,
+            self.chk_foreground_scale_lock_follow_convergence,
             self.chk_foreground_scale_scene_log,
             # Combine Scene Logs (ADR-456), the 5th per-scene log checkbox
             self.chk_combined_scene_log,
@@ -13701,6 +13755,11 @@ class MainFrame(wx.Frame):
                                allow_empty=False):
             self.show_validation_error_message(T("Glide Duration (frames)"), 1, 600)
             return None
+        # ADR-475: Foreground Scale's own Glide Duration, same rule.
+        if not validate_number(self.cbo_foreground_scale_lock_glide_duration.GetValue(), 1, 600,
+                               allow_empty=False):
+            self.show_validation_error_message(T("Glide Duration (frames)"), 1, 600)
+            return None
         if not validate_number(self.cbo_clip_shot_bias_strength.GetValue(), 0.0, 1.0, allow_empty=False):
             self.show_validation_error_message(T("Bias Strength"), 0.0, 1.0)
             return None
@@ -14271,6 +14330,9 @@ class MainFrame(wx.Frame):
                 self.cbo_foreground_scale_lock_threshold_low.GetValue()),
             foreground_scale_lock_switch=self.cbo_foreground_scale_lock_switch.GetValue(),
             foreground_scale_lock_smoothing=float(self.cbo_foreground_scale_lock_smoothing.GetValue()),
+            foreground_scale_lock_glide_duration=int(float(
+                self.cbo_foreground_scale_lock_glide_duration.GetValue())),
+            foreground_scale_lock_follow_convergence=self.chk_foreground_scale_lock_follow_convergence.GetValue(),
             foreground_scale_scene_log=self.chk_foreground_scale_scene_log.GetValue(),
             # ADR-456: GUI-only, no CLI/argparse entry -- see set_state_args() in
             # iw3/utils.py for why that's enough (it forces the 3 flags above on).
@@ -15754,6 +15816,11 @@ class MainFrame(wx.Frame):
         _apply_combo_value(
             self.cbo_foreground_scale_lock_smoothing,
             getattr(args, "foreground_scale_lock_smoothing", DEFAULT_FOREGROUND_SCALE_LOCK_SMOOTHING))
+        _apply_combo_value(  # ADR-475
+            self.cbo_foreground_scale_lock_glide_duration,
+            getattr(args, "foreground_scale_lock_glide_duration", 30))
+        self.chk_foreground_scale_lock_follow_convergence.SetValue(  # ADR-475
+            bool(getattr(args, "foreground_scale_lock_follow_convergence", False)))
         self.update_foreground_scale_lock_switch()
         self.chk_foreground_scale_scene_log.SetValue(bool(getattr(args, "foreground_scale_scene_log", False)))
         self.chk_edge_dilation_scene_log.SetValue(bool(getattr(args, "edge_dilation_scene_log", False)))
@@ -41189,6 +41256,97 @@ def _self_test_combined_scene_log_merge():
     print("_self_test_combined_scene_log_merge: PASS")
 
 
+def _self_test_foreground_scale_follow_convergence_and_glide():
+    """ADR-475: Foreground Scale Shot Lock gets a "glide" Switch Style with its own
+    Glide Duration (enabled only for glide) and a "Follow Convergence's Shot
+    Decision" checkbox (enabled only in shot_lock mode); all must round-trip through
+    parse_args()/the CLI/restore. Convergence's ShotLockEstimator must record the
+    shot TYPE of every locked decision (locked_shot_type) consistently with the
+    value it locks, so the follower can use it."""
+    import torch
+    import wx
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert "glide" in list(frame.cbo_foreground_scale_lock_switch.GetItems())
+        assert frame.cbo_foreground_scale_lock_glide_duration.GetValue() == "30"
+        assert not frame.chk_foreground_scale_lock_follow_convergence.GetValue(), "must default off"
+        frame.cbo_foreground_scale_mode.SetSelection(
+            [frame.cbo_foreground_scale_mode.GetClientData(i)
+             for i in range(frame.cbo_foreground_scale_mode.GetCount())].index("shot_lock"))
+        frame.update_foreground_scale_mode()
+        assert frame.chk_foreground_scale_lock_follow_convergence.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_glide_duration.IsEnabled(), "off unless glide"
+        frame.cbo_foreground_scale_lock_switch.SetValue("glide")
+        frame.on_changed_cbo_foreground_scale_lock_switch(wx.CommandEvent())
+        assert frame.cbo_foreground_scale_lock_glide_duration.IsEnabled()
+        assert not frame.cbo_foreground_scale_lock_smoothing.IsEnabled(), "Smoothing is ease-only"
+        frame.cbo_foreground_scale_lock_glide_duration.SetValue("24")
+        frame.chk_foreground_scale_lock_follow_convergence.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.foreground_scale_lock_switch == "glide"
+        assert args.foreground_scale_lock_glide_duration == 24
+        assert args.foreground_scale_lock_follow_convergence is True
+        cmd = frame.get_cli_command()
+        assert "--foreground-scale-lock-glide-duration" in cmd and "24" in cmd, cmd
+        assert "--foreground-scale-lock-follow-convergence" in cmd, cmd
+        frame.apply_parsed_args_to_gui(
+            U.create_parser(required_true=False).parse_args(
+                ["-i", "a.mp4", "-o", "o", "--foreground-scale-mode", "shot_lock"]))
+        assert frame.cbo_foreground_scale_lock_glide_duration.GetValue() == "30"
+        assert not frame.chk_foreground_scale_lock_follow_convergence.GetValue()
+        frame.cbo_foreground_scale_lock_glide_duration.SetValue("0")
+        frame.cbo_foreground_scale_lock_switch.SetValue("glide")
+        shown = []
+        frame.show_validation_error_message = lambda *a, **k: shown.append(a)
+        assert frame.parse_args(skip_set_state=True) is None and shown, "0 frames must be rejected"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    est = object.__new__(ShotLockEstimator)
+    est.wide_value, est.closeup_value, est.mid_value = 0.50, 0.00, 0.25
+    est.switch = "snap"
+    est.decay = 0.9
+    est.decide_speed = None
+    est.signal = "divergence"
+    est.threshold_mode = "range"
+    est.strength_threshold = 4.0
+    est.strength_threshold_low = 3.7
+    est.strength_threshold_mid = None
+    est.wait_for_settle = False
+    est.settle_wait_max = 60
+    est._clip = None
+    est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
+    est.blend_ema = None
+    est.ease_value = None
+    est._last_raw = None
+    est._scene_running_c = None
+    est._scene_n = 0
+    est._scene_locked_value = None
+    est._scene_elapsed = 0
+    est.locked_shot_type = None
+    est._recompute_decide_settle()
+    depth = torch.zeros(1, 1, 2, 2)
+
+    def lock_for(divergence):
+        est._pending_scene_reset = True
+        for _ in range(30):
+            est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=divergence)
+        return est._scene_locked_value, est.locked_shot_type
+
+    assert lock_for(4.2) == (0.50, "wide")
+    assert lock_for(3.8) == (0.25, "mid")
+    assert lock_for(3.6) == (0.00, "closeup")
+    print("_self_test_foreground_scale_follow_convergence_and_glide: PASS")
+
+
 def _self_test_foreground_scale_lock_switch_gui_and_cli():
     """ADR-455: Foreground Scale Shot Lock's new "ease" switch (parallel to, but
     independent from, Convergence Plane's own Switch Style/ease) -- the Switch
@@ -41208,7 +41366,7 @@ def _self_test_foreground_scale_lock_switch_gui_and_cli():
     try:
         frame = MainFrame()
         switch_items = list(frame.cbo_foreground_scale_lock_switch.GetItems())
-        assert switch_items == ["snap", "ease"], switch_items
+        assert switch_items == ["snap", "ease", "glide"], switch_items  # ADR-475 added glide
 
         # Default state: Foreground Scale Mode constant -> Switch Style/Smoothing
         # both disabled (same cluster as the other foreground_scale_lock_* widgets).
@@ -41846,6 +42004,7 @@ def _run_self_tests():
         _self_test_combined_scene_log_gui_and_metadata,
         _self_test_combined_scene_log_merge,
         _self_test_foreground_scale_lock_switch_gui_and_cli,
+        _self_test_foreground_scale_follow_convergence_and_glide,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,
         _self_test_experience_level_limit_bitrate_tier_and_codec_compose,

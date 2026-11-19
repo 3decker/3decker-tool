@@ -60,15 +60,19 @@ tooltip wording.
 """
 from .mapper import resolve_mapper_name, get_mapper
 
-SWITCH_MODES = ("snap", "ease")
+SWITCH_MODES = ("snap", "ease", "glide")
 DEFAULT_SWITCH = "snap"
 DEFAULT_DECAY = 0.9
+# ADR-475: same default as Convergence Plane shot_lock's own glide (ADR-442).
+DEFAULT_GLIDE_DURATION = 30
+SHOT_TYPES = ("wide", "mid", "closeup")
 
 
 class ForegroundScaleEstimator():
     def __init__(self, wide_value, closeup_value, threshold_high, mid_value=None,
                  threshold_low=None, metric_depth=False, mapper_type=None,
-                 switch=DEFAULT_SWITCH, decay=DEFAULT_DECAY):
+                 switch=DEFAULT_SWITCH, decay=DEFAULT_DECAY,
+                 glide_duration=DEFAULT_GLIDE_DURATION, follow_convergence=False):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         self.threshold_high = float(threshold_high)
@@ -86,6 +90,20 @@ class ForegroundScaleEstimator():
         self.switch = switch if switch in SWITCH_MODES else DEFAULT_SWITCH
         self.decay = float(decay)
         self.ease_value = None
+        # ADR-475: `glide` switch -- the same fixed-duration smoothstep ease-in-out
+        # as Convergence's ADR-442 glide, measured in real FRAMES (this estimator is
+        # called once per batch, so __call__ advances it by the batch's frame count).
+        self.glide_duration = max(1, int(glide_duration or DEFAULT_GLIDE_DURATION))
+        self.glide_value = None
+        self._glide_from = None
+        self._glide_active_target = None
+        self._glide_elapsed = 0
+        # ADR-475: when True, the caller passes Convergence shot_lock's own locked
+        # shot type (ShotLockEstimator.locked_shot_type) and that decides Wide/Mid/
+        # Close-Up here, instead of this module's own instant threshold check --
+        # so the two features can never disagree about the same scene. Falls back
+        # to the own check whenever no shot type is available yet.
+        self.follow_convergence = bool(follow_convergence)
 
     def _classify(self, divergence):
         """Same "range" rule as `ShotLockEstimator._closeness_for_divergence()` +
@@ -109,14 +127,33 @@ class ForegroundScaleEstimator():
             return self.mid_value if self.mid_value is not None else self.closeup_value
         return self.closeup_value
 
-    def classify_value(self, divergence):
+    def _value_for_shot_type(self, shot_type):
+        """ADR-475: this feature's own value for Convergence's decided shot type,
+        or None when it can't be mapped (unknown type, or 'mid' while this
+        feature's own Mid is disabled) -- caller then falls back to _classify()."""
+        if shot_type == "wide":
+            return self.wide_value
+        if shot_type == "closeup":
+            return self.closeup_value
+        if shot_type == "mid" and self.mid_value is not None:
+            return self.mid_value
+        return None
+
+    def _target(self, divergence, shot_type=None):
+        if self.follow_convergence and shot_type is not None:
+            v = self._value_for_shot_type(shot_type)
+            if v is not None:
+                return v
+        return self._classify(divergence)
+
+    def classify_value(self, divergence, shot_type=None):
         """ADR-453: public wrapper for `_classify()` -- the Foreground Scale scene
         log (--foreground-scale-scene-log, see iw3/utils.py's
         `_ForegroundScaleSceneLogState`) needs the classified scalar value itself
         (which of wide_value/mid_value/closeup_value this call locked in), not
         just the mapper_fn `__call__()` maps it to. `_classify()` itself is left
         untouched -- this is a one-line pass-through, not a rename."""
-        return self._classify(divergence)
+        return self._target(divergence, shot_type)
 
     def _mapper_fn_for(self, value):
         fn = self._mapper_fn_for_cache.get(value)
@@ -139,8 +176,38 @@ class ForegroundScaleEstimator():
             self.ease_value += (target - self.ease_value) * (1.0 - self.decay)
         return self.ease_value
 
-    def __call__(self, divergence=None):
-        target = self._classify(divergence)
+    def _glide_toward(self, target, frames=1):
+        """ADR-475: mirror of ShotLockEstimator._glide_toward() (ADR-442), advanced
+        by `frames` per call: smoothstep from the value at the moment the target
+        changed, landing exactly on it after glide_duration frames. A new target
+        mid-glide restarts the leg from the current value (no jump)."""
+        if self.glide_value is None:
+            self.glide_value = target
+            self._glide_from = target
+            self._glide_active_target = target
+            self._glide_elapsed = self.glide_duration
+            return self.glide_value
+        if target != self._glide_active_target:
+            self._glide_from = self.glide_value
+            self._glide_active_target = target
+            self._glide_elapsed = 0
+        self._glide_elapsed += max(1, int(frames))
+        if self._glide_elapsed >= self.glide_duration:
+            self.glide_value = target
+        else:
+            t = self._glide_elapsed / self.glide_duration
+            eased = t * t * (3.0 - 2.0 * t)  # smoothstep
+            self.glide_value = self._glide_from + (target - self._glide_from) * eased
+        return self.glide_value
+
+    def __call__(self, divergence=None, shot_type=None, frames=1):
+        target = self._target(divergence, shot_type)
+        if self.switch == "glide":
+            value = self._glide_toward(target, frames)
+            name = resolve_mapper_name(mapper=None, foreground_scale=value,
+                                       metric_depth=self.metric_depth,
+                                       mapper_type=self.mapper_type)
+            return get_mapper(name)
         if self.switch == "ease":
             # ADR-455: resolved fresh every call, never through
             # _mapper_fn_for_cache -- see module docstring.

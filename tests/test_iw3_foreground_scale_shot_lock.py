@@ -41,7 +41,8 @@ def _test_classify_2way():
     # No threshold_low/mid_value set -> plain 2-way split at threshold_high.
     est = ForegroundScaleEstimator(wide_value=2.0, closeup_value=-1.0, threshold_high=4.0)
     assert est._classify(5.0) == 2.0   # above high -> wide
-    assert est._classify(4.0) == -1.0  # exactly at high (not strictly greater) -> closeup
+    assert est._classify(4.0) == 2.0   # exactly at high -> wide (ADR-440: inclusive)
+    assert est._classify(3.99) == -1.0  # just below high -> closeup
     assert est._classify(0.5) == -1.0  # well below -> closeup
     assert est._classify(None) == -1.0  # missing divergence -> closeup fallback
     print("_test_classify_2way: PASS")
@@ -257,7 +258,8 @@ def _test_apply_divergence_resolves_mapper_fn_once_per_call():
 
     # Branch 3: convergence_model set, shot_lock mode (ADR-423: convergence stays
     # unmapped here -- only depth uses mapper_fn).
-    def dummy_conv_shot_lock(im_, depth_, reset_pts=None, log_reset_pts=None, divergence=None):
+    def dummy_conv_shot_lock(im_, depth_, reset_pts=None, log_reset_pts=None, divergence=None,
+                             divergence_settled=None):  # ADR-441 added divergence_settled
         return torch.full((2, 1, 1, 1), 0.5)
 
     args3, fs3 = make_args("shot_lock")
@@ -465,6 +467,96 @@ def _test_flag_off_writes_no_file():
         print("_test_flag_off_writes_no_file: PASS")
 
 
+def _test_glide_lands_exactly_after_duration_in_frames():
+    # ADR-475: Foreground Scale's glide is advanced by the real frame count of each
+    # call (one call per batch), so a 30-frame glide fed 4-frame batches must still
+    # land EXACTLY on the target once 30 frames have passed -- never before, never
+    # after -- with a small first step (no sharp jump like ease's).
+    fs = ForegroundScaleEstimator(wide_value=0.25, mid_value=0.5, closeup_value=1.0,
+                                  threshold_high=4.0, threshold_low=3.7,
+                                  switch="glide", glide_duration=30)
+    fs(divergence=4.1, frames=4)  # first call: start AT the Wide value, no glide
+    assert fs.glide_value == 0.25, fs.glide_value
+    values = []
+    for _ in range(9):  # 36 frames of Close-Up scenes
+        fs(divergence=3.6, frames=4)
+        values.append(fs.glide_value)
+    span = 1.0 - 0.25
+    assert values[0] - 0.25 < 0.1 * span, f"first step too big: {values[0]}"
+    assert all(b >= a for a, b in zip(values, values[1:])), values
+    assert values[6] < 1.0, f"must not arrive before 30 frames (28 frames in): {values[6]}"
+    assert values[7] == 1.0, f"must arrive exactly once 30 frames have passed (32 in): {values[7]}"
+    assert fs.classify_value(3.6) == 1.0
+    print("_test_glide_lands_exactly_after_duration_in_frames: PASS")
+
+
+def _test_follow_convergence_uses_its_shot_type():
+    # ADR-475: with follow on, Convergence's locked shot type decides -- even when
+    # this feature's own thresholds would say something else -- and falls back to
+    # its own thresholds when no shot type is available (or Mid is disabled here).
+    fs = ForegroundScaleEstimator(wide_value=0.25, mid_value=0.5, closeup_value=1.0,
+                                  threshold_high=4.0, threshold_low=3.7, follow_convergence=True)
+    assert fs.classify_value(4.1, shot_type="closeup") == 1.0, "Convergence's decision must win"
+    assert fs.classify_value(3.6, shot_type="wide") == 0.25
+    assert fs.classify_value(4.1, shot_type="mid") == 0.5
+    assert fs.classify_value(4.1, shot_type=None) == 0.25, "no decision yet -> own thresholds"
+    no_mid = ForegroundScaleEstimator(wide_value=0.25, closeup_value=1.0, threshold_high=4.0,
+                                      follow_convergence=True)
+    assert no_mid.classify_value(4.1, shot_type="mid") == 0.25, "Mid disabled here -> own thresholds"
+    off = ForegroundScaleEstimator(wide_value=0.25, mid_value=0.5, closeup_value=1.0,
+                                   threshold_high=4.0, threshold_low=3.7)
+    assert off.classify_value(4.1, shot_type="closeup") == 0.25, "follow off must ignore shot_type"
+    print("_test_follow_convergence_uses_its_shot_type: PASS")
+
+
+def _test_apply_divergence_follow_passes_convergence_decision():
+    # ADR-475 end-to-end, CPU-only: in follow mode apply_divergence() must call the
+    # Foreground Scale model exactly once, AFTER the Convergence model ran in the
+    # same call, passing Convergence's freshly locked shot type and the batch's
+    # frame count; the scene log must record the followed value.
+    import torch
+
+    H, W = 8, 8
+    depth = torch.rand(3, 1, H, W)
+    im = torch.rand(3, 3, H, W)
+    real_fs = ForegroundScaleEstimator(wide_value=0.25, mid_value=0.5, closeup_value=1.0,
+                                       threshold_high=4.0, threshold_low=3.7, follow_convergence=True)
+    fs = MagicMock(side_effect=real_fs)
+    fs.follow_convergence = True
+    fs.classify_value = real_fs.classify_value
+
+    class DummyConv:
+        locked_shot_type = "wide"
+
+        def __call__(self, im_, depth_, reset_pts=None, log_reset_pts=None, divergence=None,
+                     divergence_settled=None):
+            self.locked_shot_type = "closeup"  # decided during THIS call
+            return torch.full((3, 1, 1, 1), 0.0)
+
+    args = create_parser(required_true=False).parse_args([])
+    args.method = "grid_sample"
+    args.divergence = 4.1  # own thresholds would say Wide
+    args.convergence_mode = "shot_lock"
+    args.mapper = "none"
+    args.foreground_scale_scene_log = True
+    args.state = {"convergence_model": DummyConv(), "foreground_scale_model": fs}
+    left, right = apply_divergence(depth.clone(), im.clone(), args, side_model=None)
+    assert left is not None and right is not None
+    assert fs.call_count == 1, fs.call_count
+    kw = fs.call_args.kwargs
+    assert kw.get("shot_type") == "closeup", kw
+    assert kw.get("frames") == 3, kw
+    st = args.state["_foreground_scale_scene_log"]
+    # Pushed values are drained into the open scene's running sum by the end of the
+    # call; either way, every frame of this call must carry the FOLLOWED value 1.0.
+    pending = list(st.pending)
+    if pending:
+        assert all(v == 1.0 for v, _ in pending), pending
+    else:
+        assert st._scene_frames == 3 and abs(st._scene_sum - 3.0) < 1e-9, (st._scene_frames, st._scene_sum)
+    print("_test_apply_divergence_follow_passes_convergence_decision: PASS")
+
+
 def main():
     _test_classify_2way()
     _test_classify_3way()
@@ -481,6 +573,9 @@ def main():
     _test_shot_lock_rows_tagged_wide_and_closeup()
     _test_constant_mode_rows_have_no_tag()
     _test_flag_off_writes_no_file()
+    _test_glide_lands_exactly_after_duration_in_frames()
+    _test_follow_convergence_uses_its_shot_type()
+    _test_apply_divergence_follow_passes_convergence_decision()
     print("ALL PASS")
 
 

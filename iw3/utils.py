@@ -4083,6 +4083,10 @@ def make_output_filename(input_filename, args, video=False):
             if fsl_switch == "ease":
                 fsl_smoothing = getattr(args, "foreground_scale_lock_smoothing", 0.9)
                 fsl_tag += f"_ease{to_deciaml(fsl_smoothing, 100, 2)}"
+            elif fsl_switch == "glide":  # ADR-475
+                fsl_tag += f"_glide{int(getattr(args, 'foreground_scale_lock_glide_duration', 30))}"
+            if getattr(args, "foreground_scale_lock_follow_convergence", False):  # ADR-475
+                fsl_tag += "_fcv"
         else:
             fsl_tag = ""
 
@@ -4441,9 +4445,16 @@ def _build_iw3_comment_metadata(args, video=True):
         fsl_switch_val = getattr(args, "foreground_scale_lock_switch", "snap")
         if fsl_switch_val != "snap":
             comment_parts.append(f"iw3_foreground_scale_lock_switch={fsl_switch_val}")
-            comment_parts.append(
-                f"iw3_foreground_scale_lock_smoothing="
-                f"{getattr(args, 'foreground_scale_lock_smoothing', 0.9)}")
+            if fsl_switch_val == "glide":  # ADR-475
+                comment_parts.append(
+                    f"iw3_foreground_scale_lock_glide_duration="
+                    f"{getattr(args, 'foreground_scale_lock_glide_duration', 30)}")
+            else:
+                comment_parts.append(
+                    f"iw3_foreground_scale_lock_smoothing="
+                    f"{getattr(args, 'foreground_scale_lock_smoothing', 0.9)}")
+        if getattr(args, "foreground_scale_lock_follow_convergence", False):  # ADR-475
+            comment_parts.append("iw3_foreground_scale_lock_follow_convergence=1")
     # ADR-453: independent of foreground_scale_mode -- unlike the shot_lock-only
     # tags just above, this log also writes real rows in "constant" mode (see
     # _format_foreground_scale_scene_log()'s own settings-line handling), so it's
@@ -6067,10 +6078,18 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
     # works regardless of which Convergence Plane mode is active, including
     # "constant"/off.
     fs_model = args.state.get("foreground_scale_model")
-    if fs_model is not None:
-        mapper_fn = fs_model(divergence=getattr(args, "divergence", None))
-    else:
+    # ADR-475: --foreground-scale-lock-follow-convergence -- Foreground Scale uses
+    # Convergence shot_lock's OWN locked shot type for this call, so its mapper can
+    # only be resolved AFTER convergence_model() has run below (same call, no lag).
+    fs_follow = (fs_model is not None and getattr(fs_model, "follow_convergence", False) is True
+                 and args.state.get("convergence_model") is not None
+                 and getattr(args, "convergence_mode", "constant") == "shot_lock")
+    if fs_model is not None and not fs_follow:
+        mapper_fn = fs_model(divergence=getattr(args, "divergence", None), frames=depth.shape[0])
+    elif fs_model is None:
         mapper_fn = get_mapper(args.mapper)
+    else:
+        mapper_fn = None  # resolved right after Convergence decides -- see below
 
     # "Log Foreground Scale Value per Scene" (--foreground-scale-scene-log, ADR-453):
     # same pending-queue push/drain pattern as Convergence's own scene log (ADR-237),
@@ -6086,9 +6105,12 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
     # nothing to classify, so the plain --foreground-scale value itself is logged,
     # giving every scene a real row with no [Wide/Mid/Close-Up] tag.
     foreground_scale_scene_log_active = getattr(args, "foreground_scale_scene_log", False)
-    if foreground_scale_scene_log_active:
+
+    def _push_foreground_scale_scene_log(fs_shot_type=None):
+        # ADR-475: wrapped so follow-Convergence mode can push AFTER Convergence
+        # decides (see below); otherwise called right here, exactly as before.
         fsl_log_state = args.state.setdefault("_foreground_scale_scene_log", _ForegroundScaleSceneLogState())
-        fsl_value = (fs_model.classify_value(getattr(args, "divergence", None))
+        fsl_value = (fs_model.classify_value(getattr(args, "divergence", None), shot_type=fs_shot_type)
                     if fs_model is not None else float(args.foreground_scale))
         fsl_mode_for_log = getattr(args, "foreground_scale_mode", "constant")
         fsl_log_state.meta = (
@@ -6109,6 +6131,9 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         else:
             fsl_rp_for_log = [False] * depth.shape[0]
         fsl_log_state.pending.extend((fsl_value, cut) for cut in fsl_rp_for_log)
+
+    if foreground_scale_scene_log_active and not fs_follow:
+        _push_foreground_scale_scene_log()
 
     # "Log Edge Fix Value per Scene" (--edge-dilation-scene-log, ADR-459): same
     # pending-queue push/drain pattern as Foreground Scale's own scene log just
@@ -6163,6 +6188,12 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
                                                            log_reset_pts=log_reset_pts,
                                                            divergence=getattr(args, "divergence", None),
                                                            divergence_settled=getattr(args, "_divergence_settled", None))
+            if mapper_fn is None:  # ADR-475: follow-Convergence Foreground Scale
+                fs_shot_type = getattr(args.state["convergence_model"], "locked_shot_type", None)
+                mapper_fn = fs_model(divergence=getattr(args, "divergence", None),
+                                     shot_type=fs_shot_type, frames=depth.shape[0])
+                if foreground_scale_scene_log_active:
+                    _push_foreground_scale_scene_log(fs_shot_type)
             depth = mapper_fn(depth)
             # ADR-423: real confirmed bug -- unlike sod_v1/face_detect/depth_percentile/
             # clip_shot/sod_track (whose convergence value comes from
@@ -10555,7 +10586,7 @@ def create_parser(required_true=True):
                              "instead. Leave unset (default, \"none\") to disable this tier entirely. "
                              "Independent of --convergence-lock-strength-threshold-low.")
     parser.add_argument("--foreground-scale-lock-switch", type=str,
-                        choices=["snap", "ease"], default="snap",
+                        choices=["snap", "ease", "glide"], default="snap",
                         help="ADR-455: --foreground-scale-mode shot_lock only: snap (default, unchanged): "
                              "instant jump to the newly locked value the moment a scene reclassifies. "
                              "ease: glides continuously toward the newly locked value instead of snapping, "
@@ -10571,6 +10602,16 @@ def create_parser(required_true=True):
                              "convention as --convergence-smoothing/Convergence Plane's own shot_lock ease "
                              "(higher = slower/smoother, lower = snappier). No effect when "
                              "--foreground-scale-lock-switch is snap (default).")
+    parser.add_argument("--foreground-scale-lock-glide-duration", type=int, default=30,
+                        help="ADR-475: --foreground-scale-mode shot_lock with --foreground-scale-lock-switch "
+                             "glide only: how many frames the fixed-duration ease-in-out (same curve as "
+                             "--convergence-lock-switch glide) takes to land exactly on the new value.")
+    parser.add_argument("--foreground-scale-lock-follow-convergence", action="store_true",
+                        help="ADR-475: --foreground-scale-mode shot_lock only: use Convergence Plane "
+                             "shot_lock's OWN Wide/Mid/Close-Up decision for each scene instead of this "
+                             "feature's own instant threshold check, so the two can never disagree about "
+                             "the same scene (real Mario run: 14%% of scenes did). Needs --convergence-mode "
+                             "shot_lock; otherwise this feature's own thresholds are used as before.")
     parser.add_argument("--foreground-scale-scene-log", action="store_true",
                         help=("ADR-453: writes a text file next to the finished video listing the "
                               "Foreground Scale value used for each scene, plus one overall average for "
@@ -11476,7 +11517,10 @@ def iw3_main(args):
                 threshold_low=getattr(args, "foreground_scale_lock_threshold_low", None),
                 metric_depth=is_metric, mapper_type=args.mapper_type,
                 switch=getattr(args, "foreground_scale_lock_switch", "snap"),
-                decay=getattr(args, "foreground_scale_lock_smoothing", 0.9))
+                decay=getattr(args, "foreground_scale_lock_smoothing", 0.9),
+                glide_duration=getattr(args, "foreground_scale_lock_glide_duration", 30),
+                follow_convergence=(getattr(args, "foreground_scale_lock_follow_convergence", False)
+                                    and getattr(args, "convergence_mode", "constant") == "shot_lock"))
         # ADR-458: --edge-dilation-mode shot_lock only -- see
         # edge_dilation_estimator.py for the full rationale. Placed right next to
         # the foreground_scale_model build above so both shot_lock builds are easy

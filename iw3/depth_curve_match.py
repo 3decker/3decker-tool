@@ -71,6 +71,110 @@ def build_curve_lut(source_values, target_values, num_points=512):
     return lut_x, lut_y
 
 
+DEFAULT_MAX_STRETCH = 1.5
+
+
+def collapse_tied_points(lut_x, lut_y, eps=1e-4):
+    """ADR-474: merge runs of LUT points whose SOURCE values are effectively equal
+    (within eps) into one point at their mean x/y. These runs come from many sampled
+    pixels sharing the exact same source value -- in practice VDA_L's farthest pixels,
+    all exactly 0.0 after per-frame normalization (2.7% of a real full-movie
+    calibration). build_curve_lut's epsilon nudge kept lut_x strictly increasing but
+    left the whole run's TARGET values (0.0 -> 0.04 in that real curve) spread over
+    1e-6-wide steps, i.e. a near-vertical cliff: a pixel at exactly 0 stayed 0 while
+    one a hair nearer jumped 4% of the depth range. Returns new (lut_x, lut_y)."""
+    lut_x = np.asarray(lut_x, dtype=np.float64)
+    lut_y = np.asarray(lut_y, dtype=np.float64)
+    out_x, out_y = [], []
+    i = 0
+    n = len(lut_x)
+    while i < n:
+        j = i + 1
+        while j < n and lut_x[j] - lut_x[i] < eps:
+            j += 1
+        out_x.append(lut_x[i:j].mean())
+        out_y.append(lut_y[i:j].mean())
+        i = j
+    # Keep the curve's own end points, so the remap still spans the same 0..1 range.
+    if out_x[0] > lut_x[0]:
+        out_x.insert(0, float(lut_x[0]))
+        out_y.insert(0, float(lut_y[0]))
+    if out_x[-1] < lut_x[-1]:
+        out_x.append(float(lut_x[-1]))
+        out_y.append(float(lut_y[-1]))
+    return np.asarray(out_x, dtype=np.float32), np.asarray(out_y, dtype=np.float32)
+
+
+def limit_stretch(lut_x, lut_y, max_stretch, max_iterations=200):
+    """ADR-474: cap how strongly the curve may stretch any part of the depth range
+    (the LUT's local slope, output change per unit of input change) at max_stretch,
+    without changing its two end points. Whatever depth range the capped segments
+    give up is shared out proportionally across the uncapped segments, so the curve
+    still spans the same total range (same overall "punch") and stays monotonic --
+    only the distribution changes. max_stretch is the TRUE final maximum (iterated,
+    since sharing out the leftover range can push other segments over the cap).
+
+    Real motivation: decker's full-movie Mario calibration stretched the farthest
+    ~15% of VDA_L's range 2.2-2.3x (plus a near-vertical cliff at 0), which made
+    wide, background-heavy shots look odd -- distant structures pushed very far back,
+    with VDA_L's small background ripples amplified into visible patchy layering.
+    max_stretch None/<=0 = unchanged. Returns new (lut_x, lut_y)."""
+    lut_x = np.asarray(lut_x, dtype=np.float64)
+    lut_y = np.asarray(lut_y, dtype=np.float64)
+    if max_stretch is None or max_stretch <= 0 or len(lut_x) < 2:
+        return lut_x.astype(np.float32), lut_y.astype(np.float32)
+    dx = np.diff(lut_x)
+    dy = np.maximum(np.diff(lut_y), 0.0)
+    span = lut_y[-1] - lut_y[0]
+    # The cap can't be lower than the curve's average slope, or the end points
+    # couldn't be reached at all -- clamp to that floor instead of failing.
+    floor = span / max(dx.sum(), 1e-12)
+    cap = max(float(max_stretch), floor)
+    capped = np.zeros_like(dx, dtype=bool)
+    for _ in range(max_iterations):
+        capped |= dy > cap * dx * (1 + 1e-9)
+        dy = np.where(capped, cap * dx, dy)
+        free = ~capped
+        need = span - dy[capped].sum()
+        free_total = dy[free].sum()
+        if not free.any() or free_total <= 0:
+            break
+        dy[free] *= need / free_total
+        if not np.any(dy[free] > cap * dx[free] * (1 + 1e-9)):
+            break
+    new_y = np.concatenate([[lut_y[0]], lut_y[0] + np.cumsum(dy)])
+    new_y[-1] = lut_y[-1]
+    return lut_x.astype(np.float32), np.clip(new_y, 0.0, 1.0).astype(np.float32)
+
+
+def max_curve_stretch(lut_x, lut_y):
+    """Largest local stretch (slope) anywhere in the curve -- for logs/meta."""
+    dx = np.diff(np.asarray(lut_x, dtype=np.float64))
+    dy = np.diff(np.asarray(lut_y, dtype=np.float64))
+    return float(np.max(dy / np.maximum(dx, 1e-12))) if len(dx) else 0.0
+
+
+def refine_curve(lut_x, lut_y, max_stretch=DEFAULT_MAX_STRETCH):
+    """collapse_tied_points + limit_stretch, the two ADR-474 fixes in order."""
+    lut_x, lut_y = collapse_tied_points(lut_x, lut_y)
+    return limit_stretch(lut_x, lut_y, max_stretch)
+
+
+def reshape_curve_file(input_path, output_path, max_stretch=DEFAULT_MAX_STRETCH):
+    """ADR-474: apply refine_curve() to an ALREADY-SAVED curve file -- no depth
+    models, no GPU, takes a second -- so an existing calibration (e.g. a long
+    full-movie one) gets the fixes without being redone. Writes a new file; the
+    original is left untouched. Returns (max stretch before, max stretch after)."""
+    lut_x, lut_y, meta = load_curve(input_path)
+    before = max_curve_stretch(lut_x, lut_y)
+    new_x, new_y = refine_curve(lut_x, lut_y, max_stretch)
+    meta = dict(meta or {})
+    meta["max_stretch"] = max_stretch
+    meta["reshaped_from"] = path.basename(input_path)
+    save_curve(output_path, new_x, new_y, meta=meta)
+    return before, max_curve_stretch(new_x, new_y)
+
+
 def save_curve(file_path, lut_x, lut_y, meta=None):
     """Atomic write (temp file + os.replace), same convention as every other
     on-disk state file in this project (CS-IO-001)."""
@@ -257,7 +361,66 @@ def _self_test_matcher_preserves_order():
     print("_self_test_matcher_preserves_order: PASS")
 
 
+def _self_test_limit_stretch_caps_and_keeps_range():
+    """ADR-474: after limit_stretch the steepest segment is <= the cap (the TRUE
+    final cap, not just the first-pass one), both end points are unchanged, the
+    curve stays strictly non-decreasing, and the capped range is redistributed
+    (shallow segments get steeper) rather than lost."""
+    x = np.linspace(0.0, 1.0, 101)
+    y = np.sqrt(x)  # very steep near 0, shallow near 1 -- like a real far-end stretch
+    before = max_curve_stretch(x, y)
+    nx, ny = limit_stretch(x, y, 1.5)
+    after = max_curve_stretch(nx, ny)
+    assert before > 3.0, before
+    assert after <= 1.5 + 1e-4, after
+    assert abs(float(ny[0]) - float(y[0])) < 1e-6 and abs(float(ny[-1]) - float(y[-1])) < 1e-6, (ny[0], ny[-1])
+    assert np.all(np.diff(ny) >= -1e-7), "must stay monotonic"
+    assert float(ny[90] - ny[80]) > float(y[90] - y[80]), "shallow region should gain range"
+    lx, ly = limit_stretch(x, y, 0)
+    assert np.allclose(ly, y), "max_stretch 0 must be a no-op"
+    print("_self_test_limit_stretch_caps_and_keeps_range: PASS")
+
+
+def _self_test_collapse_removes_far_end_cliff():
+    """ADR-474: reproduces the real full-movie curve's far end -- many sampled
+    pixels exactly 0.0 in the source (nudged apart by 1e-6) while the target spans
+    0.0 -> 0.04 over them -- and confirms refine_curve removes the cliff: a value a
+    hair above 0 no longer jumps ~4% of the depth range."""
+    rng = np.random.default_rng(1)
+    source = np.concatenate([np.zeros(300), rng.uniform(0.0, 1.0, 10000)])
+    target = np.concatenate([rng.uniform(0.0, 0.08, 300), rng.uniform(0.0, 1.0, 10000) ** 0.6])
+    lx, ly = build_curve_lut(source, target, num_points=512)
+    raw_jump = float(np.interp(0.0005, lx, ly) - np.interp(0.0, lx, ly))
+    rx, ry = refine_curve(lx, ly, 1.5)
+    new_jump = float(np.interp(0.0005, rx, ry) - np.interp(0.0, rx, ry))
+    assert raw_jump > 0.01, raw_jump
+    assert new_jump < 0.005, new_jump
+    assert np.all(np.diff(rx) > 0), "lut_x must stay strictly increasing"
+    assert max_curve_stretch(rx, ry) <= 1.5 + 1e-4
+    print("_self_test_collapse_removes_far_end_cliff: PASS")
+
+
+def _self_test_reshape_curve_file_round_trip():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        src = path.join(tmp, "in.json")
+        dst = path.join(tmp, "out.json")
+        x = np.linspace(0.0, 1.0, 64).astype(np.float32)
+        save_curve(src, x, np.sqrt(x), meta={"source_model": "VDA_L"})
+        before, after = reshape_curve_file(src, dst, 1.5)
+        assert before > 1.5 and after <= 1.5 + 1e-4, (before, after)
+        _, _, meta = load_curve(dst)
+        assert meta["max_stretch"] == 1.5 and meta["reshaped_from"] == "in.json" and meta["source_model"] == "VDA_L"
+        assert DepthCurveMatcher(dst).enabled, "reshaped file must load in the live matcher"
+        _, oy, _ = load_curve(src)
+        assert np.allclose(oy, np.sqrt(x)), "original file must be untouched"
+    print("_self_test_reshape_curve_file_round_trip: PASS")
+
+
 def _run_self_tests():
+    _self_test_limit_stretch_caps_and_keeps_range()
+    _self_test_collapse_removes_far_end_cliff()
+    _self_test_reshape_curve_file_round_trip()
     _self_test_build_curve_lut_widens_spread()
     _self_test_save_load_round_trip()
     _self_test_matcher_disabled_without_file()
@@ -272,6 +435,20 @@ if __name__ == "__main__":
     import sys
     if "--self-test" in sys.argv[1:]:
         _run_self_tests()
+    elif "--reshape" in sys.argv[1:]:
+        # ADR-474: python -m iw3.depth_curve_match --reshape IN.json -o OUT.json [--max-stretch 1.5]
+        import argparse
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--reshape", required=True, help="existing curve file")
+        ap.add_argument("--output", "-o", required=True, help="new curve file (must differ)")
+        ap.add_argument("--max-stretch", type=float, default=DEFAULT_MAX_STRETCH)
+        a = ap.parse_args()
+        if path.abspath(a.reshape) == path.abspath(a.output):
+            print("ERROR: --output must be a different file (the original is kept).", file=sys.stderr)
+            sys.exit(1)
+        before, after = reshape_curve_file(a.reshape, a.output, a.max_stretch)
+        print(f"max stretch {before:.2f}x -> {after:.2f}x, saved {a.output}")
     else:
-        print("Usage: python -m iw3.depth_curve_match --self-test", file=sys.stderr)
+        print("Usage: python -m iw3.depth_curve_match --self-test | "
+              "--reshape IN.json -o OUT.json [--max-stretch 1.5]", file=sys.stderr)
         sys.exit(1)

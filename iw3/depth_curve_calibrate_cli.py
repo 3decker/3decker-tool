@@ -48,7 +48,8 @@ from os import path
 import numpy as np
 import cv2
 
-from .depth_curve_match import build_curve_lut, save_curve, DEFAULT_CURVE_PATH
+from .depth_curve_match import (build_curve_lut, save_curve, DEFAULT_CURVE_PATH,
+                                refine_curve, max_curve_stretch, DEFAULT_MAX_STRETCH)
 
 
 def _pass_depth_dir(output_dir, input_path):
@@ -160,7 +161,7 @@ def _sample_pixels_from_dir(depth_dir, pixels_per_frame=4000, seed=0):
 def calibrate(input_path, source_model, target_model, clips,
               gpu=0, resolution=None, limit_resolution=False,
               pixels_per_frame=4000, num_points=512, output_path=None,
-              work_dir=None, log=print, extra_argv=None):
+              work_dir=None, log=print, extra_argv=None, max_stretch=DEFAULT_MAX_STRETCH):
     """Full calibration run over one or more clips: export both models over
     EVERY clip (each model loaded once, reused across all its clips), sample
     pixels from each clip/side, pool every clip's samples together, build the
@@ -226,6 +227,11 @@ def calibrate(input_path, source_model, target_model, clips,
         source_values = np.concatenate(source_values_all)
         target_values = np.concatenate(target_values_all)
         lut_x, lut_y = build_curve_lut(source_values, target_values, num_points=num_points)
+        # ADR-474: tidy the far-end tie cluster and cap the curve's local stretch.
+        raw_stretch = max_curve_stretch(lut_x, lut_y)
+        lut_x, lut_y = refine_curve(lut_x, lut_y, max_stretch)
+        log(f"[depth-curve-calibrate] max stretch: raw {raw_stretch:.2f}x -> "
+            f"{max_curve_stretch(lut_x, lut_y):.2f}x (limit {max_stretch if max_stretch else 'off'})")
 
         meta = {
             "source_model": source_model,
@@ -235,6 +241,7 @@ def calibrate(input_path, source_model, target_model, clips,
             "frame_count": total_frame_count,
             "pixels_per_frame": pixels_per_frame,
             "calibrated_at": datetime.now().isoformat(timespec="seconds"),
+            "max_stretch": max_stretch,
         }
         save_curve(output_path, lut_x, lut_y, meta=meta)
         log(f"[depth-curve-calibrate] done -- wrote {output_path} "
@@ -317,6 +324,10 @@ def create_parser():
                          help="Same meaning as the main pipeline's --limit-resolution flag.")
     parser.add_argument("--pixels-per-frame", type=int, default=4000,
                          help="Random pixel sample size drawn from each exported frame.")
+    parser.add_argument("--max-stretch", type=float, default=DEFAULT_MAX_STRETCH,
+                        help="ADR-474: cap how strongly the curve may stretch any part of the "
+                             "depth range (1.5 = at most 1.5x). Stops distant backgrounds being "
+                             "over-deepened and their small ripples amplified. 0 = no limit.")
     parser.add_argument("--num-points", type=int, default=512,
                          help="Resolution of the saved lookup table.")
     parser.add_argument("--output", "-o", type=str, default=None,
@@ -404,6 +415,7 @@ def run(args):
             output_path=args.output, work_dir=args.work_dir,
             log=lambda msg: print(msg, file=sys.stderr),
             extra_argv=model_settings_argv(args),
+            max_stretch=getattr(args, "max_stretch", DEFAULT_MAX_STRETCH),
         )
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)

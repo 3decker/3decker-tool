@@ -671,6 +671,26 @@ class DepthCurveCalibrateDialog(wx.Dialog):
               "here first (e.g. add \"_v2\") so this run saves to a SEPARATE file instead of "
               "overwriting the one already in use."))
         self.btn_output = wx.Button(self, label=T("Save As..."))
+        # ADR-474: cap on how hard the saved curve may stretch any part of the depth range.
+        self.lbl_max_stretch = wx.StaticText(self, label=T("Max Stretch"))
+        self.cbo_max_stretch = EditableComboBox(
+            self, choices=["0", "1.3", "1.5", "1.75", "2.0"], name="cbo_depth_curve_max_stretch")
+        self.cbo_max_stretch.SetValue("1.5")
+        self.cbo_max_stretch.SetToolTip(
+            T("What: the most the calibrated curve is allowed to stretch any part of the depth "
+              "range. Without a limit, a curve can stretch distant backgrounds 2x or more.\n"
+              "Why: in real testing (Mario, full-movie calibration) the curve stretched the farthest "
+              "part of the scene about 2.2x. On wide, background-heavy shots that pushed distant "
+              "structures very far back and amplified VDA_L's small background ripples into visible "
+              "patchy layers. The limit stops that; the depth range it saves is shared out to the "
+              "midground and near subjects, so the overall pop stays the same, just spread more evenly.\n"
+              "Pros: calmer, smoother backgrounds; slightly rounder near subjects.\n"
+              "Cons: lower values move the look further from the borrowed model's own curve.\n"
+              "Values: 1.5 = at most 1.5x stretch anywhere (default). 1.3 is gentler, 1.75-2.0 punchier. "
+              "0 = no limit (the old behavior).\n"
+              "Recommended: 1.5. It also smooths out a sudden jump at the very far end of the depth "
+              "that curves had before this setting existed. Only affects new calibrations -- an "
+              "existing curve file can be reshaped with the limit in seconds, without recalibrating."))
         self.btn_run = wx.Button(self, label=T("Calibrate"))
         self.btn_close = wx.Button(self, id=wx.ID_CLOSE, label=T("Close"))
         self.txt_log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
@@ -689,6 +709,9 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         top.Add(self.lbl_output, flag=wx.ALIGN_CENTER_VERTICAL)
         top.Add(self.txt_output, flag=wx.EXPAND)
         top.Add(self.btn_output)
+        top.Add(self.lbl_max_stretch, flag=wx.ALIGN_CENTER_VERTICAL)
+        top.Add(self.cbo_max_stretch)
+        top.Add((0, 0))
 
         hint = wx.StaticText(self, label=T(
             "Keep each clip short -- a minute or two of real content is plenty. This runs "
@@ -810,6 +833,16 @@ class DepthCurveCalibrateDialog(wx.Dialog):
                "--source-model", self.source_model,
                "--target-model", target_model,
                "--output", output_path]
+        max_stretch_text = (self.cbo_max_stretch.GetValue() or "1.5").strip()
+        try:
+            max_stretch = float(max_stretch_text)
+            if max_stretch < 0 or (0 < max_stretch < 1.0):
+                raise ValueError
+        except ValueError:
+            wx.MessageBox(T("Max Stretch must be 0 (no limit) or a number of 1.0 or more, e.g. 1.5."),
+                          T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
+            return
+        cmd += ["--max-stretch", str(max_stretch)]
         for raw in clip_lines:
             cmd += ["--clip", raw]
         cmd += list(self.model_settings_argv)

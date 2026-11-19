@@ -2476,6 +2476,27 @@ class MainFrame(wx.Frame):
         self.chk_convergence_lock_wait_for_settle.Bind(
             wx.EVT_CHECKBOX, self.on_changed_chk_convergence_lock_wait_for_settle)
 
+        # ADR-476: Late Correction for Convergence shot_lock (divergence signal).
+        self.chk_convergence_lock_late_correction = wx.CheckBox(
+            self.grp_stereo, label=T("Late Correction (re-check once settled)"),
+            name="chk_convergence_lock_late_correction")
+        self.chk_convergence_lock_late_correction.SetValue(False)
+        self.chk_convergence_lock_late_correction.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode with Classify By set to divergence.\n"
+              "What: shot_lock decides Wide/Mid/Close-Up once, near the start of each scene. Auto 3D "
+              "Strength can still be climbing at that moment, so the decision can land on the wrong "
+              "side of a threshold. With this on, once Auto 3D Strength reports it has settled, the "
+              "scene is checked again; if the settled value belongs to a different shot type, the "
+              "scene is re-decided ONCE and moves there using your Switch Style (e.g. glide).\n"
+              "Why: real Mario case -- a 67-second scene settled at 4.003 (Wide, High threshold 4.0) but "
+              "was decided as Mid at about 3.94 and stayed Mid for the whole scene.\n"
+              "Pros: long scenes end up on the right value instead of being stuck with an early guess. "
+              "Foreground Scale with 'Follow Convergence's Shot Decision' follows the correction too.\n"
+              "Cons: a corrected scene shows one extra transition a few seconds after the cut.\n"
+              "Values: on / off (default off = unchanged). It needs 12 settled frames in a row that "
+              "disagree before it acts, and corrects at most once per scene, so it never flip-flops.\n"
+              "Recommended: on, together with glide, so the correction is a smooth move."))
+
         self.lbl_convergence_lock_settle_wait_max = wx.StaticText(
             self.grp_stereo, label=T("Max Extra Wait (frames)"))
         self.cbo_convergence_lock_settle_wait_max = EditableComboBox(
@@ -4786,6 +4807,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_convergence_lock_strength_threshold_mid, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_strength_threshold_mid, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_lock_wait_for_settle, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_convergence_lock_late_correction, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12739,6 +12761,7 @@ class MainFrame(wx.Frame):
         # divergence signal (same gating as the threshold fields above); its own
         # Max Extra Wait field further requires the checkbox itself to be on.
         self.chk_convergence_lock_wait_for_settle.Enable(is_divergence)
+        self.chk_convergence_lock_late_correction.Enable(is_divergence)  # ADR-476
         is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
         self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
@@ -13104,6 +13127,7 @@ class MainFrame(wx.Frame):
             self.lbl_convergence_lock_threshold_mode, self.cbo_convergence_lock_threshold_mode,
             self.lbl_convergence_lock_strength_threshold_mid, self.cbo_convergence_lock_strength_threshold_mid,
             self.chk_convergence_lock_wait_for_settle,
+            self.chk_convergence_lock_late_correction,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -14279,6 +14303,7 @@ class MainFrame(wx.Frame):
                 self.cbo_convergence_lock_strength_threshold_mid.GetValue()),
             # ADR-441: off by default -- see shot_lock_estimator.py's own docstring.
             convergence_lock_wait_for_settle=self.chk_convergence_lock_wait_for_settle.GetValue(),
+            convergence_lock_late_correction=self.chk_convergence_lock_late_correction.GetValue(),
             convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
@@ -15730,6 +15755,8 @@ class MainFrame(wx.Frame):
         # ADR-441: off by default -- see shot_lock_estimator.py's own docstring.
         self.chk_convergence_lock_wait_for_settle.SetValue(
             bool(getattr(args, "convergence_lock_wait_for_settle", False)))
+        self.chk_convergence_lock_late_correction.SetValue(  # ADR-476
+            bool(getattr(args, "convergence_lock_late_correction", False)))
         _apply_combo_value(self.cbo_convergence_lock_settle_wait_max,
                            getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
         self.update_shot_lock_signal()
@@ -41256,6 +41283,125 @@ def _self_test_combined_scene_log_merge():
     print("_self_test_combined_scene_log_merge: PASS")
 
 
+def _self_test_shot_lock_late_correction():
+    """ADR-476: real case -- Mario scene 6 was decided Mid at ~3.94 while Auto 3D
+    Strength was still climbing, then settled at 4.003 (>= High 4.0 = Wide) and
+    stayed Mid for 67 s. Late Correction must: (a) re-decide such a scene to Wide
+    once settled readings disagree for LATE_CORRECTION_CONFIRM_FRAMES frames, and
+    update locked_shot_type so a Foreground Scale follower follows; (b) ignore
+    unsettled readings; (c) need consecutive frames (a short blip resets the
+    count); (d) correct at most once per scene; (e) do nothing when off. The GUI
+    checkbox must default off, enable only for the divergence signal, and
+    round-trip through parse_args()/the CLI/restore."""
+    import torch
+    import wx
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator, LATE_CORRECTION_CONFIRM_FRAMES as N
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert not frame.chk_convergence_lock_late_correction.GetValue(), "must default off"
+        frame.cbo_convergence_mode.SetValue("shot_lock")
+        frame.update_convergence_mode()
+        frame.cbo_convergence_lock_signal.SetValue("divergence")
+        frame.on_changed_cbo_convergence_lock_signal(wx.CommandEvent())
+        assert frame.chk_convergence_lock_late_correction.IsEnabled()
+        frame.chk_convergence_lock_late_correction.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.convergence_lock_late_correction is True
+        cmd = frame.get_cli_command()
+        assert "--convergence-lock-late-correction" in cmd, cmd
+        frame.apply_parsed_args_to_gui(
+            U.create_parser(required_true=False).parse_args(
+                ["-i", "a.mp4", "-o", "o", "--convergence-mode", "shot_lock",
+                 "--convergence-lock-signal", "divergence"]))
+        assert not frame.chk_convergence_lock_late_correction.GetValue()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+
+    def make(late):
+        est = object.__new__(ShotLockEstimator)
+        est.wide_value, est.closeup_value, est.mid_value = 0.50, 0.00, 0.25
+        est.switch = "snap"
+        est.decay = 0.9
+        est.decide_speed = None
+        est.signal = "divergence"
+        est.threshold_mode = "range"
+        est.strength_threshold = 4.0
+        est.strength_threshold_low = 3.7
+        est.strength_threshold_mid = None
+        est.wait_for_settle = False
+        est.settle_wait_max = 60
+        est._clip = None
+        est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
+        est.blend_ema = None
+        est.ease_value = None
+        est._last_raw = None
+        est._scene_running_c = None
+        est._scene_n = 0
+        est._scene_locked_value = None
+        est._scene_elapsed = 0
+        est.locked_shot_type = None
+        est.late_correction = late
+        est._late_mismatch_frames = 0
+        est._late_corrected = False
+        est.late_corrections = 0
+        est._recompute_decide_settle()
+        return est
+
+    depth = torch.zeros(1, 1, 2, 2)
+
+    def step(est, div, settled, n=1):
+        for _ in range(n):
+            est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=div,
+                divergence_settled=settled)
+
+    # (a) decided Mid while climbing, then settles at 4.0+ -> corrected to Wide
+    est = make(True)
+    est._pending_scene_reset = True
+    step(est, 3.9, False, 30)
+    assert est.locked_shot_type == "mid", est.locked_shot_type
+    step(est, 4.0, True, N - 1)
+    assert est.locked_shot_type == "mid", "must wait for N consecutive settled frames"
+    step(est, 4.0, True, 1)
+    assert est.locked_shot_type == "wide" and est._scene_locked_value == 0.50, est.locked_shot_type
+    # (d) once per scene -- a later settled drop below 4.0 does NOT flip it back
+    step(est, 3.9, True, 3 * N)
+    assert est.locked_shot_type == "wide" and est.late_corrections == 1
+    # new scene: correction allowed again
+    est._pending_scene_reset = True
+    step(est, 3.6, False, 30)
+    assert est.locked_shot_type == "closeup"
+    step(est, 3.8, True, N)
+    assert est.locked_shot_type == "mid" and est.late_corrections == 2
+
+    # (b) unsettled readings never count; (c) a blip resets the count
+    est = make(True)
+    est._pending_scene_reset = True
+    step(est, 3.9, False, 30)
+    step(est, 4.1, False, 3 * N)
+    assert est.locked_shot_type == "mid", "unsettled readings must never correct"
+    step(est, 4.1, True, N - 2)
+    step(est, 3.9, True, 1)
+    step(est, 4.1, True, N - 2)
+    assert est.locked_shot_type == "mid", "count must restart after a disagreeing-then-agreeing blip"
+    step(est, 4.1, True, 2)
+    assert est.locked_shot_type == "wide"
+
+    # (e) off -> never corrects
+    est = make(False)
+    est._pending_scene_reset = True
+    step(est, 3.9, False, 30)
+    step(est, 4.1, True, 5 * N)
+    assert est.locked_shot_type == "mid" and est.late_corrections == 0
+    print("_self_test_shot_lock_late_correction: PASS")
+
+
 def _self_test_foreground_scale_follow_convergence_and_glide():
     """ADR-475: Foreground Scale Shot Lock gets a "glide" Switch Style with its own
     Glide Duration (enabled only for glide) and a "Follow Convergence's Shot
@@ -42005,6 +42151,7 @@ def _run_self_tests():
         _self_test_combined_scene_log_merge,
         _self_test_foreground_scale_lock_switch_gui_and_cli,
         _self_test_foreground_scale_follow_convergence_and_glide,
+        _self_test_shot_lock_late_correction,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,
         _self_test_experience_level_limit_bitrate_tier_and_codec_compose,

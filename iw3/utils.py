@@ -3797,6 +3797,9 @@ def make_output_filename(input_filename, args, video=False):
                                                         DEFAULT_SETTLE_WAIT_MAX)
                         if lock_settle_wait_max != DEFAULT_SETTLE_WAIT_MAX:
                             convergence_smoothing += f"{int(lock_settle_wait_max)}"
+                    # ADR-476: only shown when actually turned on.
+                    if getattr(args, "convergence_lock_late_correction", False):
+                        convergence_smoothing += "_latefix"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4374,6 +4377,8 @@ def _build_iw3_comment_metadata(args, video=True):
                         comment_parts.append(
                             f"iw3_convergence_lock_strength_threshold_mid={lock_threshold_mid_val}")
                 # ADR-441: omitted entirely when off (the default).
+                if getattr(args, "convergence_lock_late_correction", False):  # ADR-476
+                    comment_parts.append("iw3_convergence_lock_late_correction=true")
                 if getattr(args, "convergence_lock_wait_for_settle", False):
                     comment_parts.append("iw3_convergence_lock_wait_for_settle=true")
                     lock_settle_wait_max_val = getattr(args, "convergence_lock_settle_wait_max",
@@ -10082,6 +10087,12 @@ def create_parser(required_true=True):
                              "for Auto 3D Strength to settle before locking in anyway with whatever number "
                              "it has by then. Keeps the extra wait bounded and predictable instead of "
                              "open-ended.")
+    parser.add_argument("--convergence-lock-late-correction", action="store_true",
+                        help="ADR-476: --convergence-mode shot_lock with --convergence-lock-signal "
+                             "divergence only: if Auto 3D Strength settles on the other side of a "
+                             "threshold AFTER the scene's decision was made, re-decide that scene once "
+                             "and move there with the normal Switch Style. Foreground Scale with "
+                             "--foreground-scale-lock-follow-convergence follows automatically.")
     parser.add_argument("--convergence-lock-glide-duration", type=int, default=DEFAULT_GLIDE_DURATION,
                         help="ADR-442: --convergence-mode shot_lock only, --convergence-lock-switch glide "
                              "only: how many frames the fixed-duration ease-in-out takes to land exactly on "
@@ -11302,7 +11313,8 @@ def set_state_args(args, stop_event=None, tqdm_fn=None, depth_model=None, suspen
             strength_threshold_mid=getattr(args, "convergence_lock_strength_threshold_mid", None),
             wait_for_settle=getattr(args, "convergence_lock_wait_for_settle", False),
             settle_wait_max=getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX),
-            glide_duration=getattr(args, "convergence_lock_glide_duration", DEFAULT_GLIDE_DURATION))
+            glide_duration=getattr(args, "convergence_lock_glide_duration", DEFAULT_GLIDE_DURATION),
+            late_correction=getattr(args, "convergence_lock_late_correction", False))  # ADR-476
 
     if args.export_disparity:
         args.export = True

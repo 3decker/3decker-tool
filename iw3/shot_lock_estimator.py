@@ -297,6 +297,9 @@ DEFAULT_SETTLE_WAIT_MAX = 60
 # ADR-442: how many frames the `glide` switch's fixed-duration ease-in-out
 # takes to fully land on a new locked value -- see module docstring.
 DEFAULT_GLIDE_DURATION = 30
+# ADR-476: Late Correction -- how many consecutive SETTLED frames must disagree with
+# the scene's locked shot type before it is corrected (guards against a brief blip).
+LATE_CORRECTION_CONFIRM_FRAMES = 12
 
 
 class ShotLockEstimator():
@@ -306,7 +309,7 @@ class ShotLockEstimator():
                  strength_threshold_low=None, threshold_mode=DEFAULT_THRESHOLD_MODE,
                  strength_threshold_mid=None, wait_for_settle=False,
                  settle_wait_max=DEFAULT_SETTLE_WAIT_MAX,
-                 glide_duration=DEFAULT_GLIDE_DURATION):
+                 glide_duration=DEFAULT_GLIDE_DURATION, late_correction=False):
         self.wide_value = float(wide_value)
         self.closeup_value = float(closeup_value)
         # ADR-434: None now means "disabled" (the GUI's Mid Shot Value box left
@@ -366,6 +369,17 @@ class ShotLockEstimator():
         # deciding: Convergence's own output holds the previous value during that
         # window too, so the follower holds the previous type with it.
         self.locked_shot_type = None
+        # ADR-476: opt-in Late Correction (divergence signal only). The once-per-scene
+        # decision is made near the start of a scene; Auto 3D Strength can still be
+        # climbing then (real case: Mario scene 6 locked Mid at ~3.94 while the scene
+        # settled at 4.003 >= High 4.0, held wrong for 67 s). With this on, once Auto 3D
+        # Strength reports SETTLED and the settled value classifies differently for
+        # LATE_CORRECTION_CONFIRM_FRAMES frames in a row, the scene is re-decided ONCE
+        # (never flip-flops) and moves there with the normal switch style.
+        self.late_correction = bool(late_correction)
+        self._late_mismatch_frames = 0
+        self._late_corrected = False
+        self.late_corrections = 0  # total count this job (for tests/logging)
         self._last_raw = None  # ADR-421 fallback path: last frame's classified value
         # ADR-422: per-real-scene settle-then-lock state (only used when the caller
         # supplies log_reset_pts). _pending_scene_reset mirrors SceneHoldTracker's own
@@ -624,11 +638,30 @@ class ShotLockEstimator():
                     self._scene_locked_value = None
                     self._scene_elapsed = 0
                     self._pending_scene_reset = False
+                    self._late_mismatch_frames = 0  # ADR-476
+                    self._late_corrected = False
                 # ADR-435: `ease` makes exactly the same locked decision as snap/
                 # snap_ramp below -- only the FINAL step (how the output value moves
                 # toward that decision) differs, so it shares this whole decision
                 # block rather than duplicating it. See _advance_locked().
                 if self._scene_locked_value is not None:
+                    # ADR-476: Late Correction -- see __init__. Only on SETTLED divergence
+                    # readings (divergence_settled is True; None/False never count), only
+                    # once per scene, only after several consecutive disagreeing frames.
+                    if (getattr(self, "late_correction", False) and not getattr(self, "_late_corrected", False)
+                            and self.signal == "divergence" and divergence_settled is True
+                            and self.locked_shot_type is not None):
+                        if self._classify_label(c) != self.locked_shot_type:
+                            self._late_mismatch_frames += 1
+                            if self._late_mismatch_frames >= LATE_CORRECTION_CONFIRM_FRAMES:
+                                self._scene_locked_value = self._classify(c)
+                                self.locked_shot_type = self._classify_label(c)
+                                self._late_corrected = True
+                                self.late_corrections += 1
+                                if self.switch not in ("ease", "glide"):
+                                    self.tracker.mark_cut()
+                        else:
+                            self._late_mismatch_frames = 0
                     value = self._advance_locked(self._scene_locked_value)  # idempotent hold
                 else:
                     # averaging the continuous score over `settle` frames, then (ADR-429)

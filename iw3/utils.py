@@ -1352,6 +1352,14 @@ def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_pa
                 interpolated_path, hybrid_exclude_ranges)
             cmd += ["--hybrid-exclude-ranges-file", hybrid_exclude_ranges_path]
 
+    # ADR-473: _release_pause_vram() already ran before post-conversion steps
+    # (ADR-228), but Hybrid Frame Rate's scene/motion scans above run AFTER it, on the
+    # GPU, in this process -- and nothing emptied the CUDA cache again before RIFE's
+    # own subprocess starts. Real case: this GUI process still held ~10GB while RIFE
+    # ran, pushing the card to 32/32GB. Clean up here and log the measured numbers so
+    # the job log proves whether what remains is cache (fixed by this) or a real leak.
+    _release_and_report_vram_before_subprocess("RIFE")
+
     try:
         _notify_stage(args, STAGE_RIFE_INTERPOLATE)
         print(f"[iw3] Interpolating finished output with RIFE ({rife_model})...", file=sys.stderr)
@@ -1387,6 +1395,68 @@ def _run_rife_interpolation(output_path, args, force_hevc=False, scene_source_pa
                 os.remove(hybrid_exclude_ranges_path)
             except OSError:
                 pass
+
+
+def _cuda_memory_snapshot_gb():
+    """(allocated_gb, reserved_gb) summed over every CUDA device this process has
+    touched, or None when CUDA isn't available/initialized. Never raises."""
+    try:
+        if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+            return None
+        allocated = reserved = 0
+        for i in range(torch.cuda.device_count()):
+            allocated += torch.cuda.memory_allocated(i)
+            reserved += torch.cuda.memory_reserved(i)
+        return allocated / 1024 ** 3, reserved / 1024 ** 3
+    except Exception:  # noqa
+        return None
+
+
+def _largest_live_cuda_tensors(limit=8):
+    """Short description of the biggest still-referenced CUDA tensors in this process
+    -- diagnostic only (ADR-473), used when real memory is still allocated after
+    cleanup. Never raises; returns [] on any failure."""
+    import gc
+    found = []
+    try:
+        for obj in gc.get_objects():
+            try:
+                if torch.is_tensor(obj) and obj.is_cuda:
+                    found.append((obj.element_size() * obj.nelement(), tuple(obj.shape), str(obj.dtype)))
+            except Exception:  # noqa
+                continue
+    except Exception:  # noqa
+        return []
+    found.sort(key=lambda t: t[0], reverse=True)
+    return [f"{size / 1024 ** 2:.0f}MB {shape} {dtype}" for size, shape, dtype in found[:limit]]
+
+
+def _release_and_report_vram_before_subprocess(label):
+    """ADR-473: empty this process's CUDA cache right before launching a GPU
+    subprocess (RIFE) and print what this process still holds, before and after.
+    "allocated" = memory live tensors really use; "reserved" = what PyTorch is holding
+    from the card (allocated + reusable cache). Reserved >> allocated before cleanup
+    and small after = it was only cache (fixed by this call). Allocated still large
+    after = a real leak; the largest live tensors are listed to locate it. Never
+    raises -- a diagnostic must never block the RIFE step."""
+    try:
+        before = _cuda_memory_snapshot_gb()
+        if before is None:
+            return
+        gc_collect()
+        after = _cuda_memory_snapshot_gb() or (0.0, 0.0)
+        print(f"[iw3] GPU memory held by this process before {label}: "
+              f"allocated {before[0]:.2f}GB / reserved {before[1]:.2f}GB before cleanup -> "
+              f"allocated {after[0]:.2f}GB / reserved {after[1]:.2f}GB after cleanup",
+              file=sys.stderr)
+        if after[0] >= 1.0:
+            tensors = _largest_live_cuda_tensors()
+            print(f"[iw3] WARNING: {after[0]:.2f}GB still in live use before {label} (possible leak). "
+                  f"Largest live GPU tensors: {'; '.join(tensors) if tensors else 'none found'}",
+                  file=sys.stderr)
+    except Exception as e:  # noqa
+        print(f"[iw3] GPU memory report before {label} failed ({e.__class__.__name__}: {e})",
+              file=sys.stderr)
 
 
 def _parse_bitrate_mbps(value):

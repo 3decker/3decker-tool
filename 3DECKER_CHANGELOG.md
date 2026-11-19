@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — November 18, 2026
+## Latest Update — November 19, 2026
+
+**Fixed: the 3DECKER window could keep a large chunk of graphics memory (about 10GB in a real case) while RIFE was running, when "Hybrid Frame Rate" was on.** The app already handed back its graphics memory before starting RIFE, but Hybrid Frame Rate's motion scan runs on the graphics card right after that, and nothing tidied up again before RIFE started. On a full card, the overflow spills into much slower system memory, so RIFE can take far longer than it should. It now tidies up again right before RIFE starts. Your job log also gets one new line at that moment showing exactly how much graphics memory the app was still holding, so if anything is still left over it shows up plainly instead of being guessed at. Nothing to turn on.
+
+**Tip, from the same investigation: "RIFE Motion Detail" (on the Processor tab) at 2.0 uses several times more graphics memory than 1.0 on 4K files.** It's a separate setting from the standalone RIFE tool's own Motion Detail, so the two can differ without you noticing. That's why in-conversion RIFE can use far more memory than standalone RIFE. Keep it at 1.0 unless a movie actually shows blur or ghosting on fast motion.
+
+## Update — November 18, 2026
 
 **Added: a "Curve File" box in Depth Curve Match, so you can choose which saved calibration a job actually uses.** Previously the setting always silently loaded the one fixed file every "Calibrate..." run would overwrite — there was no way to point a job at a different saved curve, even though the Calibrate dialog already let you save different attempts under different names for comparison. Now there's a text box with a "Browse..." button right above the status line: leave it blank to keep using the default file (exactly like before), or pick any other saved curve .json file to use that one instead. The status line, the pre-start warning, and the job log all follow whichever file you pick.
 

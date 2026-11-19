@@ -496,10 +496,16 @@ class Tracker:
     behavior; a nonzero value eases `out` from its pre-cut value to the new
     scene's target over that many frames instead of jumping in one frame."""
 
-    def __init__(self, mode, stability=DEFAULT_STABILITY, cut_smooth=0):
+    def __init__(self, mode, stability=DEFAULT_STABILITY, cut_smooth=0, settle_apply=False):
         self.mode = mode if mode in MODES else DEFAULT_MODE
         self.p = _stability(stability)
         self.cut_smooth = max(0, int(cut_smooth or 0))
+        # ADR-477: at the END of the settle window, move to the settled (averaged)
+        # value even if it is closer than the deadband. Without this, `cuts` mode
+        # snaps to the FIRST frame's noisy guess at a cut and -- because the medium
+        # deadband (0.5) is wider than a typical Auto Range (e.g. 3.6-4.2) -- never
+        # moves to the averaged value at all.
+        self.settle_apply = bool(settle_apply)
         self.reset()
 
     def reset(self):
@@ -565,6 +571,12 @@ class Tracker:
                 gap = target - self.out
                 if not self.moving and abs(gap) >= p["deadband"]:
                     self.moving = True
+                # ADR-477: settle_apply -- the last frame of the settle window glides to
+                # the averaged value regardless of the deadband (only if it differs by
+                # at least half an applied STEP, so it can actually change the result).
+                if (self.settle_apply and not self.moving and self.mode != "smooth"
+                        and self.n == p["settle"] and abs(gap) >= STEP / 2):
+                    self.moving = True
                 if self.moving:
                     self.out += gap * 0.1                       # glide, ~10 frames
                     if abs(target - self.out) < 0.05:
@@ -592,7 +604,8 @@ class _RunState:
                                    if isinstance(args.state, dict) else "cpu")
         self.tracker = Tracker(getattr(args, "auto_divergence_mode", DEFAULT_MODE),
                                getattr(args, "auto_divergence_stability", DEFAULT_STABILITY),
-                               getattr(args, "auto_divergence_cut_smooth", 0))
+                               getattr(args, "auto_divergence_cut_smooth", 0),
+                               getattr(args, "auto_divergence_settle_apply", False))
         self.last_depth = None    # the depth tensor of the last call, held so its id stays unique
         self.last_divs = None
         self.last_settled_list = []  # ADR-441: parallel to last_divs -- see divergences()
@@ -752,6 +765,16 @@ class _RunState:
             # the strength curve's input changes.
             scores = [1.0 - s for s in scores]
         own_cuts = not getattr(args, "scene_detect", False)
+        # ADR-477: --auto-divergence-real-cuts -- use the SAME real, independently
+        # scanned scene boundaries Convergence shot_lock and the scene logs already use
+        # (log_reset_pts, same 'last frame of its scene' convention as reset_pts)
+        # instead of this tracker's own CLIP-similarity cut guess, so the strength
+        # changes on exactly the frame Convergence starts its new scene. Falls back to
+        # the original behavior whenever those boundaries aren't available.
+        if getattr(args, "auto_divergence_real_cuts", False) and log_reset_pts is not None:
+            own_cuts = False
+            reset_pts = (list(log_reset_pts) if reset_pts is None
+                         else [bool(a) or bool(b) for a, b in zip(reset_pts, log_reset_pts)])
         lo = float(getattr(args, "divergence_min", DEFAULT_MIN))
         hi = float(getattr(args, "divergence_max", DEFAULT_MAX))
         typical = float(args.divergence)
@@ -1515,6 +1538,15 @@ def _patch_utils(U):
                        help="ease the strength change at a cut (cuts/hybrid) into a ramp over this "
                             "many frames instead of an instant jump; 0 (default) is the original, "
                             "unchanged instant jump")
+        g.add_argument("--auto-divergence-real-cuts", action="store_true",
+                       help="ADR-477: change the strength at the real scene cuts Convergence "
+                            "shot_lock/the scene logs use, instead of auto 3D strength's own "
+                            "frame-similarity cut guess (needs those cuts to be available, e.g. "
+                            "Convergence shot_lock or a scene log on; otherwise unchanged)")
+        g.add_argument("--auto-divergence-settle-apply", action="store_true",
+                       help="ADR-477: at the end of the settle window (cuts/hybrid), glide to "
+                            "the averaged value even when it is closer than the stability "
+                            "deadband, instead of keeping the first frame's guess")
         g.add_argument("--auto-divergence-invert", action="store_true",
                        help="ADR-419: reverse which end of the shot gets more -- wide shots "
                             "and landscapes get the MOST 3D strength, close-ups get the LEAST, "

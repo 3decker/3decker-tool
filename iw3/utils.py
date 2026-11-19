@@ -4033,6 +4033,10 @@ def make_output_filename(input_filename, args, video=False):
             auto_div_cut_smooth = int(getattr(args, "auto_divergence_cut_smooth", 0) or 0)
             if auto_div_cut_smooth > 0 and auto_div_mode != "smooth":
                 auto3d_tag += f"_cutsm{auto_div_cut_smooth}"
+            if getattr(args, "auto_divergence_real_cuts", False):  # ADR-477
+                auto3d_tag += "_rc"
+            if getattr(args, "auto_divergence_settle_apply", False):  # ADR-477
+                auto3d_tag += "_sa"
             if getattr(args, "auto_divergence_invert", False):
                 # ADR-419: wide=most/close-up=least instead of the normal direction --
                 # named explicitly so a reversed run never looks like a normal one.
@@ -4292,6 +4296,10 @@ def _build_iw3_comment_metadata(args, video=True):
         if (getattr(args, "auto_divergence_mode", "hybrid") != "smooth"
                 and getattr(args, "auto_divergence_cut_smooth", 0)):
             comment_parts.append(f"iw3_auto_divergence_cut_smooth={args.auto_divergence_cut_smooth}")
+        if getattr(args, "auto_divergence", False) and getattr(args, "auto_divergence_real_cuts", False):
+            comment_parts.append("iw3_auto_divergence_real_cuts=1")  # ADR-477
+        if getattr(args, "auto_divergence", False) and getattr(args, "auto_divergence_settle_apply", False):
+            comment_parts.append("iw3_auto_divergence_settle_apply=1")  # ADR-477
         # ADR-443: omitted entirely when unset (None), same convention as every
         # other optional add-on tag here.
         auto_div_closeup_val = getattr(args, "auto_divergence_closeup", None)

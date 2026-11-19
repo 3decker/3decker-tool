@@ -1898,6 +1898,40 @@ class MainFrame(wx.Frame):
               "On: wide shots/landscapes get the MOST, close-ups get the LEAST.\n"
               "Auto Range (min, max) above keeps the same meaning either way -- only which shot type each "
               "end applies to flips."))
+        # ADR-477: two opt-in Auto 3D Strength timing/accuracy fixes.
+        self.chk_nt_auto_div_real_cuts = wx.CheckBox(
+            self.grp_stereo, label=T("Use Real Scene Cuts"), name="chk_nt_auto_div_real_cuts")
+        self.chk_nt_auto_div_real_cuts.SetValue(False)
+        self.chk_nt_auto_div_real_cuts.SetToolTip(
+            T("What: changes 3D Strength at the same real scene cuts that Convergence Plane's Shot Lock "
+              "and the scene logs use, instead of Auto 3D Strength's own quick guess (comparing each "
+              "frame to the previous one)." + "\n"
+              "Why: with Scene Detection off, the two can see a cut at different moments. If Auto 3D "
+              "Strength notices a cut late (or misses it), Shot Lock decides using the PREVIOUS scene's "
+              "strength -- a real Mario scene was decided Mid this way and stayed Mid for 67 seconds." + "\n"
+              "Pros: Auto 3D Strength, Convergence and Foreground Scale all change on exactly the same "
+              "frame; Shot Lock decisions use the new scene's real strength." + "\n"
+              "Cons: if the real scene scan misses a cut that the quick guess would have caught, the "
+              "strength won't change there either." + "\n"
+              "Values: on / off (default off = unchanged). Only works when real cuts are available -- "
+              "Convergence Plane in shot_lock mode or any scene log turned on; otherwise it quietly "
+              "keeps the original behavior. Does not turn on Scene Detection." + "\n"
+              "Recommended: on, whenever you use Shot Lock."))
+        self.chk_nt_auto_div_settle_apply = wx.CheckBox(
+            self.grp_stereo, label=T("Apply Settled Value"), name="chk_nt_auto_div_settle_apply")
+        self.chk_nt_auto_div_settle_apply.SetValue(False)
+        self.chk_nt_auto_div_settle_apply.SetToolTip(
+            T("What: after a cut, Auto 3D Strength averages the first frames of the scene (12 frames at "
+              "Medium stability) to find the scene's real strength. Today it starts from the FIRST "
+              "frame's guess and only moves to the averaged value if it differs by at least the "
+              "stability's dead zone (0.5 at Medium) -- wider than a typical Auto Range like 3.6-4.2, so "
+              "in practice every scene keeps its first-frame guess. With this on, it glides to the "
+              "averaged value at the end of that short window." + "\n"
+              "Pros: each scene's strength is based on a dozen frames instead of one noisy frame." + "\n"
+              "Cons: some scenes get a small 3D Strength adjustment about half a second after the cut "
+              "(a short glide, usually one 0.1 step)." + "\n"
+              "Values: on / off (default off = unchanged). Cuts and hybrid modes only." + "\n"
+              "Recommended: on."))
         self.lbl_nt_closeup = wx.StaticText(self.grp_stereo, label=T("Close-Up Strength"))
         self.cbo_nt_closeup = EditableComboBox(self.grp_stereo, choices=["", "4.5", "4.8", "5.0"],
                                                name="cbo_nt_closeup")
@@ -4764,6 +4798,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_nt_wide_floor_cutoff, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_nt_wide_floor_cutoff, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_nt_auto_div_invert, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_nt_auto_div_real_cuts, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.chk_nt_auto_div_settle_apply, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_overlay, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_nt_auto_div_scene_log, (i := i + 1, 1), (1, 2), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.btn_nt_scan_strength, (i := i + 1, 1), (1, 2), flag=wx.EXPAND)
@@ -13101,6 +13137,7 @@ class MainFrame(wx.Frame):
             self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
             self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
             self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_invert,
+            self.chk_nt_auto_div_real_cuts, self.chk_nt_auto_div_settle_apply,
             self.lbl_nt_closeup, self.cbo_nt_closeup, self.lbl_nt_wide, self.cbo_nt_wide,
             self.lbl_nt_wide_floor, self.cbo_nt_wide_floor,
             self.lbl_nt_wide_floor_cutoff, self.cbo_nt_wide_floor_cutoff,
@@ -13332,6 +13369,7 @@ class MainFrame(wx.Frame):
         for c in (self.cbo_nt_auto_div_mode, self.lbl_nt_div_range, self.cbo_nt_div_min, self.cbo_nt_div_max,
                   self.lbl_nt_auto_div_stab, self.cbo_nt_auto_div_stab,
                   self.lbl_nt_cut_smooth, self.cbo_nt_cut_smooth, self.chk_nt_auto_div_invert,
+                  self.chk_nt_auto_div_real_cuts, self.chk_nt_auto_div_settle_apply,
                   self.lbl_nt_closeup, self.cbo_nt_closeup, self.lbl_nt_wide, self.cbo_nt_wide,
                   self.lbl_nt_wide_floor, self.cbo_nt_wide_floor,
                   self.lbl_nt_wide_floor_cutoff, self.cbo_nt_wide_floor_cutoff,
@@ -14319,6 +14357,8 @@ class MainFrame(wx.Frame):
             auto_divergence_stability=self.cbo_nt_auto_div_stab.GetValue().replace(" ", "-"),
             auto_divergence_cut_smooth=int(self.cbo_nt_cut_smooth.GetValue()),
             auto_divergence_invert=self.chk_nt_auto_div_invert.GetValue(),
+            auto_divergence_real_cuts=self.chk_nt_auto_div_real_cuts.GetValue(),  # ADR-477
+            auto_divergence_settle_apply=self.chk_nt_auto_div_settle_apply.GetValue(),
             # ADR-443: an empty box means "keep the original single-curve behavior" -- None.
             auto_divergence_closeup=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_nt_closeup.GetValue()),
@@ -15775,6 +15815,8 @@ class MainFrame(wx.Frame):
                            getattr(args, "auto_divergence_stability", "medium").replace("-", " "))
         _apply_combo_value(self.cbo_nt_cut_smooth, getattr(args, "auto_divergence_cut_smooth", 0))
         self.chk_nt_auto_div_invert.SetValue(bool(getattr(args, "auto_divergence_invert", False)))
+        self.chk_nt_auto_div_real_cuts.SetValue(bool(getattr(args, "auto_divergence_real_cuts", False)))
+        self.chk_nt_auto_div_settle_apply.SetValue(bool(getattr(args, "auto_divergence_settle_apply", False)))
         # ADR-443: None (disabled) must restore to an empty box, not the literal text
         # "None" _apply_combo_value's plain str() would otherwise produce.
         _closeup_restore = getattr(args, "auto_divergence_closeup", None)
@@ -41283,6 +41325,101 @@ def _self_test_combined_scene_log_merge():
     print("_self_test_combined_scene_log_merge: PASS")
 
 
+def _self_test_auto_divergence_real_cuts_and_settle_apply():
+    """ADR-477: two opt-in Auto 3D Strength fixes for Shot Lock timing.
+    (1) settle_apply: in cuts mode the strength snaps to the FIRST frame's guess at
+    a cut and the medium deadband (0.5) is wider than a 3.6-4.2 Auto Range, so the
+    12-frame average was never applied. With settle_apply the tracker glides to the
+    averaged value at the end of the settle window; `settled` stays False during
+    that glide and becomes True once it lands. Off = byte-identical to before.
+    (2) real cuts: divergences() must use the caller's real log_reset_pts as the cut
+    source (own CLIP-similarity guess disabled), so the strength changes on exactly
+    the frame after the flagged last-frame-of-scene -- even when consecutive frames
+    look alike (similarity guess would see no cut). Off/absent = original behavior.
+    GUI checkboxes default off and round-trip through parse_args/CLI/restore."""
+    import types
+    import torch
+    import wx
+    from nt_autostrength import autodiv as AD
+    from . import utils as U
+
+    def curve(sc):
+        return 3.6 + 0.6 * sc   # Auto Range 3.6-4.2
+
+    # (1) settle_apply
+    scores = [0.0] + [0.5] * 39
+    off = AD.Tracker("cuts", "medium")
+    out_off = off.run(scores, None, None, False, curve)
+    assert all(abs(v - 3.6) < 1e-9 for v in out_off), "off: must keep the first-frame guess (unchanged)"
+    on = AD.Tracker("cuts", "medium", settle_apply=True)
+    out_on = on.run(scores, None, None, False, curve)
+    settle = AD.STABILITY["medium"]["settle"]
+    expected = curve((0.0 + 0.5 * (settle - 1)) / settle)
+    assert abs(out_on[settle - 2] - 3.6) < 1e-9, "must not move before the settle window ends"
+    assert abs(out_on[-1] - expected) < 1e-9, (out_on[-1], expected)
+    assert round(out_on[-1] / AD.STEP) * AD.STEP != 3.6, "the averaged value must change the applied step"
+    st_flags = on.last_settled
+    assert st_flags[settle] is False, "settled must be False while gliding to the averaged value"
+    assert st_flags[-1] is True
+
+    # (2) real cuts through divergences()
+    class _Est:
+        model = None
+        def __call__(self, im, depth):
+            n = depth.shape[0]
+            # scene A = close-up-ish (0.0), scene B = wide (1.0); identical embeddings so
+            # the own similarity guess would NEVER see a cut.
+            sc = [0.0] * 5 + [1.0] * (n - 5)
+            emb = torch.nn.functional.normalize(torch.ones(n, 4), dim=1)
+            return sc, emb
+
+    def run(real_cuts, log_reset):
+        st = AD._RunState.__new__(AD._RunState)
+        st.estimator = _Est()
+        st.tracker = AD.Tracker("cuts", "low")   # low = 6-frame settle, keeps the test short
+        st.verbose, st.announced = False, True
+        st.last_depth, st.last_divs, st.last_settled_list = None, None, []
+        args = types.SimpleNamespace(divergence=3.9, divergence_min=3.6, divergence_max=4.2,
+                                     auto_divergence_invert=False, scene_detect=False,
+                                     auto_divergence_real_cuts=real_cuts,
+                                     auto_divergence_scene_log=False)
+        depth = torch.zeros(12, 1, 2, 2)
+        divs = st.divergences(torch.zeros(12, 3, 2, 2), depth, args, None, log_reset_pts=log_reset)
+        return divs, st.tracker.last_cuts
+
+    log_reset = [False] * 4 + [True] + [False] * 7   # last frame of scene A = index 4
+    divs_on, cuts_on = run(True, log_reset)
+    assert [i for i, c in enumerate(cuts_on) if c] == [0, 5], cuts_on
+    assert divs_on[4] != divs_on[5], "strength must change exactly at the real cut"
+    divs_off, cuts_off = run(False, log_reset)
+    assert [i for i, c in enumerate(cuts_off) if c] == [0], "off: own guess sees no cut here (unchanged)"
+    divs_none, cuts_none = run(True, None)
+    assert [i for i, c in enumerate(cuts_none) if c] == [0], "no real cuts available -> original behavior"
+
+    # GUI
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert not frame.chk_nt_auto_div_real_cuts.GetValue()
+        assert not frame.chk_nt_auto_div_settle_apply.GetValue()
+        frame.chk_nt_auto_div.SetValue(True)
+        frame.chk_nt_auto_div_real_cuts.SetValue(True)
+        frame.chk_nt_auto_div_settle_apply.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.auto_divergence_real_cuts is True and args.auto_divergence_settle_apply is True
+        cmd = frame.get_cli_command()
+        assert "--auto-divergence-real-cuts" in cmd and "--auto-divergence-settle-apply" in cmd, cmd
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(["-i", "a.mp4", "-o", "o"]))
+        assert not frame.chk_nt_auto_div_real_cuts.GetValue()
+        assert not frame.chk_nt_auto_div_settle_apply.GetValue()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_auto_divergence_real_cuts_and_settle_apply: PASS")
+
+
 def _self_test_shot_lock_late_correction():
     """ADR-476: real case -- Mario scene 6 was decided Mid at ~3.94 while Auto 3D
     Strength was still climbing, then settled at 4.003 (>= High 4.0 = Wide) and
@@ -42152,6 +42289,7 @@ def _run_self_tests():
         _self_test_foreground_scale_lock_switch_gui_and_cli,
         _self_test_foreground_scale_follow_convergence_and_glide,
         _self_test_shot_lock_late_correction,
+        _self_test_auto_divergence_real_cuts_and_settle_apply,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,
         _self_test_experience_level_limit_bitrate_tier_and_codec_compose,

@@ -171,6 +171,12 @@ def calibrate(input_path, source_model, target_model, clips,
     Returns the saved file path."""
     if not clips:
         raise ValueError("calibrate() requires at least one clip")
+    # ADR-480: a clip may name its own movie file -- (path, start, end) -- so one curve
+    # can be pooled from several movies; plain (start, end) clips use input_path.
+    clips = [((c[0], c[1], c[2]) if len(c) == 3 else (input_path, c[0], c[1])) for c in clips]
+    for clip_path, _, _ in clips:
+        if not path.exists(clip_path):
+            raise ValueError(f"clip movie file does not exist: {clip_path}")
     output_path = output_path or DEFAULT_CURVE_PATH
     own_work_dir = work_dir is None
     work_dir = work_dir or tempfile.mkdtemp(prefix="iw3_depth_curve_calibrate_")
@@ -180,10 +186,11 @@ def calibrate(input_path, source_model, target_model, clips,
         log(f"[depth-curve-calibrate] [1/3] exporting depth with source model "
             f"({source_model}) over {len(clips)} clip(s)...")
         model_obj = None
-        for i, (start_time, end_time) in enumerate(clips):
-            log(f"  clip {i + 1}/{len(clips)}: {start_time or 'start'}-{end_time or 'end'}")
+        for i, (clip_path, start_time, end_time) in enumerate(clips):
+            log(f"  clip {i + 1}/{len(clips)}: {path.basename(clip_path)} "
+                f"{start_time or 'start'}-{end_time or 'end'}")
             pass_a_dir = path.join(work_dir, f"clip{i}_source")
-            model_obj = _run_export_pass(input_path, source_model, pass_a_dir, start_time, end_time,
+            model_obj = _run_export_pass(clip_path, source_model, pass_a_dir, start_time, end_time,
                                           gpu, resolution, limit_resolution, depth_model=model_obj,
                                           extra_argv=extra_argv)
             pass_dirs[i][0] = pass_a_dir
@@ -192,10 +199,11 @@ def calibrate(input_path, source_model, target_model, clips,
         log(f"[depth-curve-calibrate] [2/3] exporting depth with target model "
             f"({target_model}) over the same {len(clips)} clip(s)...")
         model_obj = None
-        for i, (start_time, end_time) in enumerate(clips):
-            log(f"  clip {i + 1}/{len(clips)}: {start_time or 'start'}-{end_time or 'end'}")
+        for i, (clip_path, start_time, end_time) in enumerate(clips):
+            log(f"  clip {i + 1}/{len(clips)}: {path.basename(clip_path)} "
+                f"{start_time or 'start'}-{end_time or 'end'}")
             pass_b_dir = path.join(work_dir, f"clip{i}_target")
-            model_obj = _run_export_pass(input_path, target_model, pass_b_dir, start_time, end_time,
+            model_obj = _run_export_pass(clip_path, target_model, pass_b_dir, start_time, end_time,
                                           gpu, resolution, limit_resolution, depth_model=model_obj,
                                           extra_argv=extra_argv)
             pass_dirs[i][1] = pass_b_dir
@@ -205,14 +213,15 @@ def calibrate(input_path, source_model, target_model, clips,
         source_values_all, target_values_all = [], []
         total_frame_count = 0
         for i, (pass_a_dir, pass_b_dir) in enumerate(pass_dirs):
-            source_depth_dir = _pass_depth_dir(pass_a_dir, input_path)
-            target_depth_dir = _pass_depth_dir(pass_b_dir, input_path)
+            clip_path = clips[i][0]
+            source_depth_dir = _pass_depth_dir(pass_a_dir, clip_path)
+            target_depth_dir = _pass_depth_dir(pass_b_dir, clip_path)
             source_values, source_frame_count = _sample_pixels_from_dir(
                 source_depth_dir, pixels_per_frame, seed=i * 2)
             target_values, target_frame_count = _sample_pixels_from_dir(
                 target_depth_dir, pixels_per_frame, seed=i * 2 + 1)
             if source_frame_count != target_frame_count:
-                start_time, end_time = clips[i]
+                _, start_time, end_time = clips[i]
                 raise RuntimeError(
                     f"clip {i + 1} ({start_time}-{end_time}): source model exported "
                     f"{source_frame_count} frame(s) but target model exported "
@@ -237,7 +246,9 @@ def calibrate(input_path, source_model, target_model, clips,
             "source_model": source_model,
             "target_model": target_model,
             "input": path.basename(input_path),
-            "clips": [f"{s}-{e}" for s, e in clips],
+            "clips": [(f"{s}-{e}" if p == input_path else f"{path.basename(p)} | {s}-{e}")
+                      for p, s, e in clips],
+            "inputs": sorted({path.basename(p) for p, _, _ in clips}),  # ADR-480
             "frame_count": total_frame_count,
             "pixels_per_frame": pixels_per_frame,
             "calibrated_at": datetime.now().isoformat(timespec="seconds"),
@@ -267,13 +278,35 @@ def parse_clip_spec(raw):
     return start, end
 
 
+def parse_clip_line(raw):
+    """ADR-480: one sample-clip line, either "START-END" (the main --input movie)
+    or "PATH | START-END" (a clip from ANOTHER movie, so one curve can be pooled
+    from several movies of a genre). Splits on the LAST "|" -- file names often
+    contain "-" (e.g. "DTS-HD.MA 5.1-W32") but never "|" on Windows. Returns
+    (path_or_None, start, end)."""
+    raw = raw.strip()
+    if "|" in raw:
+        file_part, time_part = raw.rsplit("|", 1)
+        file_part = file_part.strip().strip('"').strip()
+        if not file_part:
+            raise ValueError(f"clip line has '|' but no file before it: {raw!r}")
+        start, end = parse_clip_spec(time_part.strip())
+        return file_part, start, end
+    start, end = parse_clip_spec(raw)
+    return None, start, end
+
+
 def resolve_clips(args):
     """Returns the list of (start, end) clips to calibrate from: every --clip
     value if any were given (repeatable -- see create_parser), otherwise a
     single clip from --start-time/--end-time (the original, single-range
     behavior, unchanged for anyone not using --clip)."""
     if getattr(args, "clip", None):
-        return [parse_clip_spec(raw) for raw in args.clip]
+        out = []
+        for raw in args.clip:
+            p, s, e = parse_clip_line(raw)
+            out.append((s, e) if p is None else (p, s, e))
+        return out
     return [(args.start_time, args.end_time)]
 
 
@@ -591,6 +624,64 @@ def _self_test_calibrate_end_to_end_with_fake_passes():
     print("_self_test_calibrate_end_to_end_with_fake_passes: PASS")
 
 
+def _self_test_calibrate_pools_multiple_movies():
+    """ADR-480: clips from SEVERAL movie files pooled into one curve. parse_clip_line
+    accepts "START-END" and "PATH | START-END" (file names with '-' in them, quoted
+    paths); calibrate() exports each clip from ITS OWN file (both passes), pools all
+    frames, keeps one model per side across files, and records every input in meta.
+    A missing clip file is refused before any export."""
+    import tempfile as _tempfile
+    from unittest.mock import patch
+
+    assert parse_clip_line("00:01:00-00:02:30") == (None, "00:01:00", "00:02:30")
+    p, s0, e0 = parse_clip_line(r'"E:\Movies\A DTS-HD.MA 5.1-W32.mkv" | 00:10:00-00:11:30')
+    assert p == r"E:\Movies\A DTS-HD.MA 5.1-W32.mkv" and (s0, e0) == ("00:10:00", "00:11:30"), p
+    try:
+        parse_clip_line(" | 00:01:00-00:02:00")
+        assert False, "empty file before | must be refused"
+    except ValueError:
+        pass
+
+    calls = []
+
+    def _fake(input_path, model_name, pass_dir, start_time, end_time,
+              gpu, resolution, limit_resolution, depth_model=None, extra_argv=None):
+        calls.append((path.basename(input_path), model_name, start_time))
+        return _fake_export_pass_for_tests(input_path, model_name, pass_dir, start_time, end_time,
+                                           gpu, resolution, limit_resolution, depth_model=depth_model)
+
+    with _tempfile.TemporaryDirectory(prefix="iw3_curve_calib_multimovie_") as tmpdir:
+        main = path.join(tmpdir, "Live Action.mkv")
+        other = path.join(tmpdir, "Cartoon-Movie.mkv")
+        for f_ in (main, other):
+            with open(f_, "wb") as fh:
+                fh.write(b"0")
+        clips = [("00:02:00", "00:03:00"), (other, "00:10:00", "00:11:00"), (other, "00:40:00", "00:41:00")]
+        out = path.join(tmpdir, "curve.json")
+        with patch(f"{__name__}._run_export_pass", side_effect=_fake):
+            calibrate(main, "fake_source_model", "fake_target_model", clips,
+                      pixels_per_frame=200, num_points=64, output_path=out,
+                      work_dir=path.join(tmpdir, "work"), log=lambda msg: None)
+        files_source = [c[0] for c in calls if "source" in c[1]]
+        files_target = [c[0] for c in calls if "target" in c[1]]
+        assert files_source == ["Live Action.mkv", "Cartoon-Movie.mkv", "Cartoon-Movie.mkv"], files_source
+        assert files_target == files_source, files_target
+        from .depth_curve_match import load_curve
+        _, _, meta = load_curve(out)
+        assert meta["frame_count"] == 18, meta["frame_count"]
+        assert meta["inputs"] == ["Cartoon-Movie.mkv", "Live Action.mkv"], meta["inputs"]
+        assert meta["clips"][0] == "00:02:00-00:03:00" and meta["clips"][1].startswith("Cartoon-Movie.mkv | "), meta["clips"]
+
+        try:
+            calibrate(main, "fake_source_model", "fake_target_model",
+                      [(path.join(tmpdir, "missing.mkv"), "00:00:01", "00:00:02")],
+                      output_path=out, work_dir=path.join(tmpdir, "w2"), log=lambda msg: None)
+            assert False, "missing clip file must be refused"
+        except ValueError:
+            pass
+    print("_self_test_calibrate_pools_multiple_movies: PASS")
+
+
 def _self_test_calibrate_pools_multiple_clips():
     """The real reason multi-clip support exists: confirms calibrate() with several
     --clip ranges actually POOLS every clip's samples into the frame_count/meta
@@ -696,6 +787,7 @@ def _run_self_tests():
     _self_test_model_settings_argv()
     _self_test_calibrate_end_to_end_with_fake_passes()
     _self_test_calibrate_pools_multiple_clips()
+    _self_test_calibrate_pools_multiple_movies()
     _self_test_run_gating()
     print("All depth_curve_calibrate_cli self-tests PASSED")
 

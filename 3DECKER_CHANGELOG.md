@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — November 20, 2026
 
+**Improved: Depth Curve Match's Calibrate window can now use clips from several different movies to build one curve.** In the "Sample Clips" box, a line like `00:10:00-00:11:30` still takes the clip from the main movie, and you can now also add a line from another movie by putting its file first, then a `|`, for example: `E:\Movies\Other Movie.mkv | 00:10:00-00:11:30`. All clips are pooled into one curve. That lets you build a small set of **reusable curves**, such as one for live-action movies, one for CGI animation, one for classic hand-drawn cartoons and one for mixed live-action + cartoon films, each learned from several movies of that kind, instead of making a new curve for every movie. The window checks that every movie file you list actually exists before it starts.
+
 **Added: "Group Short Scenes (average)", a checkbox next to Minimum Scene Length (off by default).** With Minimum Scene Length on, a run of quick shots used to keep the depth of the last *long* shot before them. In Mario, a 34-second wide shot's deep settings carried into the 3-second cage shot. With this box ticked, whenever 2 or more short shots come one after another, they're treated as a group. A quick pre-scan before the conversion works out each shot's 3D Strength, and the group gets the **average** of its own shots, applied from the group's first shot until its end, with one smooth change instead of one per cut. A single short shot on its own still keeps the previous shot's settings. It needs Auto 3D Strength with "Use Real Scene Cuts" on, and adds a short pre-scan at the start of each conversion. The job log says how long it took and how many groups it found.
 
 ## Update — November 19, 2026

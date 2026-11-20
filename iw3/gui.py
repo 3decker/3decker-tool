@@ -654,7 +654,11 @@ class DepthCurveCalibrateDialog(wx.Dialog):
             self, value="00:01:00-00:02:30", style=wx.TE_MULTILINE,
             size=parent.FromDIP((300, 70)))
         self.txt_clips.SetToolTip(
-            T("One time range per line, as START-END (e.g. 00:02:00-00:03:30). Add a few "
+            T("One clip per line. START-END (e.g. 00:02:00-00:03:30) takes the clip from the "
+              "Sample Clip movie above. To pool clips from OTHER movies into the same curve "
+              "(for a reusable genre curve, or a live-action + cartoon mix), put the movie file "
+              "first, then a | : E:\\Movies\\Other Movie.mkv | 00:10:00-00:11:30 ." + "\n"
+              "Add a few "
               "lines covering DIFFERENT kinds of moments (a wide shot, a close-up, a flatter "
               "scene, a busy scene) rather than one long stretch from a single scene -- a "
               "curve built from more variety reshapes more of the movie well, instead of "
@@ -819,8 +823,11 @@ class DepthCurveCalibrateDialog(wx.Dialog):
                           T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
             return
         try:
+            from .depth_curve_calibrate_cli import parse_clip_line
             for raw in clip_lines:
-                parse_clip_spec(raw)
+                clip_file, _, _ = parse_clip_line(raw)  # ADR-480: optional "FILE | START-END"
+                if clip_file is not None and not path.exists(clip_file):
+                    raise ValueError(T("Clip movie file not found:") + f" {clip_file}")
         except ValueError as e:
             wx.MessageBox(str(e), T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
             return

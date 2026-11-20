@@ -2536,6 +2536,27 @@ class MainFrame(wx.Frame):
               "Recommended: 2.0-2.5 for a calmer feel; 3.5 if quick wide shots like the cage still show "
               "artifacts."))
 
+        # ADR-479: Group Short Scenes (average).
+        self.chk_shot_lock_group_short_scenes = wx.CheckBox(
+            self.grp_stereo, label=T("Group Short Scenes (average)"), name="chk_shot_lock_group_short_scenes")
+        self.chk_shot_lock_group_short_scenes.SetValue(False)
+        self.chk_shot_lock_group_short_scenes.SetToolTip(
+            T("Only with Minimum Scene Length above 0, Auto 3D Strength on, and 'Use Real Scene Cuts' on." + "\n"
+              "What: when 2 or more short scenes (shorter than Minimum Scene Length) come one after "
+              "another, they become a group. A quick pre-scan before the conversion works out each "
+              "scene's 3D Strength; the group gets the AVERAGE of its scenes (weighted by length), "
+              "applied from the first scene of the group and held to its end. Shot Lock picks Wide/Mid/"
+              "Close-Up from that average once, at the group's first cut. A single short scene on its "
+              "own still keeps the previous scene's settings." + "\n"
+              "Why: without it, a run of quick cuts inherits whatever the last long shot was -- real "
+              "Mario case: a 34-second wide shot's deep settings carried into the 3-second cage shot." + "\n"
+              "Pros: quick-cut sequences get depth that fits their own content, still without changing "
+              "on every cut." + "\n"
+              "Cons: adds a short pre-scan at the start of each conversion (shot-framing AI only, at a "
+              "small size); a group gets one shared value, not each shot's own." + "\n"
+              "Values: on / off (default off)." + "\n"
+              "Recommended: on, if Minimum Scene Length is used."))
+
         # ADR-476: Late Correction for Convergence shot_lock (divergence signal).
         self.chk_convergence_lock_late_correction = wx.CheckBox(
             self.grp_stereo, label=T("Late Correction (re-check once settled)"),
@@ -4872,6 +4893,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.chk_convergence_lock_late_correction, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_shot_lock_min_scene_length, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_shot_lock_min_scene_length, (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_shot_lock_group_short_scenes, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12828,6 +12850,7 @@ class MainFrame(wx.Frame):
         self.chk_convergence_lock_late_correction.Enable(is_divergence)  # ADR-476
         self.lbl_shot_lock_min_scene_length.Enable(is_divergence)  # ADR-478
         self.cbo_shot_lock_min_scene_length.Enable(is_divergence)
+        self.chk_shot_lock_group_short_scenes.Enable(is_divergence)  # ADR-479
         is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
         self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
@@ -13196,6 +13219,7 @@ class MainFrame(wx.Frame):
             self.chk_convergence_lock_wait_for_settle,
             self.chk_convergence_lock_late_correction,
             self.lbl_shot_lock_min_scene_length, self.cbo_shot_lock_min_scene_length,
+            self.chk_shot_lock_group_short_scenes,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -14374,6 +14398,7 @@ class MainFrame(wx.Frame):
             convergence_lock_wait_for_settle=self.chk_convergence_lock_wait_for_settle.GetValue(),
             convergence_lock_late_correction=self.chk_convergence_lock_late_correction.GetValue(),
             shot_lock_min_scene_length=float(self.cbo_shot_lock_min_scene_length.GetValue() or 0),  # ADR-478
+            shot_lock_group_short_scenes=self.chk_shot_lock_group_short_scenes.GetValue(),  # ADR-479
             convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
@@ -15832,6 +15857,8 @@ class MainFrame(wx.Frame):
         _msl_restore = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)  # ADR-478
         self.cbo_shot_lock_min_scene_length.SetStringSelection(
             "0" if _msl_restore <= 0 else f"{_msl_restore:.1f}")
+        self.chk_shot_lock_group_short_scenes.SetValue(  # ADR-479
+            bool(getattr(args, "shot_lock_group_short_scenes", False)))
         _apply_combo_value(self.cbo_convergence_lock_settle_wait_max,
                            getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
         self.update_shot_lock_signal()
@@ -41360,6 +41387,121 @@ def _self_test_combined_scene_log_merge():
     print("_self_test_combined_scene_log_merge: PASS")
 
 
+def _self_test_shot_lock_group_short_scenes():
+    """ADR-479: Group Short Scenes. (a) plan_short_scene_groups: runs of 2+ short
+    scenes get their length-weighted average (rounded 0.1); a lone short scene is
+    not a group; long scenes untouched. (b) scene_strengths_from_scores: first-frame
+    vs settled-mean per scene, invert honored. (c) Auto 3D Strength (real cuts +
+    min length) outputs the group value on every frame of the group, settled.
+    (d) ShotLockEstimator decides at a group's FIRST scene (not held) and holds the
+    rest of the group. (e) GUI checkbox default off + round-trip."""
+    import types
+    import torch
+    import wx
+    from nt_autostrength import autodiv as AD
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator
+
+    # (a) planning: long, short, short(group), long, short(lone), long
+    durs = [10.0, 3.0, 3.4, 8.0, 2.0, 6.0]
+    strs = [4.1, 3.7, 4.1, 3.6, 4.2, 3.9]
+    plan, starts = U.plan_short_scene_groups(durs, strs, 3.5)
+    g = round(((3.7 * 3.0 + 4.1 * 3.4) / 6.4) / 0.1) * 0.1
+    assert set(plan) == {1, 2} and starts == {1}, (plan, starts)
+    assert abs(plan[1] - g) < 1e-9 and abs(plan[2] - g) < 1e-9 and abs(g - 3.9) < 1e-9, plan
+    p2, s2 = U.plan_short_scene_groups([2.0, 2.0, 2.0], [3.6, None, 4.0], 3.5)
+    assert p2 == {} and s2 == set(), "unknown strength in a group -> skipped"
+
+    # (b) strengths from per-frame scores
+    args = types.SimpleNamespace(divergence=3.9, divergence_min=3.6, divergence_max=4.2,
+                                 auto_divergence_invert=False, auto_divergence_stability="low",
+                                 auto_divergence_settle_apply=False)
+    scores = [0.0] + [1.0] * 9 + [1.0] * 10        # scene A: first frame 0 then 1s; scene B: all 1
+    out = AD.scene_strengths_from_scores(scores, 10.0, [0.0, 1.0, 2.0], args)
+    assert abs(out[0] - 3.6) < 1e-9 and abs(out[1] - 4.2) < 1e-9, out
+    args.auto_divergence_settle_apply = True        # low = 6-frame settle: mean (0+5)/6
+    out = AD.scene_strengths_from_scores(scores, 10.0, [0.0, 1.0, 2.0], args)
+    curve = AD._strength_curve_for_args(args)
+    assert abs(out[0] - round(curve(5 / 6) / AD.STEP) * AD.STEP) < 1e-9, out
+    args.auto_divergence_invert = True
+    out = AD.scene_strengths_from_scores(scores, 10.0, [0.0, 1.0, 2.0], args)
+    assert abs(out[1] - 3.6) < 1e-9, "invert must flip the score before the curve"
+
+    # (c) Auto 3D override through divergences(): scenes 0 (5 fr) | 1 (3 fr, group) | 2 (4 fr, group)
+    class _Est:
+        model = None
+        def __call__(self, im, depth):
+            n = depth.shape[0]
+            return [0.0] * n, torch.nn.functional.normalize(torch.ones(n, 4), dim=1)
+    st = AD._RunState.__new__(AD._RunState)
+    st.estimator = _Est(); st.tracker = AD.Tracker("cuts", "low")
+    st.verbose, st.announced = False, True
+    st.last_depth, st.last_divs, st.last_settled_list = None, None, []
+    a3 = types.SimpleNamespace(divergence=3.9, divergence_min=3.6, divergence_max=4.2,
+                               auto_divergence_invert=False, scene_detect=False,
+                               auto_divergence_real_cuts=True, auto_divergence_scene_log=False,
+                               shot_lock_min_scene_length=3.5,
+                               state={"_real_scene_durations": [10.0, 3.0, 3.4],
+                                      "_group_strength_by_scene": {1: 4.0, 2: 4.0}})
+    lrp = [False] * 4 + [True] + [False] * 2 + [True] + [False] * 4
+    divs = st.divergences(torch.zeros(12, 3, 2, 2), torch.zeros(12, 1, 2, 2), a3, None, log_reset_pts=lrp)
+    assert all(abs(d - 3.6) < 1e-9 for d in divs[:5]), divs
+    assert all(abs(d - 4.0) < 1e-9 for d in divs[5:]), divs
+    assert all(st.last_settled_list[5:]), "group frames must report settled"
+
+    # (d) Shot Lock: group start decided, rest of group held
+    def make():
+        est = object.__new__(ShotLockEstimator)
+        est.wide_value, est.closeup_value, est.mid_value = 0.50, 0.00, 0.25
+        est.switch = "snap"; est.decay = 0.9; est.decide_speed = None
+        est.signal = "divergence"; est.threshold_mode = "range"
+        est.strength_threshold = 4.0; est.strength_threshold_low = 3.7; est.strength_threshold_mid = None
+        est.wait_for_settle = False; est.settle_wait_max = 60; est._clip = None
+        est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
+        est.blend_ema = None; est.ease_value = None; est._last_raw = None
+        est._scene_running_c = None; est._scene_n = 0; est._scene_locked_value = None; est._scene_elapsed = 0
+        est.locked_shot_type = None; est.late_correction = False
+        est._late_mismatch_frames = 0; est._late_corrected = False; est.late_corrections = 0
+        est._pending_scene_reset = True
+        est._recompute_decide_settle()
+        return est
+    depth = torch.zeros(1, 1, 2, 2)
+    def run(est, plan_):
+        seen = []
+        for si, (div, n) in enumerate(plan_):
+            for f in range(n):
+                est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[(f == n - 1) and si < len(plan_) - 1],
+                    divergence=div)
+            seen.append(est.locked_shot_type)
+        return seen
+    # wide 10s, group(3.0s,3.4s) at Mid 3.9 (from Auto 3D override), long close-up
+    scenes = [(4.2, 120), (3.9, 72), (3.9, 82), (3.6, 144)]
+    held = make(); held.set_scene_durations([5.0, 3.0, 3.4, 6.0], 3.5)
+    assert run(held, scenes) == ["wide", "wide", "wide", "closeup"], "min length only: group inherits Wide"
+    grp = make(); grp.set_scene_durations([5.0, 3.0, 3.4, 6.0], 3.5, group_starts={1})
+    got = run(grp, scenes)
+    assert got == ["wide", "mid", "mid", "closeup"], got
+    assert grp.held_scenes == 1, grp.held_scenes
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert not frame.chk_shot_lock_group_short_scenes.GetValue()
+        frame.chk_shot_lock_group_short_scenes.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.shot_lock_group_short_scenes is True
+        assert "--shot-lock-group-short-scenes" in frame.get_cli_command()
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(["-i", "a.mp4", "-o", "o"]))
+        assert not frame.chk_shot_lock_group_short_scenes.GetValue()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_shot_lock_group_short_scenes: PASS")
+
+
 def _self_test_shot_lock_min_scene_length():
     """ADR-478: Minimum Scene Length to Switch. With real scene lengths known upfront:
     a scene shorter than the minimum keeps the previous scene's locked value and
@@ -42437,6 +42579,7 @@ def _run_self_tests():
         _self_test_shot_lock_late_correction,
         _self_test_auto_divergence_real_cuts_and_settle_apply,
         _self_test_shot_lock_min_scene_length,
+        _self_test_shot_lock_group_short_scenes,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,
         _self_test_experience_level_limit_bitrate_tier_and_codec_compose,

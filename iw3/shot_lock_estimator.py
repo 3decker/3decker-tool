@@ -459,7 +459,7 @@ class ShotLockEstimator():
             return self.closeup_value
         return self.mid_value
 
-    def set_scene_durations(self, durations, min_scene_len):
+    def set_scene_durations(self, durations, min_scene_len, group_starts=None):
         """ADR-478: real scene lengths (seconds, processing order, scene 0 first) and
         the minimum length to switch. A scene shorter than min_scene_len keeps the
         previous scene's locked decision -- no new decision, no transition, no Late
@@ -468,6 +468,9 @@ class ShotLockEstimator():
         self._scene_durations = list(durations) if durations else None
         self._min_scene_len = float(min_scene_len or 0.0)
         self._scene_index = -1  # the job-start pending reset makes the first scene index 0
+        # ADR-479: first scene of each planned group of short scenes -- decided
+        # normally (its Auto 3D Strength is the group's average), not held.
+        self._group_starts = set(group_starts or ())
         self._hold_scene = False
 
     def _classify_label(self, c):
@@ -659,6 +662,7 @@ class ShotLockEstimator():
                         durs and getattr(self, "_min_scene_len", 0.0) > 0
                         and self._scene_index < len(durs)
                         and durs[self._scene_index] < self._min_scene_len
+                        and self._scene_index not in getattr(self, "_group_starts", ())
                         and self._scene_locked_value is not None)
                     if self._hold_scene:
                         self.held_scenes = getattr(self, "held_scenes", 0) + 1

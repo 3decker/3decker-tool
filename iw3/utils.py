@@ -3803,6 +3803,8 @@ def make_output_filename(input_filename, args, video=False):
                     _msl = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)  # ADR-478
                     if _msl > 0:
                         convergence_smoothing += f"_minlen{to_deciaml(_msl, 10, 2)}"
+                        if getattr(args, "shot_lock_group_short_scenes", False):  # ADR-479
+                            convergence_smoothing += "grp"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4392,6 +4394,8 @@ def _build_iw3_comment_metadata(args, video=True):
                     comment_parts.append("iw3_convergence_lock_late_correction=true")
                 if float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0) > 0:  # ADR-478
                     comment_parts.append(f"iw3_shot_lock_min_scene_length={args.shot_lock_min_scene_length}")
+                    if getattr(args, "shot_lock_group_short_scenes", False):  # ADR-479
+                        comment_parts.append("iw3_shot_lock_group_short_scenes=true")
                 if getattr(args, "convergence_lock_wait_for_settle", False):
                     comment_parts.append("iw3_convergence_lock_wait_for_settle=true")
                     lock_settle_wait_max_val = getattr(args, "convergence_lock_settle_wait_max",
@@ -7701,6 +7705,80 @@ def _real_scene_durations(boundary_pts, args, input_filename):
         return None
 
 
+# ADR-479: set by the Auto 3D Strength add-on (nt_autostrength.autodiv._patch_utils) --
+# core iw3 never imports that add-on directly.
+SCENE_STRENGTH_PRESCAN_HOOK = None
+
+
+def plan_short_scene_groups(durations, strengths, min_len, step=0.1):
+    """ADR-479: runs of 2+ consecutive scenes all shorter than min_len become a
+    group; each scene of a group gets the group's length-weighted average 3D
+    Strength (rounded to `step`). A lone short scene is NOT a group (it keeps the
+    previous scene's settings, ADR-478). Returns (plan {scene_index: strength},
+    group_starts {first scene index of each group}). Groups containing a scene
+    with unknown strength are skipped."""
+    plan, starts = {}, set()
+    i, n = 0, len(durations)
+    while i < n:
+        if durations[i] < min_len:
+            j = i
+            while j + 1 < n and durations[j + 1] < min_len:
+                j += 1
+            run = list(range(i, j + 1))
+            if len(run) >= 2 and all(k < len(strengths) and strengths[k] is not None for k in run):
+                tot = sum(durations[k] for k in run)
+                avg = (sum(strengths[k] * durations[k] for k in run) / tot) if tot > 0 else strengths[run[0]]
+                g = round(avg / step) * step
+                for k in run:
+                    plan[k] = g
+                starts.add(run[0])
+            i = j + 1
+        else:
+            i += 1
+    return plan, starts
+
+
+def _plan_group_short_scenes_for_job(input_filename, args, durations, min_scene_len):
+    """ADR-479: pre-scan + plan for Group Short Scenes. Needs Auto 3D Strength with
+    Use Real Scene Cuts (the plan is applied at real cuts). Stores the plan in
+    args.state and returns the set of group-start scene indexes ({} = feature off
+    for this job). Never raises."""
+    if not (getattr(args, "auto_divergence", False) and getattr(args, "auto_divergence_real_cuts", False)):
+        print("[iw3] Group Short Scenes needs Auto 3D Strength with 'Use Real Scene Cuts' on -- "
+              "skipped for this job.", file=sys.stderr)
+        return set()
+    try:
+        import time
+        prescan = SCENE_STRENGTH_PRESCAN_HOOK  # registered by the Auto 3D Strength add-on
+        if prescan is None:
+            print("[iw3] Group Short Scenes: Auto 3D Strength add-on not loaded -- skipped for this job.",
+                  file=sys.stderr)
+            return set()
+        start = SceneBoundaryCache.time_to_sec(args.start_time, 0.0)
+        edges = [start]
+        for d in durations:
+            edges.append(edges[-1] + d)
+        t = time.time()
+        strengths = prescan(
+            input_filename, args, edges, device=args.state["device"], max_fps=args.max_fps,
+            hwaccel=args.hwaccel, disable_software_fallback=getattr(args, "disable_software_fallback", False),
+            stop_event=args.state.get("stop_event"), suspend_event=args.state.get("suspend_event"),
+            tqdm_fn=args.state.get("tqdm_fn"))
+        gc_collect()
+        if not strengths:
+            print("[iw3] Group Short Scenes: pre-scan gave no result -- skipped for this job.", file=sys.stderr)
+            return set()
+        plan, starts = plan_short_scene_groups(durations, strengths, min_scene_len)
+        args.state["_group_strength_by_scene"] = plan
+        print(f"[iw3] Group Short Scenes: pre-scan took {time.time() - t:.0f}s; {len(starts)} groups covering "
+              f"{len(plan)} short scenes get their group's average 3D Strength.", file=sys.stderr)
+        return starts
+    except Exception as e:  # noqa
+        print(f"[iw3] Group Short Scenes failed ({e.__class__.__name__}: {e}) -- skipped for this job.",
+              file=sys.stderr)
+        return set()
+
+
 def process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
     is_preview = getattr(args, "preview", False)
     scene_cache_max_fps = args.max_fps  # capture before --preview clamps it, so cache key stays stable
@@ -7873,8 +7951,13 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
         durations = _real_scene_durations(log_segment_pts, args, input_filename)
         args.state["_real_scene_durations"] = durations
         conv_model = args.state.get("convergence_model")
+        group_starts = set()
+        args.state["_group_strength_by_scene"] = None
+        if (durations is not None and getattr(args, "shot_lock_group_short_scenes", False)):
+            group_starts = _plan_group_short_scenes_for_job(
+                input_filename, args, durations, min_scene_len)
         if durations is not None and conv_model is not None and hasattr(conv_model, "set_scene_durations"):
-            conv_model.set_scene_durations(durations, min_scene_len)
+            conv_model.set_scene_durations(durations, min_scene_len, group_starts=group_starts)
         if durations is not None:
             short = sum(1 for d in durations if d < min_scene_len)
             print(f"[iw3] Minimum Scene Length {min_scene_len:g}s: {short} of {len(durations)} scenes "
@@ -10150,6 +10233,12 @@ def create_parser(required_true=True):
                              "--auto-divergence-real-cuts, Auto 3D Strength also keeps its value through "
                              "them. Scene lengths come from the real scene scan, so long scenes are not "
                              "delayed. 0 (default) = off.")
+    parser.add_argument("--shot-lock-group-short-scenes", action="store_true",
+                        help="ADR-479: with --shot-lock-min-scene-length and --auto-divergence-real-cuts: "
+                             "runs of 2+ consecutive short scenes get their own group-average 3D Strength "
+                             "(from a quick pre-scan before converting), applied from the group's first "
+                             "scene and held through the group, instead of keeping the previous scene's "
+                             "settings. A lone short scene still keeps the previous settings.")
     parser.add_argument("--convergence-lock-late-correction", action="store_true",
                         help="ADR-476: --convergence-mode shot_lock with --convergence-lock-signal "
                              "divergence only: if Auto 3D Strength settles on the other side of a "

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 19, 2026
+## Latest Update — November 20, 2026
+
+**Added: "Group Short Scenes (average)", a checkbox next to Minimum Scene Length (off by default).** With Minimum Scene Length on, a run of quick shots used to keep the depth of the last *long* shot before them. In Mario, a 34-second wide shot's deep settings carried into the 3-second cage shot. With this box ticked, whenever 2 or more short shots come one after another, they're treated as a group. A quick pre-scan before the conversion works out each shot's 3D Strength, and the group gets the **average** of its own shots, applied from the group's first shot until its end, with one smooth change instead of one per cut. A single short shot on its own still keeps the previous shot's settings. It needs Auto 3D Strength with "Use Real Scene Cuts" on, and adds a short pre-scan at the start of each conversion. The job log says how long it took and how many groups it found.
+
+## Update — November 19, 2026
 
 **Added: "Minimum Scene Length to Switch" for Convergence Plane's Shot Lock (off by default; choose 1.0–5.0 seconds).** Scenes shorter than the length you pick keep the previous scene's depth settings instead of switching. That means no new Wide/Mid/Close-Up decision and no glide for a quick shot. Foreground Scale keeps its settings too when it follows Convergence, and with "Use Real Scene Cuts" on, Auto 3D Strength also keeps its value through those short shots. Long scenes switch exactly as before, with no added delay: 3DECKER already knows every scene's length from its scene scan before the conversion starts. Why: reacting to every quick cut reshapes the depth about twice as often (a real Mario comparison found 339 changes vs 162 in 49 minutes), and every reshape is a moment where thin objects and edges can show artifacts. Try 2.0–2.5 for a calmer feel, or 3.5 if quick wide shots like the Mario cage still show artifacts.
 

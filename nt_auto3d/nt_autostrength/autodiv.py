@@ -778,9 +778,14 @@ class _RunState:
             durs = (args.state.get("_real_scene_durations")
                     if isinstance(getattr(args, "state", None), dict) else None)
             msl = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)
+            group_plan = (args.state.get("_group_strength_by_scene")
+                          if isinstance(getattr(args, "state", None), dict) else None)
+            frame_scene_ids = None
             if durs and msl > 0:
                 kept = []
+                frame_scene_ids = []
                 for flag in log_reset_pts:
+                    frame_scene_ids.append(getattr(self, "_real_scene_index", 0))  # ADR-479
                     if flag:
                         self._real_scene_index = getattr(self, "_real_scene_index", 0) + 1
                         i = self._real_scene_index
@@ -804,9 +809,23 @@ class _RunState:
         wide_floor = float(wide_floor) if wide_floor is not None else None
         wide_floor_cutoff = getattr(args, "auto_divergence_wide_floor_cutoff", None)
         wide_floor_cutoff = float(wide_floor_cutoff) if wide_floor_cutoff is not None else None
+        if "frame_scene_ids" not in locals():
+            frame_scene_ids, group_plan = None, None
         used = self.tracker.run(scores, embs, reset_pts, own_cuts,
                                 lambda c: strength_curve(c, lo, typical, hi, closeup, wide,
                                                           wide_floor, wide_floor_cutoff))
+        # ADR-479: Group Short Scenes -- every frame of a planned group of short
+        # scenes gets the group's pre-scanned average strength (settled at once).
+        if group_plan and frame_scene_ids:
+            used = list(used)
+            settled_override = list(self.tracker.last_settled)
+            for i, sid in enumerate(frame_scene_ids):
+                g = group_plan.get(sid)
+                if g is not None and i < len(used):
+                    used[i] = float(g)
+                    if i < len(settled_override):
+                        settled_override[i] = True
+            self.tracker.last_settled = settled_override
         divs = [round(d / STEP) * STEP for d in used]
         # ADR-441: cached alongside last_divs below -- _patch_utils.apply_divergence()
         # reads this right after calling here to stamp args._divergence_settled per
@@ -1181,6 +1200,97 @@ SCAN_DECODE_SHORT_SIDE = 256
 SCAN_FAST_BATCH_SIZE = 32
 
 
+def _strength_curve_for_args(args):
+    """ADR-479: the same strength curve divergences() builds from args."""
+    lo = float(getattr(args, "divergence_min", DEFAULT_MIN))
+    hi = float(getattr(args, "divergence_max", DEFAULT_MAX))
+    typical = float(args.divergence)
+    def _f(name):
+        v = getattr(args, name, None)
+        return float(v) if v is not None else None
+    closeup, wide = _f("auto_divergence_closeup"), _f("auto_divergence_wide")
+    wfl, wflc = _f("auto_divergence_wide_floor"), _f("auto_divergence_wide_floor_cutoff")
+    return lambda c: strength_curve(c, lo, typical, hi, closeup, wide, wfl, wflc)
+
+
+def scene_strengths_from_scores(scores, fps, scene_edges, args):
+    """ADR-479: per real scene, the 3D Strength a conversion would give it
+    (with real cuts): the curve of the first frame's closeness, or -- with Apply
+    Settled Value -- of the mean of the first `settle` frames, rounded to STEP.
+    `scores` are raw per-frame closeness values starting at scene_edges[0];
+    `scene_edges` are scene boundaries in seconds. None for a scene with no frames."""
+    curve = _strength_curve_for_args(args)
+    if getattr(args, "auto_divergence_invert", False):
+        scores = [1.0 - s for s in scores]
+    settle = _stability(getattr(args, "auto_divergence_stability", DEFAULT_STABILITY))["settle"]
+    use_mean = bool(getattr(args, "auto_divergence_settle_apply", False))
+    t0 = scene_edges[0]
+    out = []
+    for a, b in zip(scene_edges, scene_edges[1:]):
+        i0 = max(0, int(round((a - t0) * fps)))
+        i1 = len(scores) if b == float("inf") else min(len(scores), int(round((b - t0) * fps)))
+        seg = scores[i0:i1]
+        if not seg:
+            out.append(None)
+            continue
+        base = seg[:settle] if use_mean else seg[:1]
+        out.append(round(curve(sum(base) / len(base)) / STEP) * STEP)
+    return out
+
+
+def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps=None, hwaccel=None,
+                            disable_software_fallback=False, stop_event=None, suspend_event=None,
+                            tqdm_fn=None):
+    """ADR-479: quick pre-scan for Group Short Scenes -- decodes only the
+    processed range (scene_edges[0] .. scene_edges[-1]) at the small Faster-Scan
+    size, runs ONLY the shot-framing estimator (no depth/warp/encode) and returns
+    per-real-scene 3D Strength (scene_strengths_from_scores) or None on failure."""
+    import nunif.utils.video as VU
+    device = torch.device(device) if isinstance(device, str) else device
+    est = Estimator(device)
+    fps_box = [None]
+    scores, buffer = [], []
+
+    def _flush():
+        if buffer:
+            x = torch.stack(buffer, dim=0)
+            sc, _ = est(x, torch.zeros(x.shape[0], 1, 1, 1, device=device))
+            scores.extend(float(s) for s in sc)
+            buffer.clear()
+
+    def _frame(frame):
+        if frame is None:
+            _flush()
+            return
+        buffer.append(VU.to_tensor(frame, device=device))
+        if len(buffer) >= SCAN_FAST_BATCH_SIZE:
+            _flush()
+
+    def _config(sw_format):
+        fps = float(sw_format.get_fps())
+        if max_fps and fps > max_fps:
+            fps = max_fps
+        fps_box[0] = fps if fps > 0 else None
+        return VU.VideoOutputConfig(fps=fps_box[0])
+
+    start, end = scene_edges[0], scene_edges[-1]
+    kw = {}
+    if end != float("inf") and (start > 0 or end > start):
+        kw = dict(start_time=float(start), end_time=float(end))
+    try:
+        VU.hook_frame(str(input_path), _frame, config_callback=_config,
+                      title="Group Short Scenes: pre-scan", vf=f"scale=-2:{SCAN_DECODE_SHORT_SIDE}",
+                      stop_event=stop_event, suspend_event=suspend_event, tqdm_fn=tqdm_fn,
+                      hwaccel=hwaccel, disable_software_fallback=disable_software_fallback,
+                      device=device, **kw)
+        _flush()
+    finally:
+        del est
+    if not scores or not fps_box[0]:
+        return None
+    return scene_strengths_from_scores(scores, fps_box[0], scene_edges, args)
+
+
 def _make_scan_args(args, device):
     """A shallow copy of the real args, scoped to just this scan: its own
     minimal `state` dict (only `device` -- never the real job's loaded depth/
@@ -1354,6 +1464,9 @@ def _cat(parts):
 
 
 def _patch_utils(U):
+    # ADR-479: register the Group Short Scenes pre-scan with core iw3 (core never
+    # imports this add-on; it only calls this hook when it has been registered).
+    U.SCENE_STRENGTH_PRESCAN_HOOK = prescan_scene_strengths
     if getattr(U.apply_divergence, "_nt_autodiv", False):
         return
     orig = U.apply_divergence

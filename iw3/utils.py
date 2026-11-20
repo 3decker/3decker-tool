@@ -3800,6 +3800,9 @@ def make_output_filename(input_filename, args, video=False):
                     # ADR-476: only shown when actually turned on.
                     if getattr(args, "convergence_lock_late_correction", False):
                         convergence_smoothing += "_latefix"
+                    _msl = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)  # ADR-478
+                    if _msl > 0:
+                        convergence_smoothing += f"_minlen{to_deciaml(_msl, 10, 2)}"
             if args.convergence_mode == "clip_shot":
                 if getattr(args, "clip_shot_symmetric", False):
                     convergence_smoothing += "_sym"
@@ -4387,6 +4390,8 @@ def _build_iw3_comment_metadata(args, video=True):
                 # ADR-441: omitted entirely when off (the default).
                 if getattr(args, "convergence_lock_late_correction", False):  # ADR-476
                     comment_parts.append("iw3_convergence_lock_late_correction=true")
+                if float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0) > 0:  # ADR-478
+                    comment_parts.append(f"iw3_shot_lock_min_scene_length={args.shot_lock_min_scene_length}")
                 if getattr(args, "convergence_lock_wait_for_settle", False):
                     comment_parts.append("iw3_convergence_lock_wait_for_settle=true")
                     lock_settle_wait_max_val = getattr(args, "convergence_lock_settle_wait_max",
@@ -7669,6 +7674,33 @@ def _tag_hevc_frame_packing_if_needed(output_path, args):
     return tag_hevc_frame_packing(output_path, layout)
 
 
+def _real_scene_durations(boundary_pts, args, input_filename):
+    """ADR-478: duration (seconds) of every real scene in processing order, from the
+    complete upfront boundary set (log_segment_pts) -- scene 0 runs from the start
+    of the processed range to the first boundary, scene i+1 from boundary i to
+    boundary i+1. Same pts->seconds rule as _scene_ema_schedule_rows. Returns None
+    when it can't be worked out (no boundaries / unreadable metadata); callers then
+    behave exactly as before."""
+    if not boundary_pts:
+        return None
+    try:
+        from .scene_batch import resolve_scene_scan_fps
+        metadata = VU.VideoMetadata.from_file(input_filename)
+        native_fps = float(metadata.get_fps())
+        duration = metadata.guess_duration(to_int=False)
+        scan_fps = resolve_scene_scan_fps(native_fps, args.max_fps)
+        range_start = SceneBoundaryCache.time_to_sec(args.start_time, 0.0)
+        range_end = SceneBoundaryCache.time_to_sec(args.end_time, None)
+        if range_end is None:
+            range_end = duration if duration and duration > 0 else None
+        times = [p / scan_fps for p in sorted(boundary_pts)]
+        edges = [range_start] + times + ([range_end] if range_end is not None else [float("inf")])
+        return [max(0.0, b - a) for a, b in zip(edges, edges[1:])]
+    except Exception as e:  # noqa
+        warnings.warn(f"Minimum Scene Length: could not work out scene lengths ({e}) -- off for this file.")
+        return None
+
+
 def process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
     is_preview = getattr(args, "preview", False)
     scene_cache_max_fps = args.max_fps  # capture before --preview clamps it, so cache key stays stable
@@ -7831,6 +7863,22 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
         log_segment_pts = _ensure_convergence_log_scene_pts(input_filename, args, scene_cache_max_fps)
     else:
         log_segment_pts = set()
+
+    # ADR-478: Minimum Scene Length to Switch -- every real scene's length, known
+    # upfront, so Shot Lock (and Auto 3D Strength's real cuts) can skip switching
+    # for short scenes WITHOUT delaying long ones.
+    min_scene_len = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)
+    args.state["_real_scene_durations"] = None
+    if min_scene_len > 0 and log_segment_pts:
+        durations = _real_scene_durations(log_segment_pts, args, input_filename)
+        args.state["_real_scene_durations"] = durations
+        conv_model = args.state.get("convergence_model")
+        if durations is not None and conv_model is not None and hasattr(conv_model, "set_scene_durations"):
+            conv_model.set_scene_durations(durations, min_scene_len)
+        if durations is not None:
+            short = sum(1 for d in durations if d < min_scene_len)
+            print(f"[iw3] Minimum Scene Length {min_scene_len:g}s: {short} of {len(durations)} scenes "
+                  f"are shorter and will keep the previous scene's depth settings.", file=sys.stderr)
 
     # --scene-batch-auto-ema on the regular (non---scene-batch) path: segment_pts is
     # now the COMPLETE, upfront list of every cut in the whole processed range, so
@@ -10095,6 +10143,13 @@ def create_parser(required_true=True):
                              "for Auto 3D Strength to settle before locking in anyway with whatever number "
                              "it has by then. Keeps the extra wait bounded and predictable instead of "
                              "open-ended.")
+    parser.add_argument("--shot-lock-min-scene-length", type=float, default=0.0,
+                        help="ADR-478: --convergence-mode shot_lock only: scenes shorter than this many "
+                             "seconds keep the previous scene's Shot Lock decision (Convergence, and "
+                             "Foreground Scale when it follows Convergence) instead of switching; with "
+                             "--auto-divergence-real-cuts, Auto 3D Strength also keeps its value through "
+                             "them. Scene lengths come from the real scene scan, so long scenes are not "
+                             "delayed. 0 (default) = off.")
     parser.add_argument("--convergence-lock-late-correction", action="store_true",
                         help="ADR-476: --convergence-mode shot_lock with --convergence-lock-signal "
                              "divergence only: if Auto 3D Strength settles on the other side of a "

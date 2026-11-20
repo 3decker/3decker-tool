@@ -380,6 +380,13 @@ class ShotLockEstimator():
         self._late_mismatch_frames = 0
         self._late_corrected = False
         self.late_corrections = 0  # total count this job (for tests/logging)
+        # ADR-478: Minimum Scene Length -- see set_scene_durations().
+        self._scene_durations = None
+        self._min_scene_len = 0.0
+        # -1: the initial pending reset (job start) makes the FIRST scene index 0.
+        self._scene_index = -1
+        self._hold_scene = False
+        self.held_scenes = 0
         self._last_raw = None  # ADR-421 fallback path: last frame's classified value
         # ADR-422: per-real-scene settle-then-lock state (only used when the caller
         # supplies log_reset_pts). _pending_scene_reset mirrors SceneHoldTracker's own
@@ -451,6 +458,17 @@ class ShotLockEstimator():
         if c > MID_HIGH:
             return self.closeup_value
         return self.mid_value
+
+    def set_scene_durations(self, durations, min_scene_len):
+        """ADR-478: real scene lengths (seconds, processing order, scene 0 first) and
+        the minimum length to switch. A scene shorter than min_scene_len keeps the
+        previous scene's locked decision -- no new decision, no transition, no Late
+        Correction -- so short shots don't reshape the depth. Unknown lengths (list
+        exhausted) fall back to normal behavior."""
+        self._scene_durations = list(durations) if durations else None
+        self._min_scene_len = float(min_scene_len or 0.0)
+        self._scene_index = -1  # the job-start pending reset makes the first scene index 0
+        self._hold_scene = False
 
     def _classify_label(self, c):
         """ADR-475: the same decision as _classify(), as a shot TYPE instead of a
@@ -632,6 +650,21 @@ class ShotLockEstimator():
                 # running average into a blended, non-discrete number). Only once the
                 # decision is final does exactly one transition (snap or ramp) happen,
                 # via a single explicit mark_cut().
+                if self._pending_scene_reset:
+                    # ADR-478: Minimum Scene Length -- decide whether the scene that
+                    # starts now is too short to switch for.
+                    self._scene_index = getattr(self, "_scene_index", -1) + 1
+                    durs = getattr(self, "_scene_durations", None)
+                    self._hold_scene = bool(
+                        durs and getattr(self, "_min_scene_len", 0.0) > 0
+                        and self._scene_index < len(durs)
+                        and durs[self._scene_index] < self._min_scene_len
+                        and self._scene_locked_value is not None)
+                    if self._hold_scene:
+                        self.held_scenes = getattr(self, "held_scenes", 0) + 1
+                        self._pending_scene_reset = False
+                        self._late_corrected = True  # no Late Correction in a held scene
+                        self._late_mismatch_frames = 0
                 if self._pending_scene_reset:
                     self._scene_running_c = None
                     self._scene_n = 0

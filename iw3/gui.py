@@ -2510,6 +2510,32 @@ class MainFrame(wx.Frame):
         self.chk_convergence_lock_wait_for_settle.Bind(
             wx.EVT_CHECKBOX, self.on_changed_chk_convergence_lock_wait_for_settle)
 
+        # ADR-478: Minimum Scene Length to Switch.
+        self.lbl_shot_lock_min_scene_length = wx.StaticText(
+            self.grp_stereo, label=T("Minimum Scene Length to Switch (s)"))
+        self.cbo_shot_lock_min_scene_length = wx.ComboBox(
+            self.grp_stereo, choices=["0", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "5.0"],
+            name="cbo_shot_lock_min_scene_length")
+        self.cbo_shot_lock_min_scene_length.SetEditable(False)
+        self.cbo_shot_lock_min_scene_length.SetStringSelection("0")
+        self.cbo_shot_lock_min_scene_length.SetToolTip(
+            T("Only affects shot_lock Convergence Plane mode." + "\n"
+              "What: scenes shorter than this keep the previous scene's Shot Lock settings instead of "
+              "switching -- no new decision, no glide. Foreground Scale (with 'Follow Convergence's Shot "
+              "Decision') keeps them too, and with 'Use Real Scene Cuts' on, Auto 3D Strength also keeps "
+              "its value through those short scenes. Long scenes switch exactly as before, with no extra "
+              "delay -- scene lengths come from the real scene scan, done before the conversion starts." + "\n"
+              "Why: reacting to every quick cut reshapes the depth twice as often (real Mario comparison: "
+              "339 vs 162 shot-type changes in 49 minutes). Each reshape is a moment where thin objects, "
+              "bars and edges are being re-warped, and quick-cut sequences can feel busy." + "\n"
+              "Pros: calmer depth in fast-cut sequences, fewer moments for artifacts to show." + "\n"
+              "Cons: a short shot of a different type (e.g. a 2-second close-up between wide shots) keeps "
+              "the previous shot's depth instead of its own." + "\n"
+              "Values: 0 = off (default, unchanged). 1.0-5.0 seconds. The Mario cage shot is 3.4 s long, "
+              "so it needs 3.5 or more to be held." + "\n"
+              "Recommended: 2.0-2.5 for a calmer feel; 3.5 if quick wide shots like the cage still show "
+              "artifacts."))
+
         # ADR-476: Late Correction for Convergence shot_lock (divergence signal).
         self.chk_convergence_lock_late_correction = wx.CheckBox(
             self.grp_stereo, label=T("Late Correction (re-check once settled)"),
@@ -4844,6 +4870,8 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_convergence_lock_strength_threshold_mid, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_convergence_lock_wait_for_settle, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.chk_convergence_lock_late_correction, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
+        layout.Add(self.lbl_shot_lock_min_scene_length, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+        layout.Add(self.cbo_shot_lock_min_scene_length, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12798,6 +12826,8 @@ class MainFrame(wx.Frame):
         # Max Extra Wait field further requires the checkbox itself to be on.
         self.chk_convergence_lock_wait_for_settle.Enable(is_divergence)
         self.chk_convergence_lock_late_correction.Enable(is_divergence)  # ADR-476
+        self.lbl_shot_lock_min_scene_length.Enable(is_divergence)  # ADR-478
+        self.cbo_shot_lock_min_scene_length.Enable(is_divergence)
         is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
         self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
@@ -13165,6 +13195,7 @@ class MainFrame(wx.Frame):
             self.lbl_convergence_lock_strength_threshold_mid, self.cbo_convergence_lock_strength_threshold_mid,
             self.chk_convergence_lock_wait_for_settle,
             self.chk_convergence_lock_late_correction,
+            self.lbl_shot_lock_min_scene_length, self.cbo_shot_lock_min_scene_length,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -14342,6 +14373,7 @@ class MainFrame(wx.Frame):
             # ADR-441: off by default -- see shot_lock_estimator.py's own docstring.
             convergence_lock_wait_for_settle=self.chk_convergence_lock_wait_for_settle.GetValue(),
             convergence_lock_late_correction=self.chk_convergence_lock_late_correction.GetValue(),
+            shot_lock_min_scene_length=float(self.cbo_shot_lock_min_scene_length.GetValue() or 0),  # ADR-478
             convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
@@ -15797,6 +15829,9 @@ class MainFrame(wx.Frame):
             bool(getattr(args, "convergence_lock_wait_for_settle", False)))
         self.chk_convergence_lock_late_correction.SetValue(  # ADR-476
             bool(getattr(args, "convergence_lock_late_correction", False)))
+        _msl_restore = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)  # ADR-478
+        self.cbo_shot_lock_min_scene_length.SetStringSelection(
+            "0" if _msl_restore <= 0 else f"{_msl_restore:.1f}")
         _apply_combo_value(self.cbo_convergence_lock_settle_wait_max,
                            getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
         self.update_shot_lock_signal()
@@ -41325,6 +41360,117 @@ def _self_test_combined_scene_log_merge():
     print("_self_test_combined_scene_log_merge: PASS")
 
 
+def _self_test_shot_lock_min_scene_length():
+    """ADR-478: Minimum Scene Length to Switch. With real scene lengths known upfront:
+    a scene shorter than the minimum keeps the previous scene's locked value and
+    shot type (no decision, no glide, no Late Correction); a long scene switches
+    exactly as it does with the feature off (same frame, no delay); off (0) is
+    unchanged. Auto 3D Strength with real cuts drops the cut that starts a short
+    scene. _real_scene_durations() maps boundary pts to per-scene seconds. GUI
+    combo defaults to 0 and round-trips."""
+    import types
+    import torch
+    import wx
+    from nt_autostrength import autodiv as AD
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator
+
+    def make():
+        est = object.__new__(ShotLockEstimator)
+        est.wide_value, est.closeup_value, est.mid_value = 0.50, 0.00, 0.25
+        est.switch = "snap"; est.decay = 0.9; est.decide_speed = None
+        est.signal = "divergence"; est.threshold_mode = "range"
+        est.strength_threshold = 4.0; est.strength_threshold_low = 3.7; est.strength_threshold_mid = None
+        est.wait_for_settle = False; est.settle_wait_max = 60; est._clip = None
+        est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
+        est.blend_ema = None; est.ease_value = None; est._last_raw = None
+        est._scene_running_c = None; est._scene_n = 0; est._scene_locked_value = None; est._scene_elapsed = 0
+        est.locked_shot_type = None; est.late_correction = False
+        est._late_mismatch_frames = 0; est._late_corrected = False; est.late_corrections = 0
+        est._pending_scene_reset = True  # same as a fresh job
+        est._recompute_decide_settle()
+        return est
+
+    depth = torch.zeros(1, 1, 2, 2)
+
+    def run(est, plan):
+        """plan: list of (divergence, n_frames) per scene; returns locked type per scene end."""
+        types_seen = []
+        for si, (div, n) in enumerate(plan):
+            for f in range(n):
+                last = (f == n - 1) and si < len(plan) - 1
+                est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[last], divergence=div)
+            types_seen.append(est.locked_shot_type)
+        return types_seen
+
+    # scenes: Wide 5s, Close-Up 2s (short), Wide 4s, Close-Up 6s (long)
+    plan = [(4.2, 120), (3.6, 48), (4.2, 96), (3.6, 144)]
+    durs = [5.0, 2.0, 4.0, 6.0]
+    off = make()
+    assert run(off, plan) == ["wide", "closeup", "wide", "closeup"], "off: unchanged"
+    on = make()
+    on.set_scene_durations(durs, 2.5)
+    got = run(on, plan)
+    assert got == ["wide", "wide", "wide", "closeup"], got
+    assert on.held_scenes == 1, on.held_scenes
+    # long scene switches on the same frame as with the feature off
+    a, b = make(), make(); b.set_scene_durations(durs, 2.5)
+    def frames_to_switch(est):
+        run(est, plan[:3])
+        for f in range(144):
+            est(rgb=None, depth=depth, reset_pts=None, log_reset_pts=[False], divergence=3.6)
+            if est.locked_shot_type == "closeup":
+                return f
+    run(a, []) if False else None
+    fa = frames_to_switch(a); fb = frames_to_switch(b)
+    assert fa == fb, (fa, fb)
+
+    # Auto 3D Strength real cuts: the cut starting the short scene is dropped
+    class _Est:
+        model = None
+        def __call__(self, im, depth):
+            n = depth.shape[0]
+            emb = torch.nn.functional.normalize(torch.ones(n, 4), dim=1)
+            return [0.0] * 5 + [1.0] * 3 + [0.0] * (n - 8), emb
+    def strengths(msl):
+        st = AD._RunState.__new__(AD._RunState)
+        st.estimator = _Est(); st.tracker = AD.Tracker("cuts", "low")
+        st.verbose, st.announced = False, True
+        st.last_depth, st.last_divs, st.last_settled_list = None, None, []
+        args = types.SimpleNamespace(divergence=3.9, divergence_min=3.6, divergence_max=4.2,
+                                     auto_divergence_invert=False, scene_detect=False,
+                                     auto_divergence_real_cuts=True, auto_divergence_scene_log=False,
+                                     shot_lock_min_scene_length=msl,
+                                     state={"_real_scene_durations": [5.0, 0.2, 5.0]})
+        lrp = [False] * 4 + [True] + [False] * 2 + [True] + [False] * 4
+        st.divergences(torch.zeros(12, 3, 2, 2), torch.zeros(12, 1, 2, 2), args, None, log_reset_pts=lrp)
+        return [i for i, c in enumerate(st.tracker.last_cuts) if c]
+    assert strengths(0.0) == [0, 5, 8], strengths(0.0)
+    assert strengths(1.0) == [0, 8], "the cut into the 0.2 s scene must be dropped"
+
+    # durations helper (no file needed when boundaries are empty)
+    assert U._real_scene_durations(set(), types.SimpleNamespace(), "x") is None
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.cbo_shot_lock_min_scene_length.GetValue() == "0"
+        frame.cbo_shot_lock_min_scene_length.SetStringSelection("2.5")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.shot_lock_min_scene_length == 2.5
+        assert "--shot-lock-min-scene-length" in frame.get_cli_command()
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--shot-lock-min-scene-length", "3.5"]))
+        assert frame.cbo_shot_lock_min_scene_length.GetValue() == "3.5"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_shot_lock_min_scene_length: PASS")
+
+
 def _self_test_auto_divergence_real_cuts_and_settle_apply():
     """ADR-477: two opt-in Auto 3D Strength fixes for Shot Lock timing.
     (1) settle_apply: in cuts mode the strength snaps to the FIRST frame's guess at
@@ -42290,6 +42436,7 @@ def _run_self_tests():
         _self_test_foreground_scale_follow_convergence_and_glide,
         _self_test_shot_lock_late_correction,
         _self_test_auto_divergence_real_cuts_and_settle_apply,
+        _self_test_shot_lock_min_scene_length,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,
         _self_test_experience_level_limit_bitrate_tier_and_codec_compose,

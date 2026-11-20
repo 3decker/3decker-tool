@@ -773,8 +773,24 @@ class _RunState:
         # the original behavior whenever those boundaries aren't available.
         if getattr(args, "auto_divergence_real_cuts", False) and log_reset_pts is not None:
             own_cuts = False
-            reset_pts = (list(log_reset_pts) if reset_pts is None
-                         else [bool(a) or bool(b) for a, b in zip(reset_pts, log_reset_pts)])
+            # ADR-478: Minimum Scene Length -- a real cut that starts a scene shorter
+            # than the minimum is not a cut for 3D Strength either (keeps its value).
+            durs = (args.state.get("_real_scene_durations")
+                    if isinstance(getattr(args, "state", None), dict) else None)
+            msl = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)
+            if durs and msl > 0:
+                kept = []
+                for flag in log_reset_pts:
+                    if flag:
+                        self._real_scene_index = getattr(self, "_real_scene_index", 0) + 1
+                        i = self._real_scene_index
+                        flag = not (i < len(durs) and durs[i] < msl)
+                    kept.append(bool(flag))
+                log_reset_pts_for_cuts = kept
+            else:
+                log_reset_pts_for_cuts = log_reset_pts
+            reset_pts = (list(log_reset_pts_for_cuts) if reset_pts is None
+                         else [bool(a) or bool(b) for a, b in zip(reset_pts, log_reset_pts_for_cuts)])
         lo = float(getattr(args, "divergence_min", DEFAULT_MIN))
         hi = float(getattr(args, "divergence_max", DEFAULT_MAX))
         typical = float(args.divergence)

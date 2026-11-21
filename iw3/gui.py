@@ -1904,7 +1904,11 @@ class MainFrame(wx.Frame):
               "real stereo camera behaves.\n"
               "On: wide shots/landscapes get the MOST, close-ups get the LEAST.\n"
               "Auto Range (min, max) above keeps the same meaning either way -- only which shot type each "
-              "end applies to flips."))
+              "end applies to flips.\n"
+              "Shot Lock: ticking or unticking this automatically swaps the Wide and Close-Up boxes of "
+              "Convergence, Foreground Scale and Edge Fix Shot Lock (and their labels), so every real shot "
+              "type keeps the value you gave it -- no manual swapping. The scene logs and the scene plan "
+              "always name the real shot type."))
         # ADR-477: two opt-in Auto 3D Strength timing/accuracy fixes.
         self.chk_nt_auto_div_real_cuts = wx.CheckBox(
             self.grp_stereo, label=T("Use Real Scene Cuts"), name="chk_nt_auto_div_real_cuts")
@@ -3289,6 +3293,22 @@ class MainFrame(wx.Frame):
         # enable/disable gating (stays always-enabled, same as a constant-mode run
         # still produces real, untagged scene rows -- see
         # _format_foreground_scale_scene_log() in iw3/utils.py).
+        # ADR-483: Foreground Scale debug overlay.
+        self.chk_foreground_scale_overlay = wx.CheckBox(
+            self.cpn_stereo_stability_flicker.GetPane(), label=T("Show Foreground Scale on Video (debug)"),
+            name="chk_foreground_scale_overlay")
+        self.chk_foreground_scale_overlay.SetValue(False)
+        self.chk_foreground_scale_overlay.SetToolTip(
+            T("What: writes the Foreground Scale value actually used for each frame into its bottom-left "
+              "corner, in both eyes, as \"FG 0.25\"." + "\n"
+              "Why: lets you read the real value on screen while watching a test, the same way \"Show "
+              "strength on video\" (top-left) and \"Show Convergence on Video\" (top-right) do -- all three "
+              "can be on together without overlapping." + "\n"
+              "Pros: confirm which Foreground Scale each scene really got (e.g. close-ups 0.25, wide shots "
+              "1.0), and see exactly when it changes." + "\n"
+              "Cons: the numbers are burned into the picture." + "\n"
+              "Values: on / off (default off). Works in Constant and Shot Lock modes." + "\n"
+              "Recommended: on only for test clips, off for a conversion you want to watch."))
         self.chk_foreground_scale_scene_log = wx.CheckBox(
             self.cpn_stereo_stability_flicker.GetPane(), label=T("Log Foreground Scale Value per Scene"),
             name="chk_foreground_scale_scene_log")
@@ -5043,6 +5063,7 @@ class MainFrame(wx.Frame):
         pane_layout_stability.Add(self.lbl_foreground_scale_lock_glide_duration, (k := k + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.cbo_foreground_scale_lock_glide_duration, (k, 1), (1, 2), flag=wx.EXPAND)
         pane_layout_stability.Add(self.chk_foreground_scale_lock_follow_convergence, (k := k + 1, 0), (1, 3), flag=wx.EXPAND)
+        pane_layout_stability.Add(self.chk_foreground_scale_overlay, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_foreground_scale_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_edge_dilation_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
         pane_layout_stability.Add(self.chk_combined_scene_log, (k := k + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12890,11 +12911,7 @@ class MainFrame(wx.Frame):
         is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
         self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
-        self.lbl_convergence_lock_wide.SetLabel(
-            T("High Strength Value") if is_divergence else T("Wide Shot Value"))
-        self.lbl_convergence_lock_closeup.SetLabel(
-            T("Low Strength Value") if is_divergence else T("Close-Up Value"))
-        self.Layout()
+        self.update_shot_lock_invert_labels()
 
     def on_changed_cbo_convergence_lock_threshold_mode(self, event):
         self.update_shot_lock_signal()
@@ -13279,6 +13296,7 @@ class MainFrame(wx.Frame):
             self.lbl_foreground_scale_lock_smoothing, self.cbo_foreground_scale_lock_smoothing,
             self.lbl_foreground_scale_lock_glide_duration, self.cbo_foreground_scale_lock_glide_duration,
             self.chk_foreground_scale_lock_follow_convergence,
+            self.chk_foreground_scale_overlay,
             self.chk_foreground_scale_scene_log,
             # Combine Scene Logs (ADR-456), the 5th per-scene log checkbox
             self.chk_combined_scene_log,
@@ -13492,10 +13510,51 @@ class MainFrame(wx.Frame):
         # Wide Strength, so it relabels the same way, for the same reason.
         self.lbl_nt_wide_floor.SetLabel(T("Close-Up Floor") if inv else T("Wide Floor"))
         self.lbl_nt_wide_floor_cutoff.SetLabel(T("Close-Up Floor Cutoff") if inv else T("Wide Floor Cutoff"))
+        if hasattr(self, "cbo_convergence_lock_signal"):
+            self.update_shot_lock_invert_labels()  # ADR-483
         self.Layout()
 
     def on_changed_chk_nt_auto_div_invert(self, event):
+        # ADR-483: the Shot Lock Wide/Close-Up boxes are really "High"/"Low" 3D
+        # Strength slots, and Invert flips which real shot lands in each -- swap the
+        # box contents so every real shot type keeps the value the user gave it.
+        # Only on a real user toggle (loading settings uses SetValue, no event).
+        self.swap_shot_lock_wide_closeup_values()
         self.update_nt_closeup_wide_labels()
+
+    def swap_shot_lock_wide_closeup_values(self):
+        """ADR-483: swap Wide<->Close-Up box contents of Convergence, Foreground
+        Scale and Edge Fix Shot Lock (Mid untouched)."""
+        for a, b in ((self.cbo_convergence_lock_wide, self.cbo_convergence_lock_closeup),
+                     (self.cbo_foreground_scale_lock_wide, self.cbo_foreground_scale_lock_closeup),
+                     (self.cbo_edge_dilation_lock_wide, self.cbo_edge_dilation_lock_closeup)):
+            va, vb = a.GetValue(), b.GetValue()
+            a.SetValue(vb)
+            b.SetValue(va)
+
+    def shot_lock_slots_swapped(self):
+        """ADR-483: True when the 'Wide' (High 3D Strength) slot holds real close-ups:
+        Auto 3D Strength on with Invert off."""
+        return bool(self.chk_nt_auto_div.GetValue()) and not bool(self.chk_nt_auto_div_invert.GetValue())
+
+    def update_shot_lock_invert_labels(self):
+        """ADR-483: label every Shot Lock Wide/Close-Up box with the REAL shot type it
+        shapes right now (Convergence with the 3D Strength signal also keeps its
+        High/Low strength name)."""
+        sw = self.shot_lock_slots_swapped()
+        is_divergence = self.cbo_convergence_lock_signal.GetValue() == "divergence"
+        top, bottom = (T("Close-Up"), T("Wide")) if sw else (T("Wide"), T("Close-Up"))
+        if is_divergence:
+            self.lbl_convergence_lock_wide.SetLabel(T("High Strength Value") + f" ({top})")
+            self.lbl_convergence_lock_closeup.SetLabel(T("Low Strength Value") + f" ({bottom})")
+        else:
+            self.lbl_convergence_lock_wide.SetLabel(T("Wide Shot Value"))
+            self.lbl_convergence_lock_closeup.SetLabel(T("Close-Up Value"))
+        for lw, lc in ((self.lbl_foreground_scale_lock_wide, self.lbl_foreground_scale_lock_closeup),
+                       (self.lbl_edge_dilation_lock_wide, self.lbl_edge_dilation_lock_closeup)):
+            lw.SetLabel(T("Close-Up Value") if sw else T("Wide Shot Value"))
+            lc.SetLabel(T("Wide Shot Value") if sw else T("Close-Up Value"))
+        self.Layout()
 
     def update_rife_interpolate(self):
         enabled = self.chk_rife_interpolate.GetValue()
@@ -14494,6 +14553,7 @@ class MainFrame(wx.Frame):
                 self.cbo_foreground_scale_lock_glide_duration.GetValue())),
             foreground_scale_lock_follow_convergence=self.chk_foreground_scale_lock_follow_convergence.GetValue(),
             foreground_scale_scene_log=self.chk_foreground_scale_scene_log.GetValue(),
+            foreground_scale_overlay=self.chk_foreground_scale_overlay.GetValue(),  # ADR-483
             # ADR-456: GUI-only, no CLI/argparse entry -- see set_state_args() in
             # iw3/utils.py for why that's enough (it forces the 3 flags above on).
             combined_scene_log=self.chk_combined_scene_log.GetValue(),
@@ -15994,6 +16054,7 @@ class MainFrame(wx.Frame):
             bool(getattr(args, "foreground_scale_lock_follow_convergence", False)))
         self.update_foreground_scale_lock_switch()
         self.chk_foreground_scale_scene_log.SetValue(bool(getattr(args, "foreground_scale_scene_log", False)))
+        self.chk_foreground_scale_overlay.SetValue(bool(getattr(args, "foreground_scale_overlay", False)))
         self.chk_edge_dilation_scene_log.SetValue(bool(getattr(args, "edge_dilation_scene_log", False)))
         self.chk_combined_scene_log.SetValue(bool(getattr(args, "combined_scene_log", False)))
         _apply_combo_value(self.cbo_foreground_pop, args.foreground_pop)
@@ -38588,8 +38649,8 @@ def _self_test_shot_lock_divergence_signal():
         # simply inert under divergence until Strength Threshold (Low) is also
         # filled in, same as that field's own "inert while empty" shape.
         assert frame.cbo_convergence_lock_mid.IsEnabled()
-        assert frame.lbl_convergence_lock_wide.GetLabel() == "High Strength Value"
-        assert frame.lbl_convergence_lock_closeup.GetLabel() == "Low Strength Value"
+        assert frame.lbl_convergence_lock_wide.GetLabel().startswith("High Strength Value")
+        assert frame.lbl_convergence_lock_closeup.GetLabel().startswith("Low Strength Value")
 
         frame.cbo_convergence_lock_strength_threshold.SetValue("3.85")
         args = frame.parse_args(skip_set_state=True)
@@ -41711,6 +41772,100 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_invert_shot_lock_swap_and_fs_overlay():
+    """ADR-483: (a) toggling Invert swaps the Wide/Close-Up boxes of Convergence,
+    Foreground Scale and Edge Fix Shot Lock and relabels them with the real shot type;
+    loading settings does NOT swap. (b) scene-log labels name the real shot type when
+    Auto 3D Strength is on with Invert off. (c) Foreground Scale overlay: stamps the
+    bottom-left corner only; GUI/CLI round-trip; metadata key."""
+    import types
+    import torch
+    import wx
+    from . import utils as U
+    from . import frame_overlay as FO
+
+    # (b) labels
+    a = types.SimpleNamespace(auto_divergence=True, auto_divergence_invert=False, convergence_mode="shot_lock",
+                              convergence_lock_signal="divergence", foreground_scale_mode="shot_lock",
+                              foreground_scale_lock_follow_convergence=True, edge_dilation_mode="shot_lock")
+    assert U.shot_labels_swapped_for(a) == {"convergence": True, "foreground_scale": True, "edge_fix": True}
+    try:
+        U._set_shot_label_swap(a)
+        assert U._classify_shot_lock_mean(0.0, (0.0, 0.15, 0.30)) == "Close-Up"
+        assert U._classify_shot_lock_mean(0.30, (0.0, 0.15, 0.30)) == "Wide"
+        assert U._classify_shot_lock_mean(0.15, (0.0, 0.15, 0.30)) == "Mid"
+        assert U._classify_shot_lock_mean_foreground_scale(0.25, (0.25, 0.5, 1.0)) == "Close-Up"
+        assert U._classify_shot_lock_pair_edge_dilation((1, 1), ((1, 1), None, (2, 2))) == "Close-Up"
+        a.auto_divergence_invert = True
+        U._set_shot_label_swap(a)
+        assert U._classify_shot_lock_mean(0.0, (0.0, 0.15, 0.30)) == "Wide"
+        a.auto_divergence_invert, a.convergence_lock_signal = False, "clip"
+        sw = U.shot_labels_swapped_for(a)
+        assert sw["convergence"] is False and sw["foreground_scale"] is False, sw
+        a.auto_divergence = False
+        assert not any(U.shot_labels_swapped_for(a).values())
+    finally:
+        U.SHOT_LABEL_SWAP.update({"convergence": False, "foreground_scale": False, "edge_fix": False})
+
+    # (c) overlay corner
+    fr = torch.full((1, 3, 220, 400), 0.5)
+    out = FO.stamp_values(fr, [0.25], fmt="FG {:.2f}", corner="bottom-left")
+    d = (out - fr).abs().sum(dim=1)[0]
+    assert d[:110].sum() == 0 and d[110:, :200].sum() > 0 and d[:, 300:].sum() == 0, "bottom-left only"
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        # (a) swap on toggle
+        frame.chk_nt_auto_div.SetValue(True)
+        frame.update_nt_auto_divergence()
+        frame.cbo_convergence_lock_signal.SetValue("divergence")
+        frame.update_shot_lock_signal()
+        frame.chk_nt_auto_div_invert.SetValue(True)
+        frame.update_nt_closeup_wide_labels()
+        frame.cbo_convergence_lock_wide.SetValue("0.30"); frame.cbo_convergence_lock_closeup.SetValue("0.00")
+        frame.cbo_foreground_scale_lock_wide.SetValue("1.0"); frame.cbo_foreground_scale_lock_closeup.SetValue("0.25")
+        frame.cbo_edge_dilation_lock_wide.SetValue("2 2"); frame.cbo_edge_dilation_lock_closeup.SetValue("1 1")
+        assert frame.lbl_convergence_lock_wide.GetLabel() == "High Strength Value (Wide)"
+        assert frame.lbl_foreground_scale_lock_wide.GetLabel() == "Wide Shot Value"
+        frame.chk_nt_auto_div_invert.SetValue(False)
+        frame.on_changed_chk_nt_auto_div_invert(wx.CommandEvent())
+        assert frame.cbo_convergence_lock_wide.GetValue() == "0.00" and frame.cbo_convergence_lock_closeup.GetValue() == "0.30"
+        assert frame.cbo_foreground_scale_lock_wide.GetValue() == "0.25"
+        assert frame.cbo_foreground_scale_lock_closeup.GetValue() == "1.0"
+        assert frame.cbo_edge_dilation_lock_wide.GetValue() == "1 1"
+        assert frame.lbl_convergence_lock_wide.GetLabel() == "High Strength Value (Close-Up)"
+        assert frame.lbl_convergence_lock_closeup.GetLabel() == "Low Strength Value (Wide)"
+        assert frame.lbl_foreground_scale_lock_wide.GetLabel() == "Close-Up Value"
+        assert frame.lbl_edge_dilation_lock_closeup.GetLabel() == "Wide Shot Value"
+        frame.chk_nt_auto_div_invert.SetValue(True)
+        frame.on_changed_chk_nt_auto_div_invert(wx.CommandEvent())
+        assert frame.cbo_convergence_lock_wide.GetValue() == "0.30", "toggling back restores"
+        # loading settings never swaps
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--auto-divergence", "--convergence-lock-wide", "0.3",
+             "--convergence-lock-closeup", "0.0"]))
+        assert not frame.chk_nt_auto_div_invert.GetValue()
+        assert float(frame.cbo_convergence_lock_wide.GetValue()) == 0.3, "restore must not swap"
+        assert float(frame.cbo_convergence_lock_closeup.GetValue()) == 0.0, "restore must not swap"
+
+        # (c) overlay checkbox
+        assert frame.chk_foreground_scale_overlay.GetValue() is False
+        frame.chk_foreground_scale_overlay.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.foreground_scale_overlay is True
+        assert "--foreground-scale-overlay" in frame.get_cli_command()
+        assert "iw3_foreground_scale_overlay=1" in U._build_iw3_comment_metadata(args, video=True)
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(["-i", "a.mp4", "-o", "o"]))
+        assert frame.chk_foreground_scale_overlay.GetValue() is False
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_invert_shot_lock_swap_and_fs_overlay: PASS")
+
+
 def _self_test_shot_lock_min_scene_length():
     """ADR-478: Minimum Scene Length to Switch. With real scene lengths known upfront:
     a scene shorter than the minimum keeps the previous scene's locked value and
@@ -42790,6 +42945,7 @@ def _run_self_tests():
         _self_test_shot_lock_min_scene_length,
         _self_test_shot_lock_group_short_scenes,
         _self_test_shot_lock_pre_plan,
+        _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,
         _self_test_experience_level_limit_bitrate_tier_and_codec_compose,

@@ -41,8 +41,9 @@ def _label(text, h):
 def stamp_values(frames, values, fmt="{:.2f}", corner="top-right"):
     """Writes fmt.format(value) into one corner of each frame. frames: BCHW or CHW
     tensor, values: one number per frame (shorter lists repeat their last value).
-    corner: "top-left" or "top-right" -- keep these two apart from each other so
-    two different overlays (e.g. this one and Auto 3D Strength's own) never collide.
+    corner: "top-left", "top-right", "bottom-left" or "bottom-right" -- keep
+    different overlays in different corners so they never collide (Auto 3D Strength
+    top-left, Convergence top-right, Foreground Scale bottom-left -- ADR-483).
     Returns a new tensor; never mutates the one passed in."""
     if frames is None or not torch.is_tensor(frames) or not values:
         return frames
@@ -59,7 +60,8 @@ def stamp_values(frames, values, fmt="{:.2f}", corner="top-right"):
         if mh <= 0 or mw <= 0:
             continue
         m = m[:mh, :mw]
-        x0 = h // 3 if corner == "top-left" else max(0, W - mw - h // 3)
-        r = x[i, :, y0:y0 + mh, x0:x0 + mw]
+        x0 = h // 3 if corner.endswith("left") else max(0, W - mw - h // 3)
+        yy = max(0, H - mh - h // 3) if corner.startswith("bottom") else y0
+        r = x[i, :, yy:yy + mh, x0:x0 + mw]
         r.copy_(r * 0.3 * (1 - m) + m)      # darkened box, white text
     return x[0] if single else x

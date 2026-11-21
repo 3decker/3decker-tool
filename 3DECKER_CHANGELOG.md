@@ -15,6 +15,12 @@ it matters.
 
 ## Latest Update — November 21, 2026
 
+**Improved: ticking or unticking Auto 3D Strength's "Invert" now swaps your Shot Lock values for you.** Shot Lock's Wide and Close-Up boxes really mean "high 3D Strength" and "low 3D Strength", and Invert flips which real shots get the high strength. So turning Invert off used to mean swapping your numbers by hand. Now, when you click Invert, the Wide and Close-Up boxes of Convergence, Foreground Scale and Edge Fix Shot Lock swap automatically, so every real shot keeps the value you gave it. The box labels show which real shot each box is for, for example "High Strength Value (Close-Up)".
+
+**Fixed: scene logs and the scene plan now name the real shot type.** With Invert off, real close-ups used to be tagged [Wide] and wide shots [Close-Up]. Every log (Convergence, Foreground Scale, Edge Fix, Combined) and the scene plan now say Wide, Mid or Close-Up for what the shot really is.
+
+**Added: "Show Foreground Scale on Video (debug)" (off by default).** Like the 3D Strength and Convergence debug overlays, it writes the Foreground Scale used for each frame into the bottom-left corner, for example "FG 0.25". All three can be on together without overlapping. The numbers are burned into the picture, so use it for test clips only.
+
 **Fixed: the Pre-Plan scene plan file was saved outside your output folder** (as "<folder name>_scene_plan.txt" next to the folder) when the output box was a folder. It's now saved inside the folder, next to the movie, like all the other scene logs.
 
 ## Update — November 20, 2026

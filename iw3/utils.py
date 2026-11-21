@@ -4487,6 +4487,8 @@ def _build_iw3_comment_metadata(args, video=True):
     # recorded on the flag alone, same "only shown when meaningful" convention.
     if getattr(args, "foreground_scale_scene_log", False):
         comment_parts.append("iw3_foreground_scale_scene_log=1")
+    if getattr(args, "foreground_scale_overlay", False):  # ADR-483
+        comment_parts.append("iw3_foreground_scale_overlay=1")
     # ADR-459: independent of edge_dilation_mode -- same "only shown when
     # meaningful" convention as --foreground-scale-scene-log's own tag just
     # above (meaningful in constant mode too, since every scene still logs a
@@ -5112,6 +5114,40 @@ def _format_hms(sec):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+# ADR-483: Shot Lock's Wide/Close-Up SLOTS are really "3D Strength at/above High" /
+# "at/below Low". With Auto 3D Strength on and Invert OFF, close-ups get the HIGH
+# strength, so the "Wide" slot holds the real close-ups. Scene logs and the plan file
+# show the REAL shot type: per feature, True = swap Wide<->Close-Up when labelling.
+# Set once per file by _set_shot_label_swap() (process_video_full).
+SHOT_LABEL_SWAP = {"convergence": False, "foreground_scale": False, "edge_fix": False}
+
+
+def shot_labels_swapped_for(args):
+    """ADR-483: {feature: bool} -- which Shot Lock features' Wide/Close-Up slots hold
+    the opposite REAL shot type for this job (Auto 3D Strength on, Invert off, and the
+    feature decides from 3D Strength). Pure function, no state."""
+    base = bool(getattr(args, "auto_divergence", False)) and not bool(getattr(args, "auto_divergence_invert", False))
+    conv_div = (getattr(args, "convergence_mode", "constant") == "shot_lock"
+                and getattr(args, "convergence_lock_signal", DEFAULT_SIGNAL) == "divergence")
+    fs_follow_clip = (bool(getattr(args, "foreground_scale_lock_follow_convergence", False))
+                      and getattr(args, "convergence_mode", "constant") == "shot_lock" and not conv_div)
+    return {"convergence": base and conv_div,
+            "foreground_scale": base and getattr(args, "foreground_scale_mode", "constant") == "shot_lock"
+            and not fs_follow_clip,
+            "edge_fix": base and getattr(args, "edge_dilation_mode", "constant") == "shot_lock"}
+
+
+def _set_shot_label_swap(args):
+    SHOT_LABEL_SWAP.update(shot_labels_swapped_for(args))
+
+
+def _real_shot_label(label, feature):
+    """ADR-483: the REAL shot type for a slot label (see SHOT_LABEL_SWAP)."""
+    if label and SHOT_LABEL_SWAP.get(feature):
+        return {"Wide": "Close-Up", "Close-Up": "Wide"}.get(label, label)
+    return label
+
+
 def _classify_shot_lock_mean(mean, lock_values):
     """ADR-429: which of shot_lock's locked target values a scene's logged
     mean convergence actually landed closest to -- nearest-value match, so this
@@ -5126,7 +5162,7 @@ def _classify_shot_lock_mean(mean, lock_values):
     if mid is not None:
         candidates.append(("Mid", mid))
     label, _ = min(candidates, key=lambda kv: abs(kv[1] - mean))
-    return label
+    return _real_shot_label(label, "convergence")  # ADR-483
 
 
 def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
@@ -5367,7 +5403,7 @@ def _classify_shot_lock_mean_foreground_scale(mean, lock_values):
     if mid is not None:
         candidates.append(("Mid", mid))
     label, _ = min(candidates, key=lambda kv: abs(kv[1] - mean))
-    return label
+    return _real_shot_label(label, "foreground_scale")  # ADR-483
 
 
 def _format_foreground_scale_scene_log(st, output_filename, fps, in_progress=False):
@@ -5605,11 +5641,11 @@ def _classify_shot_lock_pair_edge_dilation(pair, lock_values):
     mode."""
     wide, mid, closeup = lock_values
     if tuple(pair) == tuple(wide):
-        return "Wide"
+        return _real_shot_label("Wide", "edge_fix")  # ADR-483
     if mid is not None and tuple(pair) == tuple(mid):
         return "Mid"
     if tuple(pair) == tuple(closeup):
-        return "Close-Up"
+        return _real_shot_label("Close-Up", "edge_fix")
     return None
 
 
@@ -6257,6 +6293,17 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
     # nothing to read off a frame that the value box doesn't already say (and the GUI
     # checkbox is disabled on "constant" for the same reason; this guards the raw CLI
     # too, for anyone who sets the flag directly).
+    # ADR-483: Foreground Scale debug overlay -- one value per call (Auto 3D Strength
+    # already splits batches at every value change), pushed per INPUT frame and drained
+    # per OUTPUT frame like the Convergence overlay below (inpaint methods buffer).
+    foreground_scale_overlay_active = getattr(args, "foreground_scale_overlay", False)
+    if foreground_scale_overlay_active:
+        fs_shown = getattr(fs_model, "last_value", None) if fs_model is not None else None
+        if fs_shown is None:
+            fs_shown = float(getattr(args, "foreground_scale", 0.0) or 0.0)
+        args.state.setdefault("_foreground_scale_overlay_pending", collections.deque()).extend(
+            [float(fs_shown)] * depth.shape[0])
+
     convergence_overlay_active = getattr(args, "convergence_overlay", False) and torch.is_tensor(convergence)
     if convergence_overlay_active:
         pending = args.state.setdefault("_convergence_overlay_pending", collections.deque())
@@ -6520,6 +6567,13 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         conv_values = [pending.popleft() if pending else 0.0 for _ in range(n_out)]
         left_eye = FO.stamp_values(left_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
         right_eye = FO.stamp_values(right_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
+
+    if foreground_scale_overlay_active and left_eye is not None:  # ADR-483
+        n_out = 1 if left_eye.ndim == 3 else left_eye.shape[0]
+        fs_pending = args.state["_foreground_scale_overlay_pending"]
+        fs_values = [fs_pending.popleft() if fs_pending else 0.0 for _ in range(n_out)]
+        left_eye = FO.stamp_values(left_eye, fs_values, fmt="FG {:.2f}", corner="bottom-left")
+        right_eye = FO.stamp_values(right_eye, fs_values, fmt="FG {:.2f}", corner="bottom-left")
 
     # "Log Convergence Value per Scene": drains exactly as many (value, cut_after)
     # pairs as frames actually came back this call -- same reasoning as the overlay
@@ -7954,12 +8008,17 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
                 note.append("group start")
             elif min_scene_len > 0 and d < min_scene_len:
                 note.append("short")
-            rows.append(dict(index=i, start=edges[i], length=d, strength=v, shot=shot,
+            shot_label = {"wide": "Wide", "mid": "Mid", "closeup": "Close-Up"}.get(shot) if shot else None
+            shot_label = _real_shot_label(shot_label, "convergence")  # ADR-483: real shot type
+            rows.append(dict(index=i, start=edges[i], length=d, strength=v, shot=shot_label,
                              convergence=conv, foreground_scale=fs, note=", ".join(note)))
         _write_scene_plan_file(output_path, input_filename, rows, args)
-        counts = {k: sum(1 for x in (types or []) if x == k) for k in ("wide", "mid", "closeup")}
+        counts = {"Wide": 0, "Mid": 0, "Close-Up": 0}
+        for r in rows:
+            if r["shot"] in counts:
+                counts[r["shot"]] += 1
         print(f"[iw3] Pre-Plan Every Scene: {len(final)} scenes planned in {time.time() - t:.0f}s"
-              + (f" -- Wide {counts['wide']}, Mid {counts['mid']}, Close-Up {counts['closeup']}" if types else "")
+              + (f" -- Wide {counts['Wide']}, Mid {counts['Mid']}, Close-Up {counts['Close-Up']}" if types else "")
               + ". Each scene starts on its planned values at its cut.", file=sys.stderr)
         return starts
     except Exception as e:  # noqa
@@ -8145,6 +8204,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     args.state["_group_strength_by_scene"] = None
     args.state["_scene_plan_strengths"] = None
     _clear_scene_plan(args)  # a previous file's plan (folder jobs) must never carry over
+    _set_shot_label_swap(args)  # ADR-483: scene logs/plan show the real shot type
     if pre_plan and not log_segment_pts:
         print("[iw3] Pre-Plan Every Scene: no scene cuts found in this range -- the whole range is one "
               "scene, decided normally.", file=sys.stderr)
@@ -10989,6 +11049,11 @@ def create_parser(required_true=True):
                              "feature's own instant threshold check, so the two can never disagree about "
                              "the same scene (real Mario run: 14%% of scenes did). Needs --convergence-mode "
                              "shot_lock; otherwise this feature's own thresholds are used as before.")
+    parser.add_argument("--foreground-scale-overlay", action="store_true",
+                        help=("ADR-483: debug -- writes the Foreground Scale value actually used into the "
+                              "bottom-left corner of every frame, in both eyes (Auto 3D Strength's overlay "
+                              "is top-left, Convergence's top-right, so all three can be on at once). "
+                              "Works in Constant and Shot Lock modes."))
     parser.add_argument("--foreground-scale-scene-log", action="store_true",
                         help=("ADR-453: writes a text file next to the finished video listing the "
                               "Foreground Scale value used for each scene, plus one overall average for "

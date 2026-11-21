@@ -208,9 +208,11 @@ class ForegroundScaleEstimator():
             # applies from the cut's first frame: no glide/ease, nothing to catch up on.
             self.ease_value = self.glide_value = self._glide_from = self._glide_active_target = target
             self._glide_elapsed = self.glide_duration
+            self.last_value = target  # ADR-483: for the on-video debug overlay
             return self._mapper_fn_for(target)
         if self.switch == "glide":
             value = self._glide_toward(target, frames)
+            self.last_value = value
             name = resolve_mapper_name(mapper=None, foreground_scale=value,
                                        metric_depth=self.metric_depth,
                                        mapper_type=self.mapper_type)
@@ -219,8 +221,10 @@ class ForegroundScaleEstimator():
             # ADR-455: resolved fresh every call, never through
             # _mapper_fn_for_cache -- see module docstring.
             value = self._ease_toward(target)
+            self.last_value = value
             name = resolve_mapper_name(mapper=None, foreground_scale=value,
                                        metric_depth=self.metric_depth,
                                        mapper_type=self.mapper_type)
             return get_mapper(name)
+        self.last_value = target
         return self._mapper_fn_for(target)

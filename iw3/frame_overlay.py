@@ -38,12 +38,15 @@ def _label(text, h):
     return m
 
 
-def stamp_values(frames, values, fmt="{:.2f}", corner="top-right"):
+def stamp_values(frames, values, fmt="{:.2f}", corner="top-right", row=0):
     """Writes fmt.format(value) into one corner of each frame. frames: BCHW or CHW
     tensor, values: one number per frame (shorter lists repeat their last value).
     corner: "top-left", "top-right", "bottom-left" or "bottom-right" -- keep
     different overlays in different corners so they never collide (Auto 3D Strength
     top-left, Convergence top-right, Foreground Scale bottom-left -- ADR-483).
+    row: ADR-485 -- stack several labels in one corner: row N sits N label-heights
+    below (top corners) / above (bottom corners) row 0, so 3D Strength, Convergence
+    and Foreground Scale can be read together as one block.
     Returns a new tensor; never mutates the one passed in."""
     if frames is None or not torch.is_tensor(frames) or not values:
         return frames
@@ -61,7 +64,13 @@ def stamp_values(frames, values, fmt="{:.2f}", corner="top-right"):
             continue
         m = m[:mh, :mw]
         x0 = h // 3 if corner.endswith("left") else max(0, W - mw - h // 3)
-        yy = max(0, H - mh - h // 3) if corner.startswith("bottom") else y0
+        mw = min(mw, W - x0)  # a label wider than the room left (tiny frames) is clipped, not misfit
+        step = int(round(h * 1.5)) * int(row)
+        yy = max(0, H - mh - h // 3 - step) if corner.startswith("bottom") else min(H - 1, y0 + step)
+        mh = min(mh, H - yy)
+        if mh <= 0 or mw <= 0:
+            continue
+        m = m[:mh, :mw]
         r = x[i, :, yy:yy + mh, x0:x0 + mw]
         r.copy_(r * 0.3 * (1 - m) + m)      # darkened box, white text
     return x[0] if single else x

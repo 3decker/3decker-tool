@@ -2669,9 +2669,9 @@ class MainFrame(wx.Frame):
         self.chk_convergence_overlay.SetValue(False)
         self.chk_convergence_overlay.SetToolTip(
             T("What it's for: writes the actual Convergence Plane value used for each frame into its "
-              "top-right corner, in both eyes -- same idea as Auto 3D Strength's own \"Show strength on "
-              "video (debug)\" (top-left corner, so the two can be read together without overlapping if "
-              "both are on), so you can get real, readable numbers to compare instead of guessing from how "
+              "top-left corner, in both eyes, right under Auto 3D Strength's own \"Show strength on "
+              "video (debug)\" label when that is on (and above \"Show Foreground Scale on Video\"), so "
+              "you can get real, readable numbers to compare instead of guessing from how "
               "a shot looks -- e.g. confirming Hold Steady Per Scene above is actually holding one value "
               "per shot rather than drifting, or comparing sod_v1 against face_detect on the same footage.\n"
               "Only does anything for sod_v1 / Face Detect -- constant never varies, so there is nothing "
@@ -3299,11 +3299,11 @@ class MainFrame(wx.Frame):
             name="chk_foreground_scale_overlay")
         self.chk_foreground_scale_overlay.SetValue(False)
         self.chk_foreground_scale_overlay.SetToolTip(
-            T("What: writes the Foreground Scale value actually used for each frame into its bottom-left "
-              "corner, in both eyes, as \"FG 0.25\"." + "\n"
-              "Why: lets you read the real value on screen while watching a test, the same way \"Show "
-              "strength on video\" (top-left) and \"Show Convergence on Video\" (top-right) do -- all three "
-              "can be on together without overlapping." + "\n"
+            T("What: writes the Foreground Scale value actually used for each frame into the top-left "
+              "corner, in both eyes, as \"FG 0.25\" -- stacked under \"3D 4.1\" (Show strength on video) "
+              "and \"Conv 0.00\" (Show Convergence on Video) when those are on, so all three read as one "
+              "block." + "\n"
+              "Why: lets you read the real value on screen while watching a test, next to the other two." + "\n"
               "Pros: confirm which Foreground Scale each scene really got (e.g. close-ups 0.25, wide shots "
               "1.0), and see exactly when it changes." + "\n"
               "Cons: the numbers are burned into the picture." + "\n"
@@ -41825,6 +41825,13 @@ def _self_test_invert_shot_lock_swap_and_fs_overlay():
     out = FO.stamp_values(fr, [0.25], fmt="FG {:.2f}", corner="bottom-left")
     d = (out - fr).abs().sum(dim=1)[0]
     assert d[:110].sum() == 0 and d[110:, :200].sum() > 0 and d[:, 300:].sum() == 0, "bottom-left only"
+    # ADR-485: stacked rows in one corner never overlap and go downward
+    rows_px = []
+    for row in (0, 1, 2):
+        o = FO.stamp_values(fr, [0.25], fmt="FG {:.2f}", corner="top-left", row=row)
+        ys = ((o - fr).abs().sum(dim=1)[0].sum(dim=1) > 0).nonzero().flatten()
+        rows_px.append((int(ys.min()), int(ys.max())))
+    assert rows_px[0][1] < rows_px[1][0] and rows_px[1][1] < rows_px[2][0], rows_px
 
     app = wx.App()
     frame = None

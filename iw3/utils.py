@@ -6092,6 +6092,12 @@ def finish_combined_scene_log(args, input_path, output_path, fps, strength_state
               f"({type(e).__name__}: {e})", file=sys.stderr)
 
 
+def _overlay_row_3d(args):
+    """ADR-485: 1 when Auto 3D Strength's own '3D x.x' label occupies the top-left
+    row 0 (its overlay checkbox on with Auto 3D Strength on), else 0."""
+    return 1 if (getattr(args, "auto_divergence", False) and getattr(args, "auto_divergence_overlay", False)) else 0
+
+
 def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=None):
     batch = True
     if depth.ndim != 4:
@@ -6565,15 +6571,19 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         n_out = 1 if left_eye.ndim == 3 else left_eye.shape[0]
         pending = args.state["_convergence_overlay_pending"]
         conv_values = [pending.popleft() if pending else 0.0 for _ in range(n_out)]
-        left_eye = FO.stamp_values(left_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
-        right_eye = FO.stamp_values(right_eye, conv_values, fmt="Conv {:.2f}", corner="top-right")
+        # ADR-485: one stacked block in the top-left -- 3D Strength (Auto 3D Strength's
+        # own label, row 0 when it is on), then Convergence, then Foreground Scale.
+        conv_row = _overlay_row_3d(args)
+        left_eye = FO.stamp_values(left_eye, conv_values, fmt="Conv {:.2f}", corner="top-left", row=conv_row)
+        right_eye = FO.stamp_values(right_eye, conv_values, fmt="Conv {:.2f}", corner="top-left", row=conv_row)
 
     if foreground_scale_overlay_active and left_eye is not None:  # ADR-483
         n_out = 1 if left_eye.ndim == 3 else left_eye.shape[0]
         fs_pending = args.state["_foreground_scale_overlay_pending"]
         fs_values = [fs_pending.popleft() if fs_pending else 0.0 for _ in range(n_out)]
-        left_eye = FO.stamp_values(left_eye, fs_values, fmt="FG {:.2f}", corner="bottom-left")
-        right_eye = FO.stamp_values(right_eye, fs_values, fmt="FG {:.2f}", corner="bottom-left")
+        fg_row = _overlay_row_3d(args) + (1 if convergence_overlay_active else 0)  # ADR-485
+        left_eye = FO.stamp_values(left_eye, fs_values, fmt="FG {:.2f}", corner="top-left", row=fg_row)
+        right_eye = FO.stamp_values(right_eye, fs_values, fmt="FG {:.2f}", corner="top-left", row=fg_row)
 
     # "Log Convergence Value per Scene": drains exactly as many (value, cut_after)
     # pairs as frames actually came back this call -- same reasoning as the overlay
@@ -10593,9 +10603,9 @@ def create_parser(required_true=True):
                               "react more slowly to a subject moving fast within one shot."))
     parser.add_argument("--convergence-overlay", action="store_true",
                         help=("ADR-233: debug -- writes the Convergence Plane value actually used into the "
-                              "top-right corner of every frame (auto convergence modes only -- sod_v1/"
-                              "face_detect). Same idea as --auto-divergence-overlay, opposite corner so both "
-                              "can be on at once."))
+                              "top-left corner of every frame, under --auto-divergence-overlay's label when "
+                              "that is on (ADR-485 stacks 3D Strength, Convergence, Foreground Scale) -- "
+                              "auto convergence modes only."))
     parser.add_argument("--convergence-scene-log", action="store_true",
                         help=("Writes a text file next to the finished video listing the Convergence Plane "
                               "value used for each scene, plus one overall average for the whole movie -- "
@@ -11077,8 +11087,8 @@ def create_parser(required_true=True):
                              "shot_lock; otherwise this feature's own thresholds are used as before.")
     parser.add_argument("--foreground-scale-overlay", action="store_true",
                         help=("ADR-483: debug -- writes the Foreground Scale value actually used into the "
-                              "bottom-left corner of every frame, in both eyes (Auto 3D Strength's overlay "
-                              "is top-left, Convergence's top-right, so all three can be on at once). "
+                              "top-left corner of every frame, in both eyes, stacked under Auto 3D "
+                              "Strength's and Convergence's own overlays when those are on (ADR-485). "
                               "Works in Constant and Shot Lock modes."))
     parser.add_argument("--foreground-scale-scene-log", action="store_true",
                         help=("ADR-453: writes a text file next to the finished video listing the "

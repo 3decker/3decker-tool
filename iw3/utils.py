@@ -4396,6 +4396,10 @@ def _build_iw3_comment_metadata(args, video=True):
                     comment_parts.append("iw3_convergence_lock_late_correction=true")
                 if getattr(args, "shot_lock_pre_plan", False):  # ADR-481
                     comment_parts.append("iw3_shot_lock_pre_plan=true")
+                for _shot in ("wide", "mid", "closeup"):  # ADR-486
+                    _v = getattr(args, f"shot_lock_strength_{_shot}", None)
+                    if _v is not None:
+                        comment_parts.append(f"iw3_shot_lock_strength_{_shot}={_v}")
                 if float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0) > 0:  # ADR-478
                     comment_parts.append(f"iw3_shot_lock_min_scene_length={args.shot_lock_min_scene_length}")
                     if getattr(args, "shot_lock_group_short_scenes", False):  # ADR-479
@@ -8022,6 +8026,28 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
         elif getattr(args, "convergence_mode", "constant") == "shot_lock":
             print("[iw3] Pre-Plan Every Scene: Convergence Shot Lock uses the CLIP signal, not 3D Strength -- "
                   "its shot type is still decided live; 3D Strength is planned.", file=sys.stderr)
+        # ADR-486: "3D Strength per Shot" -- the shot type was decided above from the
+        # measured strength (Auto Range + thresholds, unchanged); now each scene's 3D
+        # Strength is SET to the user's number for its REAL shot type (empty = keep).
+        per_shot = {"Wide": getattr(args, "shot_lock_strength_wide", None),
+                    "Mid": getattr(args, "shot_lock_strength_mid", None),
+                    "Close-Up": getattr(args, "shot_lock_strength_closeup", None)}
+        if any(v is not None for v in per_shot.values()):
+            if types:
+                names = {"wide": "Wide", "mid": "Mid", "closeup": "Close-Up"}
+                n_set = 0
+                for i, slot in enumerate(types):
+                    v = per_shot.get(_real_shot_label(names.get(slot), "convergence"))
+                    if v is not None:
+                        final[i] = float(v)
+                        n_set += 1
+                args.state["_scene_plan_strengths"] = {i: v for i, v in enumerate(final) if v is not None}
+                print(f"[iw3] 3D Strength per Shot: {n_set} scenes set to "
+                      + ", ".join(f"{k} {v:g}" for k, v in per_shot.items() if v is not None) + ".",
+                      file=sys.stderr)
+            else:
+                print("[iw3] 3D Strength per Shot needs Convergence Shot Lock with the 3D Strength signal -- "
+                      "ignored for this job.", file=sys.stderr)
         fs_model = args.state.get("foreground_scale_model")
         if fs_model is not None:
             fs_model.planned = True
@@ -10541,6 +10567,12 @@ def create_parser(required_true=True):
                              "(from a quick pre-scan before converting), applied from the group's first "
                              "scene and held through the group, instead of keeping the previous scene's "
                              "settings. A lone short scene still keeps the previous settings.")
+    for _shot, _name in (("wide", "Wide"), ("mid", "Mid"), ("closeup", "Close-Up")):
+        parser.add_argument(f"--shot-lock-strength-{_shot}", type=float, default=None,
+                            help=(f"ADR-486: with --shot-lock-pre-plan: every scene whose shot type is {_name} "
+                                  f"(the REAL shot, whatever Invert is set to) gets exactly this 3D Strength. "
+                                  f"The shot type itself is still decided from the measured strength (Auto Range "
+                                  f"+ thresholds). Default: not set = keep the measured strength."))
     parser.add_argument("--shot-lock-pre-plan", action="store_true",
                         help="ADR-481: Pre-Plan Every Scene -- needs Auto 3D Strength. Before rendering, "
                              "uses the saved scene cuts and a quick (saved, reused) pre-scan to decide every "

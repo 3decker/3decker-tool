@@ -2595,6 +2595,50 @@ class MainFrame(wx.Frame):
               "Recommended: on, with Convergence Shot Lock (3D Strength signal), Foreground Scale Shot "
               "Lock following Convergence, Minimum Scene Length 3.5 and Group Short Scenes on."))
 
+        # ADR-486: Pre-Plan 3D Strength per shot type.
+        self.lbl_shot_lock_strength_wide = wx.StaticText(
+            self.grp_stereo, label=T("Pre-Plan 3D Strength: Wide"))
+        self.cbo_shot_lock_strength_wide = EditableComboBox(
+            self.grp_stereo, choices=["", "3.5", "3.6", "3.7", "3.8", "3.9", "4.0", "4.1", "4.2"],
+            name="cbo_shot_lock_strength_wide")
+        self.cbo_shot_lock_strength_wide.SetValue("")
+        self.cbo_shot_lock_strength_wide.SetToolTip(
+            T("Only with 'Pre-Plan Every Scene' on, Auto 3D Strength on, and Convergence Shot Lock using the 3D Strength signal." + "\n"
+              "What: every Wide scene gets exactly this 3D Strength. Pre-Plan still decides each scene's shot type the normal way (from the measured 3D Strength, your Auto Range and the High/Low thresholds), then SETS the 3D Strength of every scene of that type to this number. The labels always mean the real shot, whatever Invert is set to. Leave it empty to keep the measured strength for this shot type." + "\n"
+              "Why: a narrow Auto Range (e.g. 3.7-3.9) puts almost every scene on the middle value, so nearly everything becomes Mid. Keeping a wide Auto Range (3.6-4.2) separates the shot types well, and these boxes then give each type exactly the strength you want." + "\n"
+              "Pros: one exact, predictable 3D Strength per shot type; works together with that type's Convergence and Foreground Scale values." + "\n"
+              "Cons: every scene of a type gets the same strength -- no finer variation inside a type." + "\n"
+              "Values: empty = off (default), or 3.0-5.0." + "\n"
+              "Recommended: Wide 3.7, Mid 3.8, Close-Up 3.9, with Auto Range 3.6-4.2 and thresholds High 3.9 / Low 3.7."))
+        self.lbl_shot_lock_strength_mid = wx.StaticText(
+            self.grp_stereo, label=T("Pre-Plan 3D Strength: Mid"))
+        self.cbo_shot_lock_strength_mid = EditableComboBox(
+            self.grp_stereo, choices=["", "3.5", "3.6", "3.7", "3.8", "3.9", "4.0", "4.1", "4.2"],
+            name="cbo_shot_lock_strength_mid")
+        self.cbo_shot_lock_strength_mid.SetValue("")
+        self.cbo_shot_lock_strength_mid.SetToolTip(
+            T("Only with 'Pre-Plan Every Scene' on, Auto 3D Strength on, and Convergence Shot Lock using the 3D Strength signal." + "\n"
+              "What: every Mid scene gets exactly this 3D Strength. Pre-Plan still decides each scene's shot type the normal way (from the measured 3D Strength, your Auto Range and the High/Low thresholds), then SETS the 3D Strength of every scene of that type to this number. The labels always mean the real shot, whatever Invert is set to. Leave it empty to keep the measured strength for this shot type." + "\n"
+              "Why: a narrow Auto Range (e.g. 3.7-3.9) puts almost every scene on the middle value, so nearly everything becomes Mid. Keeping a wide Auto Range (3.6-4.2) separates the shot types well, and these boxes then give each type exactly the strength you want." + "\n"
+              "Pros: one exact, predictable 3D Strength per shot type; works together with that type's Convergence and Foreground Scale values." + "\n"
+              "Cons: every scene of a type gets the same strength -- no finer variation inside a type." + "\n"
+              "Values: empty = off (default), or 3.0-5.0." + "\n"
+              "Recommended: Wide 3.7, Mid 3.8, Close-Up 3.9, with Auto Range 3.6-4.2 and thresholds High 3.9 / Low 3.7."))
+        self.lbl_shot_lock_strength_closeup = wx.StaticText(
+            self.grp_stereo, label=T("Pre-Plan 3D Strength: Close-Up"))
+        self.cbo_shot_lock_strength_closeup = EditableComboBox(
+            self.grp_stereo, choices=["", "3.5", "3.6", "3.7", "3.8", "3.9", "4.0", "4.1", "4.2"],
+            name="cbo_shot_lock_strength_closeup")
+        self.cbo_shot_lock_strength_closeup.SetValue("")
+        self.cbo_shot_lock_strength_closeup.SetToolTip(
+            T("Only with 'Pre-Plan Every Scene' on, Auto 3D Strength on, and Convergence Shot Lock using the 3D Strength signal." + "\n"
+              "What: every Close-Up scene gets exactly this 3D Strength. Pre-Plan still decides each scene's shot type the normal way (from the measured 3D Strength, your Auto Range and the High/Low thresholds), then SETS the 3D Strength of every scene of that type to this number. The labels always mean the real shot, whatever Invert is set to. Leave it empty to keep the measured strength for this shot type." + "\n"
+              "Why: a narrow Auto Range (e.g. 3.7-3.9) puts almost every scene on the middle value, so nearly everything becomes Mid. Keeping a wide Auto Range (3.6-4.2) separates the shot types well, and these boxes then give each type exactly the strength you want." + "\n"
+              "Pros: one exact, predictable 3D Strength per shot type; works together with that type's Convergence and Foreground Scale values." + "\n"
+              "Cons: every scene of a type gets the same strength -- no finer variation inside a type." + "\n"
+              "Values: empty = off (default), or 3.0-5.0." + "\n"
+              "Recommended: Wide 3.7, Mid 3.8, Close-Up 3.9, with Auto Range 3.6-4.2 and thresholds High 3.9 / Low 3.7."))
+
         # ADR-476: Late Correction for Convergence shot_lock (divergence signal).
         self.chk_convergence_lock_late_correction = wx.CheckBox(
             self.grp_stereo, label=T("Late Correction (re-check once settled)"),
@@ -4949,6 +4993,9 @@ class MainFrame(wx.Frame):
         layout.Add(self.cbo_shot_lock_min_scene_length, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_shot_lock_group_short_scenes, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
         layout.Add(self.chk_shot_lock_pre_plan, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)  # ADR-481
+        for _s in ("wide", "mid", "closeup"):  # ADR-486
+            layout.Add(getattr(self, f"lbl_shot_lock_strength_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+            layout.Add(getattr(self, f"cbo_shot_lock_strength_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12908,6 +12955,9 @@ class MainFrame(wx.Frame):
         self.cbo_shot_lock_min_scene_length.Enable(is_divergence)
         self.chk_shot_lock_group_short_scenes.Enable(is_divergence)  # ADR-479
         self.chk_shot_lock_pre_plan.Enable(is_divergence)  # ADR-481
+        for _s in ("wide", "mid", "closeup"):  # ADR-486
+            getattr(self, f"lbl_shot_lock_strength_{_s}").Enable(is_divergence)
+            getattr(self, f"cbo_shot_lock_strength_{_s}").Enable(is_divergence)
         is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
         self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
@@ -13274,6 +13324,9 @@ class MainFrame(wx.Frame):
             self.lbl_shot_lock_min_scene_length, self.cbo_shot_lock_min_scene_length,
             self.chk_shot_lock_group_short_scenes,
             self.chk_shot_lock_pre_plan,
+            self.lbl_shot_lock_strength_wide, self.cbo_shot_lock_strength_wide,
+            self.lbl_shot_lock_strength_mid, self.cbo_shot_lock_strength_mid,
+            self.lbl_shot_lock_strength_closeup, self.cbo_shot_lock_strength_closeup,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -14496,6 +14549,13 @@ class MainFrame(wx.Frame):
             shot_lock_min_scene_length=float(self.cbo_shot_lock_min_scene_length.GetValue() or 0),  # ADR-478
             shot_lock_group_short_scenes=self.chk_shot_lock_group_short_scenes.GetValue(),  # ADR-479
             shot_lock_pre_plan=self.chk_shot_lock_pre_plan.GetValue(),  # ADR-481
+            # ADR-486: empty box = None (keep the measured strength)
+            shot_lock_strength_wide=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_shot_lock_strength_wide.GetValue()),
+            shot_lock_strength_mid=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_shot_lock_strength_mid.GetValue()),
+            shot_lock_strength_closeup=(lambda s: float(s) if s.strip() else None)(
+                self.cbo_shot_lock_strength_closeup.GetValue()),
             convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
@@ -15959,6 +16019,9 @@ class MainFrame(wx.Frame):
             bool(getattr(args, "shot_lock_group_short_scenes", False)))
         self.chk_shot_lock_pre_plan.SetValue(  # ADR-481
             bool(getattr(args, "shot_lock_pre_plan", False)))
+        for _s in ("wide", "mid", "closeup"):  # ADR-486
+            _v = getattr(args, f"shot_lock_strength_{_s}", None)
+            getattr(self, f"cbo_shot_lock_strength_{_s}").SetValue("" if _v is None else f"{float(_v):g}")
         _apply_combo_value(self.cbo_convergence_lock_settle_wait_max,
                            getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
         self.update_shot_lock_signal()
@@ -41785,6 +41848,65 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_shot_lock_strength_per_shot():
+    """ADR-486: Pre-Plan 3D Strength per shot. (a) the plan sets each scene's strength by
+    its REAL shot type (types still decided from the measured strength), with Invert on
+    and off; empty boxes keep the measured value. (b) GUI boxes default empty, round-trip
+    through parse_args/CLI/restore; metadata keys."""
+    import types as _t
+    import wx
+    from . import utils as U
+
+    names = {"wide": "Wide", "mid": "Mid", "closeup": "Close-Up"}
+    def apply(slots, per_shot, swap):
+        U.SHOT_LABEL_SWAP["convergence"] = swap
+        out = []
+        for slot in slots:
+            v = per_shot.get(U._real_shot_label(names[slot], "convergence"))
+            out.append(v)
+        return out
+    try:
+        per = {"Wide": 3.7, "Mid": 3.8, "Close-Up": 3.9}
+        # Invert ON: the "wide" slot = real wide shots
+        assert apply(["wide", "mid", "closeup"], per, False) == [3.7, 3.8, 3.9]
+        # Invert OFF: the "wide" (High strength) slot holds real close-ups
+        assert apply(["wide", "mid", "closeup"], per, True) == [3.9, 3.8, 3.7]
+    finally:
+        U.SHOT_LABEL_SWAP.update({"convergence": False, "foreground_scale": False, "edge_fix": False})
+
+    # the real code path, with a stub Shot Lock model
+    import inspect
+    src = inspect.getsource(U._plan_every_scene_for_job)
+    assert "shot_lock_strength_wide" in src and "_real_shot_label(names.get(slot)" in src
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        for s in ("wide", "mid", "closeup"):
+            assert getattr(frame, f"cbo_shot_lock_strength_{s}").GetValue() == ""
+        args = frame.parse_args(skip_set_state=True)
+        assert args.shot_lock_strength_wide is None and args.shot_lock_strength_closeup is None
+        frame.cbo_shot_lock_strength_wide.SetValue("3.7")
+        frame.cbo_shot_lock_strength_mid.SetValue("3.8")
+        frame.cbo_shot_lock_strength_closeup.SetValue("3.9")
+        args = frame.parse_args(skip_set_state=True)
+        assert (args.shot_lock_strength_wide, args.shot_lock_strength_mid, args.shot_lock_strength_closeup) == (3.7, 3.8, 3.9)
+        cmd = frame.get_cli_command()
+        assert "--shot-lock-strength-wide 3.7" in cmd and "--shot-lock-strength-closeup 3.9" in cmd, cmd
+        args.convergence_mode = "shot_lock"
+        meta = U._build_iw3_comment_metadata(args, video=True)
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--shot-lock-strength-mid", "3.8"]))
+        assert frame.cbo_shot_lock_strength_mid.GetValue() == "3.8"
+        assert frame.cbo_shot_lock_strength_wide.GetValue() == ""
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_shot_lock_strength_per_shot: PASS")
+
+
 def _self_test_invert_shot_lock_swap_and_fs_overlay():
     """ADR-483: (a) toggling Invert swaps the Wide/Close-Up boxes of Convergence,
     Foreground Scale and Edge Fix Shot Lock and relabels them with the real shot type;
@@ -42965,6 +43087,7 @@ def _run_self_tests():
         _self_test_shot_lock_min_scene_length,
         _self_test_shot_lock_group_short_scenes,
         _self_test_shot_lock_pre_plan,
+        _self_test_shot_lock_strength_per_shot,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

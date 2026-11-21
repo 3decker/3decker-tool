@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 20, 2026
+## Latest Update — November 21, 2026
+
+**Fixed: the Pre-Plan scene plan file was saved outside your output folder** (as "<folder name>_scene_plan.txt" next to the folder) when the output box was a folder. It's now saved inside the folder, next to the movie, like all the other scene logs.
+
+## Update — November 20, 2026
 
 **Added: "Pre-Plan Every Scene (decide before rendering)", a checkbox next to Group Short Scenes (off by default).** Before, when the movie cut from a wide shot to a close-up (or back), the new shot started with the old shot's depth and convergence, and you could see them shift during the first moments of the new shot. With this box ticked, before rendering starts, 3DECKER works out every scene of the movie in advance: its 3D Strength (measured over the whole scene), whether it's Wide, Mid or Close-Up, its Convergence Plane value and its Foreground Scale value. During rendering, every scene starts on its own values from its very first frame, so each change happens exactly at the cut, where it's hidden. Minimum Scene Length and Group Short Scenes are built into the plan. The scene-cut scan is done once per movie and saved, and the shot-framing pre-scan is saved too, so converting the same movie again skips it. The plan is written next to your output as `..._scene_plan.txt`, so you can see every scene's values. It needs Auto 3D Strength on, and it adds a pre-scan of a few minutes the first time a movie is converted.
 

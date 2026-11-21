@@ -7851,7 +7851,11 @@ def _write_scene_plan_file(output_path, input_filename, rows, args):
     converting anything. Never raises."""
     import time
     try:
-        out_path = path.splitext(str(output_path))[0] + "_scene_plan.txt"
+        # same folder-vs-real-filename resolution as every scene log (ADR-278/279):
+        # with a folder as the output, the plan goes next to the real output file.
+        job_log = _resolve_single_file_log_path(args, input_filename, output_path)
+        base = job_log[:-len("_log.txt")] if job_log.endswith("_log.txt") else path.splitext(job_log)[0]
+        out_path = base + "_scene_plan.txt"
         lines = [f"Scene plan (decided before rendering) for: {path.basename(str(input_filename))}",
                  f"Created: {time.strftime('%Y-%m-%d %H:%M:%S')}",
                  f"Minimum Scene Length: {float(getattr(args, 'shot_lock_min_scene_length', 0) or 0):g}s, "

@@ -2564,6 +2564,33 @@ class MainFrame(wx.Frame):
               "Values: on / off (default off)." + "\n"
               "Recommended: on, if Minimum Scene Length is used."))
 
+        # ADR-481: Pre-Plan Every Scene.
+        self.chk_shot_lock_pre_plan = wx.CheckBox(
+            self.grp_stereo, label=T("Pre-Plan Every Scene (decide before rendering)"),
+            name="chk_shot_lock_pre_plan")
+        self.chk_shot_lock_pre_plan.SetValue(False)
+        self.chk_shot_lock_pre_plan.SetToolTip(
+            T("Only with Auto 3D Strength on (it also turns on 'Use Real Scene Cuts' for the job)." + "\n"
+              "What: before rendering starts, every scene of the movie is worked out in advance -- its 3D "
+              "Strength, its shot type (Wide / Mid / Close-Up), its Convergence Plane value and its "
+              "Foreground Scale value. While rendering, each scene starts ON those values from its very "
+              "first frame, so every change happens exactly at the cut. Scene cuts come from the saved "
+              "scene scan (done once per movie, reused after), and the shot-framing pre-scan is saved too, "
+              "so a second run of the same movie skips it. Minimum Scene Length and Group Short Scenes are "
+              "included in the plan. The plan is written next to the output as '..._scene_plan.txt'." + "\n"
+              "Why: without it, a new scene starts on the previous scene's values and only changes after "
+              "Auto 3D Strength settles (about half a second), then glides -- you can see the depth move "
+              "after the cut. A change exactly at a cut is hidden by the cut itself." + "\n"
+              "Pros: no visible depth/convergence movement after cuts; each scene uses a value measured "
+              "over the WHOLE scene, not just its first frames; the plan file shows every scene's values." + "\n"
+              "Cons: adds a pre-scan before rendering the first time a movie/range is converted (roughly "
+              "5-8 minutes for a full movie; reused after). Glide, Wait-for-Settle and Late Correction have "
+              "nothing to do while it's on (every scene is already decided). A scene that changes framing "
+              "a lot (a long zoom) keeps one value for the whole scene." + "\n"
+              "Values: on / off (default off)." + "\n"
+              "Recommended: on, with Convergence Shot Lock (3D Strength signal), Foreground Scale Shot "
+              "Lock following Convergence, Minimum Scene Length 3.5 and Group Short Scenes on."))
+
         # ADR-476: Late Correction for Convergence shot_lock (divergence signal).
         self.chk_convergence_lock_late_correction = wx.CheckBox(
             self.grp_stereo, label=T("Late Correction (re-check once settled)"),
@@ -4901,6 +4928,7 @@ class MainFrame(wx.Frame):
         layout.Add(self.lbl_shot_lock_min_scene_length, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_shot_lock_min_scene_length, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_shot_lock_group_short_scenes, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
+        layout.Add(self.chk_shot_lock_pre_plan, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)  # ADR-481
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -12858,6 +12886,7 @@ class MainFrame(wx.Frame):
         self.lbl_shot_lock_min_scene_length.Enable(is_divergence)  # ADR-478
         self.cbo_shot_lock_min_scene_length.Enable(is_divergence)
         self.chk_shot_lock_group_short_scenes.Enable(is_divergence)  # ADR-479
+        self.chk_shot_lock_pre_plan.Enable(is_divergence)  # ADR-481
         is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
         self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
@@ -13227,6 +13256,7 @@ class MainFrame(wx.Frame):
             self.chk_convergence_lock_late_correction,
             self.lbl_shot_lock_min_scene_length, self.cbo_shot_lock_min_scene_length,
             self.chk_shot_lock_group_short_scenes,
+            self.chk_shot_lock_pre_plan,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -14406,6 +14436,7 @@ class MainFrame(wx.Frame):
             convergence_lock_late_correction=self.chk_convergence_lock_late_correction.GetValue(),
             shot_lock_min_scene_length=float(self.cbo_shot_lock_min_scene_length.GetValue() or 0),  # ADR-478
             shot_lock_group_short_scenes=self.chk_shot_lock_group_short_scenes.GetValue(),  # ADR-479
+            shot_lock_pre_plan=self.chk_shot_lock_pre_plan.GetValue(),  # ADR-481
             convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
@@ -15866,6 +15897,8 @@ class MainFrame(wx.Frame):
             "0" if _msl_restore <= 0 else f"{_msl_restore:.1f}")
         self.chk_shot_lock_group_short_scenes.SetValue(  # ADR-479
             bool(getattr(args, "shot_lock_group_short_scenes", False)))
+        self.chk_shot_lock_pre_plan.SetValue(  # ADR-481
+            bool(getattr(args, "shot_lock_pre_plan", False)))
         _apply_combo_value(self.cbo_convergence_lock_settle_wait_max,
                            getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
         self.update_shot_lock_signal()
@@ -41509,6 +41542,175 @@ def _self_test_shot_lock_group_short_scenes():
     print("_self_test_shot_lock_group_short_scenes: PASS")
 
 
+def _self_test_shot_lock_pre_plan():
+    """ADR-481: Pre-Plan Every Scene. (a) plan_scene_strengths applies min length +
+    groups + fallback. (b) whole-scene strengths. (c) the pre-scan cache round-trips
+    and is reused. (d) Auto 3D Strength outputs each scene's planned value from the
+    scene's FIRST frame, settled. (e) ShotLockEstimator starts each planned scene ON
+    its value at the first frame, for snap/ease/glide, and never late-corrects.
+    (f) Foreground Scale snaps (no glide) when planned. (g) _real_scene_durations
+    ignores saved cuts outside the converted range. (h) GUI checkbox round-trip."""
+    import os
+    import tempfile
+    import types
+    import torch
+    import wx
+    from nt_autostrength import autodiv as AD
+    from . import utils as U
+    from .convergence_tracker import SceneHoldTracker
+    from .shot_lock_estimator import ShotLockEstimator
+    from .foreground_scale_estimator import ForegroundScaleEstimator
+
+    # (a) long 4.2 | short 3.6 (lone -> keeps 4.2) | long None (-> keeps 4.2) | short,short group | long
+    durs = [10.0, 2.0, 8.0, 3.0, 3.4, 6.0]
+    strs = [4.2, 3.6, None, 3.7, 4.1, 3.6]
+    final, starts = U.plan_scene_strengths(durs, strs, min_len=3.5, group_short=True, fallback=3.9)
+    g = round(((3.7 * 3.0 + 4.1 * 3.4) / 6.4) / 0.1) * 0.1
+    assert final[:3] == [4.2, 4.2, 4.2], final
+    assert abs(final[3] - g) < 1e-9 and abs(final[4] - g) < 1e-9 and final[5] == 3.6, final
+    assert starts == {3}, starts
+    f2, _ = U.plan_scene_strengths([2.0, 9.0], [None, 3.7], min_len=3.5, fallback=3.9)
+    assert f2 == [3.9, 3.7], f2
+    f3, _ = U.plan_scene_strengths(durs, strs, min_len=0.0, fallback=3.9)
+    assert f3 == [4.2, 3.6, 3.6, 3.7, 4.1, 3.6], f3
+
+    # (b) whole-scene mean vs first frame
+    a = types.SimpleNamespace(divergence=3.9, divergence_min=3.6, divergence_max=4.2,
+                              auto_divergence_invert=False, auto_divergence_stability="low",
+                              auto_divergence_settle_apply=False)
+    sc = [0.0] + [1.0] * 9
+    first = AD.scene_strengths_from_scores(sc, 10.0, [0.0, 1.0], a)
+    whole = AD.scene_strengths_from_scores(sc, 10.0, [0.0, 1.0], a, whole_scene=True)
+    curve = AD._strength_curve_for_args(a)
+    assert abs(first[0] - 3.6) < 1e-9, first
+    assert abs(whole[0] - round(curve(0.9) / AD.STEP) * AD.STEP) < 1e-9, whole
+
+    # (c) cache
+    with tempfile.TemporaryDirectory() as td:
+        cp = os.path.join(td, "sub", "prescan_x.json")
+        AD._save_prescan_cache(cp, [0.1, 0.2, 0.3], 24.0)
+        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0)
+        got = AD.prescan_scene_strengths("does-not-exist.mkv", a, [0.0, float("inf")], cache_path=cp,
+                                         whole_scene=True)
+        assert got and len(got) == 1, "cached scores must be reused without decoding"
+        with open(cp, "w", encoding="utf-8") as f:
+            f.write("{broken")
+        assert AD._load_prescan_cache(cp) is None
+
+    # (d) Auto 3D Strength: scenes 0 (5 fr) | 1 (3 fr) | 2 (4 fr) planned 3.6 / 4.2 / 3.8
+    class _Est:
+        model = None
+        def __call__(self, im, depth):
+            n = depth.shape[0]
+            return [0.5] * n, torch.nn.functional.normalize(torch.ones(n, 4), dim=1)
+    st = AD._RunState.__new__(AD._RunState)
+    st.estimator = _Est(); st.tracker = AD.Tracker("cuts", "medium")
+    st.verbose, st.announced = False, True
+    st.last_depth, st.last_divs, st.last_settled_list = None, None, []
+    a3 = types.SimpleNamespace(divergence=3.9, divergence_min=3.6, divergence_max=4.2,
+                               auto_divergence_invert=False, scene_detect=False,
+                               auto_divergence_real_cuts=True, auto_divergence_scene_log=False,
+                               shot_lock_min_scene_length=0.0,
+                               state={"_real_scene_durations": None,
+                                      "_scene_plan_strengths": {0: 3.6, 1: 4.2, 2: 3.8}})
+    lrp = [False] * 4 + [True] + [False] * 2 + [True] + [False] * 4
+    divs = st.divergences(torch.zeros(12, 3, 2, 2), torch.zeros(12, 1, 2, 2), a3, None, log_reset_pts=lrp)
+    assert [round(d, 1) for d in divs] == [3.6] * 5 + [4.2] * 3 + [3.8] * 4, divs
+    assert all(st.last_settled_list), "planned frames must report settled"
+
+    # (e) Shot Lock: wide 4.2 -> close-up 3.6 -> mid 3.8, every switch style
+    def make(switch):
+        est = object.__new__(ShotLockEstimator)
+        est.wide_value, est.closeup_value, est.mid_value = 0.30, 0.00, 0.15
+        est.switch = switch; est.decay = 0.9; est.decide_speed = None
+        est.signal = "divergence"; est.threshold_mode = "range"
+        est.strength_threshold = 4.0; est.strength_threshold_low = 3.7; est.strength_threshold_mid = None
+        est.wait_for_settle = False; est.settle_wait_max = 60; est._clip = None
+        est.tracker = SceneHoldTracker(decay=0.9, cut_smooth=0)
+        est.blend_ema = None; est.ease_value = None; est._last_raw = None
+        est.glide_duration = 30; est.glide_value = None; est._glide_from = None
+        est._glide_active_target = None; est._glide_elapsed = 0
+        est._scene_running_c = None; est._scene_n = 0; est._scene_locked_value = None; est._scene_elapsed = 0
+        est.locked_shot_type = None; est.late_correction = True
+        est._late_mismatch_frames = 0; est._late_corrected = False; est.late_corrections = 0
+        est._pending_scene_reset = True
+        est._recompute_decide_settle()
+        return est
+    depth = torch.zeros(1, 1, 2, 2)
+    scenes = [(4.2, 40), (3.6, 40), (3.8, 40)]
+    for switch in ("snap", "ease", "glide"):
+        est = make(switch)
+        types_ = [est.classify_divergence_label(d) for d, _ in scenes]
+        assert types_ == ["wide", "closeup", "mid"], types_
+        est.set_scene_plan(types_)
+        firsts = []
+        for si, (div, n) in enumerate(scenes):
+            for f in range(n):
+                # the live 3D Strength says Wide the whole time -- the plan must win
+                v = est(rgb=None, depth=depth, reset_pts=[f == n - 1],
+                        log_reset_pts=[(f == n - 1) and si < len(scenes) - 1],
+                        divergence=4.2, divergence_settled=True).item()
+                if f == 0:
+                    firsts.append(round(v, 4))
+                assert abs(v - [0.30, 0.00, 0.15][si]) < 1e-6, (switch, si, f, v)
+        assert firsts == [0.30, 0.00, 0.15], (switch, firsts)
+        assert est.late_corrections == 0 and est.planned_scenes == 3, switch
+    # plan off again -> live decision (deciding window holds the first-frame guess)
+    est = make("snap"); est.set_scene_plan(["closeup"]); est.set_scene_plan(None)
+    v = est(rgb=None, depth=depth, log_reset_pts=[False], divergence=4.2).item()
+    assert abs(v - 0.30) < 1e-6, v
+
+    # (f) Foreground Scale: planned -> snaps to target even with glide
+    fs = ForegroundScaleEstimator(wide_value=0.6, closeup_value=0.2, threshold_high=4.0, mid_value=0.4,
+                                  threshold_low=3.7, switch="glide", glide_duration=30,
+                                  follow_convergence=True)
+    fs(shot_type="wide", divergence=4.2)
+    fs.planned = True
+    fs(shot_type="closeup", divergence=3.6, frames=1)
+    assert fs.glide_value == 0.2, fs.glide_value
+    fs.planned = False
+    fs(shot_type="wide", divergence=4.2, frames=1)
+    assert 0.2 < fs.glide_value < 0.6, "unplanned glide must still glide"
+
+    # (g) durations ignore saved cuts outside the range (absolute positions in the file)
+    class _Meta:
+        def get_fps(self):
+            return 24.0
+        def guess_duration(self, to_int=False):
+            return 100.0
+    orig = U.VU.VideoMetadata.from_file
+    U.VU.VideoMetadata.from_file = staticmethod(lambda p: _Meta())
+    try:
+        import iw3.scene_batch as SB
+        orig_fps = SB.resolve_scene_scan_fps
+        SB.resolve_scene_scan_fps = lambda native, mx: 10.0
+        try:
+            aa = types.SimpleNamespace(max_fps=30, start_time="00:00:20", end_time="00:00:40")
+            d = U._real_scene_durations({50, 250, 300, 600}, aa, "x.mkv")
+            assert d == [5.0, 5.0, 10.0], d
+        finally:
+            SB.resolve_scene_scan_fps = orig_fps
+    finally:
+        U.VU.VideoMetadata.from_file = orig
+
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert not frame.chk_shot_lock_pre_plan.GetValue()
+        frame.chk_shot_lock_pre_plan.SetValue(True)
+        args = frame.parse_args(skip_set_state=True)
+        assert args.shot_lock_pre_plan is True
+        assert "--shot-lock-pre-plan" in frame.get_cli_command()
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(["-i", "a.mp4", "-o", "o"]))
+        assert not frame.chk_shot_lock_pre_plan.GetValue()
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_shot_lock_pre_plan: PASS")
+
+
 def _self_test_shot_lock_min_scene_length():
     """ADR-478: Minimum Scene Length to Switch. With real scene lengths known upfront:
     a scene shorter than the minimum keeps the previous scene's locked value and
@@ -42587,6 +42789,7 @@ def _run_self_tests():
         _self_test_auto_divergence_real_cuts_and_settle_apply,
         _self_test_shot_lock_min_scene_length,
         _self_test_shot_lock_group_short_scenes,
+        _self_test_shot_lock_pre_plan,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,
         _self_test_experience_level_limit_bitrate_tier_and_codec_compose,

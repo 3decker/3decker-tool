@@ -3800,6 +3800,8 @@ def make_output_filename(input_filename, args, video=False):
                     # ADR-476: only shown when actually turned on.
                     if getattr(args, "convergence_lock_late_correction", False):
                         convergence_smoothing += "_latefix"
+                    if getattr(args, "shot_lock_pre_plan", False):  # ADR-481
+                        convergence_smoothing += "_preplan"
                     _msl = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)  # ADR-478
                     if _msl > 0:
                         convergence_smoothing += f"_minlen{to_deciaml(_msl, 10, 2)}"
@@ -4392,6 +4394,8 @@ def _build_iw3_comment_metadata(args, video=True):
                 # ADR-441: omitted entirely when off (the default).
                 if getattr(args, "convergence_lock_late_correction", False):  # ADR-476
                     comment_parts.append("iw3_convergence_lock_late_correction=true")
+                if getattr(args, "shot_lock_pre_plan", False):  # ADR-481
+                    comment_parts.append("iw3_shot_lock_pre_plan=true")
                 if float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0) > 0:  # ADR-478
                     comment_parts.append(f"iw3_shot_lock_min_scene_length={args.shot_lock_min_scene_length}")
                     if getattr(args, "shot_lock_group_short_scenes", False):  # ADR-479
@@ -7698,6 +7702,11 @@ def _real_scene_durations(boundary_pts, args, input_filename):
         if range_end is None:
             range_end = duration if duration and duration > 0 else None
         times = [p / scan_fps for p in sorted(boundary_pts)]
+        # ADR-481: a saved scan can cover MORE than this job's range (a full-movie
+        # scan reused for a clip) -- boundary times are positions in the whole file,
+        # so keep only the cuts inside the range being converted, or every scene
+        # length (and the scene numbering built from them) would be wrong.
+        times = [t for t in times if t > range_start and (range_end is None or t < range_end)]
         edges = [range_start] + times + ([range_end] if range_end is not None else [float("inf")])
         return [max(0.0, b - a) for a, b in zip(edges, edges[1:])]
     except Exception as e:  # noqa
@@ -7777,6 +7786,184 @@ def _plan_group_short_scenes_for_job(input_filename, args, durations, min_scene_
         print(f"[iw3] Group Short Scenes failed ({e.__class__.__name__}: {e}) -- skipped for this job.",
               file=sys.stderr)
         return set()
+
+
+def plan_scene_strengths(durations, strengths, min_len=0.0, group_short=False, fallback=None, step=0.1):
+    """ADR-481: the final 3D Strength of EVERY real scene, decided before rendering.
+    Starts from each scene's pre-scanned strength, then applies the same rules the
+    live conversion uses: with min_len > 0, a lone scene shorter than min_len keeps
+    the previous scene's value (ADR-478); with group_short, runs of 2+ short scenes
+    get their length-weighted group average (ADR-479). A scene with no pre-scanned
+    value keeps the previous scene's (or `fallback` for the first scene).
+    Returns (list of strengths, set of group-start scene indexes)."""
+    n = len(durations)
+    vals = [strengths[i] if i < len(strengths) else None for i in range(n)]
+    group_plan, starts = ({}, set())
+    if group_short and min_len > 0:
+        group_plan, starts = plan_short_scene_groups(durations, vals, min_len, step=step)
+    out, prev = [], None
+    for i in range(n):
+        if i in group_plan:
+            v = group_plan[i]
+        elif min_len > 0 and durations[i] < min_len and prev is not None:
+            v = prev
+        elif vals[i] is not None:
+            v = vals[i]
+        else:
+            v = prev if prev is not None else fallback
+        out.append(v)
+        if v is not None:
+            prev = v
+    return out, starts
+
+
+def _clear_scene_plan(args):
+    """ADR-481: turn off any plan left on the (shared, reused) Shot Lock models."""
+    conv_model = args.state.get("convergence_model")
+    if conv_model is not None and hasattr(conv_model, "set_scene_plan"):
+        conv_model.set_scene_plan(None)
+    fs_model = args.state.get("foreground_scale_model")
+    if fs_model is not None:
+        fs_model.planned = False
+
+
+def _scene_plan_cache_path(input_filename, args, start_sec, end_sec):
+    """ADR-481: where the pre-scan's raw per-frame scores are saved for reuse --
+    next to the scene-cut cache, keyed by file (path/size/date), frame rate cap and
+    the converted range, so a changed file or range is always scanned fresh."""
+    try:
+        cache_dir = getattr(args, "scene_cache_dir", None) or SceneBoundaryCache.get_cache_dir()
+        key = (f"prescan {path.abspath(input_filename)} {path.getsize(input_filename)} "
+               f"{path.getmtime(input_filename)} {args.max_fps} {start_sec:.3f} {end_sec}")
+        return path.join(cache_dir, "prescan_" + SceneBoundaryCache.md5(key) + ".json")
+    except Exception:  # noqa
+        return None
+
+
+def _format_plan_time(sec):
+    sec = max(0.0, float(sec))
+    return f"{int(sec // 3600)}:{int(sec % 3600 // 60):02d}:{sec % 60:04.1f}"
+
+
+def _write_scene_plan_file(output_path, input_filename, rows, args):
+    """ADR-481: a plain-text copy of the plan next to the output, so the decided
+    values for every scene can be read (and compared between runs) without
+    converting anything. Never raises."""
+    import time
+    try:
+        out_path = path.splitext(str(output_path))[0] + "_scene_plan.txt"
+        lines = [f"Scene plan (decided before rendering) for: {path.basename(str(input_filename))}",
+                 f"Created: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                 f"Minimum Scene Length: {float(getattr(args, 'shot_lock_min_scene_length', 0) or 0):g}s, "
+                 f"Group Short Scenes: {'on' if getattr(args, 'shot_lock_group_short_scenes', False) else 'off'}",
+                 "",
+                 f"{'scene':>5}  {'start':>10}  {'length':>7}  {'3D strength':>11}  {'shot':<8}  "
+                 f"{'convergence':>11}  {'fg scale':>8}  note"]
+        for r in rows:
+            conv = "-" if r["convergence"] is None else f"{r['convergence']:.2f}"
+            fs = "-" if r["foreground_scale"] is None else f"{r['foreground_scale']:.2f}"
+            st = "-" if r["strength"] is None else f"{r['strength']:.1f}"
+            lines.append(f"{r['index']:>5}  {_format_plan_time(r['start']):>10}  {r['length']:6.1f}s  {st:>11}  "
+                         f"{(r['shot'] or '-'):<8}  {conv:>11}  {fs:>8}  {r['note']}")
+        tmp = out_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, out_path)
+        print(f"[iw3] Pre-Plan Every Scene: plan written to {out_path}", file=sys.stderr)
+    except Exception as e:  # noqa
+        print(f"[iw3] Pre-Plan Every Scene: could not write the plan file ({e}).", file=sys.stderr)
+
+
+def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_scene_len):
+    """ADR-481: Pre-Plan Every Scene. Before rendering: pre-scans every real scene's
+    shot framing (saved for reuse), decides each scene's 3D Strength (whole-scene
+    value, plus the Minimum Scene Length / Group Short Scenes rules), then Convergence
+    Shot Lock's shot type/value and Foreground Scale's value from it. During
+    rendering each scene starts ON its planned values at its first frame (see
+    autodiv.divergences(), ShotLockEstimator.set_scene_plan(),
+    ForegroundScaleEstimator.planned). Returns the set of group-start scene indexes,
+    or None when the plan could not be made (the job then runs exactly as without
+    this option). Never raises."""
+    import time
+    if not getattr(args, "auto_divergence", False):
+        print("[iw3] Pre-Plan Every Scene needs Auto 3D Strength on -- skipped for this job.", file=sys.stderr)
+        return None
+    try:
+        prescan = SCENE_STRENGTH_PRESCAN_HOOK  # registered by the Auto 3D Strength add-on
+        if prescan is None:
+            print("[iw3] Pre-Plan Every Scene: Auto 3D Strength add-on not loaded -- skipped for this job.",
+                  file=sys.stderr)
+            return None
+        if not getattr(args, "auto_divergence_real_cuts", False):
+            # the plan is applied at the real cuts -- required, so turned on for this job
+            args.auto_divergence_real_cuts = True
+            print("[iw3] Pre-Plan Every Scene: 'Use Real Scene Cuts' turned on for this job (required).",
+                  file=sys.stderr)
+        start = SceneBoundaryCache.time_to_sec(args.start_time, 0.0)
+        edges = [start]
+        for d in durations:
+            edges.append(edges[-1] + d)
+        t = time.time()
+        strengths = prescan(
+            input_filename, args, edges, device=args.state["device"], max_fps=args.max_fps,
+            hwaccel=args.hwaccel, disable_software_fallback=getattr(args, "disable_software_fallback", False),
+            stop_event=args.state.get("stop_event"), suspend_event=args.state.get("suspend_event"),
+            tqdm_fn=args.state.get("tqdm_fn"), whole_scene=True,
+            cache_path=_scene_plan_cache_path(input_filename, args, start, edges[-1]))
+        gc_collect()
+        if not strengths:
+            print("[iw3] Pre-Plan Every Scene: pre-scan gave no result -- skipped for this job.", file=sys.stderr)
+            return None
+        final, starts = plan_scene_strengths(
+            durations, strengths, min_len=min_scene_len,
+            group_short=bool(getattr(args, "shot_lock_group_short_scenes", False)),
+            fallback=float(args.divergence))
+        args.state["_scene_plan_strengths"] = {i: v for i, v in enumerate(final) if v is not None}
+
+        conv_model = args.state.get("convergence_model")
+        types = None
+        if (conv_model is not None and hasattr(conv_model, "set_scene_plan")
+                and getattr(conv_model, "signal", None) == "divergence"
+                and getattr(args, "convergence_mode", "constant") == "shot_lock"):
+            types = [conv_model.classify_divergence_label(v) if v is not None else None for v in final]
+            conv_model.set_scene_plan(types)
+        elif getattr(args, "convergence_mode", "constant") == "shot_lock":
+            print("[iw3] Pre-Plan Every Scene: Convergence Shot Lock uses the CLIP signal, not 3D Strength -- "
+                  "its shot type is still decided live; 3D Strength is planned.", file=sys.stderr)
+        fs_model = args.state.get("foreground_scale_model")
+        if fs_model is not None:
+            fs_model.planned = True
+
+        rows = []
+        for i, (d, v) in enumerate(zip(durations, final)):
+            shot = types[i] if types else None
+            conv = conv_model._value_for_shot_type(shot) if (types and shot) else None
+            fs = None
+            if fs_model is not None:
+                fs = fs_model._target(v, shot)
+            elif getattr(args, "foreground_scale", None) is not None:
+                fs = float(args.foreground_scale)
+            note = []
+            if i < len(strengths) and strengths[i] is not None and v is not None and abs(strengths[i] - v) > 1e-6:
+                note.append(f"own {strengths[i]:.1f}")
+            if i in starts:
+                note.append("group start")
+            elif min_scene_len > 0 and d < min_scene_len:
+                note.append("short")
+            rows.append(dict(index=i, start=edges[i], length=d, strength=v, shot=shot,
+                             convergence=conv, foreground_scale=fs, note=", ".join(note)))
+        _write_scene_plan_file(output_path, input_filename, rows, args)
+        counts = {k: sum(1 for x in (types or []) if x == k) for k in ("wide", "mid", "closeup")}
+        print(f"[iw3] Pre-Plan Every Scene: {len(final)} scenes planned in {time.time() - t:.0f}s"
+              + (f" -- Wide {counts['wide']}, Mid {counts['mid']}, Close-Up {counts['closeup']}" if types else "")
+              + ". Each scene starts on its planned values at its cut.", file=sys.stderr)
+        return starts
+    except Exception as e:  # noqa
+        args.state["_scene_plan_strengths"] = None
+        _clear_scene_plan(args)
+        print(f"[iw3] Pre-Plan Every Scene failed ({e.__class__.__name__}: {e}) -- skipped for this job.",
+              file=sys.stderr)
+        return None
 
 
 def process_video_full(input_filename, output_path, args, depth_model, side_model, raw_frame_sink=None):
@@ -7937,7 +8124,9 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
             # this it would get zero real cut points and record everything as one
             # giant "scene" whenever Convergence Plane's own log/mode and Auto 3D
             # Strength's own log are all off/constant.
-            or getattr(args, "foreground_scale_scene_log", False)):
+            or getattr(args, "foreground_scale_scene_log", False)
+            # ADR-481: Pre-Plan Every Scene needs every real cut upfront.
+            or getattr(args, "shot_lock_pre_plan", False)):
         log_segment_pts = _ensure_convergence_log_scene_pts(input_filename, args, scene_cache_max_fps)
     else:
         log_segment_pts = set()
@@ -7946,19 +8135,32 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     # upfront, so Shot Lock (and Auto 3D Strength's real cuts) can skip switching
     # for short scenes WITHOUT delaying long ones.
     min_scene_len = float(getattr(args, "shot_lock_min_scene_length", 0.0) or 0.0)
+    # ADR-481: Pre-Plan Every Scene also needs every scene's length upfront.
+    pre_plan = bool(getattr(args, "shot_lock_pre_plan", False))
     args.state["_real_scene_durations"] = None
-    if min_scene_len > 0 and log_segment_pts:
+    args.state["_group_strength_by_scene"] = None
+    args.state["_scene_plan_strengths"] = None
+    _clear_scene_plan(args)  # a previous file's plan (folder jobs) must never carry over
+    if pre_plan and not log_segment_pts:
+        print("[iw3] Pre-Plan Every Scene: no scene cuts found in this range -- the whole range is one "
+              "scene, decided normally.", file=sys.stderr)
+    if (min_scene_len > 0 or pre_plan) and log_segment_pts:
         durations = _real_scene_durations(log_segment_pts, args, input_filename)
         args.state["_real_scene_durations"] = durations
         conv_model = args.state.get("convergence_model")
         group_starts = set()
-        args.state["_group_strength_by_scene"] = None
-        if (durations is not None and getattr(args, "shot_lock_group_short_scenes", False)):
+        planned = None
+        if durations is not None and pre_plan:
+            planned = _plan_every_scene_for_job(input_filename, output_path, args, durations, min_scene_len)
+            if planned is not None:
+                group_starts = planned
+        if (planned is None and durations is not None and min_scene_len > 0
+                and getattr(args, "shot_lock_group_short_scenes", False)):
             group_starts = _plan_group_short_scenes_for_job(
                 input_filename, args, durations, min_scene_len)
         if durations is not None and conv_model is not None and hasattr(conv_model, "set_scene_durations"):
             conv_model.set_scene_durations(durations, min_scene_len, group_starts=group_starts)
-        if durations is not None:
+        if durations is not None and min_scene_len > 0:
             short = sum(1 for d in durations if d < min_scene_len)
             print(f"[iw3] Minimum Scene Length {min_scene_len:g}s: {short} of {len(durations)} scenes "
                   f"are shorter and will keep the previous scene's depth settings.", file=sys.stderr)
@@ -10239,6 +10441,14 @@ def create_parser(required_true=True):
                              "(from a quick pre-scan before converting), applied from the group's first "
                              "scene and held through the group, instead of keeping the previous scene's "
                              "settings. A lone short scene still keeps the previous settings.")
+    parser.add_argument("--shot-lock-pre-plan", action="store_true",
+                        help="ADR-481: Pre-Plan Every Scene -- needs Auto 3D Strength. Before rendering, "
+                             "uses the saved scene cuts and a quick (saved, reused) pre-scan to decide every "
+                             "scene's 3D Strength (whole-scene value, plus --shot-lock-min-scene-length/"
+                             "--shot-lock-group-short-scenes), its Convergence Shot Lock type/value and its "
+                             "Foreground Scale value. Each scene then starts ON those values at its cut: no "
+                             "settling, no glide, no Late Correction. Writes <output>_scene_plan.txt. "
+                             "Turns on --auto-divergence-real-cuts for the job.")
     parser.add_argument("--convergence-lock-late-correction", action="store_true",
                         help="ADR-476: --convergence-mode shot_lock with --convergence-lock-signal "
                              "divergence only: if Auto 3D Strength settles on the other side of a "

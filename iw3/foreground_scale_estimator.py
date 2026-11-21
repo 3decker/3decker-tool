@@ -202,6 +202,13 @@ class ForegroundScaleEstimator():
 
     def __call__(self, divergence=None, shot_type=None, frames=1):
         target = self._target(divergence, shot_type)
+        if getattr(self, "planned", False):
+            # ADR-481: Pre-Plan Every Scene -- every scene's value was decided before
+            # rendering and the batch is already split at each cut, so the new value
+            # applies from the cut's first frame: no glide/ease, nothing to catch up on.
+            self.ease_value = self.glide_value = self._glide_from = self._glide_active_target = target
+            self._glide_elapsed = self.glide_duration
+            return self._mapper_fn_for(target)
         if self.switch == "glide":
             value = self._glide_toward(target, frames)
             name = resolve_mapper_name(mapper=None, foreground_scale=value,

@@ -473,6 +473,45 @@ class ShotLockEstimator():
         self._group_starts = set(group_starts or ())
         self._hold_scene = False
 
+    def set_scene_plan(self, shot_types):
+        """ADR-481: Pre-Plan Every Scene -- the shot type ('wide'/'mid'/'closeup') of
+        every real scene in processing order, decided before rendering. A planned
+        scene starts ON its value at its first frame (no deciding window, no glide,
+        no Late Correction): the change happens exactly at the cut, where the whole
+        picture changes anyway. None entries / scenes past the end of the list fall
+        back to the normal live decision. Pass None to turn the plan off."""
+        self._scene_plan = list(shot_types) if shot_types else None
+        self._scene_index = -1  # the job-start pending reset makes the first scene index 0
+        self.planned_scenes = 0
+
+    def _value_for_shot_type(self, shot_type):
+        """ADR-481: this estimator's value for a shot type (None if unknown)."""
+        if shot_type == "wide":
+            return self.wide_value
+        if shot_type == "closeup":
+            return self.closeup_value
+        if shot_type == "mid":
+            return self.mid_value if self.mid_value is not None else self.closeup_value
+        return None
+
+    def classify_divergence_label(self, divergence):
+        """ADR-481: the shot type this estimator would lock for a scene whose 3D
+        Strength is `divergence` -- the same rule as the live decision."""
+        return self._classify_label(self._closeness_for_divergence(divergence))
+
+    def _jump_to(self, value):
+        """ADR-481: make `value` the output immediately, whatever the switch style --
+        the next _advance_locked(value) returns exactly `value` with no movement."""
+        value = float(value)
+        self.ease_value = value
+        self.glide_value = value
+        self._glide_from = value
+        self._glide_active_target = value
+        self._glide_elapsed = self.glide_duration
+        t = self.tracker
+        t.s, t.n, t.out = value, max(1, t.settle), value
+        t.moving, t.cut_pending, t.ramp_from, t.ramp_left = False, False, None, 0
+
     def _classify_label(self, c):
         """ADR-475: the same decision as _classify(), as a shot TYPE instead of a
         convergence value -- so a follower never has to guess the type back from
@@ -653,10 +692,28 @@ class ShotLockEstimator():
                 # running average into a blended, non-discrete number). Only once the
                 # decision is final does exactly one transition (snap or ramp) happen,
                 # via a single explicit mark_cut().
+                planned_type = None
                 if self._pending_scene_reset:
                     # ADR-478: Minimum Scene Length -- decide whether the scene that
                     # starts now is too short to switch for.
                     self._scene_index = getattr(self, "_scene_index", -1) + 1
+                    # ADR-481: Pre-Plan Every Scene -- this scene's type was decided
+                    # before rendering (the plan already applied Minimum Scene Length/
+                    # Group Short Scenes), so start ON its value right now.
+                    plan = getattr(self, "_scene_plan", None)
+                    if plan is not None and self._scene_index < len(plan):
+                        planned_type = plan[self._scene_index]
+                    planned_value = self._value_for_shot_type(planned_type)
+                    if planned_value is not None:
+                        self._pending_scene_reset = False
+                        self._hold_scene = False
+                        self._scene_locked_value = planned_value
+                        self.locked_shot_type = planned_type
+                        self._late_corrected = True  # already decided -- nothing to correct
+                        self._late_mismatch_frames = 0
+                        self._jump_to(planned_value)
+                        self.planned_scenes = getattr(self, "planned_scenes", 0) + 1
+                if self._pending_scene_reset:
                     durs = getattr(self, "_scene_durations", None)
                     self._hold_scene = bool(
                         durs and getattr(self, "_min_scene_len", 0.0) > 0

@@ -7736,7 +7736,7 @@ def _tag_hevc_frame_packing_if_needed(output_path, args):
     return tag_hevc_frame_packing(output_path, layout)
 
 
-def _real_scene_durations(boundary_pts, args, input_filename):
+def _real_scene_durations(boundary_pts, args, input_filename, range_start=None):
     """ADR-478: duration (seconds) of every real scene in processing order, from the
     complete upfront boundary set (log_segment_pts) -- scene 0 runs from the start
     of the processed range to the first boundary, scene i+1 from boundary i to
@@ -7751,7 +7751,8 @@ def _real_scene_durations(boundary_pts, args, input_filename):
         native_fps = float(metadata.get_fps())
         duration = metadata.guess_duration(to_int=False)
         scan_fps = resolve_scene_scan_fps(native_fps, args.max_fps)
-        range_start = SceneBoundaryCache.time_to_sec(args.start_time, 0.0)
+        if range_start is None:  # ADR-484: callers may pass the REAL first decoded frame's time
+            range_start = SceneBoundaryCache.time_to_sec(args.start_time, 0.0)
         range_end = SceneBoundaryCache.time_to_sec(args.end_time, None)
         if range_end is None:
             range_end = duration if duration and duration > 0 else None
@@ -7771,6 +7772,8 @@ def _real_scene_durations(boundary_pts, args, input_filename):
 # ADR-479: set by the Auto 3D Strength add-on (nt_autostrength.autodiv._patch_utils) --
 # core iw3 never imports that add-on directly.
 SCENE_STRENGTH_PRESCAN_HOOK = None
+# ADR-484: also set by the add-on -- (scores, fps, edges, args, whole_scene, times) -> strengths.
+SCENE_STRENGTHS_FROM_SCORES_HOOK = None
 
 
 def plan_short_scene_groups(durations, strengths, min_len, step=0.1):
@@ -7932,16 +7935,21 @@ def _write_scene_plan_file(output_path, input_filename, rows, args):
         print(f"[iw3] Pre-Plan Every Scene: could not write the plan file ({e}).", file=sys.stderr)
 
 
-def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_scene_len):
+def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_scene_len,
+                              boundary_pts=None):
     """ADR-481: Pre-Plan Every Scene. Before rendering: pre-scans every real scene's
     shot framing (saved for reuse), decides each scene's 3D Strength (whole-scene
     value, plus the Minimum Scene Length / Group Short Scenes rules), then Convergence
     Shot Lock's shot type/value and Foreground Scale's value from it. During
     rendering each scene starts ON its planned values at its first frame (see
     autodiv.divergences(), ShotLockEstimator.set_scene_plan(),
-    ForegroundScaleEstimator.planned). Returns the set of group-start scene indexes,
-    or None when the plan could not be made (the job then runs exactly as without
-    this option). Never raises."""
+    ForegroundScaleEstimator.planned). Returns (set of group-start scene indexes,
+    scene durations actually planned), or None when the plan could not be made (the
+    job then runs exactly as without this option). Never raises.
+    ADR-484: a --start-time clip is decoded from the keyframe before the start; the
+    pre-scan reports each frame's real time, and when the first frame is earlier than
+    the start the plan starts there too (re-deriving the scene lengths from the saved
+    cuts), so plan scene N is exactly the render's scene N."""
     import time
     if not getattr(args, "auto_divergence", False):
         print("[iw3] Pre-Plan Every Scene needs Auto 3D Strength on -- skipped for this job.", file=sys.stderr)
@@ -7962,13 +7970,29 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
         for d in durations:
             edges.append(edges[-1] + d)
         t = time.time()
-        strengths = prescan(
+        raw = prescan(
             input_filename, args, edges, device=args.state["device"], max_fps=args.max_fps,
             hwaccel=args.hwaccel, disable_software_fallback=getattr(args, "disable_software_fallback", False),
             stop_event=args.state.get("stop_event"), suspend_event=args.state.get("suspend_event"),
             tqdm_fn=args.state.get("tqdm_fn"), whole_scene=True,
-            cache_path=_scene_plan_cache_path(input_filename, args, start, edges[-1]))
+            cache_path=_scene_plan_cache_path(input_filename, args, start, edges[-1]), return_raw=True)
         gc_collect()
+        strengths = None
+        to_strengths = SCENE_STRENGTHS_FROM_SCORES_HOOK
+        if raw and to_strengths is not None:
+            scores, times, fps = raw
+            real_start = times[0] if times else start
+            if boundary_pts and fps and real_start < start - 0.5 / fps:
+                d2 = _real_scene_durations(boundary_pts, args, input_filename, range_start=real_start)
+                if d2:
+                    print(f"[iw3] Pre-Plan Every Scene: this clip really starts at {_format_plan_time(real_start)} "
+                          f"(decoding begins at the keyframe before the Start Time) -- planning from there.",
+                          file=sys.stderr)
+                    durations, start = d2, real_start
+                    edges = [start]
+                    for d in durations:
+                        edges.append(edges[-1] + d)
+            strengths = to_strengths(scores, fps, edges, args, whole_scene=True, times=times)
         if not strengths:
             print("[iw3] Pre-Plan Every Scene: pre-scan gave no result -- skipped for this job.", file=sys.stderr)
             return None
@@ -8020,7 +8044,7 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
         print(f"[iw3] Pre-Plan Every Scene: {len(final)} scenes planned in {time.time() - t:.0f}s"
               + (f" -- Wide {counts['Wide']}, Mid {counts['Mid']}, Close-Up {counts['Close-Up']}" if types else "")
               + ". Each scene starts on its planned values at its cut.", file=sys.stderr)
-        return starts
+        return starts, durations
     except Exception as e:  # noqa
         args.state["_scene_plan_strengths"] = None
         _clear_scene_plan(args)
@@ -8215,9 +8239,11 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
         group_starts = set()
         planned = None
         if durations is not None and pre_plan:
-            planned = _plan_every_scene_for_job(input_filename, output_path, args, durations, min_scene_len)
+            planned = _plan_every_scene_for_job(input_filename, output_path, args, durations, min_scene_len,
+                                                boundary_pts=log_segment_pts)
             if planned is not None:
-                group_starts = planned
+                group_starts, durations = planned
+                args.state["_real_scene_durations"] = durations
         if (planned is None and durations is not None and min_scene_len > 0
                 and getattr(args, "shot_lock_group_short_scenes", False)):
             group_starts = _plan_group_short_scenes_for_job(

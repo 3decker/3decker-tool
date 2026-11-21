@@ -41645,12 +41645,25 @@ def _self_test_shot_lock_pre_plan():
     curve = AD._strength_curve_for_args(a)
     assert abs(first[0] - 3.6) < 1e-9, first
     assert abs(whole[0] - round(curve(0.9) / AD.STEP) * AD.STEP) < 1e-9, whole
+    # ADR-484: placed by real time -- the clip really started 1 s early (frames at 9.0..9.9 belong
+    # to nothing planned); scene [10, 11) holds only the 1.0 scores
+    t_sc = [0.0] * 10 + [1.0] * 10
+    t_tm = [9.0 + i * 0.1 for i in range(20)]
+    by_time = AD.scene_strengths_from_scores(t_sc, 10.0, [10.0, 11.0], a, whole_scene=True, times=t_tm)
+    by_index = AD.scene_strengths_from_scores(t_sc, 10.0, [10.0, 11.0], a, whole_scene=True)
+    assert abs(by_time[0] - 4.2) < 1e-9, by_time
+    assert by_index[0] < 4.2, "without times the early frames leak into the scene (the old bug)"
 
     # (c) cache
     with tempfile.TemporaryDirectory() as td:
         cp = os.path.join(td, "sub", "prescan_x.json")
         AD._save_prescan_cache(cp, [0.1, 0.2, 0.3], 24.0)
-        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0)
+        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0, None)
+        AD._save_prescan_cache(cp, [0.1, 0.2, 0.3], 24.0, [9.0, 9.5, 10.0])
+        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0, [9.0, 9.5, 10.0])
+        raw = AD.prescan_scene_strengths("does-not-exist.mkv", a, [0.0, float("inf")], cache_path=cp,
+                                         return_raw=True)
+        assert raw == ([0.1, 0.2, 0.3], [9.0, 9.5, 10.0], 24.0), raw
         got = AD.prescan_scene_strengths("does-not-exist.mkv", a, [0.0, float("inf")], cache_path=cp,
                                          whole_scene=True)
         assert got and len(got) == 1, "cached scores must be reused without decoding"

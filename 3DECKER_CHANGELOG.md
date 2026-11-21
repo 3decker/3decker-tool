@@ -21,6 +21,8 @@ it matters.
 
 **Added: "Show Foreground Scale on Video (debug)" (off by default).** Like the 3D Strength and Convergence debug overlays, it writes the Foreground Scale used for each frame into the bottom-left corner, for example "FG 0.25". All three can be on together without overlapping. The numbers are burned into the picture, so use it for test clips only.
 
+**Fixed: Pre-Plan measured scenes slightly wrong in clips that use a Start Time.** A clip always starts decoding a little before the Start Time (at the nearest keyframe, often about 1 second early), and the pre-scan didn't account for that. So in clips, each scene's 3D Strength was partly measured from the end of the shot before it, and a scene could land on a different shot type than in the full movie. The pre-scan now uses each frame's real time, so test clips plan every scene exactly as a full-movie conversion does. Full-movie conversions were not affected.
+
 **Fixed: the Pre-Plan scene plan file was saved outside your output folder** (as "<folder name>_scene_plan.txt" next to the folder) when the output box was a folder. It's now saved inside the folder, next to the movie, like all the other scene logs.
 
 ## Update — November 20, 2026

@@ -1222,7 +1222,7 @@ def _strength_curve_for_args(args):
     return lambda c: strength_curve(c, lo, typical, hi, closeup, wide, wfl, wflc)
 
 
-def scene_strengths_from_scores(scores, fps, scene_edges, args, whole_scene=False):
+def scene_strengths_from_scores(scores, fps, scene_edges, args, whole_scene=False, times=None):
     """ADR-479: per real scene, the 3D Strength a conversion would give it
     (with real cuts): the curve of the first frame's closeness, or -- with Apply
     Settled Value -- of the mean of the first `settle` frames, rounded to STEP.
@@ -1230,18 +1230,26 @@ def scene_strengths_from_scores(scores, fps, scene_edges, args, whole_scene=Fals
     WHOLE scene instead -- the plan is made before rendering, so the entire scene is
     known and its value describes the whole scene, not only its first frames.
     `scores` are raw per-frame closeness values starting at scene_edges[0];
-    `scene_edges` are scene boundaries in seconds. None for a scene with no frames."""
+    `scene_edges` are scene boundaries in seconds. None for a scene with no frames.
+    ADR-484: `times` (optional, seconds, one per score) places each score by its REAL
+    time instead of assuming scores[0] sits exactly at scene_edges[0] -- a --start-time
+    clip is decoded from the keyframe BEFORE the start (often ~1 s early), which
+    otherwise shifted every scene's measurement by that much."""
     curve = _strength_curve_for_args(args)
     if getattr(args, "auto_divergence_invert", False):
         scores = [1.0 - s for s in scores]
     settle = _stability(getattr(args, "auto_divergence_stability", DEFAULT_STABILITY))["settle"]
     use_mean = bool(getattr(args, "auto_divergence_settle_apply", False))
     t0 = scene_edges[0]
+    half = 0.5 / fps if fps else 0.0
     out = []
     for a, b in zip(scene_edges, scene_edges[1:]):
-        i0 = max(0, int(round((a - t0) * fps)))
-        i1 = len(scores) if b == float("inf") else min(len(scores), int(round((b - t0) * fps)))
-        seg = scores[i0:i1]
+        if times is not None and len(times) == len(scores):
+            seg = [sc for sc, t in zip(scores, times) if a - half <= t < b - half]
+        else:
+            i0 = max(0, int(round((a - t0) * fps)))
+            i1 = len(scores) if b == float("inf") else min(len(scores), int(round((b - t0) * fps)))
+            seg = scores[i0:i1]
         if not seg:
             out.append(None)
             continue
@@ -1251,11 +1259,11 @@ def scene_strengths_from_scores(scores, fps, scene_edges, args, whole_scene=Fals
 
 
 # ADR-481: bump when the estimator or its scan size changes, so old saved scans are ignored.
-PRESCAN_CACHE_VERSION = 1
+PRESCAN_CACHE_VERSION = 2  # ADR-484: v2 also stores each frame's real time
 
 
 def _load_prescan_cache(cache_path):
-    """ADR-481: (scores, fps) saved by an earlier pre-scan of the same file and
+    """ADR-481: (scores, fps, times) saved by an earlier pre-scan of the same file and
     range, or None. Any problem reading it just means 'scan again'."""
     if not cache_path or not path.isfile(cache_path):
         return None
@@ -1263,15 +1271,16 @@ def _load_prescan_cache(cache_path):
         import json
         with open(cache_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        scores, fps = data.get("scores"), data.get("fps")
+        scores, fps, times = data.get("scores"), data.get("fps"), data.get("times")
         if not scores or not fps or data.get("version") != PRESCAN_CACHE_VERSION:
             return None
-        return [float(v) for v in scores], float(fps)
+        times = [float(v) for v in times] if times and len(times) == len(scores) else None
+        return [float(v) for v in scores], float(fps), times
     except Exception:  # noqa
         return None
 
 
-def _save_prescan_cache(cache_path, scores, fps):
+def _save_prescan_cache(cache_path, scores, fps, times=None):
     """ADR-481: atomic write (temp file + replace) so a cancelled job never leaves
     a half-written file behind. Failing to save is harmless (next run rescans)."""
     if not cache_path:
@@ -1282,7 +1291,8 @@ def _save_prescan_cache(cache_path, scores, fps):
         tmp = cache_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"version": PRESCAN_CACHE_VERSION, "fps": fps,
-                       "scores": [round(float(v), 5) for v in scores]}, f)
+                       "scores": [round(float(v), 5) for v in scores],
+                       "times": [round(float(v), 4) for v in times] if times else None}, f)
         os.replace(tmp, cache_path)
     except Exception:  # noqa
         pass
@@ -1290,24 +1300,30 @@ def _save_prescan_cache(cache_path, scores, fps):
 
 def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps=None, hwaccel=None,
                             disable_software_fallback=False, stop_event=None, suspend_event=None,
-                            tqdm_fn=None, whole_scene=False, cache_path=None):
+                            tqdm_fn=None, whole_scene=False, cache_path=None, return_raw=False):
     """ADR-479: quick pre-scan for Group Short Scenes -- decodes only the
     processed range (scene_edges[0] .. scene_edges[-1]) at the small Faster-Scan
     size, runs ONLY the shot-framing estimator (no depth/warp/encode) and returns
     per-real-scene 3D Strength (scene_strengths_from_scores) or None on failure.
     ADR-481: `cache_path` -- the raw per-frame shot-framing scores are saved there and
     reused on the next run (they don't depend on any 3D Strength setting, so changing
-    settings never needs a rescan); `whole_scene` -- see scene_strengths_from_scores."""
+    settings never needs a rescan); `whole_scene` -- see scene_strengths_from_scores.
+    ADR-484: each frame's real time is kept (frame.pts is a frame-index counter at the
+    scan fps -- the same units as the saved scene cuts), so scores are placed by time;
+    return_raw=True returns (scores, times, fps) instead of strengths."""
     cached = _load_prescan_cache(cache_path)
     if cached is not None:
-        c_scores, c_fps = cached
+        c_scores, c_fps, c_times = cached
         print(f"[iw3] Scene pre-scan: reusing the saved scan ({len(c_scores)} frames).", file=sys.stderr)
-        return scene_strengths_from_scores(c_scores, c_fps, scene_edges, args, whole_scene=whole_scene)
+        if return_raw:
+            return c_scores, c_times, c_fps
+        return scene_strengths_from_scores(c_scores, c_fps, scene_edges, args, whole_scene=whole_scene,
+                                           times=c_times)
     import nunif.utils.video as VU
     device = torch.device(device) if isinstance(device, str) else device
     est = Estimator(device)
     fps_box = [None]
-    scores, buffer = [], []
+    scores, buffer, pts_list = [], [], []
 
     def _flush():
         if buffer:
@@ -1321,6 +1337,7 @@ def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps
             _flush()
             return
         buffer.append(VU.to_tensor(frame, device=device))
+        pts_list.append(getattr(frame, "pts", None))
         if len(buffer) >= SCAN_FAST_BATCH_SIZE:
             _flush()
 
@@ -1346,9 +1363,20 @@ def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps
         del est
     if not scores or not fps_box[0]:
         return None
+    times = None
+    if len(pts_list) == len(scores) and all(p is not None for p in pts_list):
+        times = [float(p) / fps_box[0] for p in pts_list]
+        # sanity: must start within a few seconds of the requested start and keep
+        # increasing -- otherwise the pts were not frame-index units; place by index.
+        if (abs(times[0] - float(start)) > 10.0
+                or any(t2 <= t1 for t1, t2 in zip(times, times[1:]))):
+            times = None
     if not (stop_event is not None and stop_event.is_set()):
-        _save_prescan_cache(cache_path, scores, fps_box[0])
-    return scene_strengths_from_scores(scores, fps_box[0], scene_edges, args, whole_scene=whole_scene)
+        _save_prescan_cache(cache_path, scores, fps_box[0], times)
+    if return_raw:
+        return scores, times, fps_box[0]
+    return scene_strengths_from_scores(scores, fps_box[0], scene_edges, args, whole_scene=whole_scene,
+                                       times=times)
 
 
 def _make_scan_args(args, device):
@@ -1527,6 +1555,7 @@ def _patch_utils(U):
     # ADR-479: register the Group Short Scenes pre-scan with core iw3 (core never
     # imports this add-on; it only calls this hook when it has been registered).
     U.SCENE_STRENGTH_PRESCAN_HOOK = prescan_scene_strengths
+    U.SCENE_STRENGTHS_FROM_SCORES_HOOK = scene_strengths_from_scores  # ADR-484
     if getattr(U.apply_divergence, "_nt_autodiv", False):
         return
     orig = U.apply_divergence

@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 21, 2026
+## Latest Update — November 22, 2026
+
+**Improved: five fixes from the original iw3 author (nagadomi).** A fix for how frames are handed to the NVIDIA video encoder (NVENC) on the graphics-card path, a faster color conversion before encoding, no sudden graphics-memory jump when a scene's frames are flushed, a `--compile` fix for the 3D model in one processing path, and a frame-offload fix for Video Depth Anything when Flicker Reduction is off. Tested on a real Mario clip: the picture is the same as before (only tiny encoder rounding differences), with slightly lower average graphics-memory use.
+
+## Update — November 21, 2026
 
 **Improved: ticking or unticking Auto 3D Strength's "Invert" now swaps your Shot Lock values for you.** Shot Lock's Wide and Close-Up boxes really mean "high 3D Strength" and "low 3D Strength", and Invert flips which real shots get the high strength. So turning Invert off used to mean swapping your numbers by hand. Now, when you click Invert, the Wide and Close-Up boxes of Convergence, Foreground Scale and Edge Fix Shot Lock swap automatically, so every real shot keeps the value you gave it. The box labels show which real shot each box is for, for example "High Strength Value (Close-Up)".
 

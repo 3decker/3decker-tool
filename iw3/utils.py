@@ -38,7 +38,7 @@ from . import face_protect as FACEP
 from .dilation import dilate_edge, edge_dilation_is_enabled, edge_dilation_parse
 from .forward_warp import apply_divergence_forward_warp, SPLAT_BLEND_TEMPERATURE
 from .anaglyph import apply_anaglyph_redcyan
-from .mapper import get_mapper, resolve_mapper_name, MAPPER_ALL
+from .mapper import get_mapper, resolve_mapper_name, MAPPER_ALL, midground_roundness_curve
 from .depth_model_factory import create_depth_model
 from .base_depth_model import BaseDepthModel
 from .hub_dir import HUB_MODEL_DIR
@@ -3865,6 +3865,12 @@ def make_output_filename(input_filename, args, video=False):
                 mp += f"hi{to_deciaml(mg_high, 100, 2)}"
         else:
             mp = ""
+        if _midground_roundness_any(args):  # ADR-492: Midground Roundness
+            _rv = [getattr(args, "midground_roundness", 0.0) or 0.0] + [
+                getattr(args, f"midground_roundness_{k}", None) for k in ROUNDNESS_SHOT_KEYS.values()]
+            mp += "_rnd" + "-".join("x" if v is None else to_deciaml(v, 100, 2) for v in _rv)
+            if float(getattr(args, "midground_roundness_center", 0.5)) != 0.5:
+                mp += f"c{to_deciaml(args.midground_roundness_center, 100, 2)}"
         # Only meaningful (and only named) when at least one Pop tool is actually
         # active -- a feather value with all three Pop strengths at 0.0 does nothing.
         pop_feather_val = getattr(args, "pop_feather", 0.0) or 0.0
@@ -4401,6 +4407,10 @@ def _build_iw3_comment_metadata(args, video=True):
                     comment_parts.append("iw3_convergence_lock_late_correction=true")
                 if getattr(args, "shot_lock_pre_plan", False):  # ADR-481
                     comment_parts.append("iw3_shot_lock_pre_plan=true")
+                for _k in ROUNDNESS_SHOT_KEYS.values():  # ADR-492
+                    _v = getattr(args, f"midground_roundness_{_k}", None)
+                    if _v is not None:
+                        comment_parts.append(f"iw3_midground_roundness_{_k}={_v}")
                 if getattr(args, "shot_lock_five_groups", False):  # ADR-491
                     comment_parts.append("iw3_shot_lock_five_groups=true")
                     for _k in ("shot_lock_strength_threshold_top", "shot_lock_strength_threshold_bottom",
@@ -4532,6 +4542,10 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_background_pop_threshold_high={args.background_pop_threshold_high}")
     if getattr(args, "midground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_midground_pop={args.midground_pop}")
+    if float(getattr(args, "midground_roundness", 0.0) or 0.0) > 0.0:  # ADR-492
+        comment_parts.append(f"iw3_midground_roundness={args.midground_roundness}")
+    if float(getattr(args, "midground_roundness_center", 0.5)) != 0.5:
+        comment_parts.append(f"iw3_midground_roundness_center={args.midground_roundness_center}")
         if getattr(args, "midground_threshold_low", 0.15) != 0.15:
             comment_parts.append(f"iw3_midground_threshold_low={args.midground_threshold_low}")
         if getattr(args, "midground_threshold_high", 0.85) != 0.85:
@@ -6323,7 +6337,7 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
                                      shot_type=fs_shot_type, frames=depth.shape[0])
                 if foreground_scale_scene_log_active:
                     _push_foreground_scale_scene_log(fs_shot_type)
-            depth = mapper_fn(depth)
+            depth = _apply_midground_roundness(mapper_fn(depth), args)  # ADR-492
             # ADR-423: real confirmed bug -- unlike sod_v1/face_detect/depth_percentile/
             # clip_shot/sod_track (whose convergence value comes from
             # ConvergenceEstimator._quantile_position(), a position WITHIN the depth
@@ -6340,10 +6354,10 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         else:
             convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts)
             convergence = mapper_fn(convergence)
-            depth = mapper_fn(depth)
+            depth = _apply_midground_roundness(mapper_fn(depth), args)  # ADR-492
     else:
         convergence = args.convergence
-        depth = mapper_fn(depth)
+        depth = _apply_midground_roundness(mapper_fn(depth), args)  # ADR-492
 
     # ADR-237: real user-found bug -- the inpaint methods below (forward_inpaint/
     # mlbw_l2_inpaint/monobw_inpaint) buffer frames internally and only return a
@@ -6370,6 +6384,9 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             fs_shown = float(getattr(args, "foreground_scale", 0.0) or 0.0)
         args.state.setdefault("_foreground_scale_overlay_pending", collections.deque()).extend(
             [float(fs_shown)] * depth.shape[0])
+        if _midground_roundness_any(args):  # ADR-492: Roundness shown under FG
+            args.state.setdefault("_roundness_overlay_pending", collections.deque()).extend(
+                [float(args.state.get("_midground_roundness_last", 0.0))] * depth.shape[0])
 
     convergence_overlay_active = getattr(args, "convergence_overlay", False) and torch.is_tensor(convergence)
     if convergence_overlay_active:
@@ -6645,6 +6662,11 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         fg_row = _overlay_row_3d(args) + (1 if convergence_overlay_active else 0)  # ADR-485
         left_eye = FO.stamp_values(left_eye, fs_values, fmt="FG {:.2f}", corner="top-left", row=fg_row)
         right_eye = FO.stamp_values(right_eye, fs_values, fmt="FG {:.2f}", corner="top-left", row=fg_row)
+        rnd_pending = args.state.get("_roundness_overlay_pending")
+        if rnd_pending is not None:  # ADR-492
+            rnd_values = [rnd_pending.popleft() if rnd_pending else 0.0 for _ in range(n_out)]
+            left_eye = FO.stamp_values(left_eye, rnd_values, fmt="Rnd {:.2f}", corner="top-left", row=fg_row + 1)
+            right_eye = FO.stamp_values(right_eye, rnd_values, fmt="Rnd {:.2f}", corner="top-left", row=fg_row + 1)
 
     # "Log Convergence Value per Scene": drains exactly as many (value, cut_after)
     # pairs as frames actually came back this call -- same reasoning as the overlay
@@ -8021,6 +8043,46 @@ def _write_scene_plan_file(output_path, input_filename, rows, args):
         print(f"[iw3] Pre-Plan Every Scene: plan written to {out_path}", file=sys.stderr)
     except Exception as e:  # noqa
         print(f"[iw3] Pre-Plan Every Scene: could not write the plan file ({e}).", file=sys.stderr)
+
+
+ROUNDNESS_SHOT_KEYS = {"Extreme Wide": "extreme_wide", "Wide": "wide", "Mid": "mid",
+                       "Close-Up": "closeup", "Extreme Close-Up": "extreme_closeup"}
+
+
+def midground_roundness_value(args, shot_label=None):
+    """ADR-492: Midground Roundness for this call. With Convergence Shot Lock, the box
+    for the scene's REAL shot type wins (an empty extreme box falls back to its
+    neighbour's box); otherwise / empty boxes = the plain --midground-roundness."""
+    if shot_label:
+        key = ROUNDNESS_SHOT_KEYS.get(shot_label)
+        v = getattr(args, f"midground_roundness_{key}", None) if key else None
+        if v is None and key in ("extreme_wide", "extreme_closeup"):
+            v = getattr(args, "midground_roundness_" + ("wide" if key == "extreme_wide" else "closeup"), None)
+        if v is not None:
+            return float(v)
+    return float(getattr(args, "midground_roundness", 0.0) or 0.0)
+
+
+def _midground_roundness_any(args):
+    return (float(getattr(args, "midground_roundness", 0.0) or 0.0) > 0.0
+            or any((getattr(args, f"midground_roundness_{k}", None) or 0.0) > 0.0
+                   for k in ROUNDNESS_SHOT_KEYS.values()))
+
+
+def _apply_midground_roundness(depth, args):
+    """ADR-492: called right after Foreground Scale's mapper at every apply_divergence()
+    call site. Uses Convergence Shot Lock's own decided shot type for this call."""
+    if not _midground_roundness_any(args):
+        return depth
+    label = None
+    cm = args.state.get("convergence_model") if hasattr(args, "state") else None
+    if cm is not None and getattr(args, "convergence_mode", "constant") == "shot_lock":
+        label = _slot_real_label(getattr(cm, "locked_shot_type", None))
+    value = midground_roundness_value(args, label)
+    args.state["_midground_roundness_last"] = value  # for the on-video overlay / logs
+    if value <= 0.0:
+        return depth
+    return midground_roundness_curve(depth, value, float(getattr(args, "midground_roundness_center", 0.5)))
 
 
 def _five_groups_on(args):
@@ -10712,6 +10774,20 @@ def create_parser(required_true=True):
                                   f"(the REAL shot, whatever Invert is set to) gets exactly this 3D Strength. "
                                   f"The shot type itself is still decided from the measured strength (Auto Range "
                                   f"+ thresholds). Default: not set = keep the measured strength."))
+    parser.add_argument("--midground-roundness", type=float, default=0.0,
+                        help=("ADR-492: Midground Roundness -- an S-shaped reshape of the depth curve (applied right "
+                              "after Foreground Scale's curve): more depth inside mid-distance subjects (rounder), "
+                              "flatter far background and less foreground pop. Nearest/farthest stay fixed. "
+                              "0 = off (default), 0.3-0.6 to try, max 1.0. Used for every scene unless a per-shot "
+                              "box below is set"))
+    parser.add_argument("--midground-roundness-center", type=float, default=0.5,
+                        help="ADR-492: where the roundness is concentrated, 0 = far .. 1 = near (default 0.5)")
+    for _shot, _name in (("wide", "Wide"), ("mid", "Mid"), ("closeup", "Close-Up"),
+                         ("extreme-wide", "Extreme Wide"), ("extreme-closeup", "Extreme Close-Up")):
+        parser.add_argument(f"--midground-roundness-{_shot}", type=float, default=None,
+                            help=f"ADR-492: Midground Roundness for {_name} scenes (REAL shot type; needs Convergence "
+                                 f"Shot Lock; empty = --midground-roundness"
+                                 + (", or the neighbouring group's box)" if "extreme" in _shot else ")"))
     parser.add_argument("--shot-lock-five-groups", action="store_true",
                         help=("ADR-491: with --shot-lock-pre-plan: two extra shot groups beyond the "
                               "High / Low thresholds -- Extreme Wide and Extreme Close-Up -- each with its "

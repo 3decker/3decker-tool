@@ -2761,6 +2761,48 @@ class MainFrame(wx.Frame):
                       "Recommended: " + _rec))
                 setattr(self, f"cbo_{_prefix}_{_s}", _c)
 
+        # ADR-492: Midground Roundness (S-shaped depth curve reshape).
+        self.lbl_midground_roundness = wx.StaticText(self.grp_stereo, label=T("Midground Roundness"))
+        self.cbo_midground_roundness = EditableComboBox(
+            self.grp_stereo, choices=["0", "0.2", "0.3", "0.4", "0.5", "0.6", "0.8", "1.0"],
+            name="cbo_midground_roundness")
+        self.cbo_midground_roundness.SetValue("0")
+        self.cbo_midground_roundness.SetToolTip(
+            T("What: reshapes the depth curve -- the same kind of reshape Foreground Scale does, applied right after it -- into an S shape: depth gets steeper around the middle distance and flatter at the near and far ends. Subjects at mid distance get more depth inside themselves (rounder, more sculpted faces and bodies); the far background gets flatter and the nearest things pop out less. The nearest and farthest points stay where they are and nothing changes order or overlaps -- depth is moved, not pixels pushed. Used for every scene unless a per-shot box below is set." + "\n"
+              "Why: Foreground Scale can only favour the near end. This favours the middle, where the subject of a mid shot usually is." + "\n"
+              "Pros: rounder mid-distance subjects without changing the overall 3D size; smooth, no band edges or lines; stacks with Foreground Scale." + "\n"
+              "Cons: less foreground pop and a flatter background where it's on; a subject that is the NEAREST thing in the shot sits in the flattened end and gets flatter, not rounder; more depth across a subject can show a little more edge smearing." + "\n"
+              "Values: 0 = off (default), 0.3-0.6 to try, max 1.0 (about twice the depth in the middle)." + "\n"
+              "Recommended: 0 here, and use the per-shot boxes (e.g. Mid 0.4-0.5) so only the shots that benefit get it."))
+        self.lbl_midground_roundness_center = wx.StaticText(self.grp_stereo, label=T("Roundness Center"))
+        self.cbo_midground_roundness_center = EditableComboBox(
+            self.grp_stereo, choices=["0.3", "0.4", "0.5", "0.6", "0.7"],
+            name="cbo_midground_roundness_center")
+        self.cbo_midground_roundness_center.SetValue("0.5")
+        self.cbo_midground_roundness_center.SetToolTip(
+            T("Only when Midground Roundness (or a per-shot Roundness box) is above 0." + "\n"
+              "What: where on the depth range the extra roundness is concentrated -- 0 = far end, 1 = near end." + "\n"
+              "Why: if your mid subjects tend to sit a bit nearer or farther than the exact middle, moving the center puts the roundness on them." + "\n"
+              "Pros: aims the effect at the subjects you care about." + "\n"
+              "Cons: moving it toward one end flattens the other end more." + "\n"
+              "Values: 0.3-0.7, default 0.5 (the middle)." + "\n"
+              "Recommended: 0.5; try 0.6 if subjects look like they're nearer than the middle."))
+        for _s, _name in (("wide", "Wide"), ("mid", "Mid"), ("closeup", "Close-Up"),
+                          ("extreme_wide", "Extreme Wide"), ("extreme_closeup", "Extreme Close-Up")):
+            setattr(self, f"lbl_midground_roundness_{_s}", wx.StaticText(
+                self.grp_stereo, label=T(f"Roundness: {_name}")))
+            _c = EditableComboBox(self.grp_stereo, choices=["", "0", "0.2", "0.3", "0.4", "0.5", "0.6", "0.8", "1.0"], name=f"cbo_midground_roundness_{_s}")
+            _c.SetValue("")
+            _c.SetToolTip(
+                T("Only with Convergence Plane mode shot_lock (best with Pre-Plan Every Scene, so it changes exactly at cuts)" + (" and '5 Shot Groups' on." if "extreme" in _s else ".") + "\n"
+                  f"What: Midground Roundness for every {_name} scene (the real shot type, whatever Invert is set to)." + "\n"
+                  "Why: roundness helps most in mid shots; wide shots and close-ups may look better without it." + "\n"
+                  "Pros: each shot type gets its own amount, decided with the shot type." + "\n"
+                  "Cons: every scene of this type gets the same amount." + "\n"
+                  "Values: empty = use Midground Roundness above" + (" (or the " + ("Wide" if _s == "extreme_wide" else "Close-Up") + " box if that is set)" if "extreme" in _s else "") + " (default); 0 = off for this type; 0.3-0.6 to try." + "\n"
+                  "Recommended: Mid 0.4-0.5, Wide and Close-Up 0 to start."))
+            setattr(self, f"cbo_midground_roundness_{_s}", _c)
+
         # ADR-476: Late Correction for Convergence shot_lock (divergence signal).
         self.chk_convergence_lock_late_correction = wx.CheckBox(
             self.grp_stereo, label=T("Late Correction (re-check once settled)"),
@@ -5120,6 +5162,9 @@ class MainFrame(wx.Frame):
             layout.Add(getattr(self, f"cbo_shot_lock_strength_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_shot_lock_five_groups, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)  # ADR-491
         for _n in self._five_group_widget_names()[1:][::2]:
+            layout.Add(getattr(self, _n), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+            layout.Add(getattr(self, "cbo" + _n[3:]), (i, 1), (1, 2), flag=wx.EXPAND)
+        for _n in self._roundness_widget_names()[::2]:  # ADR-492
             layout.Add(getattr(self, _n), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, "cbo" + _n[3:]), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13458,6 +13503,7 @@ class MainFrame(wx.Frame):
             self.lbl_shot_lock_strength_mid, self.cbo_shot_lock_strength_mid,
             self.lbl_shot_lock_strength_closeup, self.cbo_shot_lock_strength_closeup,
             *[getattr(self, _n) for _n in self._five_group_widget_names()],  # ADR-491
+            *[getattr(self, _n) for _n in self._roundness_widget_names()],  # ADR-492
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -13744,6 +13790,12 @@ class MainFrame(wx.Frame):
         self.lbl_shot_lock_strength_threshold_bottom.SetLabel(
             T("Extreme ") + bottom + T(" at 3D Strength <="))
         self.Layout()
+
+    def _roundness_widget_names(self):
+        """ADR-492: Midground Roundness (label, box) name pairs."""
+        return [f"{k}_midground_roundness{s}" for s in ("", "_center", "_wide", "_mid", "_closeup",
+                                                         "_extreme_wide", "_extreme_closeup")
+                for k in ("lbl", "cbo")]
 
     def _five_group_widget_names(self):
         """ADR-491: the 5 Shot Groups checkbox, then (label, box) name pairs."""
@@ -14699,6 +14751,11 @@ class MainFrame(wx.Frame):
             shot_lock_five_groups=self.chk_shot_lock_five_groups.GetValue(),  # ADR-491
             **{_n[4:]: (lambda s: float(s) if s.strip() else None)(getattr(self, _n).GetValue())
                for _n in self._five_group_widget_names()[2::2]},
+            # ADR-492: Midground Roundness (empty per-shot box = None)
+            midground_roundness=float(self.cbo_midground_roundness.GetValue() or 0),
+            midground_roundness_center=float(self.cbo_midground_roundness_center.GetValue() or 0.5),
+            **{_n[4:]: (lambda s: float(s) if s.strip() else None)(getattr(self, _n).GetValue())
+               for _n in self._roundness_widget_names()[5::2]},
             convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
@@ -16166,6 +16223,11 @@ class MainFrame(wx.Frame):
             _v = getattr(args, f"shot_lock_strength_{_s}", None)
             getattr(self, f"cbo_shot_lock_strength_{_s}").SetValue("" if _v is None else f"{float(_v):g}")
         self.chk_shot_lock_five_groups.SetValue(bool(getattr(args, "shot_lock_five_groups", False)))  # ADR-491
+        self.cbo_midground_roundness.SetValue(f"{float(getattr(args, 'midground_roundness', 0.0) or 0.0):g}")  # ADR-492
+        self.cbo_midground_roundness_center.SetValue(f"{float(getattr(args, 'midground_roundness_center', 0.5)):g}")
+        for _n in self._roundness_widget_names()[5::2]:
+            _v = getattr(args, _n[4:], None)
+            getattr(self, _n).SetValue("" if _v is None else f"{float(_v):g}")
         for _n in self._five_group_widget_names()[2::2]:
             _v = getattr(args, _n[4:], None)
             getattr(self, _n).SetValue("" if _v is None else f"{float(_v):g}")
@@ -42000,6 +42062,104 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_midground_roundness():
+    """ADR-492: Midground Roundness. (a) curve: identity at 0, endpoints fixed, strictly
+    increasing, steeper at the center and flatter at the ends, center moves the steep part;
+    (b) per-shot value resolution incl. extreme fallback; (c) apply helper uses the Shot Lock
+    model's decided shot type, real labels with Invert; (d) GUI defaults, round-trip through
+    parse_args / CLI / restore; metadata + filename tag."""
+    import types as _t
+    import torch
+    import wx
+    from . import utils as U
+    from .mapper import midground_roundness_curve as R
+
+    # (a)
+    x = torch.linspace(0, 1, 1001)
+    assert torch.equal(R(x, 0.0), x)
+    for s in (0.3, 0.6, 1.0):
+        y = R(x, s)
+        assert abs(float(y[0])) < 1e-5 and abs(float(y[-1]) - 1) < 1e-5, (s, y[0], y[-1])
+        d = y[1:] - y[:-1]
+        assert bool((d > 0).all()), s
+        slope = d * 1000
+        assert float(slope[500]) > 1.2 and float(slope[0]) < 0.9 and float(slope[-1]) < 0.9, (s, slope[0], slope[500])
+    y6 = R(x, 1.0, center=0.6)
+    d6 = (y6[1:] - y6[:-1])
+    assert 560 <= int(torch.argmax(d6)) <= 640, int(torch.argmax(d6))
+    assert torch.allclose(R(x, 2.0), R(x, 1.0))  # capped at 1
+
+    # (b)
+    a = _t.SimpleNamespace(midground_roundness=0.2, midground_roundness_wide=None, midground_roundness_mid=0.5,
+                           midground_roundness_closeup=0.0, midground_roundness_extreme_wide=None,
+                           midground_roundness_extreme_closeup=None)
+    v = U.midground_roundness_value
+    assert v(a, None) == 0.2 and v(a, "Mid") == 0.5 and v(a, "Wide") == 0.2 and v(a, "Close-Up") == 0.0
+    assert v(a, "Extreme Close-Up") == 0.0 and v(a, "Extreme Wide") == 0.2  # neighbour box / global
+    a.midground_roundness_extreme_wide = 0.7
+    assert v(a, "Extreme Wide") == 0.7
+
+    # (c)
+    saved = dict(U.SHOT_LABEL_SWAP)
+    try:
+        cm = _t.SimpleNamespace(locked_shot_type="wide")
+        args = _t.SimpleNamespace(state={"convergence_model": cm}, convergence_mode="shot_lock",
+                                  midground_roundness=0.0, midground_roundness_center=0.5,
+                                  midground_roundness_wide=0.6, midground_roundness_mid=None,
+                                  midground_roundness_closeup=None, midground_roundness_extreme_wide=None,
+                                  midground_roundness_extreme_closeup=None)
+        d = torch.rand(2, 1, 8, 8)
+        U.SHOT_LABEL_SWAP["convergence"] = False  # Invert ON: "wide" slot = real Wide
+        assert torch.allclose(U._apply_midground_roundness(d, args), R(d, 0.6))
+        assert args.state["_midground_roundness_last"] == 0.6
+        U.SHOT_LABEL_SWAP["convergence"] = True   # Invert OFF: "wide" slot = real Close-Up
+        assert torch.equal(U._apply_midground_roundness(d, args), d)
+        args.midground_roundness_wide = None
+        args.midground_roundness_mid = 0.0
+        assert torch.equal(U._apply_midground_roundness(d, args), d)  # everything off -> untouched
+        args.convergence_mode = "constant"; args.midground_roundness = 0.4
+        assert torch.allclose(U._apply_midground_roundness(d, args), R(d, 0.4))
+    finally:
+        U.SHOT_LABEL_SWAP.clear(); U.SHOT_LABEL_SWAP.update(saved)
+    src = __import__("inspect").getsource(U)  # module source: apply_divergence may be wrapped by an add-on
+    assert src.count("_apply_midground_roundness(mapper_fn(depth), args)") == 3
+
+    # (d)
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.cbo_midground_roundness.GetValue() == "0"
+        assert frame.cbo_midground_roundness_center.GetValue() == "0.5"
+        args = frame.parse_args(skip_set_state=True)
+        assert args.midground_roundness == 0.0 and args.midground_roundness_mid is None
+        assert "roundness" not in frame.get_cli_command()
+        frame.cbo_midground_roundness_mid.SetValue("0.5")
+        frame.cbo_midground_roundness_closeup.SetValue("0")
+        frame.cbo_midground_roundness_center.SetValue("0.6")
+        args = frame.parse_args(skip_set_state=True)
+        assert (args.midground_roundness_mid, args.midground_roundness_closeup, args.midground_roundness_wide,
+                args.midground_roundness_center) == (0.5, 0.0, None, 0.6)
+        cmd = frame.get_cli_command()
+        for flag in ("--midground-roundness-mid 0.5", "--midground-roundness-closeup 0.0",
+                     "--midground-roundness-center 0.6"):
+            assert flag in cmd, (flag, cmd)
+        assert "--midground-roundness-wide" not in cmd
+        meta = U._build_iw3_comment_metadata(args, video=True) or ""
+        assert "iw3_midground_roundness_center=0.6" in meta, meta
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--midground-roundness", "0.3", "--midground-roundness-extreme-wide", "0.2"]))
+        assert frame.cbo_midground_roundness.GetValue() == "0.3"
+        assert frame.cbo_midground_roundness_extreme_wide.GetValue() == "0.2"
+        assert frame.cbo_midground_roundness_mid.GetValue() == ""
+        assert frame.cbo_midground_roundness_center.GetValue() == "0.5"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_midground_roundness: PASS")
+
+
 def _self_test_shot_lock_five_groups():
     """ADR-491: 5 Shot Groups. (a) pure slot rule (top/bottom beyond the extra thresholds,
     inclusive); (b) real labels for the extra slots with Invert on and off; (c) Shot Lock /
@@ -43380,6 +43540,7 @@ def _run_self_tests():
         _self_test_shot_lock_pre_plan,
         _self_test_shot_lock_strength_per_shot,
         _self_test_shot_lock_five_groups,
+        _self_test_midground_roundness,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

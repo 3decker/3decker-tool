@@ -120,6 +120,25 @@ def resolve_mapper_function(name):
         raise NotImplementedError(f"mapper={name}")
 
 
+def midground_roundness_curve(x, strength, center=0.5, k=8.0):
+    """ADR-492: Midground Roundness -- an S-shaped remap of the (already Foreground
+    Scale-mapped) 0..1 depth: steeper around `center` (more depth inside mid-distance
+    subjects = rounder), flatter toward 0 and 1 (flatter far background and less
+    foreground pop). 0 and 1 stay fixed and the curve is strictly increasing, so no
+    two depths ever swap order or overlap -- it redistributes depth, it does not push
+    pixels. strength 0 = exact identity; 1 = full logistic S (slope ~2x at center).
+    The result is a blend x*(1-s) + S(x)*s of two increasing functions."""
+    s = float(strength)
+    if s <= 0.0:
+        return x
+    s = min(s, 1.0)
+    c = min(max(float(center), 0.05), 0.95)
+    lo = 1.0 / (1.0 + math.exp(k * c))            # logistic at x = 0
+    hi = 1.0 / (1.0 + math.exp(-k * (1.0 - c)))   # logistic at x = 1
+    g = (torch.sigmoid((x - c) * k) - lo) / (hi - lo)
+    return x * (1.0 - s) + g * s
+
+
 def chain(x, functions):
     for f in functions:
         x = f(x)

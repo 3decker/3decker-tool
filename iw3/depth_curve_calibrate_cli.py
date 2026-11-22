@@ -162,7 +162,7 @@ def calibrate(input_path, source_model, target_model, clips,
               gpu=0, resolution=None, limit_resolution=False,
               pixels_per_frame=4000, num_points=512, output_path=None,
               work_dir=None, log=print, extra_argv=None, max_stretch=DEFAULT_MAX_STRETCH,
-              target_reset_look=False):
+              target_reset_look=False, target_apply_curve=None):
     """Full calibration run over one or more clips: export both models over
     EVERY clip (each model loaded once, reused across all its clips), sample
     pixels from each clip/side, pool every clip's samples together, build the
@@ -174,7 +174,11 @@ def calibrate(input_path, source_model, target_model, clips,
     its depth range (EMA) and model state restart at every scene cut ("reset look":
     each scene stretched over its own range), while the SOURCE pass stays exactly like a
     real conversion. The curve then reshapes normal depth toward the reset look, to be
-    used in real jobs WITHOUT any reset. The target may be the source model itself."""
+    used in real jobs WITHOUT any reset. The target may be the source model itself.
+    ADR-490 `target_apply_curve` (a curve file path): the TARGET depth samples are passed
+    through that curve before the new curve is learned -- the same order a real job uses
+    (depth -> normalize -> curve). With target = source model + target_reset_look this
+    reproduces "my current curve + the reset" exactly, as one new curve."""
     if not clips:
         raise ValueError("calibrate() requires at least one clip")
     # ADR-480: a clip may name its own movie file -- (path, start, end) -- so one curve
@@ -245,6 +249,14 @@ def calibrate(input_path, source_model, target_model, clips,
 
         source_values = np.concatenate(source_values_all)
         target_values = np.concatenate(target_values_all)
+        applied_meta = None
+        if target_apply_curve:
+            # ADR-490: reshape the target samples with an existing curve first.
+            from .depth_curve_match import load_curve
+            ax, ay, applied_meta = load_curve(target_apply_curve)
+            target_values = np.interp(np.clip(target_values, 0.0, 1.0), ax, ay).astype(np.float32)
+            log(f"[depth-curve-calibrate] target samples reshaped by {path.basename(target_apply_curve)} "
+                f"({applied_meta.get('source_model', '?')} -> {applied_meta.get('target_model', '?')})")
         lut_x, lut_y = build_curve_lut(source_values, target_values, num_points=num_points)
         # ADR-474: tidy the far-end tie cluster and cap the curve's local stretch.
         raw_stretch = max_curve_stretch(lut_x, lut_y)
@@ -264,6 +276,12 @@ def calibrate(input_path, source_model, target_model, clips,
             "calibrated_at": datetime.now().isoformat(timespec="seconds"),
             "max_stretch": max_stretch,
             "target_reset_look": bool(target_reset_look),  # ADR-488
+            # ADR-490: the curve the target was reshaped with (file name + what it was)
+            "target_apply_curve": (None if not target_apply_curve else {
+                "file": path.basename(target_apply_curve),
+                "source_model": (applied_meta or {}).get("source_model"),
+                "target_model": (applied_meta or {}).get("target_model"),
+                "calibrated_at": (applied_meta or {}).get("calibrated_at")}),
         }
         save_curve(output_path, lut_x, lut_y, meta=meta)
         log(f"[depth-curve-calibrate] done -- wrote {output_path} "
@@ -380,6 +398,12 @@ def create_parser():
                               "real conversions as usual (no reset there). Allows the same model as "
                               "source and target (e.g. VDA_L -> VDA_L reset look); with a different "
                               "target (e.g. Any_V3_Metric_Large) the curve carries both looks."))
+    parser.add_argument("--target-apply-curve", type=str, default=None,
+                        help=("ADR-490: reshape the TARGET pass's depth with this existing curve file "
+                              "before learning the new curve (same order as a real job: depth -> "
+                              "normalize -> curve). E.g. --source-model VDA_L --target-model VDA_L "
+                              "--target-reset-look --target-apply-curve my_curve.json learns ONE curve "
+                              "equal to 'my curve + the reset look'."))
     parser.add_argument("--num-points", type=int, default=512,
                          help="Resolution of the saved lookup table.")
     parser.add_argument("--output", "-o", type=str, default=None,
@@ -450,7 +474,11 @@ def run(args):
     if not path.exists(args.input):
         print(f"ERROR: --input file does not exist: {args.input}", file=sys.stderr)
         return 1
-    if args.source_model == args.target_model and not getattr(args, "target_reset_look", False):
+    if getattr(args, "target_apply_curve", None) and not path.exists(args.target_apply_curve):
+        print(f"ERROR: --target-apply-curve file does not exist: {args.target_apply_curve}", file=sys.stderr)
+        return 1
+    if (args.source_model == args.target_model and not getattr(args, "target_reset_look", False)
+            and not getattr(args, "target_apply_curve", None)):
         print("ERROR: --source-model and --target-model must be different -- there is "
               "nothing to reshape toward if they're the same model (unless --target-reset-look "
               "is on).", file=sys.stderr)
@@ -470,6 +498,7 @@ def run(args):
             extra_argv=model_settings_argv(args),
             max_stretch=getattr(args, "max_stretch", DEFAULT_MAX_STRETCH),
             target_reset_look=bool(getattr(args, "target_reset_look", False)),
+            target_apply_curve=getattr(args, "target_apply_curve", None),
         )
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -839,12 +868,51 @@ def _self_test_target_reset_look():
     print("_self_test_target_reset_look: PASS")
 
 
+def _self_test_target_apply_curve():
+    """ADR-490: target samples go through the given curve before learning; the source
+    samples don't; meta records it; same model is allowed with it."""
+    import tempfile as _tf, json
+    from . import depth_curve_calibrate_cli as M
+    from .depth_curve_match import save_curve
+    def _fake(input_path, model_name, pass_dir, start_time, end_time, gpu, resolution,
+              limit_resolution, depth_model=None, extra_argv=None):
+        d = _pass_depth_dir(pass_dir, input_path); os.makedirs(d, exist_ok=True)
+        for k in range(4):
+            _make_fake_depth_png(path.join(d, f"{k:06d}.png"), 0.2 + 0.2 * k)   # 0.2 .. 0.8, both passes
+        return object()
+    orig, orig_rel = M._run_export_pass, M._release_model
+    M._run_export_pass, M._release_model = _fake, (lambda m: None)
+    try:
+        with _tf.TemporaryDirectory() as td:
+            vid = path.join(td, "movie.mkv"); open(vid, "wb").close()
+            squash = path.join(td, "half.json")
+            save_curve(squash, np.linspace(0, 1, 11), np.linspace(0, 1, 11) * 0.5,
+                       meta={"source_model": "VDA_L", "target_model": "Any_V3_Metric_Large"})
+            out = path.join(td, "curve.json")
+            M.calibrate(vid, "VDA_L", "VDA_L", [("00:00:01", "00:00:02")], output_path=out,
+                        work_dir=path.join(td, "w"), log=lambda *_: None, max_stretch=0,
+                        target_apply_curve=squash)
+            d = json.load(open(out, encoding="utf-8"))
+            assert d["meta"]["target_apply_curve"]["file"] == "half.json", d["meta"]
+            # same depth on both passes, target halved -> learned curve ~ y = x / 2 in the sampled range
+            y = np.interp(0.6, d["lut_x"], d["lut_y"])
+            assert abs(y - 0.3) < 0.03, y
+    finally:
+        M._run_export_pass, M._release_model = orig, orig_rel
+    p = create_parser()
+    a = p.parse_args(["-i", "x.mkv", "--source-model", "VDA_L", "--target-model", "VDA_L",
+                      "--target-apply-curve", "missing.json"])
+    assert run(a) == 1
+    print("_self_test_target_apply_curve: PASS")
+
+
 def _run_self_tests():
     _self_test_pass_depth_dir_layout()
     _self_test_sample_pixels_from_dir()
     _self_test_parse_clip_spec_and_resolve_clips()
     _self_test_model_settings_argv()
     _self_test_target_reset_look()
+    _self_test_target_apply_curve()
     _self_test_calibrate_end_to_end_with_fake_passes()
     _self_test_calibrate_pools_multiple_clips()
     _self_test_calibrate_pools_multiple_movies()

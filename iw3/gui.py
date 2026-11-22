@@ -629,7 +629,7 @@ class DepthCurveCalibrateDialog(wx.Dialog):
     can't lose the log or think it finished early."""
 
     def __init__(self, parent, source_model, target_model_choices, default_target_model,
-                 model_settings_argv=None):
+                 model_settings_argv=None, current_curve_path=None):
         super().__init__(parent, title=T("Calibrate Depth Curve"),
                           size=parent.FromDIP((640, 540)),
                           style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
@@ -719,6 +719,27 @@ class DepthCurveCalibrateDialog(wx.Dialog):
               "model's look AND the reset look in one curve." + "\n"
               "Recommended: Borrow Curve From Any_V3_Metric_Large + this on, Max Stretch 0, saved under "
               "a new name (e.g. ..._resetlook.json) so your current curve is kept."))
+        # ADR-490: reshape the target with an existing curve (e.g. your current one).
+        self.chk_target_apply_curve = wx.CheckBox(
+            self, label=T("Target: apply this curve first"), name="chk_depth_curve_target_apply_curve")
+        self.chk_target_apply_curve.SetValue(False)
+        self.txt_target_apply_curve = wx.TextCtrl(self, value=current_curve_path or "")
+        self.btn_target_apply_curve = wx.Button(self, label=T("Browse..."))
+        _tip = T("What: before learning, the target pass's depth is reshaped by this existing curve "
+                 "(defaults to the curve set in the main window) -- the same order a real conversion uses. "
+                 "Combined with 'Target: Reset Look' and your OWN model as 'Borrow Curve From' (e.g. VDA_L -> "
+                 "VDA_L), the new curve equals 'your current curve + the reset look', learned as ONE curve "
+                 "you can use in normal conversions with no reset." + "\n"
+                 "Why: it rebuilds exactly the look of a reset test made with your current curve, instead "
+                 "of starting over from another model." + "\n"
+                 "Pros: keeps your existing curve's character and adds the reset look on top." + "\n"
+                 "Cons: a curve still gives the AVERAGE reset look, not each scene's own stretch." + "\n"
+                 "Values: on / off (default off) + a curve file." + "\n"
+                 "Recommended: on with your current curve, Borrow Curve From = your own model, Reset Look on, "
+                 "Max Stretch 0, saved under a new name.")
+        self.chk_target_apply_curve.SetToolTip(_tip)
+        self.txt_target_apply_curve.SetToolTip(_tip)
+        self.btn_target_apply_curve.Bind(wx.EVT_BUTTON, self._on_browse_target_apply_curve)
         self.btn_run = wx.Button(self, label=T("Calibrate"))
         self.btn_close = wx.Button(self, id=wx.ID_CLOSE, label=T("Close"))
         self.txt_log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
@@ -743,6 +764,9 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         top.Add((0, 0))
         top.Add(self.chk_target_reset_look)  # ADR-488
         top.Add((0, 0))
+        top.Add(self.chk_target_apply_curve, flag=wx.ALIGN_CENTER_VERTICAL)  # ADR-490
+        top.Add(self.txt_target_apply_curve, flag=wx.EXPAND)
+        top.Add(self.btn_target_apply_curve)
 
         hint = wx.StaticText(self, label=T(
             "Keep each clip short -- a minute or two of real content is plenty. This runs "
@@ -826,6 +850,13 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         self.txt_log.AppendText(text)
         self.txt_log.ShowPosition(self.txt_log.GetLastPosition())
 
+    def _on_browse_target_apply_curve(self, event):
+        with wx.FileDialog(self, T("Curve to apply to the target"), wildcard="Curve (*.json)|*.json",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() == wx.ID_OK:
+                self.txt_target_apply_curve.SetValue(dlg.GetPath())
+                self.chk_target_apply_curve.SetValue(True)
+
     def on_click_run(self, event):
         input_path = self.txt_input.GetValue().strip()
         if not input_path or not path.exists(input_path):
@@ -838,7 +869,13 @@ class DepthCurveCalibrateDialog(wx.Dialog):
                           wx.OK | wx.ICON_WARNING)
             return
         reset_look = self.chk_target_reset_look.GetValue()  # ADR-488
-        if target_model == self.source_model and not reset_look:
+        apply_curve = (self.txt_target_apply_curve.GetValue().strip()
+                       if self.chk_target_apply_curve.GetValue() else "")  # ADR-490
+        if apply_curve and not path.exists(apply_curve):
+            wx.MessageBox(T("The curve file to apply to the target was not found:") + f" {apply_curve}",
+                          T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
+            return
+        if target_model == self.source_model and not reset_look and not apply_curve:
             wx.MessageBox(T("Pick a DIFFERENT model to borrow a curve from -- there is nothing "
                              "to reshape toward if it's the same as your own Depth Model "
                              "(unless 'Target: Reset Look' is ticked)."),
@@ -881,6 +918,8 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         cmd += ["--max-stretch", str(max_stretch)]
         if reset_look:
             cmd += ["--target-reset-look"]  # ADR-488
+        if apply_curve:
+            cmd += ["--target-apply-curve", apply_curve]  # ADR-490
         for raw in clip_lines:
             cmd += ["--clip", raw]
         cmd += list(self.model_settings_argv)
@@ -18764,7 +18803,9 @@ class MainFrame(wx.Frame):
             default_target = ""
         target_choices = _picked_default + [source_model]
         dlg = DepthCurveCalibrateDialog(self, source_model, target_choices, default_target,
-                                         self._depth_model_settings_argv())
+                                         self._depth_model_settings_argv(),
+                                         current_curve_path=self.txt_depth_curve_match_path.GetValue().strip()
+                                         or None)
         dlg.ShowModal()
         dlg.Destroy()
         self._refresh_depth_curve_match_status()

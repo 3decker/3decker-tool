@@ -15,6 +15,8 @@ it matters.
 
 ## Latest Update — November 22, 2026
 
+**Added: "Target: Reset Look" in the Calibrate Depth Curve window (off by default).** With it ticked, the calibration learns how to turn your normal depth into the "reset look": the extra separation you get when every scene uses its own full near-to-far depth range. You then use the saved curve in normal conversions with Depth Curve Match, with no reset happening, so thin objects like cage bars and spears don't smear the way the real reset made them. Pick "Borrow Curve From: Any_V3_Metric_Large" to get Any_V3's look and the reset look in one curve, or pick your own model (now at the bottom of the list) for only the reset look. Save it under a new name so you keep your current curve. In the Mario test it gave close-ups and mid shots about 10 px more pop-out than the normal curve while keeping the cage clean. It's a little milder than the real reset, because one curve gives the average effect, not each scene's own.
+
 **Improved: five fixes from the original iw3 author (nagadomi).** A fix for how frames are handed to the NVIDIA video encoder (NVENC) on the graphics-card path, a faster color conversion before encoding, no sudden graphics-memory jump when a scene's frames are flushed, a `--compile` fix for the 3D model in one processing path, and a frame-offload fix for Video Depth Anything when Flicker Reduction is off. Tested on a real Mario clip: the picture is the same as before (only tiny encoder rounding differences), with slightly lower average graphics-memory use.
 
 ## Update — November 21, 2026

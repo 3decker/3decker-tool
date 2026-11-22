@@ -485,7 +485,16 @@ class ShotLockEstimator():
         self.planned_scenes = 0
 
     def _value_for_shot_type(self, shot_type):
-        """ADR-481: this estimator's value for a shot type (None if unknown)."""
+        """ADR-481: this estimator's value for a shot type (None if unknown).
+        ADR-491: 'top' / 'bottom' are the 5-group slots beyond the High / Low
+        thresholds (only ever planned by Pre-Plan); their values are set by the
+        planner (top_value / bottom_value), falling back to the neighbouring slot."""
+        if shot_type == "top":
+            v = getattr(self, "top_value", None)
+            return float(v) if v is not None else self.wide_value
+        if shot_type == "bottom":
+            v = getattr(self, "bottom_value", None)
+            return float(v) if v is not None else self.closeup_value
         if shot_type == "wide":
             return self.wide_value
         if shot_type == "closeup":

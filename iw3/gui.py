@@ -2709,6 +2709,58 @@ class MainFrame(wx.Frame):
               "Values: empty = off (default), or 3.0-5.0." + "\n"
               "Recommended: Wide 3.7, Mid 3.8, Close-Up 3.9, with Auto Range 3.6-4.2 and thresholds High 3.9 / Low 3.7."))
 
+        # ADR-491: 5 Shot Groups (Pre-Plan only) -- Extreme Wide / Extreme Close-Up.
+        self.chk_shot_lock_five_groups = wx.CheckBox(
+            self.grp_stereo, label=T("5 Shot Groups (adds Extreme Wide / Extreme Close-Up)"),
+            name="chk_shot_lock_five_groups")
+        self.chk_shot_lock_five_groups.SetValue(False)
+        self.chk_shot_lock_five_groups.SetToolTip(
+            T("Only with 'Pre-Plan Every Scene' on, Auto 3D Strength on, and Convergence Shot Lock using the 3D Strength signal." + "\n"
+              "What: splits scenes into 5 shot groups instead of 3. Scenes beyond your High threshold can become an extra group, and scenes beyond your Low threshold another one -- Extreme Wide and Extreme Close-Up (the boxes below always show which is which for your Invert setting). Each extra group gets its own 3D Strength, Convergence and Foreground Scale. Wide / Mid / Close-Up keep working exactly as before." + "\n"
+              "Why: with 3 groups, a huge landscape and a normal wide shot get the same treatment, and an eye close-up gets the same as a face. With 5, you can push big scenery further behind the screen and tame very strong extreme close-ups, without touching the other groups." + "\n"
+              "Pros: more spread of depth across the movie; separate control of the most extreme shots." + "\n"
+              "Cons: the shot type is guessed automatically from the measured 3D Strength, so with more borders more borderline scenes land one group off (the scene plan file lists every scene's group). A bigger Convergence spread means bigger jumps at cuts between extreme groups. Foreground Scale for the extra groups needs 'Follow Convergence's Shot Decision' on." + "\n"
+              "Values: on / off (default off). Off = exactly the normal 3 groups." + "\n"
+              "Recommended: on only when you want more depth spread; set the two extra thresholds one step beyond High / Low (e.g. High 3.9 -> 4.1, Low 3.7 -> 3.6)."))
+        self.chk_shot_lock_five_groups.Bind(wx.EVT_CHECKBOX, lambda e: self.update_shot_lock_signal())
+        for _side, _base in (("top", "High"), ("bottom", "Low")):
+            setattr(self, f"lbl_shot_lock_strength_threshold_{_side}", wx.StaticText(
+                self.grp_stereo, label=T("Extreme threshold")))
+            _c = EditableComboBox(self.grp_stereo, choices=["", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8", "3.9", "4.0", "4.1", "4.2", "4.3"],
+                                  name=f"cbo_shot_lock_strength_threshold_{_side}")
+            _c.SetValue("")
+            _c.SetToolTip(
+                T("Only with '5 Shot Groups' on." + "\n"
+                  "What: a 3D Strength value on the " + _base + " side. A scene whose planned 3D Strength is "
+                  + ("at or ABOVE" if _side == "top" else "at or BELOW") + " this number goes to the extreme group named on the left (beyond your normal " + _base + " threshold). The name follows your Invert setting automatically." + "\n"
+                  "Why: decides which scenes count as 'extreme' instead of normal Wide / Close-Up." + "\n"
+                  "Pros: simple -- one number per side." + "\n"
+                  "Cons: set too close to the normal threshold and many scenes become extreme; too far and none do. Check the shot counts in the scene plan file." + "\n"
+                  "Values: empty = no extreme group on this side (default), or a 3D Strength value beyond your " + _base + " threshold. Values on the Auto 3D Strength steps work best (e.g. 3.6, 4.1)." + "\n"
+                  "Recommended: one step beyond your " + _base + " threshold, e.g. " + ("4.1 when High is 3.9." if _side == "top" else "3.6 when Low is 3.7.")))
+            setattr(self, f"cbo_shot_lock_strength_threshold_{_side}", _c)
+        for _s, _name in (("extreme_wide", "Extreme Wide"), ("extreme_closeup", "Extreme Close-Up")):
+            for _prefix, _what, _choices, _rec in (
+                    ("shot_lock_strength", "3D Strength", ["", "3.3", "3.4", "3.5", "3.6", "3.7", "3.8", "3.9", "4.0", "4.1", "4.2", "4.3"],
+                     "Extreme Wide 3.6 / Extreme Close-Up 3.8 (a little less than Close-Up, so the strongest shots pop less)."),
+                    ("convergence_lock", "Convergence", ["", "0.0", "0.1", "0.2", "0.3", "0.35", "0.4", "0.45", "0.5", "0.55", "0.6", "0.7"],
+                     "Extreme Wide 0.50-0.60 (more of the scene behind the screen), Extreme Close-Up 0.0."),
+                    ("foreground_scale_lock", "Foreground Scale", ["", "-0.5", "-0.25", "0", "0.25", "0.5", "0.75", "1.0"],
+                     "Extreme Wide 0, Extreme Close-Up 0.5-0.75 (calms the very front and hides mild smearing).")):
+                setattr(self, f"lbl_{_prefix}_{_s}", wx.StaticText(
+                    self.grp_stereo, label=T(f"{_name}: {_what}")))
+                _c = EditableComboBox(self.grp_stereo, choices=_choices, name=f"cbo_{_prefix}_{_s}")
+                _c.SetValue("")
+                _c.SetToolTip(
+                    T("Only with '5 Shot Groups' on" + (" and Foreground Scale Shot Lock with 'Follow Convergence's Shot Decision' on." if _prefix == "foreground_scale_lock" else ".") + "\n"
+                      f"What: the {_what} used for every {_name} scene (the real shot type, whatever Invert is set to)." + "\n"
+                      f"Why: lets the most extreme shots get their own {_what} instead of sharing the neighbouring group's." + "\n"
+                      "Pros: exact, predictable value for these scenes; decided before rendering, changes only at cuts." + "\n"
+                      "Cons: every scene in this group gets the same value." + "\n"
+                      f"Values: empty = use the neighbouring group's value ({'Wide' if _s == 'extreme_wide' else 'Close-Up'}) (default)." + "\n"
+                      "Recommended: " + _rec))
+                setattr(self, f"cbo_{_prefix}_{_s}", _c)
+
         # ADR-476: Late Correction for Convergence shot_lock (divergence signal).
         self.chk_convergence_lock_late_correction = wx.CheckBox(
             self.grp_stereo, label=T("Late Correction (re-check once settled)"),
@@ -5066,6 +5118,10 @@ class MainFrame(wx.Frame):
         for _s in ("wide", "mid", "closeup"):  # ADR-486
             layout.Add(getattr(self, f"lbl_shot_lock_strength_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, f"cbo_shot_lock_strength_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
+        layout.Add(self.chk_shot_lock_five_groups, (i := i + 1, 0), (1, 3), flag=wx.EXPAND)  # ADR-491
+        for _n in self._five_group_widget_names()[1:][::2]:
+            layout.Add(getattr(self, _n), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+            layout.Add(getattr(self, "cbo" + _n[3:]), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13028,6 +13084,10 @@ class MainFrame(wx.Frame):
         for _s in ("wide", "mid", "closeup"):  # ADR-486
             getattr(self, f"lbl_shot_lock_strength_{_s}").Enable(is_divergence)
             getattr(self, f"cbo_shot_lock_strength_{_s}").Enable(is_divergence)
+        self.chk_shot_lock_five_groups.Enable(is_divergence)  # ADR-491
+        _five = is_divergence and self.chk_shot_lock_five_groups.GetValue()
+        for _n in self._five_group_widget_names()[1:]:
+            getattr(self, _n).Enable(_five)
         is_wait_for_settle = is_divergence and self.chk_convergence_lock_wait_for_settle.GetValue()
         self.lbl_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
         self.cbo_convergence_lock_settle_wait_max.Enable(is_wait_for_settle)
@@ -13397,6 +13457,7 @@ class MainFrame(wx.Frame):
             self.lbl_shot_lock_strength_wide, self.cbo_shot_lock_strength_wide,
             self.lbl_shot_lock_strength_mid, self.cbo_shot_lock_strength_mid,
             self.lbl_shot_lock_strength_closeup, self.cbo_shot_lock_strength_closeup,
+            *[getattr(self, _n) for _n in self._five_group_widget_names()],  # ADR-491
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -13677,7 +13738,16 @@ class MainFrame(wx.Frame):
                        (self.lbl_edge_dilation_lock_wide, self.lbl_edge_dilation_lock_closeup)):
             lw.SetLabel(T("Close-Up Value") if sw else T("Wide Shot Value"))
             lc.SetLabel(T("Wide Shot Value") if sw else T("Close-Up Value"))
+        # ADR-491: which real extreme group each extra threshold makes
+        self.lbl_shot_lock_strength_threshold_top.SetLabel(
+            T("Extreme ") + top + T(" at 3D Strength >="))
+        self.lbl_shot_lock_strength_threshold_bottom.SetLabel(
+            T("Extreme ") + bottom + T(" at 3D Strength <="))
         self.Layout()
+
+    def _five_group_widget_names(self):
+        """ADR-491: the 5 Shot Groups checkbox, then (label, box) name pairs."""
+        return ["chk_shot_lock_five_groups"] + [f"{k}_shot_lock_strength_threshold_{s}" for s in ("top", "bottom") for k in ("lbl", "cbo")] + [f"{k}_{p}_{s}" for s in ("extreme_wide", "extreme_closeup") for p in ("shot_lock_strength", "convergence_lock", "foreground_scale_lock") for k in ("lbl", "cbo")]
 
     def update_rife_interpolate(self):
         enabled = self.chk_rife_interpolate.GetValue()
@@ -14626,6 +14696,9 @@ class MainFrame(wx.Frame):
                 self.cbo_shot_lock_strength_mid.GetValue()),
             shot_lock_strength_closeup=(lambda s: float(s) if s.strip() else None)(
                 self.cbo_shot_lock_strength_closeup.GetValue()),
+            shot_lock_five_groups=self.chk_shot_lock_five_groups.GetValue(),  # ADR-491
+            **{_n[4:]: (lambda s: float(s) if s.strip() else None)(getattr(self, _n).GetValue())
+               for _n in self._five_group_widget_names()[2::2]},
             convergence_lock_settle_wait_max=int(self.cbo_convergence_lock_settle_wait_max.GetValue()),
             clip_shot_symmetric=self.chk_clip_shot_symmetric.GetValue(),
             clip_shot_bias_strength=float(self.cbo_clip_shot_bias_strength.GetValue()),
@@ -16092,6 +16165,10 @@ class MainFrame(wx.Frame):
         for _s in ("wide", "mid", "closeup"):  # ADR-486
             _v = getattr(args, f"shot_lock_strength_{_s}", None)
             getattr(self, f"cbo_shot_lock_strength_{_s}").SetValue("" if _v is None else f"{float(_v):g}")
+        self.chk_shot_lock_five_groups.SetValue(bool(getattr(args, "shot_lock_five_groups", False)))  # ADR-491
+        for _n in self._five_group_widget_names()[2::2]:
+            _v = getattr(args, _n[4:], None)
+            getattr(self, _n).SetValue("" if _v is None else f"{float(_v):g}")
         _apply_combo_value(self.cbo_convergence_lock_settle_wait_max,
                            getattr(args, "convergence_lock_settle_wait_max", DEFAULT_SETTLE_WAIT_MAX))
         self.update_shot_lock_signal()
@@ -41923,6 +42000,145 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_shot_lock_five_groups():
+    """ADR-491: 5 Shot Groups. (a) pure slot rule (top/bottom beyond the extra thresholds,
+    inclusive); (b) real labels for the extra slots with Invert on and off; (c) Shot Lock /
+    Foreground Scale values for the extra slots, falling back to the neighbour; (d) the
+    planner helpers (off unless the checkbox AND a threshold are set; strength boxes fall
+    back); (e) scene-log label override + tally; (f) GUI defaults, round-trip through
+    parse_args / CLI / restore, labels follow Invert, metadata + filename tag."""
+    import types as _t
+    import wx
+    from . import utils as U
+    from .shot_lock_estimator import ShotLockEstimator
+    from .foreground_scale_estimator import ForegroundScaleEstimator
+
+    # (a)
+    f = U.plan_slot_for_strength
+    assert f(4.1, "wide", 4.1, 3.6) == "top" and f(4.2, "wide", 4.1, 3.6) == "top"
+    assert f(4.0, "wide", 4.1, 3.6) == "wide" and f(3.8, "mid", 4.1, 3.6) == "mid"
+    assert f(3.6, "closeup", 4.1, 3.6) == "bottom" and f(3.7, "closeup", 4.1, 3.6) == "closeup"
+    assert f(4.2, "wide", None, 3.6) == "wide" and f(3.5, "closeup", 4.1, None) == "closeup"
+
+    # (b)
+    saved = dict(U.SHOT_LABEL_SWAP)
+    try:
+        U.SHOT_LABEL_SWAP["convergence"] = False  # Invert ON
+        assert [U._slot_real_label(x) for x in ("top", "wide", "mid", "closeup", "bottom")] == \
+            ["Extreme Wide", "Wide", "Mid", "Close-Up", "Extreme Close-Up"]
+        U.SHOT_LABEL_SWAP["convergence"] = True  # Invert OFF: High strength = close-ups
+        assert [U._slot_real_label(x) for x in ("top", "wide", "mid", "closeup", "bottom")] == \
+            ["Extreme Close-Up", "Close-Up", "Mid", "Wide", "Extreme Wide"]
+    finally:
+        U.SHOT_LABEL_SWAP.clear(); U.SHOT_LABEL_SWAP.update(saved)
+
+    # (c)
+    est = _t.SimpleNamespace(wide_value=0.0, mid_value=0.10, closeup_value=0.35)
+    v = lambda st: ShotLockEstimator._value_for_shot_type(est, st)
+    assert v("top") == 0.0 and v("bottom") == 0.35  # no extreme value -> neighbour
+    est.top_value, est.bottom_value = 0.05, 0.6
+    assert v("top") == 0.05 and v("bottom") == 0.6 and v("mid") == 0.10 and v("wide") == 0.0
+    fs = _t.SimpleNamespace(wide_value=0.25, mid_value=0.5, closeup_value=1.0)
+    fv = lambda st: ForegroundScaleEstimator._value_for_shot_type(fs, st)
+    assert fv("top") == 0.25 and fv("bottom") == 1.0
+    fs.top_value, fs.bottom_value = 0.75, 0.0
+    assert fv("top") == 0.75 and fv("bottom") == 0.0 and fv("wide") == 0.25
+
+    # (d)
+    a = _t.SimpleNamespace(shot_lock_five_groups=False, shot_lock_strength_threshold_top=4.1,
+                           shot_lock_strength_threshold_bottom=3.6)
+    assert not U._five_groups_on(a)
+    a.shot_lock_five_groups = True
+    assert U._five_groups_on(a)
+    a.shot_lock_strength_threshold_top = a.shot_lock_strength_threshold_bottom = None
+    assert not U._five_groups_on(a)  # checkbox alone does nothing
+    cm = _t.SimpleNamespace(classify_divergence_label=lambda s: "wide" if s >= 3.9 else ("closeup" if s <= 3.7 else "mid"))
+    a.shot_lock_strength_threshold_top, a.shot_lock_strength_threshold_bottom = 4.1, 3.6
+    assert [U._plan_slot_for_strength(cm, x, a) for x in (4.2, 4.0, 3.8, 3.7, 3.6)] == \
+        ["top", "wide", "mid", "closeup", "bottom"]
+    a.shot_lock_five_groups = False
+    assert [U._plan_slot_for_strength(cm, x, a) for x in (4.2, 3.6)] == ["wide", "closeup"]
+    b = _t.SimpleNamespace(convergence_lock_extreme_wide=0.55, convergence_lock_extreme_closeup=None)
+    assert U._extreme_box(b, "convergence_lock", "Extreme Wide") == 0.55
+    assert U._extreme_box(b, "convergence_lock", "Extreme Close-Up") is None
+    assert U._extreme_box(b, "convergence_lock", "Wide") is None
+    src = __import__("inspect").getsource(U._plan_every_scene_for_job)
+    assert "_plan_slot_for_strength" in src and "per_shot[\"Extreme Wide\"]" in src
+
+    # (e)
+    try:
+        U.SCENE_PLAN_LABELS, U.FS_LABELS_FROM_PLAN = ["Extreme Wide", "Close-Up", "Extreme Close-Up"], False
+        assert U._planned_label(0, "convergence") == "Extreme Wide"
+        assert U._planned_label(5, "convergence") is None
+        assert U._planned_label(0, "foreground_scale") is None  # FS not following Convergence
+        U.FS_LABELS_FROM_PLAN = True
+        assert U._planned_label(2, "foreground_scale") == "Extreme Close-Up"
+        c = {}
+        for lab in ("Wide", "Extreme Wide", "Extreme Wide", "Close-Up"):
+            U._count_label(c, lab)
+        assert U._shot_tally_text(c) == "2 extreme wide, 1 wide, 1 close-up", U._shot_tally_text(c)
+        assert U._shot_tally_text({"Wide": 1, "Mid": 0, "Close-Up": 2}) == "1 wide, 0 mid, 2 close-up"
+    finally:
+        U.SCENE_PLAN_LABELS, U.FS_LABELS_FROM_PLAN = None, False
+
+    # (f)
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        names = frame._five_group_widget_names()
+        assert len(names) == 1 + 2 * 2 + 2 * 3 * 2, names
+        assert not frame.chk_shot_lock_five_groups.GetValue()
+        for n in names[2::2]:
+            assert getattr(frame, n).GetValue() == "", n
+        args = frame.parse_args(skip_set_state=True)
+        assert args.shot_lock_five_groups is False and args.convergence_lock_extreme_wide is None
+        cmd = frame.get_cli_command()
+        assert "five-groups" not in cmd and "extreme" not in cmd, cmd
+        frame.chk_shot_lock_five_groups.SetValue(True)
+        frame.cbo_shot_lock_strength_threshold_top.SetValue("4.1")
+        frame.cbo_shot_lock_strength_threshold_bottom.SetValue("3.6")
+        frame.cbo_convergence_lock_extreme_wide.SetValue("0.55")
+        frame.cbo_foreground_scale_lock_extreme_closeup.SetValue("0.75")
+        frame.cbo_shot_lock_strength_extreme_closeup.SetValue("3.8")
+        args = frame.parse_args(skip_set_state=True)
+        assert (args.shot_lock_five_groups, args.shot_lock_strength_threshold_top,
+                args.shot_lock_strength_threshold_bottom, args.convergence_lock_extreme_wide,
+                args.foreground_scale_lock_extreme_closeup, args.shot_lock_strength_extreme_closeup,
+                args.convergence_lock_extreme_closeup) == (True, 4.1, 3.6, 0.55, 0.75, 3.8, None)
+        cmd = frame.get_cli_command()
+        for flag in ("--shot-lock-five-groups", "--shot-lock-strength-threshold-top 4.1",
+                     "--shot-lock-strength-threshold-bottom 3.6", "--convergence-lock-extreme-wide 0.55",
+                     "--foreground-scale-lock-extreme-closeup 0.75", "--shot-lock-strength-extreme-closeup 3.8"):
+            assert flag in cmd, (flag, cmd)
+        assert "--convergence-lock-extreme-closeup" not in cmd
+        # labels follow Invert (slot swap)
+        frame.cbo_convergence_lock_signal.SetValue("divergence")
+        sw = frame.shot_lock_slots_swapped()
+        frame.update_shot_lock_invert_labels()
+        top_lbl = frame.lbl_shot_lock_strength_threshold_top.GetLabel()
+        assert ("Close-Up" in top_lbl) == bool(sw) and "Extreme" in top_lbl, (sw, top_lbl)
+        # metadata + filename tag
+        args.convergence_mode = "shot_lock"
+        args.convergence_lock_signal = "divergence"
+        meta = U._build_iw3_comment_metadata(args, video=True) or ""
+        assert "iw3_shot_lock_five_groups=true" in meta and "iw3_convergence_lock_extreme_wide=0.55" in meta, meta
+        # restore from a pasted command
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--shot-lock-five-groups", "--shot-lock-strength-threshold-bottom", "3.6",
+             "--convergence-lock-extreme-wide", "0.6"]))
+        assert frame.chk_shot_lock_five_groups.GetValue()
+        assert frame.cbo_shot_lock_strength_threshold_bottom.GetValue() == "3.6"
+        assert frame.cbo_shot_lock_strength_threshold_top.GetValue() == ""
+        assert frame.cbo_convergence_lock_extreme_wide.GetValue() == "0.6"
+        assert frame.cbo_foreground_scale_lock_extreme_closeup.GetValue() == ""
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_shot_lock_five_groups: PASS")
+
+
 def _self_test_shot_lock_strength_per_shot():
     """ADR-486: Pre-Plan 3D Strength per shot. (a) the plan sets each scene's strength by
     its REAL shot type (types still decided from the measured strength), with Invert on
@@ -41952,7 +42168,7 @@ def _self_test_shot_lock_strength_per_shot():
     # the real code path, with a stub Shot Lock model
     import inspect
     src = inspect.getsource(U._plan_every_scene_for_job)
-    assert "shot_lock_strength_wide" in src and "_real_shot_label(names.get(slot)" in src
+    assert "shot_lock_strength_wide" in src and "_slot_real_label(slot)" in src
 
     app = wx.App()
     frame = None
@@ -43163,6 +43379,7 @@ def _run_self_tests():
         _self_test_shot_lock_group_short_scenes,
         _self_test_shot_lock_pre_plan,
         _self_test_shot_lock_strength_per_shot,
+        _self_test_shot_lock_five_groups,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

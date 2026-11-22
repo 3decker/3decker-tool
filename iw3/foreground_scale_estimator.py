@@ -131,6 +131,12 @@ class ForegroundScaleEstimator():
         """ADR-475: this feature's own value for Convergence's decided shot type,
         or None when it can't be mapped (unknown type, or 'mid' while this
         feature's own Mid is disabled) -- caller then falls back to _classify()."""
+        if shot_type == "top":  # ADR-491: 5-group slot beyond the High threshold
+            v = getattr(self, "top_value", None)
+            return float(v) if v is not None else self.wide_value
+        if shot_type == "bottom":  # ADR-491: 5-group slot beyond the Low threshold
+            v = getattr(self, "bottom_value", None)
+            return float(v) if v is not None else self.closeup_value
         if shot_type == "wide":
             return self.wide_value
         if shot_type == "closeup":

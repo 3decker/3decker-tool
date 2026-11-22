@@ -3772,6 +3772,11 @@ def make_output_filename(input_filename, args, video=False):
                 lock_decide_speed = getattr(args, "convergence_lock_decide_speed", None)
                 if lock_decide_speed is not None:
                     convergence_smoothing += f"_decidespd{to_deciaml(lock_decide_speed, 100, 2)}"
+                if getattr(args, "shot_lock_five_groups", False):  # ADR-491
+                    _t5 = getattr(args, "shot_lock_strength_threshold_top", None)
+                    _b5 = getattr(args, "shot_lock_strength_threshold_bottom", None)
+                    convergence_smoothing += ("_5g" + (to_deciaml(_t5, 100, 2) if _t5 is not None else "x")
+                                              + "-" + (to_deciaml(_b5, 100, 2) if _b5 is not None else "x"))
                 # ADR-437: only shown when actually using the divergence signal --
                 # "clip" is the unchanged default, so nothing new to show for it.
                 lock_signal = getattr(args, "convergence_lock_signal", DEFAULT_SIGNAL)
@@ -4396,6 +4401,15 @@ def _build_iw3_comment_metadata(args, video=True):
                     comment_parts.append("iw3_convergence_lock_late_correction=true")
                 if getattr(args, "shot_lock_pre_plan", False):  # ADR-481
                     comment_parts.append("iw3_shot_lock_pre_plan=true")
+                if getattr(args, "shot_lock_five_groups", False):  # ADR-491
+                    comment_parts.append("iw3_shot_lock_five_groups=true")
+                    for _k in ("shot_lock_strength_threshold_top", "shot_lock_strength_threshold_bottom",
+                               "shot_lock_strength_extreme_wide", "shot_lock_strength_extreme_closeup",
+                               "convergence_lock_extreme_wide", "convergence_lock_extreme_closeup",
+                               "foreground_scale_lock_extreme_wide", "foreground_scale_lock_extreme_closeup"):
+                        _v = getattr(args, _k, None)
+                        if _v is not None:
+                            comment_parts.append(f"iw3_{_k}={_v}")
                 for _shot in ("wide", "mid", "closeup"):  # ADR-486
                     _v = getattr(args, f"shot_lock_strength_{_shot}", None)
                     if _v is not None:
@@ -5146,10 +5160,51 @@ def _set_shot_label_swap(args):
 
 
 def _real_shot_label(label, feature):
-    """ADR-483: the REAL shot type for a slot label (see SHOT_LABEL_SWAP)."""
+    """ADR-483: the REAL shot type for a slot label (see SHOT_LABEL_SWAP).
+    ADR-491: also swaps the 5-group extremes."""
     if label and SHOT_LABEL_SWAP.get(feature):
-        return {"Wide": "Close-Up", "Close-Up": "Wide"}.get(label, label)
+        return {"Wide": "Close-Up", "Close-Up": "Wide",
+                "Extreme Wide": "Extreme Close-Up", "Extreme Close-Up": "Extreme Wide"}.get(label, label)
     return label
+
+
+# ADR-491: slot name -> slot label (before the real-shot swap). 'top' = beyond the High
+# threshold (same side as the "wide" slot), 'bottom' = beyond the Low threshold.
+SLOT_LABELS = {"top": "Extreme Wide", "wide": "Wide", "mid": "Mid", "closeup": "Close-Up",
+               "bottom": "Extreme Close-Up"}
+SHOT_LABEL_ORDER = ("Extreme Wide", "Wide", "Mid", "Close-Up", "Extreme Close-Up")
+# ADR-491: when Pre-Plan ran, each scene's REAL shot label (index = scene number - 1);
+# the Convergence / Foreground Scale scene logs use it instead of guessing from the
+# value (two groups can share a value, e.g. Close-Up and Extreme Close-Up both 0.00).
+SCENE_PLAN_LABELS = None
+FS_LABELS_FROM_PLAN = False
+
+
+def _slot_real_label(slot):
+    """ADR-491: REAL shot label for a planner slot ('top'/'wide'/'mid'/'closeup'/'bottom')."""
+    return _real_shot_label(SLOT_LABELS.get(slot), "convergence") if slot else None
+
+
+def _planned_label(scene_index, feature):
+    """ADR-491: the planned real label for a scene, or None (use value matching)."""
+    labels = SCENE_PLAN_LABELS
+    if labels is None or (feature == "foreground_scale" and not FS_LABELS_FROM_PLAN):
+        return None
+    return labels[scene_index] if 0 <= scene_index < len(labels) else None
+
+
+def _count_label(counts, label):
+    counts[label] = counts.get(label, 0) + 1
+
+
+def _shot_tally_text(counts):
+    """ADR-491: 'N wide, N mid, N close-up' -- extremes only when present."""
+    parts = []
+    for name in SHOT_LABEL_ORDER:
+        n = counts.get(name, 0)
+        if n or name in ("Wide", "Close-Up") or (name == "Mid" and "Mid" in counts):
+            parts.append(f"{n} {name.lower()}")
+    return ", ".join(parts)
 
 
 def _classify_shot_lock_mean(mean, lock_values):
@@ -5204,8 +5259,8 @@ def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
                else f"frame {start} - {end}")
         line = f"Scene {i}   {span}   ({frames} frames)   Convergence: {mean:.2f}"
         if lock_values is not None:
-            label = _classify_shot_lock_mean(mean, lock_values)
-            shot_counts[label] += 1
+            label = _planned_label(i - 1, "convergence") or _classify_shot_lock_mean(mean, lock_values)
+            _count_label(shot_counts, label)
             line += f"   [{label}]"
         lines.append(line)
         total_frames += frames
@@ -5221,10 +5276,10 @@ def _format_convergence_scene_log(st, output_filename, fps, in_progress=False):
         so_far = " so far" if in_progress else ""
         # ADR-434: no "0 mid" clutter when the Mid Shot Value box was left empty
         # (disabled) -- _classify_shot_lock_mean() never returns "Mid" in that case.
-        mid_part = f"{shot_counts['Mid']} mid, " if lock_values[1] is not None else ""
-        lines.append(
-            f"Shot classification{so_far}: {shot_counts['Wide']} wide, {mid_part}"
-            f"{shot_counts['Close-Up']} close-up (of {len(st.scene_records)} scene(s))")
+        if lock_values[1] is None and not shot_counts.get("Mid"):
+            shot_counts.pop("Mid", None)
+        lines.append(f"Shot classification{so_far}: {_shot_tally_text(shot_counts)} "
+                     f"(of {len(st.scene_records)} scene(s))")
     return "\n".join(lines) + "\n"
 
 
@@ -5440,8 +5495,9 @@ def _format_foreground_scale_scene_log(st, output_filename, fps, in_progress=Fal
                else f"frame {start} - {end}")
         line = f"Scene {i}   {span}   ({frames} frames)   Foreground Scale: {mean:.2f}"
         if lock_values is not None:
-            label = _classify_shot_lock_mean_foreground_scale(mean, lock_values)
-            shot_counts[label] += 1
+            label = (_planned_label(i - 1, "foreground_scale")
+                     or _classify_shot_lock_mean_foreground_scale(mean, lock_values))
+            _count_label(shot_counts, label)
             line += f"   [{label}]"
         lines.append(line)
         total_frames += frames
@@ -5455,10 +5511,10 @@ def _format_foreground_scale_scene_log(st, output_filename, fps, in_progress=Fal
         lines.append(f"Average Foreground Scale for whole movie (time-weighted): {overall:.2f}")
     if lock_values is not None and st.scene_records:
         so_far = " so far" if in_progress else ""
-        mid_part = f"{shot_counts['Mid']} mid, " if lock_values[1] is not None else ""
-        lines.append(
-            f"Shot classification{so_far}: {shot_counts['Wide']} wide, {mid_part}"
-            f"{shot_counts['Close-Up']} close-up (of {len(st.scene_records)} scene(s))")
+        if lock_values[1] is None and not shot_counts.get("Mid"):
+            shot_counts.pop("Mid", None)
+        lines.append(f"Shot classification{so_far}: {_shot_tally_text(shot_counts)} "
+                     f"(of {len(st.scene_records)} scene(s))")
     return "\n".join(lines) + "\n"
 
 
@@ -5944,13 +6000,14 @@ def _format_combined_scene_log(strength_state, conv_state, fg_state, output_file
                 f"3D Strength: {s_mean:.1f} (raw {s_raw:.3f})   "
                 f"Convergence: {c_mean:.2f}")
         if c_lock_values is not None:
-            label = _classify_shot_lock_mean(c_mean, c_lock_values)
-            shot_counts_conv[label] += 1
+            label = _planned_label(i, "convergence") or _classify_shot_lock_mean(c_mean, c_lock_values)
+            _count_label(shot_counts_conv, label)
             line += f" [{label}]"
         line += f"   Foreground Scale: {fg_mean:.2f}"
         if fg_lock_values is not None:
-            label = _classify_shot_lock_mean_foreground_scale(fg_mean, fg_lock_values)
-            shot_counts_fg[label] += 1
+            label = (_planned_label(i, "foreground_scale")
+                     or _classify_shot_lock_mean_foreground_scale(fg_mean, fg_lock_values))
+            _count_label(shot_counts_fg, label)
             line += f" [{label}]"
         if edl_records is not None:
             _, _, _, edl_pair = edl_records[i]
@@ -7905,6 +7962,8 @@ def plan_scene_strengths(durations, strengths, min_len=0.0, group_short=False, f
 
 def _clear_scene_plan(args):
     """ADR-481: turn off any plan left on the (shared, reused) Shot Lock models."""
+    global SCENE_PLAN_LABELS, FS_LABELS_FROM_PLAN
+    SCENE_PLAN_LABELS, FS_LABELS_FROM_PLAN = None, False  # ADR-491
     conv_model = args.state.get("convergence_model")
     if conv_model is not None and hasattr(conv_model, "set_scene_plan"):
         conv_model.set_scene_plan(None)
@@ -7947,14 +8006,14 @@ def _write_scene_plan_file(output_path, input_filename, rows, args):
                  f"Minimum Scene Length: {float(getattr(args, 'shot_lock_min_scene_length', 0) or 0):g}s, "
                  f"Group Short Scenes: {'on' if getattr(args, 'shot_lock_group_short_scenes', False) else 'off'}",
                  "",
-                 f"{'scene':>5}  {'start':>10}  {'length':>7}  {'3D strength':>11}  {'shot':<8}  "
+                 f"{'scene':>5}  {'start':>10}  {'length':>7}  {'3D strength':>11}  {'shot':<16}  "
                  f"{'convergence':>11}  {'fg scale':>8}  note"]
         for r in rows:
             conv = "-" if r["convergence"] is None else f"{r['convergence']:.2f}"
             fs = "-" if r["foreground_scale"] is None else f"{r['foreground_scale']:.2f}"
             st = "-" if r["strength"] is None else f"{r['strength']:.1f}"
             lines.append(f"{r['index']:>5}  {_format_plan_time(r['start']):>10}  {r['length']:6.1f}s  {st:>11}  "
-                         f"{(r['shot'] or '-'):<8}  {conv:>11}  {fs:>8}  {r['note']}")
+                         f"{(r['shot'] or '-'):<16}  {conv:>11}  {fs:>8}  {r['note']}")
         tmp = out_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -7962,6 +8021,47 @@ def _write_scene_plan_file(output_path, input_filename, rows, args):
         print(f"[iw3] Pre-Plan Every Scene: plan written to {out_path}", file=sys.stderr)
     except Exception as e:  # noqa
         print(f"[iw3] Pre-Plan Every Scene: could not write the plan file ({e}).", file=sys.stderr)
+
+
+def _five_groups_on(args):
+    """ADR-491: the 5-group option is on and at least one extra threshold is set."""
+    return bool(getattr(args, "shot_lock_five_groups", False)) and (
+        getattr(args, "shot_lock_strength_threshold_top", None) is not None
+        or getattr(args, "shot_lock_strength_threshold_bottom", None) is not None)
+
+
+def _first_not_none(*values):
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
+def _extreme_box(args, prefix, real_label):
+    """ADR-491: value of the REAL-shot extreme box (e.g. convergence_lock_extreme_wide)
+    for 'Extreme Wide' / 'Extreme Close-Up'; None = use the neighbouring group's value."""
+    key = {"Extreme Wide": "extreme_wide", "Extreme Close-Up": "extreme_closeup"}.get(real_label)
+    v = getattr(args, f"{prefix}_{key}", None) if key else None
+    return float(v) if v is not None else None
+
+
+def plan_slot_for_strength(strength, base_slot, top=None, bottom=None):
+    """ADR-491: pure rule -- a planned 3D Strength beyond the extra 'top' threshold (at
+    or above) or 'bottom' threshold (at or below) gets the extreme slot; otherwise the
+    normal 3-group slot."""
+    if top is not None and strength >= float(top) - 1e-9:
+        return "top"
+    if bottom is not None and strength <= float(bottom) + 1e-9:
+        return "bottom"
+    return base_slot
+
+
+def _plan_slot_for_strength(conv_model, strength, args):
+    base = conv_model.classify_divergence_label(strength)
+    if not _five_groups_on(args):
+        return base
+    return plan_slot_for_strength(strength, base, getattr(args, "shot_lock_strength_threshold_top", None),
+                                  getattr(args, "shot_lock_strength_threshold_bottom", None))
 
 
 def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_scene_len,
@@ -8036,7 +8136,15 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
         if (conv_model is not None and hasattr(conv_model, "set_scene_plan")
                 and getattr(conv_model, "signal", None) == "divergence"
                 and getattr(args, "convergence_mode", "constant") == "shot_lock"):
-            types = [conv_model.classify_divergence_label(v) if v is not None else None for v in final]
+            types = [_plan_slot_for_strength(conv_model, v, args) if v is not None else None for v in final]
+            five = _five_groups_on(args)
+            if five:
+                # ADR-491: values for the two extra slots, from the REAL-shot boxes.
+                top_real, bottom_real = _slot_real_label("top"), _slot_real_label("bottom")
+                conv_model.top_value = _extreme_box(args, "convergence_lock", top_real)
+                conv_model.bottom_value = _extreme_box(args, "convergence_lock", bottom_real)
+            else:
+                conv_model.top_value = conv_model.bottom_value = None
             conv_model.set_scene_plan(types)
         elif getattr(args, "convergence_mode", "constant") == "shot_lock":
             print("[iw3] Pre-Plan Every Scene: Convergence Shot Lock uses the CLIP signal, not 3D Strength -- "
@@ -8047,12 +8155,16 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
         per_shot = {"Wide": getattr(args, "shot_lock_strength_wide", None),
                     "Mid": getattr(args, "shot_lock_strength_mid", None),
                     "Close-Up": getattr(args, "shot_lock_strength_closeup", None)}
+        if _five_groups_on(args):  # ADR-491: extremes fall back to their neighbour's box
+            per_shot["Extreme Wide"] = _first_not_none(getattr(args, "shot_lock_strength_extreme_wide", None),
+                                                       per_shot["Wide"])
+            per_shot["Extreme Close-Up"] = _first_not_none(
+                getattr(args, "shot_lock_strength_extreme_closeup", None), per_shot["Close-Up"])
         if any(v is not None for v in per_shot.values()):
             if types:
-                names = {"wide": "Wide", "mid": "Mid", "closeup": "Close-Up"}
                 n_set = 0
                 for i, slot in enumerate(types):
-                    v = per_shot.get(_real_shot_label(names.get(slot), "convergence"))
+                    v = per_shot.get(_slot_real_label(slot))
                     if v is not None:
                         final[i] = float(v)
                         n_set += 1
@@ -8066,6 +8178,11 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
         fs_model = args.state.get("foreground_scale_model")
         if fs_model is not None:
             fs_model.planned = True
+            if _five_groups_on(args):  # ADR-491
+                fs_model.top_value = _extreme_box(args, "foreground_scale_lock", _slot_real_label("top"))
+                fs_model.bottom_value = _extreme_box(args, "foreground_scale_lock", _slot_real_label("bottom"))
+            else:
+                fs_model.top_value = fs_model.bottom_value = None
 
         rows = []
         for i, (d, v) in enumerate(zip(durations, final)):
@@ -8083,17 +8200,21 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
                 note.append("group start")
             elif min_scene_len > 0 and d < min_scene_len:
                 note.append("short")
-            shot_label = {"wide": "Wide", "mid": "Mid", "closeup": "Close-Up"}.get(shot) if shot else None
-            shot_label = _real_shot_label(shot_label, "convergence")  # ADR-483: real shot type
+            shot_label = _slot_real_label(shot)  # ADR-483/491: real shot type
             rows.append(dict(index=i, start=edges[i], length=d, strength=v, shot=shot_label,
                              convergence=conv, foreground_scale=fs, note=", ".join(note)))
         _write_scene_plan_file(output_path, input_filename, rows, args)
-        counts = {"Wide": 0, "Mid": 0, "Close-Up": 0}
+        global SCENE_PLAN_LABELS, FS_LABELS_FROM_PLAN  # ADR-491: logs use the planned labels
+        if types:
+            SCENE_PLAN_LABELS = [r["shot"] for r in rows]
+            FS_LABELS_FROM_PLAN = bool(fs_model is not None and getattr(fs_model, "follow_convergence", False))
+        counts = {}
         for r in rows:
-            if r["shot"] in counts:
-                counts[r["shot"]] += 1
+            if r["shot"]:
+                _count_label(counts, r["shot"])
         print(f"[iw3] Pre-Plan Every Scene: {len(final)} scenes planned in {time.time() - t:.0f}s"
-              + (f" -- Wide {counts['Wide']}, Mid {counts['Mid']}, Close-Up {counts['Close-Up']}" if types else "")
+              + (" -- " + ", ".join(f"{k} {counts.get(k, 0)}" for k in SHOT_LABEL_ORDER
+                                    if counts.get(k) or k in ("Wide", "Mid", "Close-Up")) if types else "")
               + ". Each scene starts on its planned values at its cut.", file=sys.stderr)
         return starts, durations
     except Exception as e:  # noqa
@@ -10591,6 +10712,26 @@ def create_parser(required_true=True):
                                   f"(the REAL shot, whatever Invert is set to) gets exactly this 3D Strength. "
                                   f"The shot type itself is still decided from the measured strength (Auto Range "
                                   f"+ thresholds). Default: not set = keep the measured strength."))
+    parser.add_argument("--shot-lock-five-groups", action="store_true",
+                        help=("ADR-491: with --shot-lock-pre-plan: two extra shot groups beyond the "
+                              "High / Low thresholds -- Extreme Wide and Extreme Close-Up -- each with its "
+                              "own 3D Strength, Convergence and Foreground Scale (Foreground Scale needs "
+                              "--foreground-scale-lock-follow-convergence). Set the extra thresholds with "
+                              "--shot-lock-strength-threshold-top / -bottom (3D Strength values, like High / Low)."))
+    parser.add_argument("--shot-lock-strength-threshold-top", type=float, default=None,
+                        help="ADR-491: planned 3D Strength at or ABOVE this = the extreme group on the High side")
+    parser.add_argument("--shot-lock-strength-threshold-bottom", type=float, default=None,
+                        help="ADR-491: planned 3D Strength at or BELOW this = the extreme group on the Low side")
+    for _shot, _name in (("extreme-wide", "Extreme Wide"), ("extreme-closeup", "Extreme Close-Up")):
+        parser.add_argument(f"--shot-lock-strength-{_shot}", type=float, default=None,
+                            help=f"ADR-491: 3D Strength for {_name} scenes (REAL shot type; empty = the "
+                                 f"neighbouring group's box)")
+        parser.add_argument(f"--convergence-lock-{_shot}", type=float, default=None,
+                            help=f"ADR-491: Convergence for {_name} scenes (REAL shot type; empty = the "
+                                 f"neighbouring group's value)")
+        parser.add_argument(f"--foreground-scale-lock-{_shot}", type=float, default=None,
+                            help=f"ADR-491: Foreground Scale for {_name} scenes (REAL shot type; needs Follow "
+                                 f"Convergence; empty = the neighbouring group's value)")
     parser.add_argument("--shot-lock-pre-plan", action="store_true",
                         help="ADR-481: Pre-Plan Every Scene -- needs Auto 3D Strength. Before rendering, "
                              "uses the saved scene cuts and a quick (saved, reused) pre-scan to decide every "

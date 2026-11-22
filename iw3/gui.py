@@ -695,6 +695,30 @@ class DepthCurveCalibrateDialog(wx.Dialog):
               "Recommended: 1.5. It also smooths out a sudden jump at the very far end of the depth "
               "that curves had before this setting existed. Only affects new calibrations -- an "
               "existing curve file can be reshaped with the limit in seconds, without recalibrating."))
+        # ADR-488: Target Reset Look.
+        self.chk_target_reset_look = wx.CheckBox(
+            self, label=T("Target: Reset Look (depth restarts at each scene cut)"),
+            name="chk_depth_curve_target_reset_look")
+        self.chk_target_reset_look.SetValue(False)
+        self.chk_target_reset_look.SetToolTip(
+            T("What: the 'Borrow Curve From' pass is made with its depth range restarted at every "
+              "scene cut, so each scene is stretched over its own full near-to-far range (the 'reset "
+              "look'). Your own model's pass stays exactly like a real conversion. The saved curve "
+              "reshapes normal depth toward that look, and you use it in real conversions as usual "
+              "with Depth Curve Match -- no reset happens there." + "\n"
+              "Why: the reset look gives more separation and pop (more depth used inside each scene), "
+              "but resetting during a real conversion made thin objects (cage bars, spears) pop out and "
+              "smear. A curve keeps the extra separation while never moving the nearest and farthest "
+              "points." + "\n"
+              "Pros: more separation/immersion, reusable per movie or genre." + "\n"
+              "Cons: a curve applies the same reshaping to every scene, so it gives the AVERAGE reset "
+              "look, not each scene's own stretch. Calibration takes a little longer (a scene scan per "
+              "clip, saved for reuse)." + "\n"
+              "Values: on / off (default off). With it on you may pick your own model (e.g. VDA_L -> "
+              "VDA_L) for the pure reset look, or another model (e.g. Any_V3_Metric_Large) to get that "
+              "model's look AND the reset look in one curve." + "\n"
+              "Recommended: Borrow Curve From Any_V3_Metric_Large + this on, Max Stretch 0, saved under "
+              "a new name (e.g. ..._resetlook.json) so your current curve is kept."))
         self.btn_run = wx.Button(self, label=T("Calibrate"))
         self.btn_close = wx.Button(self, id=wx.ID_CLOSE, label=T("Close"))
         self.txt_log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
@@ -715,6 +739,9 @@ class DepthCurveCalibrateDialog(wx.Dialog):
         top.Add(self.btn_output)
         top.Add(self.lbl_max_stretch, flag=wx.ALIGN_CENTER_VERTICAL)
         top.Add(self.cbo_max_stretch)
+        top.Add((0, 0))
+        top.Add((0, 0))
+        top.Add(self.chk_target_reset_look)  # ADR-488
         top.Add((0, 0))
 
         hint = wx.StaticText(self, label=T(
@@ -810,9 +837,11 @@ class DepthCurveCalibrateDialog(wx.Dialog):
             wx.MessageBox(T("Pick a model to borrow a curve from."), T("Calibrate Depth Curve"),
                           wx.OK | wx.ICON_WARNING)
             return
-        if target_model == self.source_model:
+        reset_look = self.chk_target_reset_look.GetValue()  # ADR-488
+        if target_model == self.source_model and not reset_look:
             wx.MessageBox(T("Pick a DIFFERENT model to borrow a curve from -- there is nothing "
-                             "to reshape toward if it's the same as your own Depth Model."),
+                             "to reshape toward if it's the same as your own Depth Model "
+                             "(unless 'Target: Reset Look' is ticked)."),
                           T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
             return
 
@@ -850,6 +879,8 @@ class DepthCurveCalibrateDialog(wx.Dialog):
                           T("Calibrate Depth Curve"), wx.OK | wx.ICON_WARNING)
             return
         cmd += ["--max-stretch", str(max_stretch)]
+        if reset_look:
+            cmd += ["--target-reset-look"]  # ADR-488
         for raw in clip_lines:
             cmd += ["--clip", raw]
         cmd += list(self.model_settings_argv)
@@ -18723,12 +18754,15 @@ class MainFrame(wx.Frame):
             return
         source_model = self.cbo_depth_model.GetValue()
         target_choices = [m for m in self.get_depth_models() if m != source_model]
+        # ADR-488: your own model last -- only usable with "Target: Reset Look".
+        _picked_default = target_choices[:]
         if "Any_V3_Metric_Large" in target_choices:
             default_target = "Any_V3_Metric_Large"
         elif target_choices:
             default_target = target_choices[0]
         else:
             default_target = ""
+        target_choices = _picked_default + [source_model]
         dlg = DepthCurveCalibrateDialog(self, source_model, target_choices, default_target,
                                          self._depth_model_settings_argv())
         dlg.ShowModal()

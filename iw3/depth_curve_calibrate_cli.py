@@ -161,14 +161,20 @@ def _sample_pixels_from_dir(depth_dir, pixels_per_frame=4000, seed=0):
 def calibrate(input_path, source_model, target_model, clips,
               gpu=0, resolution=None, limit_resolution=False,
               pixels_per_frame=4000, num_points=512, output_path=None,
-              work_dir=None, log=print, extra_argv=None, max_stretch=DEFAULT_MAX_STRETCH):
+              work_dir=None, log=print, extra_argv=None, max_stretch=DEFAULT_MAX_STRETCH,
+              target_reset_look=False):
     """Full calibration run over one or more clips: export both models over
     EVERY clip (each model loaded once, reused across all its clips), sample
     pixels from each clip/side, pool every clip's samples together, build the
     LUT from the pooled data, save it. `clips` is a list of (start_time,
     end_time) tuples. `extra_argv` (ADR-469) is forwarded unchanged to every
     export pass -- see _run_export_pass's own docstring for why this exists.
-    Returns the saved file path."""
+    Returns the saved file path.
+    ADR-488 `target_reset_look`: the TARGET pass is exported with Scene Detection on, so
+    its depth range (EMA) and model state restart at every scene cut ("reset look":
+    each scene stretched over its own range), while the SOURCE pass stays exactly like a
+    real conversion. The curve then reshapes normal depth toward the reset look, to be
+    used in real jobs WITHOUT any reset. The target may be the source model itself."""
     if not clips:
         raise ValueError("calibrate() requires at least one clip")
     # ADR-480: a clip may name its own movie file -- (path, start, end) -- so one curve
@@ -196,8 +202,12 @@ def calibrate(input_path, source_model, target_model, clips,
             pass_dirs[i][0] = pass_a_dir
         _release_model(model_obj)
 
+        target_argv = list(extra_argv or [])
+        if target_reset_look:
+            target_argv += ["--scene-detect"]  # ADR-488: depth restarts at every scene cut
         log(f"[depth-curve-calibrate] [2/3] exporting depth with target model "
-            f"({target_model}) over the same {len(clips)} clip(s)...")
+            f"({target_model}{', reset look' if target_reset_look else ''}) over the same "
+            f"{len(clips)} clip(s)...")
         model_obj = None
         for i, (clip_path, start_time, end_time) in enumerate(clips):
             log(f"  clip {i + 1}/{len(clips)}: {path.basename(clip_path)} "
@@ -205,7 +215,7 @@ def calibrate(input_path, source_model, target_model, clips,
             pass_b_dir = path.join(work_dir, f"clip{i}_target")
             model_obj = _run_export_pass(clip_path, target_model, pass_b_dir, start_time, end_time,
                                           gpu, resolution, limit_resolution, depth_model=model_obj,
-                                          extra_argv=extra_argv)
+                                          extra_argv=target_argv)
             pass_dirs[i][1] = pass_b_dir
         _release_model(model_obj)
 
@@ -253,10 +263,12 @@ def calibrate(input_path, source_model, target_model, clips,
             "pixels_per_frame": pixels_per_frame,
             "calibrated_at": datetime.now().isoformat(timespec="seconds"),
             "max_stretch": max_stretch,
+            "target_reset_look": bool(target_reset_look),  # ADR-488
         }
         save_curve(output_path, lut_x, lut_y, meta=meta)
         log(f"[depth-curve-calibrate] done -- wrote {output_path} "
-            f"({source_model} -> {target_model}, {total_frame_count} frames across "
+            f"({source_model} -> {target_model}{' (reset look)' if target_reset_look else ''}, "
+            f"{total_frame_count} frames across "
             f"{len(clips)} clip(s))")
         return output_path
     finally:
@@ -361,6 +373,13 @@ def create_parser():
                         help="ADR-474: cap how strongly the curve may stretch any part of the "
                              "depth range (1.5 = at most 1.5x). Stops distant backgrounds being "
                              "over-deepened and their small ripples amplified. 0 = no limit.")
+    parser.add_argument("--target-reset-look", action="store_true",
+                        help=("ADR-488: export the TARGET pass with its depth range restarted at every "
+                              "scene cut (each scene stretched over its own range -- the 'reset look'), "
+                              "so the curve reshapes normal depth toward that look. Use the curve in "
+                              "real conversions as usual (no reset there). Allows the same model as "
+                              "source and target (e.g. VDA_L -> VDA_L reset look); with a different "
+                              "target (e.g. Any_V3_Metric_Large) the curve carries both looks."))
     parser.add_argument("--num-points", type=int, default=512,
                          help="Resolution of the saved lookup table.")
     parser.add_argument("--output", "-o", type=str, default=None,
@@ -431,9 +450,10 @@ def run(args):
     if not path.exists(args.input):
         print(f"ERROR: --input file does not exist: {args.input}", file=sys.stderr)
         return 1
-    if args.source_model == args.target_model:
+    if args.source_model == args.target_model and not getattr(args, "target_reset_look", False):
         print("ERROR: --source-model and --target-model must be different -- there is "
-              "nothing to reshape toward if they're the same model.", file=sys.stderr)
+              "nothing to reshape toward if they're the same model (unless --target-reset-look "
+              "is on).", file=sys.stderr)
         return 1
     try:
         clips = resolve_clips(args)
@@ -449,6 +469,7 @@ def run(args):
             log=lambda msg: print(msg, file=sys.stderr),
             extra_argv=model_settings_argv(args),
             max_stretch=getattr(args, "max_stretch", DEFAULT_MAX_STRETCH),
+            target_reset_look=bool(getattr(args, "target_reset_look", False)),
         )
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -780,11 +801,50 @@ def _self_test_run_gating():
     print("_self_test_run_gating: PASS")
 
 
+def _self_test_target_reset_look():
+    """ADR-488: only the TARGET pass gets --scene-detect; the source pass keeps the
+    real-job settings; meta records it; same model allowed only with the option."""
+    import tempfile as _tf
+    from . import depth_curve_calibrate_cli as M
+    seen = []
+    def _fake(input_path, model_name, pass_dir, start_time, end_time, gpu, resolution,
+              limit_resolution, depth_model=None, extra_argv=None):
+        seen.append((model_name, list(extra_argv or [])))
+        d = _pass_depth_dir(pass_dir, input_path); os.makedirs(d, exist_ok=True)
+        v = 0.3 if "--scene-detect" in (extra_argv or []) else 0.5
+        for k in range(3):
+            _make_fake_depth_png(path.join(d, f"{k:06d}.png"), v + 0.1 * k)
+        return object()
+    orig, orig_rel = M._run_export_pass, M._release_model
+    M._run_export_pass, M._release_model = _fake, (lambda m: None)
+    try:
+        with _tf.TemporaryDirectory() as td:
+            vid = path.join(td, "movie.mkv"); open(vid, "wb").close()
+            out = path.join(td, "curve.json")
+            M.calibrate(vid, "VDA_L", "VDA_L", [("00:00:01", "00:00:02")], output_path=out,
+                        work_dir=path.join(td, "w"), log=lambda *_: None,
+                        extra_argv=["--ema-normalize", "--ema-decay", "0.99"], target_reset_look=True)
+            import json
+            meta = json.load(open(out, encoding="utf-8"))["meta"]
+            assert meta["target_reset_look"] is True, meta
+    finally:
+        M._run_export_pass, M._release_model = orig, orig_rel
+    assert seen[0] == ("VDA_L", ["--ema-normalize", "--ema-decay", "0.99"]), seen
+    assert seen[1] == ("VDA_L", ["--ema-normalize", "--ema-decay", "0.99", "--scene-detect"]), seen
+    p = create_parser()
+    a = p.parse_args(["-i", "x.mkv", "--source-model", "VDA_L", "--target-model", "VDA_L"])
+    assert run(a) == 1, "same model without the option must still be refused (missing file also refuses)"
+    a = p.parse_args(["-i", "x.mkv", "--source-model", "VDA_L", "--target-model", "VDA_L", "--target-reset-look"])
+    assert a.target_reset_look is True
+    print("_self_test_target_reset_look: PASS")
+
+
 def _run_self_tests():
     _self_test_pass_depth_dir_layout()
     _self_test_sample_pixels_from_dir()
     _self_test_parse_clip_spec_and_resolve_clips()
     _self_test_model_settings_argv()
+    _self_test_target_reset_look()
     _self_test_calibrate_end_to_end_with_fake_passes()
     _self_test_calibrate_pools_multiple_clips()
     _self_test_calibrate_pools_multiple_movies()

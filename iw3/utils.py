@@ -3865,6 +3865,9 @@ def make_output_filename(input_filename, args, video=False):
                 mp += f"hi{to_deciaml(mg_high, 100, 2)}"
         else:
             mp = ""
+        if float(getattr(args, "smear_guard", 0.0) or 0.0) > 0.0:  # ADR-494: Smear Guard
+            mp += (f"_sg{to_deciaml(args.smear_guard, 100, 2)}"
+                   f"l{int(round(float(getattr(args, 'smear_guard_limit', 12.0) or 12.0)))}")
         if _midground_roundness_any(args):  # ADR-492: Midground Roundness
             _rv = [getattr(args, "midground_roundness", 0.0) or 0.0] + [
                 getattr(args, f"midground_roundness_{k}", None) for k in ROUNDNESS_SHOT_KEYS.values()]
@@ -4542,6 +4545,9 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_background_pop_threshold_high={args.background_pop_threshold_high}")
     if getattr(args, "midground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_midground_pop={args.midground_pop}")
+    if float(getattr(args, "smear_guard", 0.0) or 0.0) > 0.0:  # ADR-494
+        comment_parts.append(f"iw3_smear_guard={args.smear_guard}")
+        comment_parts.append(f"iw3_smear_guard_limit={getattr(args, 'smear_guard_limit', 12.0)}")
     if float(getattr(args, "midground_roundness", 0.0) or 0.0) > 0.0:  # ADR-492
         comment_parts.append(f"iw3_midground_roundness={args.midground_roundness}")
     if float(getattr(args, "midground_roundness_center", 0.5)) != 0.5:
@@ -6337,7 +6343,8 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
                                      shot_type=fs_shot_type, frames=depth.shape[0])
                 if foreground_scale_scene_log_active:
                     _push_foreground_scale_scene_log(fs_shot_type)
-            depth = _apply_midground_roundness(mapper_fn(depth), args)  # ADR-492
+            depth = _apply_smear_guard(_apply_midground_roundness(mapper_fn(depth), args),
+                                       args, im, reset_pts)  # ADR-492 / ADR-494
             # ADR-423: real confirmed bug -- unlike sod_v1/face_detect/depth_percentile/
             # clip_shot/sod_track (whose convergence value comes from
             # ConvergenceEstimator._quantile_position(), a position WITHIN the depth
@@ -6354,10 +6361,12 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
         else:
             convergence = args.state["convergence_model"](im, depth, reset_pts=reset_pts)
             convergence = mapper_fn(convergence)
-            depth = _apply_midground_roundness(mapper_fn(depth), args)  # ADR-492
+            depth = _apply_smear_guard(_apply_midground_roundness(mapper_fn(depth), args),
+                                       args, im, reset_pts)  # ADR-492 / ADR-494
     else:
         convergence = args.convergence
-        depth = _apply_midground_roundness(mapper_fn(depth), args)  # ADR-492
+        depth = _apply_smear_guard(_apply_midground_roundness(mapper_fn(depth), args),
+                                   args, im, reset_pts)  # ADR-492 / ADR-494
 
     # ADR-237: real user-found bug -- the inpaint methods below (forward_inpaint/
     # mlbw_l2_inpaint/monobw_inpaint) buffer frames internally and only return a
@@ -8083,6 +8092,69 @@ def _apply_midground_roundness(depth, args):
     if value <= 0.0:
         return depth
     return midground_roundness_curve(depth, value, float(getattr(args, "midground_roundness_center", 0.5)))
+
+
+def smear_guard_depth(depth, strength, limit_px, divergence, out_width, prev_weight=None,
+                      reset=None, smooth=0.6):
+    """ADR-494: Smear Guard -- runs on the final 0..1 depth BEFORE the other eye is drawn.
+    Smearing comes from a big depth jump between neighbouring pixels: the eye has to be
+    stretched across it. The jump is known exactly from the depth map, so no guessing:
+      jump_px = (local max - local min of depth over a short horizontal window)
+                * divergence/100 * output width     (~ how many output pixels get stretched)
+    Where jump_px > limit_px, depth is eased toward its local average (both sides move
+    toward each other), by weight a = strength * clamp((jump_px - limit) / limit, 0, 1),
+    spread over the edge zone and blurred so there is no hard border. Only horizontal
+    jumps matter (the eyes differ horizontally). Away from big jumps depth is untouched.
+    The weight is smoothed over frames (EMA `smooth`, restarted at scene cuts) so a guarded
+    edge does not blink. Returns (new_depth, weight_map) -- the weight is passed back in as
+    prev_weight for the next call. depth: (B,1,H,W)."""
+    s = float(strength)
+    if s <= 0.0 or divergence is None or float(divergence) <= 0.0:
+        return depth, None
+    s = min(s, 1.0)
+    B, C, H, W = depth.shape
+    w = max(3, (W // 64) | 1)                      # short window: ~1.5% of the width, odd
+    pad = w // 2
+    d = depth.float()
+    dmax = F.max_pool2d(d, (1, w), stride=1, padding=(0, pad))
+    dmin = -F.max_pool2d(-d, (1, w), stride=1, padding=(0, pad))
+    jump_px = (dmax - dmin) * (float(divergence) / 100.0) * float(out_width)
+    lim = max(float(limit_px), 1.0)
+    a = ((jump_px - lim) / lim).clamp(0.0, 1.0) * s
+    a = F.max_pool2d(a, (1, w), stride=1, padding=(0, pad))                       # cover the whole edge zone
+    a = F.avg_pool2d(a, (3, w), stride=1, padding=(1, pad), count_include_pad=False)  # soft border
+    if prev_weight is not None and prev_weight.shape[1:] == a.shape[1:]:
+        out = []
+        p = prev_weight[-1:].to(a.device, a.dtype)
+        for i in range(B):
+            if reset is not None and i < len(reset) and reset[i]:
+                p = a[i:i + 1]
+            else:
+                p = p * smooth + a[i:i + 1] * (1.0 - smooth)
+            out.append(p)
+        a = torch.cat(out, dim=0)
+    mw = 3 * w if (3 * w) % 2 else 3 * w + 1
+    local_mean = F.avg_pool2d(d, (1, mw), stride=1, padding=(0, mw // 2), count_include_pad=False)
+    new = d - a * (d - local_mean)
+    return new.to(depth.dtype), a.detach()
+
+
+def _apply_smear_guard(depth, args, im=None, reset_pts=None):
+    """ADR-494: apply_divergence() hook, right after Midground Roundness."""
+    strength = float(getattr(args, "smear_guard", 0.0) or 0.0)
+    if strength <= 0.0 or depth.ndim != 4:
+        return depth
+    out_width = im.shape[-1] if im is not None else depth.shape[-1]
+    prev = args.state.get("_smear_guard_prev")
+    new, a = smear_guard_depth(depth, strength, float(getattr(args, "smear_guard_limit", 12.0) or 12.0),
+                               getattr(args, "divergence", None), out_width, prev_weight=prev,
+                               reset=reset_pts)
+    if a is not None:
+        args.state["_smear_guard_prev"] = a[-1:]
+        st = args.state.setdefault("_smear_guard_stats", [0, 0])
+        st[0] += int(depth.shape[0])
+        st[1] += int((a.flatten(1).amax(1) > 0.05).sum().item())
+    return new
 
 
 def _five_groups_on(args):
@@ -10774,6 +10846,13 @@ def create_parser(required_true=True):
                                   f"(the REAL shot, whatever Invert is set to) gets exactly this 3D Strength. "
                                   f"The shot type itself is still decided from the measured strength (Auto Range "
                                   f"+ thresholds). Default: not set = keep the measured strength."))
+    parser.add_argument("--smear-guard", type=float, default=0.0,
+                        help=("ADR-494: Smear Guard -- before the other eye is drawn, finds the spots where the "
+                              "depth jumps so sharply that pixels would be stretched (smearing) and eases the "
+                              "depth there only, smoothed over time. 0 = off (default), 0.5 to try, max 1.0"))
+    parser.add_argument("--smear-guard-limit", type=float, default=12.0,
+                        help=("ADR-494: how big a depth jump (in output pixels of stretch) is allowed before "
+                              "Smear Guard steps in. Lower = acts on more edges. Default 12"))
     parser.add_argument("--midground-roundness", type=float, default=0.0,
                         help=("ADR-492: Midground Roundness -- an S-shaped reshape of the depth curve (applied right "
                               "after Foreground Scale's curve): more depth inside mid-distance subjects (rounder), "

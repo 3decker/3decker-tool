@@ -2761,6 +2761,31 @@ class MainFrame(wx.Frame):
                       "Recommended: " + _rec))
                 setattr(self, f"cbo_{_prefix}_{_s}", _c)
 
+        # ADR-494: Smear Guard.
+        self.lbl_smear_guard = wx.StaticText(self.grp_stereo, label=T("Smear Guard"))
+        self.cbo_smear_guard = EditableComboBox(
+            self.grp_stereo, choices=["0", "0.25", "0.5", "0.75", "1.0"], name="cbo_smear_guard")
+        self.cbo_smear_guard.SetValue("0")
+        self.cbo_smear_guard.SetToolTip(
+            T("What: before the other eye is drawn, finds the spots where the depth jumps so sharply between neighbouring pixels that the picture would have to be stretched (that stretch is the smearing you see around thin objects and object edges), and eases the depth right there -- both sides of the jump move a little toward each other. Everywhere else the depth is untouched. The amount is smoothed over time, so a guarded edge doesn't blink on and off while the camera moves." + "\n"
+              "Why: smearing around cage bars, spears, or an object entering at the frame edge comes from those sharp depth jumps; the jump size is known exactly from the depth map, so it can be prevented instead of repaired." + "\n"
+              "Pros: targets only the problem spots; calms edge shimmer during camera moves; cheap (no extra AI pass)." + "\n"
+              "Cons: guarded edges get a little less depth; too strong and an object can look like a flat cut-out right at its outline." + "\n"
+              "Values: 0 = off (default), 0.25-0.75 to try, 1.0 = strongest." + "\n"
+              "Recommended: 0.5 with Smear Guard Limit 12, then compare the cage / spears / moving edges."))
+        self.lbl_smear_guard_limit = wx.StaticText(self.grp_stereo, label=T("Smear Guard Limit (px)"))
+        self.cbo_smear_guard_limit = EditableComboBox(
+            self.grp_stereo, choices=["6", "8", "12", "16", "24"], name="cbo_smear_guard_limit")
+        self.cbo_smear_guard_limit.SetValue("12")
+        self.cbo_smear_guard_limit.SetToolTip(
+            T("Only when Smear Guard is above 0." + "\n"
+              "What: how big a depth jump is allowed, in pixels of stretch on the final picture, before Smear Guard steps in. It eases in gradually: at twice this value it acts at full strength." + "\n"
+              "Why: small jumps don't smear visibly; only big ones need guarding." + "\n"
+              "Pros: lower catches more edges; higher leaves more of the 3D alone." + "\n"
+              "Cons: too low and it softens edges that were fine; too high and it misses real smears." + "\n"
+              "Values: 6-24, default 12." + "\n"
+              "Recommended: 12; try 8 if smearing remains."))
+
         # ADR-492: Midground Roundness (S-shaped depth curve reshape).
         self.lbl_midground_roundness = wx.StaticText(self.grp_stereo, label=T("Midground Roundness"))
         self.cbo_midground_roundness = EditableComboBox(
@@ -5167,6 +5192,9 @@ class MainFrame(wx.Frame):
         for _n in self._roundness_widget_names()[::2]:  # ADR-492
             layout.Add(getattr(self, _n), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, "cbo" + _n[3:]), (i, 1), (1, 2), flag=wx.EXPAND)
+        for _s in ("smear_guard", "smear_guard_limit"):  # ADR-494
+            layout.Add(getattr(self, f"lbl_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+            layout.Add(getattr(self, f"cbo_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13504,6 +13532,8 @@ class MainFrame(wx.Frame):
             self.lbl_shot_lock_strength_closeup, self.cbo_shot_lock_strength_closeup,
             *[getattr(self, _n) for _n in self._five_group_widget_names()],  # ADR-491
             *[getattr(self, _n) for _n in self._roundness_widget_names()],  # ADR-492
+            self.lbl_smear_guard, self.cbo_smear_guard,  # ADR-494
+            self.lbl_smear_guard_limit, self.cbo_smear_guard_limit,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -14752,6 +14782,8 @@ class MainFrame(wx.Frame):
             **{_n[4:]: (lambda s: float(s) if s.strip() else None)(getattr(self, _n).GetValue())
                for _n in self._five_group_widget_names()[2::2]},
             # ADR-492: Midground Roundness (empty per-shot box = None)
+            smear_guard=float(self.cbo_smear_guard.GetValue() or 0),  # ADR-494
+            smear_guard_limit=float(self.cbo_smear_guard_limit.GetValue() or 12),
             midground_roundness=float(self.cbo_midground_roundness.GetValue() or 0),
             midground_roundness_center=float(self.cbo_midground_roundness_center.GetValue() or 0.5),
             **{_n[4:]: (lambda s: float(s) if s.strip() else None)(getattr(self, _n).GetValue())
@@ -16223,6 +16255,8 @@ class MainFrame(wx.Frame):
             _v = getattr(args, f"shot_lock_strength_{_s}", None)
             getattr(self, f"cbo_shot_lock_strength_{_s}").SetValue("" if _v is None else f"{float(_v):g}")
         self.chk_shot_lock_five_groups.SetValue(bool(getattr(args, "shot_lock_five_groups", False)))  # ADR-491
+        self.cbo_smear_guard.SetValue(f"{float(getattr(args, 'smear_guard', 0.0) or 0.0):g}")  # ADR-494
+        self.cbo_smear_guard_limit.SetValue(f"{float(getattr(args, 'smear_guard_limit', 12.0) or 12.0):g}")
         self.cbo_midground_roundness.SetValue(f"{float(getattr(args, 'midground_roundness', 0.0) or 0.0):g}")  # ADR-492
         self.cbo_midground_roundness_center.SetValue(f"{float(getattr(args, 'midground_roundness_center', 0.5)):g}")
         for _n in self._roundness_widget_names()[5::2]:
@@ -42062,6 +42096,78 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_smear_guard():
+    """ADR-494: Smear Guard. (a) off / no divergence = identity; (b) a big horizontal depth step
+    gets a smaller jump, small steps and flat areas stay untouched; (c) vertical steps ignored;
+    (d) temporal smoothing + reset at cuts; (e) apply hook + all 3 call sites; (f) GUI round-trip,
+    CLI, metadata."""
+    import types as _t
+    import torch
+    import wx
+    from . import utils as U
+
+    H, W = 32, 256
+    d = torch.zeros(2, 1, H, W)
+    d[..., W // 2:] = 0.8                     # big step in the middle
+    d[..., :20] = 0.02                        # tiny step near the left (0.02 -> 0)
+    # (a)
+    assert U.smear_guard_depth(d, 0.0, 12, 3.8, 1920)[0] is d
+    assert U.smear_guard_depth(d, 0.5, 12, None, 1920)[0] is d
+    # (b) jump 0.8 * 3.8% * 1920 = 58 px > 12 -> guarded
+    new, a = U.smear_guard_depth(d, 1.0, 12, 3.8, 1920)
+    c = W // 2
+    before = float(d[0, 0, 5, c + 2] - d[0, 0, 5, c - 3])
+    after = float(new[0, 0, 5, c + 2] - new[0, 0, 5, c - 3])
+    assert after < before * 0.8, (before, after)
+    assert torch.allclose(new[..., 60:80], d[..., 60:80])        # flat area untouched
+    assert torch.allclose(new[..., 230:], d[..., 230:])
+    assert float(a[..., :12].max()) == 0.0                        # 0.02 step = 1.5 px -> not guarded
+    weak, _ = U.smear_guard_depth(d, 0.25, 12, 3.8, 1920)
+    assert float((weak - d).abs().max()) < float((new - d).abs().max())
+    # (c) vertical step only -> nothing
+    v = torch.zeros(1, 1, H, W); v[..., H // 2:, :] = 0.8
+    assert torch.allclose(U.smear_guard_depth(v, 1.0, 12, 3.8, 1920)[0], v)
+    # (d) temporal smoothing: previous weight 0 -> this frame's weight is reduced; reset ignores history
+    prev = torch.zeros_like(a[:1])
+    _, a_s = U.smear_guard_depth(d[:1], 1.0, 12, 3.8, 1920, prev_weight=prev)
+    _, a_r = U.smear_guard_depth(d[:1], 1.0, 12, 3.8, 1920, prev_weight=prev, reset=[True])
+    assert float(a_s.max()) < float(a_r.max()) * 0.5 + 1e-6 and torch.allclose(a_r, a[:1])
+    # (e)
+    args = _t.SimpleNamespace(state={}, smear_guard=0.5, smear_guard_limit=12.0, divergence=3.8)
+    im = torch.zeros(2, 3, H, 1920)
+    out = U._apply_smear_guard(d, args, im)
+    assert not torch.equal(out, d) and "_smear_guard_prev" in args.state
+    assert args.state["_smear_guard_stats"] == [2, 2], args.state["_smear_guard_stats"]
+    args.smear_guard = 0.0
+    assert U._apply_smear_guard(d, args, im) is d
+    src = __import__("inspect").getsource(U)
+    assert src.count("depth = _apply_smear_guard(_apply_midground_roundness(mapper_fn(depth), args),") == 3
+    # (f)
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.cbo_smear_guard.GetValue() == "0" and frame.cbo_smear_guard_limit.GetValue() == "12"
+        args = frame.parse_args(skip_set_state=True)
+        assert args.smear_guard == 0.0 and args.smear_guard_limit == 12.0
+        assert "smear" not in frame.get_cli_command()
+        frame.cbo_smear_guard.SetValue("0.5")
+        frame.cbo_smear_guard_limit.SetValue("8")
+        args = frame.parse_args(skip_set_state=True)
+        cmd = frame.get_cli_command()
+        assert "--smear-guard 0.5" in cmd and "--smear-guard-limit 8.0" in cmd, cmd
+        meta = U._build_iw3_comment_metadata(args, video=True) or ""
+        assert "iw3_smear_guard=0.5" in meta, meta
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--smear-guard", "0.75"]))
+        assert frame.cbo_smear_guard.GetValue() == "0.75" and frame.cbo_smear_guard_limit.GetValue() == "12"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_smear_guard: PASS")
+
+
 def _self_test_midground_roundness():
     """ADR-492: Midground Roundness. (a) curve: identity at 0, endpoints fixed, strictly
     increasing, steeper at the center and flatter at the ends, center moves the steep part;
@@ -42122,7 +42228,7 @@ def _self_test_midground_roundness():
     finally:
         U.SHOT_LABEL_SWAP.clear(); U.SHOT_LABEL_SWAP.update(saved)
     src = __import__("inspect").getsource(U)  # module source: apply_divergence may be wrapped by an add-on
-    assert src.count("_apply_midground_roundness(mapper_fn(depth), args)") == 3
+    assert src.count("_apply_midground_roundness(mapper_fn(depth), args)") == 3  # inside the Smear Guard hook
 
     # (d)
     app = wx.App()
@@ -43541,6 +43647,7 @@ def _run_self_tests():
         _self_test_shot_lock_strength_per_shot,
         _self_test_shot_lock_five_groups,
         _self_test_midground_roundness,
+        _self_test_smear_guard,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

@@ -42096,6 +42096,44 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_smear_guard_log():
+    """ADR-495: Smear Guard log -- per-frame stats from the guard, per-scene rows from Pre-Plan
+    edges (or 10 s blocks), real labels, summary + hardest scenes; finish writes next to the output."""
+    import os, tempfile, types as _t
+    import torch
+    from . import utils as U
+    H, W = 16, 128
+    d = torch.zeros(3, 1, H, W); d[..., W // 2:] = 0.8
+    stats = []
+    U.smear_guard_depth(d, 0.5, 12, 3.8, 1920, stats=stats)
+    assert len(stats) == 3 and stats[0][0] > 50 and stats[0][1] > 0 and stats[0][2] > 0, stats[0]
+    flat = torch.zeros(2, 1, H, W); st2 = []
+    U.smear_guard_depth(flat, 0.5, 12, 3.8, 1920, stats=st2)
+    assert st2 == [(0.0, 0.0, 0.0)] * 2, st2
+    # 2 scenes at 24 fps from 10.0 s: scene 1 = 48 frames flat, scene 2 = 24 frames with a smear
+    fr = [(1.0, 0.0, 0.0)] * 48 + [(40.0, 0.03, 0.5)] * 24
+    txt = U.format_smear_guard_log(fr, 24, 10.0, [10.0, 12.0, 13.0], ["Wide", "Close-Up"], 0.5, 12, "x.mkv")
+    assert "Scene 1   00:00:10 - 00:00:12   (48 frames)   [Wide]   acted on 0% of frames" in txt, txt
+    assert "Scene 2" in txt and "[Close-Up]   acted on 100% of frames   area 3.00%   worst jump 40 px" in txt, txt
+    assert "acted on 33.3% of all frames, in 1 of 2 scene(s)" in txt, txt
+    assert "Scenes where it worked hardest" in txt
+    txt2 = U.format_smear_guard_log(fr, 24, 0.0, None, None, 0.5, 12, "x.mkv")
+    assert "Scene 1   00:00:00 - 00:00:03" in txt2, txt2  # one 10 s block (clip only 3 s)
+    # finish writes the file and clears state
+    with tempfile.TemporaryDirectory() as tdir:
+        out = os.path.join(tdir, "movie_out.mkv")
+        args = U.create_parser(required_true=False).parse_args(["-i", os.path.join(tdir, "movie.mkv"), "-o", out,
+                                                                 "--smear-guard", "0.5"])
+        args.state = {"_smear_guard_frames": list(fr), "_scene_plan_edges": [0.0, 2.0, 3.0]}
+        U.finish_smear_guard_log(args, os.path.join(tdir, "movie.mkv"), out, fps=24)
+        logs = [f for f in os.listdir(tdir) if f.endswith("_smear_guard_log.txt")]
+        assert len(logs) == 1, os.listdir(tdir)
+        assert "_smear_guard_frames" not in args.state
+    src = __import__("inspect").getsource(U)
+    assert src.count("    finish_smear_guard_log(args, ") == 2  # the two call sites (not the def)
+    print("_self_test_smear_guard_log: PASS")
+
+
 def _self_test_smear_guard():
     """ADR-494: Smear Guard. (a) off / no divergence = identity; (b) a big horizontal depth step
     gets a smaller jump, small steps and flat areas stay untouched; (c) vertical steps ignored;
@@ -43648,6 +43686,7 @@ def _run_self_tests():
         _self_test_shot_lock_five_groups,
         _self_test_midground_roundness,
         _self_test_smear_guard,
+        _self_test_smear_guard_log,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

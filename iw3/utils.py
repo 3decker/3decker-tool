@@ -7995,6 +7995,8 @@ def _clear_scene_plan(args):
     """ADR-481: turn off any plan left on the (shared, reused) Shot Lock models."""
     global SCENE_PLAN_LABELS, FS_LABELS_FROM_PLAN
     SCENE_PLAN_LABELS, FS_LABELS_FROM_PLAN = None, False  # ADR-491
+    if isinstance(getattr(args, "state", None), dict):
+        args.state.pop("_scene_plan_edges", None)  # ADR-495
     conv_model = args.state.get("convergence_model")
     if conv_model is not None and hasattr(conv_model, "set_scene_plan"):
         conv_model.set_scene_plan(None)
@@ -8095,7 +8097,7 @@ def _apply_midground_roundness(depth, args):
 
 
 def smear_guard_depth(depth, strength, limit_px, divergence, out_width, prev_weight=None,
-                      reset=None, smooth=0.6):
+                      reset=None, smooth=0.6, stats=None):
     """ADR-494: Smear Guard -- runs on the final 0..1 depth BEFORE the other eye is drawn.
     Smearing comes from a big depth jump between neighbouring pixels: the eye has to be
     stretched across it. The jump is known exactly from the depth map, so no guessing:
@@ -8136,6 +8138,11 @@ def smear_guard_depth(depth, strength, limit_px, divergence, out_width, prev_wei
     mw = 3 * w if (3 * w) % 2 else 3 * w + 1
     local_mean = F.avg_pool2d(d, (1, mw), stride=1, padding=(0, mw // 2), count_include_pad=False)
     new = d - a * (d - local_mean)
+    if stats is not None:  # ADR-495: per-frame (worst jump px, guarded area fraction, max weight)
+        worst = jump_px.flatten(1).amax(1).tolist()
+        area = (a > 0.05).float().flatten(1).mean(1).tolist()
+        amax = a.flatten(1).amax(1).tolist()
+        stats.extend(zip(worst, area, amax))
     return new.to(depth.dtype), a.detach()
 
 
@@ -8146,15 +8153,104 @@ def _apply_smear_guard(depth, args, im=None, reset_pts=None):
         return depth
     out_width = im.shape[-1] if im is not None else depth.shape[-1]
     prev = args.state.get("_smear_guard_prev")
+    frame_stats = args.state.setdefault("_smear_guard_frames", [])  # ADR-495: for the Smear Guard log
+    n_before = len(frame_stats)
     new, a = smear_guard_depth(depth, strength, float(getattr(args, "smear_guard_limit", 12.0) or 12.0),
                                getattr(args, "divergence", None), out_width, prev_weight=prev,
-                               reset=reset_pts)
+                               reset=reset_pts, stats=frame_stats)
+    if len(frame_stats) == n_before:  # guard skipped (e.g. no divergence) -- keep frame count aligned
+        frame_stats.extend([(0.0, 0.0, 0.0)] * int(depth.shape[0]))
     if a is not None:
         args.state["_smear_guard_prev"] = a[-1:]
         st = args.state.setdefault("_smear_guard_stats", [0, 0])
         st[0] += int(depth.shape[0])
         st[1] += int((a.flatten(1).amax(1) > 0.05).sum().item())
     return new
+
+
+def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength, limit, title):
+    """ADR-495: per-scene Smear Guard report. frame_stats[i] = (worst jump px, guarded area
+    fraction, max weight) for the i-th processed frame (frame i is at start_sec + i/fps).
+    `edges`: Pre-Plan scene start times in seconds (+ end), or None -> 10-second blocks."""
+    fps = float(fps) if fps else 24.0
+    n = len(frame_stats)
+    if edges and len(edges) >= 2:
+        bounds = [(edges[k], edges[k + 1]) for k in range(len(edges) - 1)]
+    else:
+        end = start_sec + n / fps
+        bounds, t = [], start_sec
+        while t < end - 1e-9:
+            bounds.append((t, min(t + 10.0, end)))
+            t += 10.0
+    lines = [f"Smear Guard log for: {title}",
+             f"Smear Guard {strength:g}, Limit {limit:g} px -- 'acted' = the guard eased the depth somewhere "
+             f"in that frame; 'area' = share of the picture it touched; 'worst jump' = the biggest depth "
+             f"jump found (px of stretch, before easing). Jumps over {limit:g} px are eased; at "
+             f"{2 * limit:g} px and more at full strength.", ""]
+    rows = []
+    for k, (a, b) in enumerate(bounds):
+        i0 = max(0, int(round((a - start_sec) * fps)))
+        i1 = min(n, int(round((b - start_sec) * fps)))
+        if i1 <= i0:
+            continue
+        seg = frame_stats[i0:i1]
+        acted = sum(1 for _, ar, _ in seg if ar > 0)
+        area = sum(ar for _, ar, _ in seg) / len(seg) * 100.0
+        worst = max(w for w, _, _ in seg)
+        label = labels[k] if labels and k < len(labels) and labels[k] else ""
+        rows.append((k + 1, a, b, i1 - i0, acted, area, worst, label))
+        lines.append(f"Scene {k + 1}   {_format_hms(a)} - {_format_hms(b)}   ({i1 - i0} frames)"
+                     + (f"   [{label}]" if label else "")
+                     + f"   acted on {acted * 100.0 / (i1 - i0):.0f}% of frames   area {area:.2f}%"
+                     + f"   worst jump {worst:.0f} px")
+    lines.append("")
+    if rows:
+        total = sum(r[3] for r in rows)
+        acted = sum(r[4] for r in rows)
+        busy = sum(1 for r in rows if r[4] > 0)
+        lines.append(f"Summary: acted on {acted * 100.0 / total:.1f}% of all frames, in {busy} of "
+                     f"{len(rows)} scene(s).")
+        top = sorted(rows, key=lambda r: (-r[5], -r[6]))[:10]
+        top = [r for r in top if r[4] > 0]
+        if top:
+            lines.append("Scenes where it worked hardest (largest area first):")
+            for r in top:
+                lines.append(f"  Scene {r[0]}   {_format_hms(r[1])} - {_format_hms(r[2])}"
+                             + (f"   [{r[7]}]" if r[7] else "")
+                             + f"   area {r[5]:.2f}%   worst jump {r[6]:.0f} px")
+    return "\n".join(lines) + "\n"
+
+
+def finish_smear_guard_log(args, input_path, output_path, fps=None):
+    """ADR-495: writes '<output>_smear_guard_log.txt' when Smear Guard was on. Never raises."""
+    try:
+        if float(getattr(args, "smear_guard", 0.0) or 0.0) <= 0.0:
+            return
+        state = getattr(args, "state", None)
+        stats = state.get("_smear_guard_frames") if isinstance(state, dict) else None
+        if not stats:
+            return
+        if fps is None:
+            fps = _convergence_scene_log_fps(args, input_path)
+        start = SceneBoundaryCache.time_to_sec(getattr(args, "start_time", None), 0.0)
+        real_output, fs_log = _foreground_scale_scene_log_paths(args, input_path, output_path)
+        log_path = fs_log[:-len("_foreground_scale_log.txt")] + "_smear_guard_log.txt"
+        text = format_smear_guard_log(stats, fps, start, state.get("_scene_plan_edges"),
+                                      SCENE_PLAN_LABELS, float(args.smear_guard),
+                                      float(getattr(args, "smear_guard_limit", 12.0) or 12.0),
+                                      path.basename(real_output))
+        tmp = f"{log_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, log_path)
+        print(f"[iw3] Smear Guard log written: {log_path}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[iw3] could not write the Smear Guard log ({type(e).__name__}: {e})", file=sys.stderr)
+    finally:
+        state = getattr(args, "state", None)
+        if isinstance(state, dict):
+            state.pop("_smear_guard_frames", None)
+            state.pop("_smear_guard_prev", None)
 
 
 def _five_groups_on(args):
@@ -8338,6 +8434,7 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
             rows.append(dict(index=i, start=edges[i], length=d, strength=v, shot=shot_label,
                              convergence=conv, foreground_scale=fs, note=", ".join(note)))
         _write_scene_plan_file(output_path, input_filename, rows, args)
+        args.state["_scene_plan_edges"] = list(edges)  # ADR-495: Smear Guard log scenes
         global SCENE_PLAN_LABELS, FS_LABELS_FROM_PLAN  # ADR-491: logs use the planned labels
         if types:
             SCENE_PLAN_LABELS = [r["shot"] for r in rows]
@@ -9695,6 +9792,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     finish_convergence_scene_log(args, original_input_filename, final_output_path)
     finish_foreground_scale_scene_log(args, original_input_filename, final_output_path)
     finish_edge_dilation_scene_log(args, original_input_filename, final_output_path)
+    finish_smear_guard_log(args, original_input_filename, final_output_path)  # ADR-495
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -10409,6 +10507,7 @@ def process_config_video(config, args, side_model):
     # config.fps is the real, already-resolved fps -- never re-derived here.
     finish_convergence_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
     finish_foreground_scale_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
+    finish_smear_guard_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)  # ADR-495
     finish_edge_dilation_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
 
 

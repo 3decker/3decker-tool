@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 22, 2026
+## Latest Update — November 23, 2026
+
+**Fixed: Shot Lock thresholds sometimes missed scenes that sit exactly on the threshold value.** A scene measured at exactly your Low threshold (for example 3.8) could be counted as Mid instead of Wide, because the computer stores 3.8 as 3.8000000000000003. Now a scene exactly on a threshold always counts the way the label says, for Convergence, Foreground Scale and Edge Fix Shot Lock. Found in the 5-group Mario test, where every 3.8 scene had landed in Mid.
+
+## Update — November 22, 2026
 
 **Added: "Midground Roundness" (off by default).** A depth-curve reshape like Foreground Scale, but centered on the middle distance: subjects at mid distance get more depth inside themselves (rounder faces and bodies), while the far background gets flatter and the nearest things pop out a little less. The nearest and farthest points stay where they are, and nothing overlaps, since depth is moved, not pixels. Set one amount for all scenes, or (with Convergence Shot Lock) a separate amount per shot type: Wide, Mid, Close-Up, and the new Extreme Wide / Extreme Close-Up. "Roundness Center" moves where the roundness is concentrated. Try Mid 0.4–0.5 to start. With the Foreground Scale debug overlay on, the value shows on the video as "Rnd".
 

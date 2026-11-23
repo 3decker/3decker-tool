@@ -119,9 +119,9 @@ class ForegroundScaleEstimator():
         if divergence is None:
             return self.closeup_value
         divergence = float(divergence)
-        if divergence >= self.threshold_high:
+        if divergence >= self.threshold_high - 1e-6:  # ADR-493: tolerance -- 3.6+0.2 is stored as 3.8000000000000003
             return self.wide_value
-        if self.threshold_low is not None and divergence <= self.threshold_low:
+        if self.threshold_low is not None and divergence <= self.threshold_low + 1e-6:  # ADR-493: tolerance -- 3.6+0.2 is stored as 3.8000000000000003
             return self.closeup_value
         if self.threshold_low is not None:
             return self.mid_value if self.mid_value is not None else self.closeup_value

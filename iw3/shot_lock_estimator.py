@@ -649,11 +649,11 @@ class ShotLockEstimator():
             if self.strength_threshold_low is not None:
                 candidates.append((self.strength_threshold_low, 1.0))
             if len(candidates) == 1:
-                return 0.0 if divergence >= self.strength_threshold else 1.0
+                return 0.0 if divergence >= self.strength_threshold - 1e-6 else 1.0  # ADR-493: tolerance -- 3.6+0.2 is stored as 3.8000000000000003
             return min(candidates, key=lambda pair: abs(divergence - pair[0]))[1]
-        if divergence >= self.strength_threshold:
+        if divergence >= self.strength_threshold - 1e-6:  # ADR-493: tolerance -- 3.6+0.2 is stored as 3.8000000000000003
             return 0.0
-        if self.strength_threshold_low is not None and divergence <= self.strength_threshold_low:
+        if self.strength_threshold_low is not None and divergence <= self.strength_threshold_low + 1e-6:  # ADR-493: tolerance -- 3.6+0.2 is stored as 3.8000000000000003
             return 1.0
         if self.strength_threshold_low is not None:
             return 0.5

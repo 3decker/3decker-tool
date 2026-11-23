@@ -50,6 +50,83 @@ class _CompileContext():
         return False
 
 
+
+def depth_jump_glide(depth, state, strength, decay=0.9, k_typical=2.0, floor_frac=0.60, blur=5, allow=True,
+                     image=None, image_limit=0.04):
+    """ADR-498: Depth Jump Glide. Video Depth Anything works in 32-frame chunks (22 new frames
+    each); at a chunk handover it re-fits the new chunk to the old one with ONE scale/shift for
+    the whole picture, so a single object it now sees differently (real case: a shell entering
+    at the frame edge, Mario 6:33.3) can snap to a new depth in 1-2 frames. This turns such
+    snaps into a short glide:
+      - per pixel, this frame's change vs. the previous raw frame is compared with that pixel's
+        recent typical change (EMA, spatially blurred) -- normal motion passes untouched;
+      - only the part of the change beyond max(k_typical x typical, floor_frac x depth range)
+        counts as a jump; that excess (spatially smoothed) is held back as an offset;
+      - the offset fades by `decay` per frame (0.9 -> ~0.65 s at 24 fps), so the depth still
+        arrives at the model's new value, just gradually.
+    Raw (pre-normalization) depth, (C,H,W). `state` dict is cleared at scene cuts by the caller.
+    Returns (depth, worst excess as % of depth range, acted bool)."""
+    import torch.nn.functional as F
+    d = depth.float()
+    x = d[0] if d.ndim == 3 else d
+    prev = state.get("prev")
+    if prev is None or prev.shape != x.shape:
+        state.update(prev=x.clone(), typ=torch.zeros(1), offset=torch.zeros(1))  # sized on first use
+        return depth, 0.0, False
+    flat = x.flatten()
+    if flat.numel() > 200000:
+        flat = flat[:: max(1, flat.numel() // 200000)]
+    lo, hi = torch.quantile(flat, 0.02), torch.quantile(flat, 0.98)
+    rng = float((hi - lo).clamp(min=1e-6))
+    # ADR-498 (rev): decide on a COARSE block grid (16x16 averages). A whole object snapping to a
+    # new depth moves entire blocks; a moving outline (1-2 px) only nudges a block a little, so
+    # ordinary motion no longer looks like a snap. The coarse correction is upsampled smoothly.
+    H, W = x.shape
+    bs = max(4, min(H, W) // 32)
+    def coarse(t):
+        return F.avg_pool2d(t[None, None], bs, stride=bs, ceil_mode=True)[0, 0]
+    cx, cp = coarse(x), coarse(prev)
+    # ADR-498 (rev 2): a snap is a BREAK FROM THE TREND, not just a big change. Steady motion
+    # (an object rising/approaching, a camera tilt, a moving outline) continues last frame's
+    # change; a chunk-handover snap does not. So compare this frame's change with the previous
+    # frame's change (on the coarse grid).
+    trend = state.get("trend")
+    change = cx - cp
+    if trend is None or trend.shape != change.shape:
+        trend = change * 0.0
+    delta = change - trend                    # how far this frame breaks from the recent trend
+    typ_b = F.avg_pool2d(state["typ"][None, None], 3, stride=1, padding=1, count_include_pad=False)[0, 0]         if state["typ"].shape == delta.shape else torch.zeros_like(delta)
+    thr = torch.clamp(typ_b * k_typical, min=floor_frac * rng)
+    excess = torch.sign(delta) * torch.relu(delta.abs() - thr)
+    if not allow:  # ADR-498 handover-only: outside a chunk handover nothing new is held back
+        excess = torch.zeros_like(excess)
+    if image is not None:
+        # ADR-498 picture check: a VDA snap changes the DEPTH while the PICTURE there barely changes;
+        # real movement (a character turning, a fast gesture) changes the picture a lot. Only glide
+        # blocks whose picture changed by less than `image_limit` (0..1 brightness) since last frame.
+        gi = coarse(image.float())
+        gp = state.get("img")
+        state["img"] = gi
+        if gp is None or gp.shape != gi.shape:
+            excess = torch.zeros_like(excess)
+        else:
+            calm = (image_limit - (gi - gp).abs()).clamp(min=0) / image_limit   # 1 = unchanged .. 0 = changed
+            calm = -F.max_pool2d(-calm[None, None], 3, stride=1, padding=1)[0, 0]  # also require calm neighbours
+            excess = excess * calm
+    if state["offset"].shape != excess.shape:
+        state["offset"] = torch.zeros_like(excess)
+    state["offset"] = state["offset"] * decay - excess * float(strength)
+    full = F.interpolate(state["offset"][None, None], size=(H, W), mode="bilinear", align_corners=False)[0, 0]
+    out = x + full
+    state["typ"] = (state["typ"] if state["typ"].shape == delta.shape else torch.zeros_like(delta)) * 0.8         + torch.minimum(delta.abs(), thr) * 0.2
+    # the trend only learns from ACCEPTED movement (the snap itself is excluded), so the frames
+    # after a snap -- where the depth simply stops jumping -- are not mistaken for a new snap
+    state["trend"] = trend * 0.6 + (change - excess) * 0.4
+    state["prev"] = x.clone()
+    worst = float(excess.abs().max()) / rng * 100.0
+    out = out.unsqueeze(0) if d.ndim == 3 else out
+    return out.to(depth.dtype), worst, worst > 2.0
+
 class BaseDepthModel(metaclass=ABCMeta):
     def __init__(self, model_type):
         self.device = None
@@ -60,6 +137,9 @@ class BaseDepthModel(metaclass=ABCMeta):
         self.limit_resolution = False
         self.refine_enabled = False
         self.refine_strength = 1.0
+        self.jump_glide = 0.0          # ADR-498: Depth Jump Glide strength (0 = off)
+        self._jump_glide_state = None
+        self.jump_glide_stats = []     # per frame: (worst excess jump as % of depth range, acted)
         self.temporal_stabilizer = TemporalStabilizer()
         # Queues up a motion-adaptive activity summary every time the EMA scaler
         # resets (scene cut or end of export) instead of losing it the instant the
@@ -249,6 +329,11 @@ class BaseDepthModel(metaclass=ABCMeta):
         # with their own internal frame window (VideoDepthAnythingModel) override this.
         return self.get_ema_buffer_size() > 1
 
+    def enable_jump_glide(self, strength=0.0):
+        """ADR-498: Depth Jump Glide -- see depth_jump_glide()."""
+        self.jump_glide = max(0.0, min(1.0, float(strength or 0.0)))
+        self._jump_glide_state = None
+
     def enable_refine(self, enabled=True, strength=1.0):
         self.refine_enabled = bool(enabled)
         self.refine_strength = float(strength) if strength is not None else 1.0
@@ -331,6 +416,7 @@ class BaseDepthModel(metaclass=ABCMeta):
         # tracking never bleeds across an unrelated cut, without touching whether it's
         # enabled or its configured strength.
         self.temporal_stabilizer.reset()
+        self._jump_glide_state = None  # ADR-498: never glide across a scene cut
         return result
 
     def pop_motion_activity_log(self):

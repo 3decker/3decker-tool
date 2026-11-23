@@ -3866,6 +3866,8 @@ def make_output_filename(input_filename, args, video=False):
                 mp += f"hi{to_deciaml(mg_high, 100, 2)}"
         else:
             mp = ""
+        if float(getattr(args, "depth_jump_glide", 0.0) or 0.0) > 0.0:  # ADR-498: Depth Jump Glide
+            mp += f"_djg{to_deciaml(args.depth_jump_glide, 100, 2)}"
         if float(getattr(args, "edge_steady", 0.0) or 0.0) > 0.0:  # ADR-497: Edge Steady
             mp += (f"_es{to_deciaml(args.edge_steady, 100, 2)}"
                    f"l{to_deciaml(float(getattr(args, 'edge_steady_limit', 1.0) or 1.0), 10, 2)}")
@@ -4549,6 +4551,8 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_background_pop_threshold_high={args.background_pop_threshold_high}")
     if getattr(args, "midground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_midground_pop={args.midground_pop}")
+    if float(getattr(args, "depth_jump_glide", 0.0) or 0.0) > 0.0:  # ADR-498
+        comment_parts.append(f"iw3_depth_jump_glide={args.depth_jump_glide}")
     if float(getattr(args, "edge_steady", 0.0) or 0.0) > 0.0:  # ADR-497
         comment_parts.append(f"iw3_edge_steady={args.edge_steady}")
         comment_parts.append(f"iw3_edge_steady_limit={getattr(args, 'edge_steady_limit', 1.0)}")
@@ -6196,6 +6200,7 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
     else:
         # BCHW
         pass
+    depth = _apply_depth_jump_glide(depth, args, reset_pts, im)  # ADR-498: on the normalized depth
 
     # ADR-459: "Log Edge Fix Value per Scene" -- captured BEFORE
     # "_last_applied_divergence" is overwritten just below, by calling
@@ -8395,6 +8400,106 @@ def edge_steady_depth(depth, im, strength, limit_px, divergence, out_width, stat
     return torch.from_numpy(out_all).unsqueeze(1).to(device=depth.device, dtype=depth.dtype)
 
 
+def _apply_depth_jump_glide(depth, args, reset_pts=None, im=None):
+    """ADR-498: Depth Jump Glide on the NORMALIZED 0..1 depth, first thing in apply_divergence
+    (before curve/roundness/guards). Applied first on the raw model output it shifted the EMA
+    normalization scale and left near objects ~30-40 px further out for good (real Mario A/B);
+    here the overall scale is already fixed. Restarts at reset_pts cuts and per movie."""
+    strength = float(getattr(args, "depth_jump_glide", 0.0) or 0.0)
+    if strength <= 0.0 or not hasattr(args, "state") or depth.ndim != 4:
+        return depth
+    from .base_depth_model import depth_jump_glide
+    st = args.state.setdefault("_jump_glide_state", {})
+    stats = args.state.setdefault("_jump_glide_stats", [0, 0])
+    acted_log = args.state.setdefault("_jump_glide_acted", [])
+    dm = args.state.get("depth_model")
+    seams = getattr(dm, "seam_frames", None)  # ADR-498: VDA chunk handovers (None = not a chunked model)
+    win = JUMP_GLIDE_SEAM_WINDOW
+    gray = None
+    if im is not None and im.ndim == 4:  # ADR-498 picture check: brightness at the depth map's size
+        gray = F.interpolate(im[:, :3].float().mean(1, keepdim=True), size=depth.shape[-2:],
+                             mode="area")[:, 0].clamp(0, 1)
+    out = []
+    for i in range(depth.shape[0]):
+        idx = args.state.get("_jump_glide_frame", 0)
+        args.state["_jump_glide_frame"] = idx + 1
+        if reset_pts is not None and i < len(reset_pts) and reset_pts[i]:
+            st.clear()
+        allow = bool(seams) and any((idx - k) in seams for k in range(-win, win + 1))
+        o, worst, acted = depth_jump_glide(depth[i], st, strength, allow=allow,
+                                           image=gray[i] if gray is not None else None)
+        out.append(o)
+        stats[0] += 1
+        stats[1] += int(acted)
+        if acted:
+            acted_log.append((idx, worst))
+    return torch.stack(out, dim=0)
+
+
+JUMP_GLIDE_SEAM_WINDOW = 4  # frames around a chunk handover where a glide may start
+
+
+def reset_jump_glide(args):
+    """ADR-498: once per movie -- clear the glide state, frame counter and the model's handover list."""
+    if not isinstance(getattr(args, "state", None), dict):
+        return
+    for k in ("_jump_glide_state", "_jump_glide_frame", "_jump_glide_acted", "_jump_glide_stats"):
+        args.state.pop(k, None)
+    dm = args.state.get("depth_model")
+    if hasattr(dm, "reset_seam_tracking"):
+        dm.reset_seam_tracking()
+
+
+def finish_jump_glide_log(args, input_path, output_path, fps=None):
+    """ADR-498: '<output>_jump_glide_log.txt' -- every chunk handover where the glide actually held
+    back a depth snap (time, scene, size). Never raises."""
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict) or float(getattr(args, "depth_jump_glide", 0.0) or 0.0) <= 0.0:
+        return
+    try:
+        acted = state.get("_jump_glide_acted") or []
+        if fps is None:
+            fps = _convergence_scene_log_fps(args, input_path)
+        fps = float(fps) if fps else 24.0
+        start = SceneBoundaryCache.time_to_sec(getattr(args, "start_time", None), 0.0)
+        real_output, sg_path = _smear_guard_log_paths(args, input_path, output_path)
+        log_path = sg_path[:-len("_smear_guard_log.txt")] + "_jump_glide_log.txt"
+        dm = state.get("depth_model")
+        n_seams = len(getattr(dm, "seam_frames", ()) or ())
+        edges = state.get("_scene_plan_edges")
+        # group consecutive acted frames into events
+        events = []
+        for idx, worst in acted:
+            if events and idx - events[-1][1] <= 2:
+                events[-1][1] = idx
+                events[-1][2] = max(events[-1][2], worst)
+            else:
+                events.append([idx, idx, worst])
+        lines = [f"Depth Jump Glide log for: {path.basename(real_output)}",
+                 f"Depth Jump Glide {float(args.depth_jump_glide):g} -- only at VDA chunk handovers "
+                 f"(+/-{JUMP_GLIDE_SEAM_WINDOW} frames). Handovers checked: {n_seams}. "
+                 f"'jump' = the largest snap held back, as % of the full depth range.", ""]
+        for a, b, worst in events:
+            t = start + a / fps
+            scene = ""
+            if edges and len(edges) >= 2:
+                for k in range(len(edges) - 1):
+                    if edges[k] <= t < edges[k + 1]:
+                        lab = SCENE_PLAN_LABELS[k] if SCENE_PLAN_LABELS and k < len(SCENE_PLAN_LABELS) else None
+                        scene = f"   Scene {k + 1}" + (f" [{lab}]" if lab else "")
+                        break
+            lines.append(f"{_format_hms(t)} ({t:.2f} s){scene}   glided a snap of {worst:.1f}% "
+                         f"({b - a + 1} frame(s) held back)")
+        lines += ["", f"Summary: acted at {len(events)} handover(s) out of {n_seams}."]
+        tmp = f"{log_path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, log_path)
+        print(f"[iw3] Depth Jump Glide log written: {log_path} ({len(events)} event(s))", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[iw3] Depth Jump Glide log: write failed ({type(e).__name__}: {e})", file=sys.stderr)
+
+
 def _apply_edge_steady(depth, args, im=None, reset_pts=None):
     """ADR-497: apply_divergence() hook, right after Smear Guard."""
     strength = float(getattr(args, "edge_steady", 0.0) or 0.0)
@@ -9950,6 +10055,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     reset_combined_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_smear_guard_log(args, input_path=original_input_filename, output_path=output_path)  # ADR-496
     reset_edge_steady_log(args, input_path=original_input_filename, output_path=output_path)  # ADR-497
+    reset_jump_glide(args)  # ADR-498
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -10027,6 +10133,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     finish_edge_dilation_scene_log(args, original_input_filename, final_output_path)
     finish_smear_guard_log(args, original_input_filename, final_output_path)  # ADR-495
     finish_edge_steady_log(args, original_input_filename, final_output_path)  # ADR-497
+    finish_jump_glide_log(args, original_input_filename, final_output_path)  # ADR-498
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -10583,6 +10690,7 @@ def process_config_video(config, args, side_model):
                           fps=float(getattr(config, "fps", 0)) or None)  # ADR-496
     reset_edge_steady_log(args, input_path=args.input, output_path=args.output,
                           fps=float(getattr(config, "fps", 0)) or None)  # ADR-497
+    reset_jump_glide(args)  # ADR-498
     reset_combined_scene_log(args, input_path=args.input, output_path=args.output,
                              fps=float(getattr(config, "fps", 0)) or None)
 
@@ -10747,6 +10855,7 @@ def process_config_video(config, args, side_model):
     finish_foreground_scale_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
     finish_smear_guard_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)  # ADR-495
     finish_edge_steady_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)  # ADR-497
+    finish_jump_glide_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)  # ADR-498
     finish_edge_dilation_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
 
 
@@ -11184,6 +11293,11 @@ def create_parser(required_true=True):
                                   f"(the REAL shot, whatever Invert is set to) gets exactly this 3D Strength. "
                                   f"The shot type itself is still decided from the measured strength (Auto Range "
                                   f"+ thresholds). Default: not set = keep the measured strength."))
+    parser.add_argument("--depth-jump-glide", type=float, default=0.0,
+                        help=("ADR-498: Depth Jump Glide -- when an object's depth suddenly snaps far more than "
+                              "its normal frame-to-frame movement (e.g. Video Depth Anything re-estimating it at "
+                              "a 32-frame chunk handover), the snap is turned into a ~0.5 s glide. Normal motion "
+                              "is untouched; restarts at scene cuts. 0 = off (default), 1.0 = full"))
     parser.add_argument("--edge-steady", type=float, default=0.0,
                         help=("ADR-497: Edge Steady -- holds object outlines steady over time ONLY where they "
                               "wobble back and forth between frames (motion-followed, so no lag). 0 = off "

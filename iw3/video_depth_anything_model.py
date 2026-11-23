@@ -282,6 +282,23 @@ class VideoDepthAnythingModel(BaseDepthModel):
         self.input_frame_count = 0
         self.output_frame_count = 0
         self.reset_tta_state()
+        self._chunks_since_reset = 0  # ADR-498: first chunk after a reset is not a handover
+
+    def reset_seam_tracking(self):
+        """ADR-498: per movie -- clear the handover frame list and the output counter."""
+        self.seam_frames = set()
+        self._frames_emitted = 0
+        self._chunks_since_reset = 0
+
+    def _note_chunk(self, n_frames, offset=0):
+        """ADR-498: a new chunk of `n_frames` output depth frames is about to be emitted, `offset`
+        frames after the current emitted count. Its first frame is a chunk handover unless it is
+        the first chunk since a reset (scene start)."""
+        if not hasattr(self, "seam_frames"):
+            self.reset_seam_tracking()
+        if getattr(self, "_chunks_since_reset", 0) > 0:
+            self.seam_frames.add(self._frames_emitted + offset)
+        self._chunks_since_reset = getattr(self, "_chunks_since_reset", 0) + 1
 
     def reset(self):
         self.reset_state()
@@ -339,6 +356,8 @@ class VideoDepthAnythingModel(BaseDepthModel):
             self.input_frame_count += 1
             ret = self._model_infer_tta(x[i], use_amp=enable_amp)
             if ret is not None:
+                self._note_chunk(len(ret))  # ADR-498
+                self._frames_emitted = getattr(self, "_frames_emitted", 0) + len(ret)
                 self.output_frame_count += len(ret)
                 out = torch.stack(ret)
                 out = postprocess(out, edge_dilation=edge_dilation, depth_aa=depth_aa, metric_depth=self.model.metric_depth,
@@ -385,6 +404,7 @@ class VideoDepthAnythingModel(BaseDepthModel):
             ret = self._model_infer_tta(None, use_amp=enable_amp)
             if ret is None:
                 continue
+            self._note_chunk(len(ret), offset=len(results))  # ADR-498
             results += ret
             self.output_frame_count += len(ret)
         if results:
@@ -392,6 +412,7 @@ class VideoDepthAnythingModel(BaseDepthModel):
             if unpad > 0:
                 assert unpad <= len(results)
                 results = results[:-unpad]
+            self._frames_emitted = getattr(self, "_frames_emitted", 0) + len(results)
             return results
         else:
             return []

@@ -2761,6 +2761,19 @@ class MainFrame(wx.Frame):
                       "Recommended: " + _rec))
                 setattr(self, f"cbo_{_prefix}_{_s}", _c)
 
+        # ADR-498: Depth Jump Glide.
+        self.lbl_depth_jump_glide = wx.StaticText(self.grp_stereo, label=T("Depth Jump Glide"))
+        self.cbo_depth_jump_glide = EditableComboBox(
+            self.grp_stereo, choices=["0", "0.5", "0.75", "1.0"], name="cbo_depth_jump_glide")
+        self.cbo_depth_jump_glide.SetValue("0")
+        self.cbo_depth_jump_glide.SetToolTip(
+            T("What: watches the depth frame by frame. When one spot's depth suddenly snaps much further than it normally moves between frames, the snap is held back and faded in over about half a second, so the object glides to its new depth instead of jumping. Normal movement passes through untouched, and it restarts at every scene cut." + "\n"
+              "Why: VDA_L (Video Depth Anything) works on 32-frame chunks. At each chunk handover it can re-estimate one object differently -- real Mario case: a shell rising into the frame at 6:33 snapped about 50 px back in 3D in one moment. Any_V3 does not do this, but is less steady elsewhere." + "\n"
+              "Pros: keeps VDA_L's steadiness and removes its sudden snaps; works on the raw depth, so everything after it (curve, convergence, Foreground Scale) sees the smoothed result." + "\n"
+              "Cons: a genuinely sudden real depth change (e.g. something jumping toward the camera) also arrives over ~0.5 s instead of instantly." + "\n"
+              "Values: 0 = off (default), 0.5 = halve the snap, 1.0 = glide the full snap." + "\n"
+              "Recommended: 1.0 with VDA_L; 0 with per-frame models like Any_V3."))
+
         # ADR-497: Edge Steady.
         self.lbl_edge_steady = wx.StaticText(self.grp_stereo, label=T("Edge Steady"))
         self.cbo_edge_steady = EditableComboBox(
@@ -5217,7 +5230,8 @@ class MainFrame(wx.Frame):
         for _n in self._roundness_widget_names()[::2]:  # ADR-492
             layout.Add(getattr(self, _n), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, "cbo" + _n[3:]), (i, 1), (1, 2), flag=wx.EXPAND)
-        for _s in ("smear_guard", "smear_guard_limit", "edge_steady", "edge_steady_limit"):  # ADR-494/497
+        for _s in ("smear_guard", "smear_guard_limit", "edge_steady", "edge_steady_limit",
+                   "depth_jump_glide"):  # ADR-494/497/498
             layout.Add(getattr(self, f"lbl_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, f"cbo_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13560,6 +13574,7 @@ class MainFrame(wx.Frame):
             self.lbl_smear_guard, self.cbo_smear_guard,  # ADR-494
             self.lbl_smear_guard_limit, self.cbo_smear_guard_limit,
             self.lbl_edge_steady, self.cbo_edge_steady,  # ADR-497
+            self.lbl_depth_jump_glide, self.cbo_depth_jump_glide,  # ADR-498
             self.lbl_edge_steady_limit, self.cbo_edge_steady_limit,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
@@ -14812,6 +14827,7 @@ class MainFrame(wx.Frame):
             smear_guard=float(self.cbo_smear_guard.GetValue() or 0),  # ADR-494
             smear_guard_limit=float(self.cbo_smear_guard_limit.GetValue() or 12),
             edge_steady=float(self.cbo_edge_steady.GetValue() or 0),  # ADR-497
+            depth_jump_glide=float(self.cbo_depth_jump_glide.GetValue() or 0),  # ADR-498
             edge_steady_limit=float(self.cbo_edge_steady_limit.GetValue() or 1.0),
             midground_roundness=float(self.cbo_midground_roundness.GetValue() or 0),
             midground_roundness_center=float(self.cbo_midground_roundness_center.GetValue() or 0.5),
@@ -16287,6 +16303,7 @@ class MainFrame(wx.Frame):
         self.cbo_smear_guard.SetValue(f"{float(getattr(args, 'smear_guard', 0.0) or 0.0):g}")  # ADR-494
         self.cbo_smear_guard_limit.SetValue(f"{float(getattr(args, 'smear_guard_limit', 12.0) or 12.0):g}")
         self.cbo_edge_steady.SetValue(f"{float(getattr(args, 'edge_steady', 0.0) or 0.0):g}")  # ADR-497
+        self.cbo_depth_jump_glide.SetValue(f"{float(getattr(args, 'depth_jump_glide', 0.0) or 0.0):g}")  # ADR-498
         self.cbo_edge_steady_limit.SetValue(f"{float(getattr(args, 'edge_steady_limit', 1.0) or 1.0):g}")
         self.cbo_midground_roundness.SetValue(f"{float(getattr(args, 'midground_roundness', 0.0) or 0.0):g}")  # ADR-492
         self.cbo_midground_roundness_center.SetValue(f"{float(getattr(args, 'midground_roundness_center', 0.5)):g}")
@@ -42127,6 +42144,102 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_depth_jump_glide():
+    """ADR-498: Depth Jump Glide. (a) first frame passes through; (b) a sudden local snap (one
+    object jumps far back in 1 frame) becomes a glide that still ends at the new value;
+    (c) smooth steady motion of the object is untouched; (d) strength 0 via the model is off;
+    (e) state cleared at a cut (flush); (f) GUI/CLI/metadata round-trip."""
+    import torch
+    import wx
+    from . import utils as U
+    from .base_depth_model import depth_jump_glide
+    H, W = 40, 80
+    def frame(v_obj, x0=30):
+        d = torch.full((1, H, W), 1.0)
+        d[0, 10:30, x0:x0 + 20] = v_obj
+        return d
+    # (a)+(b): object at 5.0, steady for 6 frames, then snaps to 2.0 and stays
+    st, outs = {}, []
+    seq = [frame(5.0)] * 6 + [frame(2.0)] * 34
+    for f in seq:
+        o, worst, acted = depth_jump_glide(f, st, 1.0)
+        outs.append(float(o[0, 20, 40]))
+    assert outs[0] == 5.0 and abs(outs[5] - 5.0) < 1e-4
+    assert outs[6] > 4.0, outs[6]                       # the snap is held back
+    assert outs[6] > outs[8] > outs[12] > outs[18], outs  # then glides down
+    assert abs(outs[-1] - 2.0) < 0.2, outs[-1]          # and arrives at the new value
+    assert float(o[0, 2, 2]) == 1.0                      # background untouched
+    # (c) smooth motion: object depth ramps 0.1 per frame -> untouched
+    st, ok = {}, True
+    for i in range(20):
+        f = frame(5.0 - 0.1 * i)
+        o, _, _ = depth_jump_glide(f, st, 1.0)
+        ok = ok and abs(float(o[0, 20, 40]) - (5.0 - 0.1 * i)) < 0.02
+    assert ok
+    # (d)+(e): hooked first in apply_divergence on the normalized depth; reset at cuts
+    import types as _t
+    usrc = __import__("inspect").getsource(U)
+    assert "depth = _apply_depth_jump_glide(depth, args, reset_pts, im)  # ADR-498" in usrc
+    # picture check: same depth snap, but the picture changed a lot there -> real movement, no glide
+    st2 = {}
+    img_a = torch.zeros(H, W); img_b = torch.zeros(H, W); img_b[10:30, 30:50] = 0.8
+    for k in range(6):
+        depth_jump_glide(frame(5.0), st2, 1.0, image=img_a)
+    o_moving, _, _ = depth_jump_glide(frame(2.0), st2, 1.0, image=img_b)
+    assert abs(float(o_moving[0, 20, 40]) - 2.0) < 1e-4, float(o_moving[0, 20, 40])
+    st3 = {}
+    for k in range(6):
+        depth_jump_glide(frame(5.0), st3, 1.0, image=img_a)
+    o_snap, _, _ = depth_jump_glide(frame(2.0), st3, 1.0, image=img_a)   # picture unchanged -> snap
+    assert float(o_snap[0, 20, 40]) > 4.0, float(o_snap[0, 20, 40])
+    # handover-only: the same snap away from a handover passes untouched; at a handover it glides
+    dm = _t.SimpleNamespace(seam_frames={20})
+    a = _t.SimpleNamespace(state={"depth_model": dm}, depth_jump_glide=1.0)
+    b = torch.stack([frame(5.0)] * 3 + [frame(2.0)])            # snap at frame 3, far from 20
+    o = U._apply_depth_jump_glide(b, a)
+    assert abs(float(o[3, 0, 20, 40]) - 2.0) < 1e-5, float(o[3, 0, 20, 40])
+    a = _t.SimpleNamespace(state={"depth_model": _t.SimpleNamespace(seam_frames={3})}, depth_jump_glide=1.0)
+    o = U._apply_depth_jump_glide(b, a)
+    assert float(o[3, 0, 20, 40]) > 4.0 and a.state["_jump_glide_acted"], a.state.get("_jump_glide_acted")
+    o2 = U._apply_depth_jump_glide(torch.stack([frame(2.0)]), a, reset_pts=[True])
+    assert abs(float(o2[0, 0, 20, 40]) - 2.0) < 1e-5          # cut: no carry-over
+    a2 = _t.SimpleNamespace(state={}, depth_jump_glide=1.0)   # not a chunked model -> never acts
+    assert torch.equal(U._apply_depth_jump_glide(b, a2), b)
+    a.depth_jump_glide = 0.0
+    assert U._apply_depth_jump_glide(b, a) is b
+    # the VDA wrapper records handovers: first chunk after a reset is not one
+    from .video_depth_anything_model import VideoDepthAnythingModel as V
+    m = V.__new__(V)
+    V.reset_seam_tracking(m)
+    V._note_chunk(m, 46); m._frames_emitted += 46
+    V._note_chunk(m, 22); m._frames_emitted += 22
+    V._note_chunk(m, 22); m._frames_emitted += 22
+    assert m.seam_frames == {46, 68}, m.seam_frames
+    vsrc = __import__("inspect").getsource(V)
+    assert vsrc.count("self._note_chunk(") == 2
+    # (f)
+    app = wx.App()
+    frame_ = None
+    try:
+        frame_ = MainFrame()
+        assert frame_.cbo_depth_jump_glide.GetValue() == "0"
+        assert "jump-glide" not in frame_.get_cli_command()
+        frame_.cbo_depth_jump_glide.SetValue("1.0")
+        args = frame_.parse_args(skip_set_state=True)
+        assert args.depth_jump_glide == 1.0
+        assert "--depth-jump-glide 1.0" in frame_.get_cli_command()
+        meta = U._build_iw3_comment_metadata(args, video=True) or ""
+        assert "iw3_depth_jump_glide=1.0" in meta, meta
+        frame_.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--depth-jump-glide", "0.5"]))
+        assert frame_.cbo_depth_jump_glide.GetValue() == "0.5"
+    finally:
+        if frame_ is not None:
+            frame_.Destroy()
+        app.Destroy()
+    print("_self_test_depth_jump_glide: PASS")
+
+
 def _self_test_edge_steady():
     """ADR-497: Edge Steady. (a) off = identity; (b) an outline that wobbles left/right every frame
     is held (smaller frame-to-frame change), flat areas untouched; (c) a steady real move (one
@@ -43843,6 +43956,7 @@ def _run_self_tests():
         _self_test_smear_guard,
         _self_test_smear_guard_log,
         _self_test_edge_steady,
+        _self_test_depth_jump_glide,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

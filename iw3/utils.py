@@ -1,6 +1,7 @@
 import sys
 import traceback
 import os
+import time
 import csv
 import hashlib
 import subprocess
@@ -8160,6 +8161,7 @@ def _apply_smear_guard(depth, args, im=None, reset_pts=None):
                                reset=reset_pts, stats=frame_stats)
     if len(frame_stats) == n_before:  # guard skipped (e.g. no divergence) -- keep frame count aligned
         frame_stats.extend([(0.0, 0.0, 0.0)] * int(depth.shape[0]))
+    _write_smear_guard_log_live(args)  # ADR-496
     if a is not None:
         args.state["_smear_guard_prev"] = a[-1:]
         st = args.state.setdefault("_smear_guard_stats", [0, 0])
@@ -8168,7 +8170,8 @@ def _apply_smear_guard(depth, args, im=None, reset_pts=None):
     return new
 
 
-def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength, limit, title):
+def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength, limit, title,
+                           in_progress=False):
     """ADR-495: per-scene Smear Guard report. frame_stats[i] = (worst jump px, guarded area
     fraction, max weight) for the i-th processed frame (frame i is at start_sec + i/fps).
     `edges`: Pre-Plan scene start times in seconds (+ end), or None -> 10-second blocks."""
@@ -8182,7 +8185,7 @@ def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength,
         while t < end - 1e-9:
             bounds.append((t, min(t + 10.0, end)))
             t += 10.0
-    lines = [f"Smear Guard log for: {title}",
+    lines = [f"Smear Guard log for: {title}" + ("   (IN PROGRESS -- conversion still running)" if in_progress else ""),
              f"Smear Guard {strength:g}, Limit {limit:g} px -- 'acted' = the guard eased the depth somewhere "
              f"in that frame; 'area' = share of the picture it touched; 'worst jump' = the biggest depth "
              f"jump found (px of stretch, before easing). Jumps over {limit:g} px are eased; at "
@@ -8208,8 +8211,8 @@ def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength,
         total = sum(r[3] for r in rows)
         acted = sum(r[4] for r in rows)
         busy = sum(1 for r in rows if r[4] > 0)
-        lines.append(f"Summary: acted on {acted * 100.0 / total:.1f}% of all frames, in {busy} of "
-                     f"{len(rows)} scene(s).")
+        lines.append(f"Summary{' so far' if in_progress else ''}: acted on {acted * 100.0 / total:.1f}% "
+                     f"of all frames, in {busy} of {len(rows)} scene(s).")
         top = sorted(rows, key=lambda r: (-r[5], -r[6]))[:10]
         top = [r for r in top if r[4] > 0]
         if top:
@@ -8233,8 +8236,7 @@ def finish_smear_guard_log(args, input_path, output_path, fps=None):
         if fps is None:
             fps = _convergence_scene_log_fps(args, input_path)
         start = SceneBoundaryCache.time_to_sec(getattr(args, "start_time", None), 0.0)
-        real_output, fs_log = _foreground_scale_scene_log_paths(args, input_path, output_path)
-        log_path = fs_log[:-len("_foreground_scale_log.txt")] + "_smear_guard_log.txt"
+        real_output, log_path = _smear_guard_log_paths(args, input_path, output_path)
         text = format_smear_guard_log(stats, fps, start, state.get("_scene_plan_edges"),
                                       SCENE_PLAN_LABELS, float(args.smear_guard),
                                       float(getattr(args, "smear_guard_limit", 12.0) or 12.0),
@@ -8251,6 +8253,62 @@ def finish_smear_guard_log(args, input_path, output_path, fps=None):
         if isinstance(state, dict):
             state.pop("_smear_guard_frames", None)
             state.pop("_smear_guard_prev", None)
+            state.pop("_smear_guard_live", None)
+
+
+def _smear_guard_log_paths(args, input_path, output_path):
+    real_output, fs_log = _foreground_scale_scene_log_paths(args, input_path, output_path)
+    return real_output, fs_log[:-len("_foreground_scale_log.txt")] + "_smear_guard_log.txt"
+
+
+SMEAR_GUARD_LIVE_INTERVAL = 30.0  # seconds between live rewrites
+
+
+def reset_smear_guard_log(args, input_path=None, output_path=None, fps=None):
+    """ADR-496: once per movie, next to the other scene-log resets -- clears the per-frame
+    stats and remembers where/how to write the live (in-progress) Smear Guard log."""
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict):
+        return
+    state.pop("_smear_guard_frames", None)
+    state.pop("_smear_guard_prev", None)
+    state.pop("_smear_guard_live", None)
+    if float(getattr(args, "smear_guard", 0.0) or 0.0) <= 0.0 or input_path is None or output_path is None:
+        return
+    try:
+        real_output, log_path = _smear_guard_log_paths(args, input_path, output_path)
+        state["_smear_guard_live"] = dict(
+            path=log_path, title=path.basename(real_output),
+            fps=fps if fps is not None else _convergence_scene_log_fps(args, input_path),
+            start=SceneBoundaryCache.time_to_sec(getattr(args, "start_time", None), 0.0),
+            last=time.time())
+    except Exception as e:  # noqa: BLE001
+        print(f"[iw3] Smear Guard log: no live log path ({type(e).__name__}: {e}) -- "
+              f"it will still be written at the end.", file=sys.stderr)
+
+
+def _write_smear_guard_log_live(args, force=False):
+    """ADR-496: rewrite the in-progress log at most every SMEAR_GUARD_LIVE_INTERVAL s. Never raises."""
+    state = args.state
+    live = state.get("_smear_guard_live")
+    stats = state.get("_smear_guard_frames")
+    if not live or not stats:
+        return
+    now = time.time()
+    if not force and now - live["last"] < SMEAR_GUARD_LIVE_INTERVAL:
+        return
+    live["last"] = now
+    try:
+        text = format_smear_guard_log(stats, live["fps"], live["start"], state.get("_scene_plan_edges"),
+                                      SCENE_PLAN_LABELS, float(args.smear_guard),
+                                      float(getattr(args, "smear_guard_limit", 12.0) or 12.0),
+                                      live["title"], in_progress=True)
+        tmp = f"{live['path']}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, live["path"])
+    except Exception as e:  # noqa: BLE001
+        print(f"[iw3] Smear Guard log: live write failed ({type(e).__name__}: {e})", file=sys.stderr)
 
 
 def _five_groups_on(args):
@@ -9717,6 +9775,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     reset_foreground_scale_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_edge_dilation_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_combined_scene_log(args, input_path=original_input_filename, output_path=output_path)
+    reset_smear_guard_log(args, input_path=original_input_filename, output_path=output_path)  # ADR-496
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -10345,6 +10404,8 @@ def process_config_video(config, args, side_model):
                                      fps=float(getattr(config, "fps", 0)) or None)
     reset_edge_dilation_scene_log(args, input_path=args.input, output_path=args.output,
                                   fps=float(getattr(config, "fps", 0)) or None)
+    reset_smear_guard_log(args, input_path=args.input, output_path=args.output,
+                          fps=float(getattr(config, "fps", 0)) or None)  # ADR-496
     reset_combined_scene_log(args, input_path=args.input, output_path=args.output,
                              fps=float(getattr(config, "fps", 0)) or None)
 

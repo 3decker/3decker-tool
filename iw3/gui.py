@@ -42131,6 +42131,30 @@ def _self_test_smear_guard_log():
         assert "_smear_guard_frames" not in args.state
     src = __import__("inspect").getsource(U)
     assert src.count("    finish_smear_guard_log(args, ") == 2  # the two call sites (not the def)
+    assert src.count("    reset_smear_guard_log(args, ") == 2
+    # ADR-496: live (in-progress) rewrite during the run
+    with tempfile.TemporaryDirectory() as tdir:
+        out = os.path.join(tdir, "movie_out.mkv")
+        src_in = os.path.join(tdir, "movie.mkv")
+        args = U.create_parser(required_true=False).parse_args(["-i", src_in, "-o", out, "--smear-guard", "1.0",
+                                                                 "--smear-guard-limit", "6"])
+        args.state = {"_smear_guard_frames": [(1.0, 0.0, 0.0)]}
+        U.reset_smear_guard_log(args, input_path=src_in, output_path=out, fps=24)
+        assert "_smear_guard_frames" not in args.state and "_smear_guard_live" in args.state
+        live_path = args.state["_smear_guard_live"]["path"]
+        assert live_path.endswith("_smear_guard_log.txt")
+        args.divergence = 3.8
+        dd = torch.zeros(4, 1, H, W); dd[..., W // 2:] = 0.8
+        U._apply_smear_guard(dd, args, torch.zeros(4, 3, H, 1920))
+        assert not os.path.exists(live_path)           # interval not reached yet
+        args.state["_smear_guard_live"]["last"] -= U.SMEAR_GUARD_LIVE_INTERVAL + 1
+        U._apply_smear_guard(dd, args, torch.zeros(4, 3, H, 1920))
+        live_txt = open(live_path, encoding="utf-8").read()
+        assert "IN PROGRESS" in live_txt and "Summary so far" in live_txt, live_txt
+        U.finish_smear_guard_log(args, src_in, out, fps=24)
+        final_txt = open(live_path, encoding="utf-8").read()
+        assert "IN PROGRESS" not in final_txt and "Summary:" in final_txt, final_txt
+        assert "_smear_guard_live" not in args.state
     print("_self_test_smear_guard_log: PASS")
 
 

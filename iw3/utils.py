@@ -7270,6 +7270,14 @@ def bind_vda_frame_callback(depth_model, side_model, segment_pts, args, scene_em
     pts_queue = []
     pix_dtype = None
     pix_max = None
+    # ADR-500 (test-only): --depth-reset-at-cuts -- the DEPTH model alone (EMA range + VDA state)
+    # restarts at every real cut (the same cuts Pre-Plan / the scene logs use); everything else
+    # (apply_divergence reset_pts, logs) is unchanged. Rebuild of the ADR-487 experiment.
+    depth_reset_pts = segment_pts
+    if getattr(args, "depth_reset_at_cuts", False) and log_segment_pts:
+        depth_reset_pts = set(segment_pts) | set(log_segment_pts)
+        print(f"[iw3] Depth Reset at Cuts (test): depth restarts at {len(log_segment_pts)} real cut(s).",
+              file=sys.stderr)
 
     depth_model.reset()
 
@@ -7319,7 +7327,7 @@ def bind_vda_frame_callback(depth_model, side_model, segment_pts, args, scene_em
 
         x = torch.stack(batch_queue)
         depth_list = depth_model.infer_with_normalize(
-            x, pts_queue, segment_pts,
+            x, pts_queue, depth_reset_pts,
             enable_amp=not args.disable_amp,
             edge_dilation=_resolve_edge_dilation(args),
             depth_aa=args.depth_aa,
@@ -11293,6 +11301,10 @@ def create_parser(required_true=True):
                                   f"(the REAL shot, whatever Invert is set to) gets exactly this 3D Strength. "
                                   f"The shot type itself is still decided from the measured strength (Auto Range "
                                   f"+ thresholds). Default: not set = keep the measured strength."))
+    parser.add_argument("--depth-reset-at-cuts", action="store_true",
+                        help=("ADR-500 TEST ONLY (VDA models): restart the depth range (EMA) and the VDA state at "
+                              "every real scene cut (the cuts Pre-Plan uses). Rebuild of the rejected ADR-487 "
+                              "experiment for A/B tests; not in the GUI"))
     parser.add_argument("--depth-jump-glide", type=float, default=0.0,
                         help=("ADR-498: Depth Jump Glide -- when an object's depth suddenly snaps far more than "
                               "its normal frame-to-frame movement (e.g. Video Depth Anything re-estimating it at "

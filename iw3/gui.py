@@ -2761,6 +2761,31 @@ class MainFrame(wx.Frame):
                       "Recommended: " + _rec))
                 setattr(self, f"cbo_{_prefix}_{_s}", _c)
 
+        # ADR-497: Edge Steady.
+        self.lbl_edge_steady = wx.StaticText(self.grp_stereo, label=T("Edge Steady"))
+        self.cbo_edge_steady = EditableComboBox(
+            self.grp_stereo, choices=["0", "0.25", "0.5", "0.75", "1.0"], name="cbo_edge_steady")
+        self.cbo_edge_steady.SetValue("0")
+        self.cbo_edge_steady.SetToolTip(
+            T("What: holds object outlines steady over time, but ONLY at the spots that wobble. Each frame it follows the camera/object motion from the previous frame, then looks for outline spots whose depth goes up, then down, then up again (a wobble -- a real depth change keeps going one way). Only those spots are blended with their previous, motion-followed depth. Everything else -- steady edges, real depth changes, flat areas, the insides of objects -- is untouched. It skips spots where something new appears, and restarts at every scene cut." + "\n"
+              "Why: the depth AI sometimes redraws a soft outline a little differently each frame (e.g. an object entering at the frame edge while the camera moves), which shows up as edge flicker in 3D." + "\n"
+              "Pros: targets only the flicker; follows motion so it doesn't lag like Object Stability; writes a per-scene log of where it acted." + "\n"
+              "Cons: a little slower (it tracks motion every frame); on very fast motion it acts less (safety check)." + "\n"
+              "Values: 0 = off (default), 0.5 to try, 1.0 = hold wobbling spots fully." + "\n"
+              "Recommended: 0.5-0.75 with Limit 1.0."))
+        self.lbl_edge_steady_limit = wx.StaticText(self.grp_stereo, label=T("Edge Steady Limit (px)"))
+        self.cbo_edge_steady_limit = EditableComboBox(
+            self.grp_stereo, choices=["0.5", "1.0", "1.5", "2.0", "3.0"], name="cbo_edge_steady_limit")
+        self.cbo_edge_steady_limit.SetValue("1.0")
+        self.cbo_edge_steady_limit.SetToolTip(
+            T("Only when Edge Steady is above 0." + "\n"
+              "What: the smallest back-and-forth change on an outline (in pixels of 3D shift) that counts as a wobble." + "\n"
+              "Why: tiny changes are invisible; only real wobble needs holding." + "\n"
+              "Pros: lower catches subtler flicker; higher touches less." + "\n"
+              "Cons: too low may hold outlines that were fine (harmless but slightly stiffer); too high misses mild flicker." + "\n"
+              "Values: 0.5-3.0, default 1.0." + "\n"
+              "Recommended: 1.0; try 0.5 if mild flicker remains."))
+
         # ADR-494: Smear Guard.
         self.lbl_smear_guard = wx.StaticText(self.grp_stereo, label=T("Smear Guard"))
         self.cbo_smear_guard = EditableComboBox(
@@ -5192,7 +5217,7 @@ class MainFrame(wx.Frame):
         for _n in self._roundness_widget_names()[::2]:  # ADR-492
             layout.Add(getattr(self, _n), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, "cbo" + _n[3:]), (i, 1), (1, 2), flag=wx.EXPAND)
-        for _s in ("smear_guard", "smear_guard_limit"):  # ADR-494
+        for _s in ("smear_guard", "smear_guard_limit", "edge_steady", "edge_steady_limit"):  # ADR-494/497
             layout.Add(getattr(self, f"lbl_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, f"cbo_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13534,6 +13559,8 @@ class MainFrame(wx.Frame):
             *[getattr(self, _n) for _n in self._roundness_widget_names()],  # ADR-492
             self.lbl_smear_guard, self.cbo_smear_guard,  # ADR-494
             self.lbl_smear_guard_limit, self.cbo_smear_guard_limit,
+            self.lbl_edge_steady, self.cbo_edge_steady,  # ADR-497
+            self.lbl_edge_steady_limit, self.cbo_edge_steady_limit,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
             # Edge Fix Shot Lock cluster (ADR-458/459)
@@ -14784,6 +14811,8 @@ class MainFrame(wx.Frame):
             # ADR-492: Midground Roundness (empty per-shot box = None)
             smear_guard=float(self.cbo_smear_guard.GetValue() or 0),  # ADR-494
             smear_guard_limit=float(self.cbo_smear_guard_limit.GetValue() or 12),
+            edge_steady=float(self.cbo_edge_steady.GetValue() or 0),  # ADR-497
+            edge_steady_limit=float(self.cbo_edge_steady_limit.GetValue() or 1.0),
             midground_roundness=float(self.cbo_midground_roundness.GetValue() or 0),
             midground_roundness_center=float(self.cbo_midground_roundness_center.GetValue() or 0.5),
             **{_n[4:]: (lambda s: float(s) if s.strip() else None)(getattr(self, _n).GetValue())
@@ -16257,6 +16286,8 @@ class MainFrame(wx.Frame):
         self.chk_shot_lock_five_groups.SetValue(bool(getattr(args, "shot_lock_five_groups", False)))  # ADR-491
         self.cbo_smear_guard.SetValue(f"{float(getattr(args, 'smear_guard', 0.0) or 0.0):g}")  # ADR-494
         self.cbo_smear_guard_limit.SetValue(f"{float(getattr(args, 'smear_guard_limit', 12.0) or 12.0):g}")
+        self.cbo_edge_steady.SetValue(f"{float(getattr(args, 'edge_steady', 0.0) or 0.0):g}")  # ADR-497
+        self.cbo_edge_steady_limit.SetValue(f"{float(getattr(args, 'edge_steady_limit', 1.0) or 1.0):g}")
         self.cbo_midground_roundness.SetValue(f"{float(getattr(args, 'midground_roundness', 0.0) or 0.0):g}")  # ADR-492
         self.cbo_midground_roundness_center.SetValue(f"{float(getattr(args, 'midground_roundness_center', 0.5)):g}")
         for _n in self._roundness_widget_names()[5::2]:
@@ -42096,6 +42127,106 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_edge_steady():
+    """ADR-497: Edge Steady. (a) off = identity; (b) an outline that wobbles left/right every frame
+    is held (smaller frame-to-frame change), flat areas untouched; (c) a steady real move (one
+    direction) is NOT held; (d) follows a camera pan (picture + depth shifted together) without
+    acting; (e) reset at a cut; (f) hook + log + GUI/CLI round-trip."""
+    import os, tempfile, types as _t
+    import torch
+    import wx
+    from . import utils as U
+    H, W = 48, 160
+    yy, xx = torch.meshgrid(torch.arange(H).float(), torch.arange(W).float(), indexing="ij")
+
+    def scene(edge_x, pan=0):
+        img = torch.zeros(1, 3, H, W)
+        tex = ((((xx - pan) // 6 + yy // 6) % 2) * 0.4 + 0.3)          # textured picture
+        img[0, :] = tex
+        dep = torch.zeros(1, 1, H, W)
+        x = xx - pan
+        dep[0, 0] = torch.clamp((x - edge_x) / 6.0, 0, 1) * 0.6     # soft outline (ramp)
+        return img, dep
+
+    # (a)
+    img, dep = scene(80)
+    assert U.edge_steady_depth(dep, img, 0.0, 1.0, 3.8, 1920, {}) is dep
+    # (b) wobble: the soft outline jumps +/-2 depth px every frame while the picture is identical
+    st, outs, raws, stats = {}, [], [], []
+    for f in range(8):
+        _, dep = scene(80 + (2 if f % 2 else -2))
+        raws.append(dep)
+        outs.append(U.edge_steady_depth(dep, img, 1.0, 1.0, 3.8, 1920, st, stats=stats))
+    ch_raw = sum(float((raws[f] - raws[f - 1]).abs().mean()) for f in range(3, 8))
+    ch_out = sum(float((outs[f] - outs[f - 1]).abs().mean()) for f in range(3, 8))
+    assert ch_out < ch_raw * 0.6, (ch_raw, ch_out)
+    assert torch.allclose(outs[-1][..., :, :40], raws[-1][..., :, :40])   # flat area untouched
+    assert max(a for _, a, _ in stats) > 0 and stats[0] == (0.0, 0.0, 0.0)
+    # (c) a real one-direction move of the outline is not held
+    st, outs, raws = {}, [], []
+    for f in range(8):
+        _, dep = scene(70 + 2 * f)
+        raws.append(dep)
+        outs.append(U.edge_steady_depth(dep, img, 1.0, 1.0, 3.8, 1920, st))
+    assert all(torch.allclose(o, r, atol=1e-5) for o, r in zip(outs, raws))
+    # (d) camera pan: picture and depth move together -> nothing to hold
+    st, ok = {}, True
+    for f in range(6):
+        im2, dep = scene(80, pan=2 * f)
+        o = U.edge_steady_depth(dep, im2, 1.0, 1.0, 3.8, 1920, st)
+        ok = ok and float((o - dep).abs().max()) < 0.05
+    assert ok
+    # (e) reset at a cut clears history
+    st = {}
+    for f in range(4):
+        _, dep = scene(80 + (2 if f % 2 else -2))
+        U.edge_steady_depth(dep, img, 1.0, 1.0, 3.8, 1920, st)
+    _, dep = scene(80 + 2)
+    assert torch.equal(U.edge_steady_depth(dep, img, 1.0, 1.0, 3.8, 1920, st, reset=[True]), dep)
+    # (f) hook + log
+    src = __import__("inspect").getsource(U)
+    assert src.count("depth = _apply_edge_steady(depth, args, im, reset_pts)  # ADR-497") == 3
+    assert src.count("    reset_edge_steady_log(args, input_path=") == 2 and src.count("    finish_edge_steady_log(args, ") == 2
+    with tempfile.TemporaryDirectory() as tdir:
+        out = os.path.join(tdir, "movie_out.mkv"); src_in = os.path.join(tdir, "movie.mkv")
+        args = U.create_parser(required_true=False).parse_args(["-i", src_in, "-o", out, "--edge-steady", "1.0"])
+        args.state = {}
+        args.divergence = 3.8
+        U.reset_edge_steady_log(args, input_path=src_in, output_path=out, fps=24)
+        for f in range(6):
+            _, dep = scene(80 + (2 if f % 2 else -2))
+            U._apply_edge_steady(dep, args, img)
+        assert len(args.state["_edge_steady_frames"]) == 6
+        U.finish_edge_steady_log(args, src_in, out, fps=24)
+        logs = [f for f in os.listdir(tdir) if f.endswith("_edge_steady_log.txt")]
+        assert len(logs) == 1, os.listdir(tdir)
+        txt = open(os.path.join(tdir, logs[0]), encoding="utf-8").read()
+        assert txt.startswith("Edge Steady log for:") and "worst wobble" in txt and "IN PROGRESS" not in txt, txt
+        assert "_edge_steady_frames" not in args.state
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.cbo_edge_steady.GetValue() == "0" and frame.cbo_edge_steady_limit.GetValue() == "1.0"
+        assert "edge-steady" not in frame.get_cli_command()
+        frame.cbo_edge_steady.SetValue("1.0")
+        frame.cbo_edge_steady_limit.SetValue("0.5")
+        args = frame.parse_args(skip_set_state=True)
+        assert (args.edge_steady, args.edge_steady_limit) == (1.0, 0.5)
+        cmd = frame.get_cli_command()
+        assert "--edge-steady 1.0" in cmd and "--edge-steady-limit 0.5" in cmd, cmd
+        meta = U._build_iw3_comment_metadata(args, video=True) or ""
+        assert "iw3_edge_steady=1.0" in meta, meta
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--edge-steady", "0.75"]))
+        assert frame.cbo_edge_steady.GetValue() == "0.75" and frame.cbo_edge_steady_limit.GetValue() == "1"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_edge_steady: PASS")
+
+
 def _self_test_smear_guard_log():
     """ADR-495: Smear Guard log -- per-frame stats from the guard, per-scene rows from Pre-Plan
     edges (or 10 s blocks), real labels, summary + hardest scenes; finish writes next to the output."""
@@ -43711,6 +43842,7 @@ def _run_self_tests():
         _self_test_midground_roundness,
         _self_test_smear_guard,
         _self_test_smear_guard_log,
+        _self_test_edge_steady,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

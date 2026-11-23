@@ -3866,6 +3866,9 @@ def make_output_filename(input_filename, args, video=False):
                 mp += f"hi{to_deciaml(mg_high, 100, 2)}"
         else:
             mp = ""
+        if float(getattr(args, "edge_steady", 0.0) or 0.0) > 0.0:  # ADR-497: Edge Steady
+            mp += (f"_es{to_deciaml(args.edge_steady, 100, 2)}"
+                   f"l{to_deciaml(float(getattr(args, 'edge_steady_limit', 1.0) or 1.0), 10, 2)}")
         if float(getattr(args, "smear_guard", 0.0) or 0.0) > 0.0:  # ADR-494: Smear Guard
             mp += (f"_sg{to_deciaml(args.smear_guard, 100, 2)}"
                    f"l{int(round(float(getattr(args, 'smear_guard_limit', 12.0) or 12.0)))}")
@@ -4546,6 +4549,9 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_background_pop_threshold_high={args.background_pop_threshold_high}")
     if getattr(args, "midground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_midground_pop={args.midground_pop}")
+    if float(getattr(args, "edge_steady", 0.0) or 0.0) > 0.0:  # ADR-497
+        comment_parts.append(f"iw3_edge_steady={args.edge_steady}")
+        comment_parts.append(f"iw3_edge_steady_limit={getattr(args, 'edge_steady_limit', 1.0)}")
     if float(getattr(args, "smear_guard", 0.0) or 0.0) > 0.0:  # ADR-494
         comment_parts.append(f"iw3_smear_guard={args.smear_guard}")
         comment_parts.append(f"iw3_smear_guard_limit={getattr(args, 'smear_guard_limit', 12.0)}")
@@ -6346,6 +6352,7 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
                     _push_foreground_scale_scene_log(fs_shot_type)
             depth = _apply_smear_guard(_apply_midground_roundness(mapper_fn(depth), args),
                                        args, im, reset_pts)  # ADR-492 / ADR-494
+            depth = _apply_edge_steady(depth, args, im, reset_pts)  # ADR-497
             # ADR-423: real confirmed bug -- unlike sod_v1/face_detect/depth_percentile/
             # clip_shot/sod_track (whose convergence value comes from
             # ConvergenceEstimator._quantile_position(), a position WITHIN the depth
@@ -6364,10 +6371,12 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             convergence = mapper_fn(convergence)
             depth = _apply_smear_guard(_apply_midground_roundness(mapper_fn(depth), args),
                                        args, im, reset_pts)  # ADR-492 / ADR-494
+            depth = _apply_edge_steady(depth, args, im, reset_pts)  # ADR-497
     else:
         convergence = args.convergence
         depth = _apply_smear_guard(_apply_midground_roundness(mapper_fn(depth), args),
                                    args, im, reset_pts)  # ADR-492 / ADR-494
+        depth = _apply_edge_steady(depth, args, im, reset_pts)  # ADR-497
 
     # ADR-237: real user-found bug -- the inpaint methods below (forward_inpaint/
     # mlbw_l2_inpaint/monobw_inpaint) buffer frames internally and only return a
@@ -8171,7 +8180,7 @@ def _apply_smear_guard(depth, args, im=None, reset_pts=None):
 
 
 def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength, limit, title,
-                           in_progress=False):
+                           in_progress=False, name="Smear Guard", intro=None, metric="worst jump"):
     """ADR-495: per-scene Smear Guard report. frame_stats[i] = (worst jump px, guarded area
     fraction, max weight) for the i-th processed frame (frame i is at start_sec + i/fps).
     `edges`: Pre-Plan scene start times in seconds (+ end), or None -> 10-second blocks."""
@@ -8185,11 +8194,13 @@ def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength,
         while t < end - 1e-9:
             bounds.append((t, min(t + 10.0, end)))
             t += 10.0
-    lines = [f"Smear Guard log for: {title}" + ("   (IN PROGRESS -- conversion still running)" if in_progress else ""),
-             f"Smear Guard {strength:g}, Limit {limit:g} px -- 'acted' = the guard eased the depth somewhere "
-             f"in that frame; 'area' = share of the picture it touched; 'worst jump' = the biggest depth "
-             f"jump found (px of stretch, before easing). Jumps over {limit:g} px are eased; at "
-             f"{2 * limit:g} px and more at full strength.", ""]
+    if intro is None:
+        intro = (f"Smear Guard {strength:g}, Limit {limit:g} px -- 'acted' = the guard eased the depth somewhere "
+                 f"in that frame; 'area' = share of the picture it touched; 'worst jump' = the biggest depth "
+                 f"jump found (px of stretch, before easing). Jumps over {limit:g} px are eased; at "
+                 f"{2 * limit:g} px and more at full strength.")
+    lines = [f"{name} log for: {title}" + ("   (IN PROGRESS -- conversion still running)" if in_progress else ""),
+             intro, ""]
     rows = []
     for k, (a, b) in enumerate(bounds):
         i0 = max(0, int(round((a - start_sec) * fps)))
@@ -8205,7 +8216,7 @@ def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength,
         lines.append(f"Scene {k + 1}   {_format_hms(a)} - {_format_hms(b)}   ({i1 - i0} frames)"
                      + (f"   [{label}]" if label else "")
                      + f"   acted on {acted * 100.0 / (i1 - i0):.0f}% of frames   area {area:.2f}%"
-                     + f"   worst jump {worst:.0f} px")
+                     + (f"   {metric} {worst:.0f} px" if worst >= 10 else f"   {metric} {worst:.1f} px"))
     lines.append("")
     if rows:
         total = sum(r[3] for r in rows)
@@ -8220,7 +8231,7 @@ def format_smear_guard_log(frame_stats, fps, start_sec, edges, labels, strength,
             for r in top:
                 lines.append(f"  Scene {r[0]}   {_format_hms(r[1])} - {_format_hms(r[2])}"
                              + (f"   [{r[7]}]" if r[7] else "")
-                             + f"   area {r[5]:.2f}%   worst jump {r[6]:.0f} px")
+                             + f"   area {r[5]:.2f}%   {metric} {r[6]:.1f} px")
     return "\n".join(lines) + "\n"
 
 
@@ -8309,6 +8320,168 @@ def _write_smear_guard_log_live(args, force=False):
         os.replace(tmp, live["path"])
     except Exception as e:  # noqa: BLE001
         print(f"[iw3] Smear Guard log: live write failed ({type(e).__name__}: {e})", file=sys.stderr)
+
+
+def edge_steady_depth(depth, im, strength, limit_px, divergence, out_width, state, reset=None, stats=None):
+    """ADR-497: Edge Steady -- holds object outlines steady over time, ONLY where they wobble.
+    For each frame (in order): the previous frame is followed to this one with optical flow on
+    the picture (so the hold moves with the camera/object -- no lag), then a spot is treated as
+    flickering only when ALL of these hold:
+      - it is on an object outline (local depth range over 5x5 > 2*limit px of disparity),
+      - its depth changed by more than `limit` px vs. where it was last frame, AND that change
+        has the OPPOSITE direction of last frame's change (up-down-up = wobble; a real depth
+        change keeps one direction),
+      - the picture there matches last frame after following the motion (no new object /
+        occlusion -> no ghost trails).
+    Only there the depth is blended with last frame's (already steadied, motion-followed) depth
+    by `strength` (1.0 = hold fully). Everything else is untouched. Restarts at cuts (`reset`).
+    depth (B,1,H,W) 0..1, im (B,3,h,w) 0..1. `state` is a dict kept between calls."""
+    import cv2
+    import numpy as np
+    s = float(strength)
+    if s <= 0.0 or divergence is None or float(divergence) <= 0.0:
+        return depth
+    s = min(s, 1.0)
+    B, _, H, W = depth.shape
+    px = float(divergence) / 100.0 * float(out_width)   # depth unit -> output px of disparity
+    lim = max(float(limit_px), 0.05)
+    fw = min(W, 640)
+    fh = max(8, int(round(H * fw / W)))
+    g_all = F.interpolate(im[:, :3].float().mean(1, keepdim=True), size=(fh, fw), mode="area")
+    g_all = (g_all.clamp(0, 1) * 255).round().to(torch.uint8)[:, 0].cpu().numpy()
+    d_all = depth[:, 0].float().cpu().numpy()
+    gx, gy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+    fgx, fgy = np.meshgrid(np.arange(fw, dtype=np.float32), np.arange(fh, dtype=np.float32))
+    k5 = np.ones((5, 5), np.uint8)
+    out_all = np.empty_like(d_all)
+    for i in range(B):
+        d, g = d_all[i], g_all[i]
+        prev = state.get("prev")
+        if (prev is None or (reset is not None and i < len(reset) and reset[i])
+                or prev["raw"].shape != d.shape or prev["g"].shape != g.shape):
+            out = d
+            state["prev"] = dict(g=g, raw=d, out=d, delta=np.zeros_like(d))
+            out_all[i] = out
+            if stats is not None:
+                stats.append((0.0, 0.0, 0.0))
+            continue
+        flow = cv2.calcOpticalFlowFarneback(g, prev["g"], None, 0.5, 3, 15, 3, 5, 1.2, 0)
+        gw = cv2.remap(prev["g"], fgx + flow[..., 0], fgy + flow[..., 1], cv2.INTER_LINEAR,
+                       borderMode=cv2.BORDER_REPLICATE)
+        ok = (np.abs(g.astype(np.int16) - gw.astype(np.int16)) < 24).astype(np.uint8)
+        if (fh, fw) != (H, W):
+            flow = cv2.resize(flow, (W, H), interpolation=cv2.INTER_LINEAR)
+            flow[..., 0] *= W / fw
+            flow[..., 1] *= H / fh
+            ok = cv2.resize(ok, (W, H), interpolation=cv2.INTER_NEAREST)
+        mx, my = gx + flow[..., 0], gy + flow[..., 1]
+        wr = cv2.remap(prev["raw"], mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        wo = cv2.remap(prev["out"], mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        wd = cv2.remap(prev["delta"], mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        delta = d - wr
+        dpx = np.abs(delta) * px
+        osc = (delta * wd < 0) & (dpx > lim) & (np.abs(wd) * px > lim)
+        edge = (cv2.dilate(d, k5) - cv2.erode(d, k5)) * px > 2.0 * lim
+        edge = cv2.dilate(edge.astype(np.uint8), k5) > 0
+        m = (osc & edge & (ok > 0)).astype(np.float32)
+        m = cv2.blur(m, (5, 5))
+        w = np.clip(m * 1.5, 0.0, 1.0) * s
+        out = d * (1.0 - w) + wo * w
+        out_all[i] = out
+        state["prev"] = dict(g=g, raw=d, out=out, delta=delta)
+        if stats is not None:
+            wob = float((dpx * (osc & edge)).max()) if (osc & edge).any() else 0.0
+            stats.append((wob, float((w > 0.05).mean()), float(w.max())))
+    return torch.from_numpy(out_all).unsqueeze(1).to(device=depth.device, dtype=depth.dtype)
+
+
+def _apply_edge_steady(depth, args, im=None, reset_pts=None):
+    """ADR-497: apply_divergence() hook, right after Smear Guard."""
+    strength = float(getattr(args, "edge_steady", 0.0) or 0.0)
+    if strength <= 0.0 or depth.ndim != 4 or im is None:
+        return depth
+    st = args.state.setdefault("_edge_steady_state", {})
+    frames = args.state.setdefault("_edge_steady_frames", [])
+    n0 = len(frames)
+    new = edge_steady_depth(depth, im, strength, float(getattr(args, "edge_steady_limit", 1.0) or 1.0),
+                            getattr(args, "divergence", None), im.shape[-1], st, reset=reset_pts, stats=frames)
+    if len(frames) == n0:
+        frames.extend([(0.0, 0.0, 0.0)] * int(depth.shape[0]))
+    _write_edge_steady_log(args, live=True)
+    return new
+
+
+def _edge_steady_log_text(args, stats, fps, start, title, in_progress):
+    lim = float(getattr(args, "edge_steady_limit", 1.0) or 1.0)
+    intro = (f"Edge Steady {float(args.edge_steady):g}, Limit {lim:g} px -- 'acted' = it held a wobbling "
+             f"outline steady somewhere in that frame; 'area' = share of the picture it touched; 'worst wobble' "
+             f"= the biggest back-and-forth depth change found on an outline (px of disparity, before holding). "
+             f"Only outline spots that change direction frame to frame by more than {lim:g} px are held.")
+    return format_smear_guard_log(stats, fps, start, args.state.get("_scene_plan_edges"), SCENE_PLAN_LABELS,
+                                  float(args.edge_steady), lim, title, in_progress=in_progress,
+                                  name="Edge Steady", intro=intro, metric="worst wobble")
+
+
+def reset_edge_steady_log(args, input_path=None, output_path=None, fps=None):
+    """ADR-497: once per movie -- clears Edge Steady's history/stats and sets the live log path."""
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict):
+        return
+    for k in ("_edge_steady_state", "_edge_steady_frames", "_edge_steady_live"):
+        state.pop(k, None)
+    if float(getattr(args, "edge_steady", 0.0) or 0.0) <= 0.0 or input_path is None or output_path is None:
+        return
+    try:
+        real_output, sg_path = _smear_guard_log_paths(args, input_path, output_path)
+        state["_edge_steady_live"] = dict(
+            path=sg_path[:-len("_smear_guard_log.txt")] + "_edge_steady_log.txt",
+            title=path.basename(real_output),
+            fps=fps if fps is not None else _convergence_scene_log_fps(args, input_path),
+            start=SceneBoundaryCache.time_to_sec(getattr(args, "start_time", None), 0.0),
+            last=time.time())
+    except Exception as e:  # noqa: BLE001
+        print(f"[iw3] Edge Steady log: no log path ({type(e).__name__}: {e})", file=sys.stderr)
+
+
+def _write_edge_steady_log(args, live=False):
+    """ADR-497: live (every SMEAR_GUARD_LIVE_INTERVAL s, "IN PROGRESS") or final write. Never raises."""
+    state = args.state
+    info, stats = state.get("_edge_steady_live"), state.get("_edge_steady_frames")
+    if not info or not stats:
+        return
+    now = time.time()
+    if live and now - info["last"] < SMEAR_GUARD_LIVE_INTERVAL:
+        return
+    info["last"] = now
+    try:
+        text = _edge_steady_log_text(args, stats, info["fps"], info["start"], info["title"], in_progress=live)
+        tmp = f"{info['path']}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, info["path"])
+        if not live:
+            print(f"[iw3] Edge Steady log written: {info['path']}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[iw3] Edge Steady log: write failed ({type(e).__name__}: {e})", file=sys.stderr)
+
+
+def finish_edge_steady_log(args, input_path, output_path, fps=None):
+    """ADR-497: final Edge Steady log, then clear its state. Never raises."""
+    state = getattr(args, "state", None)
+    if not isinstance(state, dict):
+        return
+    try:
+        if float(getattr(args, "edge_steady", 0.0) or 0.0) > 0.0 and state.get("_edge_steady_frames"):
+            if not state.get("_edge_steady_live"):
+                reset_info_frames = state["_edge_steady_frames"]
+                reset_edge_steady_log(args, input_path, output_path, fps)
+                state["_edge_steady_frames"] = reset_info_frames
+            elif fps is not None:
+                state["_edge_steady_live"]["fps"] = fps
+            _write_edge_steady_log(args, live=False)
+    finally:
+        for k in ("_edge_steady_state", "_edge_steady_frames", "_edge_steady_live"):
+            state.pop(k, None)
 
 
 def _five_groups_on(args):
@@ -9776,6 +9949,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     reset_edge_dilation_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_combined_scene_log(args, input_path=original_input_filename, output_path=output_path)
     reset_smear_guard_log(args, input_path=original_input_filename, output_path=output_path)  # ADR-496
+    reset_edge_steady_log(args, input_path=original_input_filename, output_path=output_path)  # ADR-497
     try:
         if args.keyframe:
             if side_model is not None and hasattr(side_model, "set_mode"):
@@ -9852,6 +10026,7 @@ def process_video(input_filename, output_path, args, depth_model, side_model, re
     finish_foreground_scale_scene_log(args, original_input_filename, final_output_path)
     finish_edge_dilation_scene_log(args, original_input_filename, final_output_path)
     finish_smear_guard_log(args, original_input_filename, final_output_path)  # ADR-495
+    finish_edge_steady_log(args, original_input_filename, final_output_path)  # ADR-497
 
 
 def export_images(input_path, output_dir, args, title=None):
@@ -10406,6 +10581,8 @@ def process_config_video(config, args, side_model):
                                   fps=float(getattr(config, "fps", 0)) or None)
     reset_smear_guard_log(args, input_path=args.input, output_path=args.output,
                           fps=float(getattr(config, "fps", 0)) or None)  # ADR-496
+    reset_edge_steady_log(args, input_path=args.input, output_path=args.output,
+                          fps=float(getattr(config, "fps", 0)) or None)  # ADR-497
     reset_combined_scene_log(args, input_path=args.input, output_path=args.output,
                              fps=float(getattr(config, "fps", 0)) or None)
 
@@ -10569,6 +10746,7 @@ def process_config_video(config, args, side_model):
     finish_convergence_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
     finish_foreground_scale_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
     finish_smear_guard_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)  # ADR-495
+    finish_edge_steady_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)  # ADR-497
     finish_edge_dilation_scene_log(args, args.input, args.output, fps=float(getattr(config, "fps", 0)) or None)
 
 
@@ -11006,6 +11184,12 @@ def create_parser(required_true=True):
                                   f"(the REAL shot, whatever Invert is set to) gets exactly this 3D Strength. "
                                   f"The shot type itself is still decided from the measured strength (Auto Range "
                                   f"+ thresholds). Default: not set = keep the measured strength."))
+    parser.add_argument("--edge-steady", type=float, default=0.0,
+                        help=("ADR-497: Edge Steady -- holds object outlines steady over time ONLY where they "
+                              "wobble back and forth between frames (motion-followed, so no lag). 0 = off "
+                              "(default), 0.5 to try, max 1.0"))
+    parser.add_argument("--edge-steady-limit", type=float, default=1.0,
+                        help="ADR-497: smallest back-and-forth change (px of disparity) treated as a wobble. Default 1.0")
     parser.add_argument("--smear-guard", type=float, default=0.0,
                         help=("ADR-494: Smear Guard -- before the other eye is drawn, finds the spots where the "
                               "depth jumps so sharply that pixels would be stretched (smearing) and eases the "

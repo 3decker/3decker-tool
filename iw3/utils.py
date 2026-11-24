@@ -3866,6 +3866,8 @@ def make_output_filename(input_filename, args, video=False):
                 mp += f"hi{to_deciaml(mg_high, 100, 2)}"
         else:
             mp = ""
+        if float(getattr(args, "depth_edge_snap", 0.0) or 0.0) > 0.0:  # ADR-501: Depth Edge Snap
+            mp += f"_des{to_deciaml(args.depth_edge_snap, 100, 2)}"
         if float(getattr(args, "depth_jump_glide", 0.0) or 0.0) > 0.0:  # ADR-498: Depth Jump Glide
             mp += f"_djg{to_deciaml(args.depth_jump_glide, 100, 2)}"
         if float(getattr(args, "edge_steady", 0.0) or 0.0) > 0.0:  # ADR-497: Edge Steady
@@ -4551,6 +4553,8 @@ def _build_iw3_comment_metadata(args, video=True):
             comment_parts.append(f"iw3_background_pop_threshold_high={args.background_pop_threshold_high}")
     if getattr(args, "midground_pop", 0.0) != 0.0:
         comment_parts.append(f"iw3_midground_pop={args.midground_pop}")
+    if float(getattr(args, "depth_edge_snap", 0.0) or 0.0) > 0.0:  # ADR-501
+        comment_parts.append(f"iw3_depth_edge_snap={args.depth_edge_snap}")
     if float(getattr(args, "depth_jump_glide", 0.0) or 0.0) > 0.0:  # ADR-498
         comment_parts.append(f"iw3_depth_jump_glide={args.depth_jump_glide}")
     if float(getattr(args, "edge_steady", 0.0) or 0.0) > 0.0:  # ADR-497
@@ -6560,6 +6564,9 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
             depth = torch.minimum(depth, parallax_cap)
         else:
             depth = torch.clamp(depth, max=parallax_cap)
+
+    if float(getattr(args, "depth_edge_snap", 0.0) or 0.0) > 0.0:  # ADR-501: last depth step before 3D
+        depth = depth_edge_snap(depth, im, args.depth_edge_snap)
 
     if args.method == "NULL":
         left_eye, right_eye = im.clone(), im.clone()
@@ -8595,6 +8602,35 @@ def finish_edge_steady_log(args, input_path, output_path, fps=None):
     finally:
         for k in ("_edge_steady_state", "_edge_steady_frames", "_edge_steady_live"):
             state.pop(k, None)
+
+
+def _box(x, r):
+    return F.avg_pool2d(x, 2 * r + 1, stride=1, padding=r, count_include_pad=False)
+
+
+def depth_edge_snap(depth, im, strength, radius=None, eps=1e-3):
+    """ADR-501: Depth Edge Snap -- a guided filter (He et al.) that re-shapes the depth map using the
+    picture's own brightness as a guide, so depth edges land on the objects' outlines and the soft
+    "half object / half background" band (what gets stretched into the jello look around edges) is
+    narrowed. Inside flat areas the depth stays smooth (`eps` keeps picture texture from being copied
+    into the depth). Works at the depth map's own size (the 3D methods size some masks from it).
+    depth (B,1,h,w) 0..1, im (B,3,H,W) 0..1. strength 0 = off .. 1 = full snapped result."""
+    s = float(strength)
+    if s <= 0.0 or im is None:
+        return depth
+    s = min(s, 1.0)
+    B, _, h, w = depth.shape
+    r = int(radius) if radius else max(6, int(round(w / 80)))  # window must span the soft band
+    I = F.interpolate(im[:, :3].float().mean(1, keepdim=True), size=(h, w), mode="area").clamp(0, 1)
+    p = depth.float()
+    mI, mp = _box(I, r), _box(p, r)
+    cov = _box(I * p, r) - mI * mp
+    var = _box(I * I, r) - mI * mI
+    a = cov / (var + eps)
+    b = mp - a * mI
+    q = _box(a, r) * I + _box(b, r)
+    out = (p + s * (q - p)).clamp(0.0, 1.0)
+    return out.to(depth.dtype)
 
 
 def _five_groups_on(args):
@@ -11305,6 +11341,10 @@ def create_parser(required_true=True):
                         help=("ADR-500 TEST ONLY (VDA models): restart the depth range (EMA) and the VDA state at "
                               "every real scene cut (the cuts Pre-Plan uses). Rebuild of the rejected ADR-487 "
                               "experiment for A/B tests; not in the GUI"))
+    parser.add_argument("--depth-edge-snap", type=float, default=0.0,
+                        help=("ADR-501: Depth Edge Snap -- re-shapes the depth map with the picture's own outlines as "
+                              "a guide (guided filter), so depth edges land on the objects' outlines and the soft "
+                              "object/background band (the 'jello' around edges) narrows. 0 = off (default), 1.0 = full"))
     parser.add_argument("--depth-jump-glide", type=float, default=0.0,
                         help=("ADR-498: Depth Jump Glide -- when an object's depth suddenly snaps far more than "
                               "its normal frame-to-frame movement (e.g. Video Depth Anything re-estimating it at "

@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — November 23, 2026
+## Latest Update — November 24, 2026
+
+**Added (off by default, being tested): "Depth Edge Snap".** Right before the 3D is built, it lines the depth map's edges up with the objects' outlines in the picture, so the background next to a character isn't dragged along and wobbling (the "jello" look around edges). Try 0.5–1.0.
+
+**Note:** Smear Guard makes that edge "jello" more visible in some scenes, because it softens the depth at edges. Use it when thin objects smear, not as an everyday setting.
+
+## Update — November 23, 2026
 
 **Added (experimental, off by default): "Depth Jump Glide".** Tries to turn VDA_L's occasional sudden depth snaps (when it re-estimates an object at one of its internal 32-frame handovers) into a short glide. In testing it could not tell those snaps apart from normal depth changes well enough: strong enough to fix the snap, it delayed depth in other scenes; gentle enough to be harmless, it missed the snap. It is kept only for experiments; leave it at 0. For a scene with a visible shift, Any_V3_Metric_Large doesn't have this problem.
 

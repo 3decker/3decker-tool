@@ -2761,6 +2761,19 @@ class MainFrame(wx.Frame):
                       "Recommended: " + _rec))
                 setattr(self, f"cbo_{_prefix}_{_s}", _c)
 
+        # ADR-501: Depth Edge Snap.
+        self.lbl_depth_edge_snap = wx.StaticText(self.grp_stereo, label=T("Depth Edge Snap"))
+        self.cbo_depth_edge_snap = EditableComboBox(
+            self.grp_stereo, choices=["0", "0.5", "0.75", "1.0"], name="cbo_depth_edge_snap")
+        self.cbo_depth_edge_snap.SetValue("0")
+        self.cbo_depth_edge_snap.SetToolTip(
+            T("What: right before the 3D is built, re-shapes the depth map using the picture's own outlines as a guide, so the depth's edges land exactly on the objects' outlines. The depth AI's edges are always a little soft; the pixels in that soft band get an in-between 3D shift, so the background right next to an object is dragged along with it and wobbles -- a 'jello' look around edges. Snapping the depth to the outlines narrows that band. Flat areas stay smooth." + "\n"
+              "Why: aimed at the jello / edge-mixing around characters and objects." + "\n"
+              "Pros: targets edges only; no extra AI pass; works with any 3D method." + "\n"
+              "Cons: where an object and its background have the same brightness, the picture gives no outline to snap to; very strong values can copy a little picture texture into the depth." + "\n"
+              "Values: 0 = off (default), 0.5 = half, 1.0 = full." + "\n"
+              "Recommended: try 0.5-1.0 and compare edges around moving characters."))
+
         # ADR-498: Depth Jump Glide.
         self.lbl_depth_jump_glide = wx.StaticText(self.grp_stereo, label=T("Depth Jump Glide"))
         self.cbo_depth_jump_glide = EditableComboBox(
@@ -5231,7 +5244,7 @@ class MainFrame(wx.Frame):
             layout.Add(getattr(self, _n), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, "cbo" + _n[3:]), (i, 1), (1, 2), flag=wx.EXPAND)
         for _s in ("smear_guard", "smear_guard_limit", "edge_steady", "edge_steady_limit",
-                   "depth_jump_glide"):  # ADR-494/497/498
+                   "depth_jump_glide", "depth_edge_snap"):  # ADR-494/497/498/501
             layout.Add(getattr(self, f"lbl_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, f"cbo_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13575,6 +13588,7 @@ class MainFrame(wx.Frame):
             self.lbl_smear_guard_limit, self.cbo_smear_guard_limit,
             self.lbl_edge_steady, self.cbo_edge_steady,  # ADR-497
             self.lbl_depth_jump_glide, self.cbo_depth_jump_glide,  # ADR-498
+            self.lbl_depth_edge_snap, self.cbo_depth_edge_snap,  # ADR-501
             self.lbl_edge_steady_limit, self.cbo_edge_steady_limit,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
@@ -14828,6 +14842,7 @@ class MainFrame(wx.Frame):
             smear_guard_limit=float(self.cbo_smear_guard_limit.GetValue() or 12),
             edge_steady=float(self.cbo_edge_steady.GetValue() or 0),  # ADR-497
             depth_jump_glide=float(self.cbo_depth_jump_glide.GetValue() or 0),  # ADR-498
+            depth_edge_snap=float(self.cbo_depth_edge_snap.GetValue() or 0),  # ADR-501
             edge_steady_limit=float(self.cbo_edge_steady_limit.GetValue() or 1.0),
             midground_roundness=float(self.cbo_midground_roundness.GetValue() or 0),
             midground_roundness_center=float(self.cbo_midground_roundness_center.GetValue() or 0.5),
@@ -16304,6 +16319,7 @@ class MainFrame(wx.Frame):
         self.cbo_smear_guard_limit.SetValue(f"{float(getattr(args, 'smear_guard_limit', 12.0) or 12.0):g}")
         self.cbo_edge_steady.SetValue(f"{float(getattr(args, 'edge_steady', 0.0) or 0.0):g}")  # ADR-497
         self.cbo_depth_jump_glide.SetValue(f"{float(getattr(args, 'depth_jump_glide', 0.0) or 0.0):g}")  # ADR-498
+        self.cbo_depth_edge_snap.SetValue(f"{float(getattr(args, 'depth_edge_snap', 0.0) or 0.0):g}")  # ADR-501
         self.cbo_edge_steady_limit.SetValue(f"{float(getattr(args, 'edge_steady_limit', 1.0) or 1.0):g}")
         self.cbo_midground_roundness.SetValue(f"{float(getattr(args, 'midground_roundness', 0.0) or 0.0):g}")  # ADR-492
         self.cbo_midground_roundness_center.SetValue(f"{float(getattr(args, 'midground_roundness_center', 0.5)):g}")
@@ -42144,6 +42160,53 @@ def _self_test_shot_lock_pre_plan():
     print("_self_test_shot_lock_pre_plan: PASS")
 
 
+def _self_test_depth_edge_snap():
+    """ADR-501: Depth Edge Snap. (a) off = identity; (b) a soft depth edge next to a sharp picture
+    edge becomes sharper and lands on the picture edge; (c) flat areas stay flat; (d) range kept;
+    (e) hook + GUI/CLI/metadata round-trip."""
+    import torch
+    import torch.nn.functional as F
+    import wx
+    from . import utils as U
+    H, W = 32, 128
+    im = torch.zeros(1, 3, H, W); im[..., 64:] = 0.9                 # picture edge at x=64
+    sharp = torch.zeros(1, 1, H, W); sharp[..., 64:] = 0.8
+    soft = F.avg_pool2d(F.pad(sharp, (6, 6, 0, 0), mode="replicate"), (1, 13), stride=1)  # soft band around 64
+    assert U.depth_edge_snap(soft, im, 0.0) is soft
+    out = U.depth_edge_snap(soft, im, 1.0, radius=12)
+    err_before = float((soft - sharp).abs()[..., 56:72].mean())
+    err_after = float((out - sharp).abs()[..., 56:72].mean())
+    assert err_after < err_before * 0.7, (err_before, err_after)
+    step_before = float(soft[0, 0, 5, 64] - soft[0, 0, 5, 63])
+    step_after = float(out[0, 0, 5, 64] - out[0, 0, 5, 63])
+    assert step_after > 0.4 and step_after > step_before * 5, (step_before, step_after)   # sharp step ON the outline
+    assert float((out[..., 8:40] - 0.0).abs().max()) < 0.02 and float((out[..., 90:120] - 0.8).abs().max()) < 0.02
+    assert float(out.min()) >= 0.0 and float(out.max()) <= 1.0
+    half = U.depth_edge_snap(soft, im, 0.5, radius=12)
+    assert float((half - sharp).abs()[..., 56:72].mean()) < err_before
+    src = __import__("inspect").getsource(U)
+    assert "depth = depth_edge_snap(depth, im, args.depth_edge_snap)" in src
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert frame.cbo_depth_edge_snap.GetValue() == "0"
+        assert "edge-snap" not in frame.get_cli_command()
+        frame.cbo_depth_edge_snap.SetValue("0.75")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.depth_edge_snap == 0.75 and "--depth-edge-snap 0.75" in frame.get_cli_command()
+        meta = U._build_iw3_comment_metadata(args, video=True) or ""
+        assert "iw3_depth_edge_snap=0.75" in meta, meta
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--depth-edge-snap", "1.0"]))
+        assert frame.cbo_depth_edge_snap.GetValue() == "1"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_depth_edge_snap: PASS")
+
+
 def _self_test_depth_jump_glide():
     """ADR-498: Depth Jump Glide. (a) first frame passes through; (b) a sudden local snap (one
     object jumps far back in 1 frame) becomes a glide that still ends at the new value;
@@ -43957,6 +44020,7 @@ def _run_self_tests():
         _self_test_smear_guard_log,
         _self_test_edge_steady,
         _self_test_depth_jump_glide,
+        _self_test_depth_edge_snap,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

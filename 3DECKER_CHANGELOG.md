@@ -13,7 +13,15 @@ it matters.
 
 ---
 
-## Latest Update — November 24, 2026
+## Latest Update — November 25, 2026
+
+**Added: depth curves can reuse depth that was already calculated.** Building a Depth Curve Match curve normally runs both depth models over the movie again, which takes hours for a whole movie. It can now reuse the depth saved from an earlier calibration, after checking it was made with the same settings (model, reset look, resolution, EMA and time range). Building a new curve "mix" from saved depth takes minutes instead of hours. For now this is a command-line option (`--source-depth-from` / `--target-depth-from`), not in the Calibrate window.
+
+**Good to know (tests, no setting changed):**
+- **The occasional depth "snap" with VDA_L** (for example the shell at 6:33 in Mario) also happens in the original January 2026 iw3. It's how VDA_L works, not something an update broke. Any_V3 doesn't have it.
+- **The "my curve + reset" depth curve made moving characters look a little off.** At the same amount of pop, the Mario curve was about 18% cleaner on moving characters. Smear Guard and Edge Snap were not the cause.
+
+## Update — November 24, 2026
 
 **Added: "Depth Edge Snap" (off by default).** Right before the 3D is built, it lines the depth map's edges up with the objects' outlines in the picture, so the background next to a character isn't dragged along and wobbling (the "jello" look around edges). In the Mario test at 1.0 the two eyes matched better in 7 of 8 scenes (cage 16% cleaner, also Peach, Yoshi and the stars) with the same pop-out, and nothing got worse. Try 0.5–1.0.
 

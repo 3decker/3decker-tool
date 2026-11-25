@@ -62,6 +62,67 @@ def _pass_depth_dir(output_dir, input_path):
     return path.join(output_dir, basename, "depth")
 
 
+PASS_MANIFEST = "calibrate_pass.json"
+
+
+def _write_pass_manifest(pass_dir, input_path, model_name, start_time, end_time,
+                         resolution, limit_resolution, extra_argv):
+    """ADR-502: records exactly how an export pass was made, so a later calibration
+    can safely reuse that pass's depth (--source-depth-from / --target-depth-from)."""
+    import json
+    info = {"input": path.basename(input_path), "model": model_name,
+            "start_time": start_time, "end_time": end_time,
+            "resolution": resolution, "limit_resolution": bool(limit_resolution),
+            "extra_argv": list(extra_argv or [])}
+    with open(path.join(pass_dir, PASS_MANIFEST), "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=1)
+
+
+def _check_reused_pass(pass_dir, input_path, model_name, start_time, end_time,
+                       resolution, limit_resolution, extra_argv, log=print):
+    """ADR-502: confirms a saved export pass matches what this calibration would export,
+    so reusing it gives the same curve as re-exporting. Raises ValueError on mismatch.
+    Uses the pass's own calibrate_pass.json when present (exact check); older passes
+    only have iw3_export.yml (model / EMA / scene-detect checked, the rest trusted --
+    the later source/target frame-count check still catches a different time range)."""
+    import json
+    depth_dir = _pass_depth_dir(pass_dir, input_path)
+    if not path.isdir(depth_dir) or not any(n.endswith(".png") for n in os.listdir(depth_dir)):
+        raise ValueError(f"no saved depth frames in {depth_dir}")
+    argv = list(extra_argv or [])
+    manifest = path.join(pass_dir, PASS_MANIFEST)
+    if path.exists(manifest):
+        with open(manifest, encoding="utf-8") as f:
+            info = json.load(f)
+        want = {"input": path.basename(input_path), "model": model_name,
+                "start_time": start_time, "end_time": end_time,
+                "resolution": resolution, "limit_resolution": bool(limit_resolution),
+                "extra_argv": argv}
+        bad = [k for k in want if info.get(k) != want[k]]
+        if bad:
+            raise ValueError(f"saved depth in {pass_dir} was made with different settings: " +
+                             ", ".join(f"{k}={info.get(k)!r} (need {want[k]!r})" for k in bad))
+        return depth_dir
+    import yaml
+    yml = path.join(path.dirname(depth_dir), "iw3_export.yml")
+    if not path.exists(yml):
+        raise ValueError(f"{pass_dir} has neither {PASS_MANIFEST} nor iw3_export.yml -- can't verify it")
+    with open(yml, encoding="utf-8") as f:
+        opt = ((yaml.safe_load(f) or {}).get("user_data") or {}).get("export_options") or {}
+    want = {"depth_model": model_name, "scene_detect": "--scene-detect" in argv,
+            "ema_normalize": "--ema-normalize" in argv}
+    if want["ema_normalize"]:
+        want["ema_decay"] = float(argv[argv.index("--ema-decay") + 1]) if "--ema-decay" in argv else 0.75
+        want["ema_buffer"] = int(argv[argv.index("--ema-buffer") + 1]) if "--ema-buffer" in argv else 30
+    bad = [k for k in want if opt.get(k) != want[k]]
+    if bad:
+        raise ValueError(f"saved depth in {pass_dir} was made with different settings: " +
+                         ", ".join(f"{k}={opt.get(k)!r} (need {want[k]!r})" for k in bad))
+    log(f"[depth-curve-calibrate] note: {pass_dir} is an older pass without {PASS_MANIFEST}; "
+        f"model/EMA/reset checked, resolution/Depth Refine/time range trusted")
+    return depth_dir
+
+
 def _run_export_pass(input_path, model_name, pass_dir, start_time, end_time,
                       gpu, resolution, limit_resolution, depth_model=None, extra_argv=None):
     """Runs one depth-only export pass with one model, using iw3's own real
@@ -162,7 +223,8 @@ def calibrate(input_path, source_model, target_model, clips,
               gpu=0, resolution=None, limit_resolution=False,
               pixels_per_frame=4000, num_points=512, output_path=None,
               work_dir=None, log=print, extra_argv=None, max_stretch=DEFAULT_MAX_STRETCH,
-              target_reset_look=False, target_apply_curve=None):
+              target_reset_look=False, target_apply_curve=None,
+              source_depth_from=None, target_depth_from=None):
     """Full calibration run over one or more clips: export both models over
     EVERY clip (each model loaded once, reused across all its clips), sample
     pixels from each clip/side, pool every clip's samples together, build the
@@ -178,9 +240,14 @@ def calibrate(input_path, source_model, target_model, clips,
     ADR-490 `target_apply_curve` (a curve file path): the TARGET depth samples are passed
     through that curve before the new curve is learned -- the same order a real job uses
     (depth -> normalize -> curve). With target = source model + target_reset_look this
-    reproduces "my current curve + the reset" exactly, as one new curve."""
+    reproduces "my current curve + the reset" exactly, as one new curve.
+    ADR-502 `source_depth_from` / `target_depth_from` (a saved pass folder, e.g. a previous
+    work dir's clip0_source): skip that export and reuse its depth after checking it
+    was made with the same settings (single clip only)."""
     if not clips:
         raise ValueError("calibrate() requires at least one clip")
+    if (source_depth_from or target_depth_from) and len(clips) != 1:
+        raise ValueError("--source-depth-from / --target-depth-from need exactly one --clip")
     # ADR-480: a clip may name its own movie file -- (path, start, end) -- so one curve
     # can be pooled from several movies; plain (start, end) clips use input_path.
     clips = [((c[0], c[1], c[2]) if len(c) == 3 else (input_path, c[0], c[1])) for c in clips]
@@ -199,12 +266,21 @@ def calibrate(input_path, source_model, target_model, clips,
         for i, (clip_path, start_time, end_time) in enumerate(clips):
             log(f"  clip {i + 1}/{len(clips)}: {path.basename(clip_path)} "
                 f"{start_time or 'start'}-{end_time or 'end'}")
+            if source_depth_from:  # ADR-502: reuse saved depth, no export
+                _check_reused_pass(source_depth_from, clip_path, source_model, start_time, end_time,
+                                   resolution, limit_resolution, extra_argv, log=log)
+                log(f"  reusing saved source depth: {source_depth_from}")
+                pass_dirs[i][0] = source_depth_from
+                continue
             pass_a_dir = path.join(work_dir, f"clip{i}_source")
             model_obj = _run_export_pass(clip_path, source_model, pass_a_dir, start_time, end_time,
                                           gpu, resolution, limit_resolution, depth_model=model_obj,
                                           extra_argv=extra_argv)
+            _write_pass_manifest(pass_a_dir, clip_path, source_model, start_time, end_time,
+                                 resolution, limit_resolution, extra_argv)
             pass_dirs[i][0] = pass_a_dir
-        _release_model(model_obj)
+        if model_obj is not None:
+            _release_model(model_obj)
 
         target_argv = list(extra_argv or [])
         if target_reset_look:
@@ -216,12 +292,21 @@ def calibrate(input_path, source_model, target_model, clips,
         for i, (clip_path, start_time, end_time) in enumerate(clips):
             log(f"  clip {i + 1}/{len(clips)}: {path.basename(clip_path)} "
                 f"{start_time or 'start'}-{end_time or 'end'}")
+            if target_depth_from:  # ADR-502: reuse saved depth, no export
+                _check_reused_pass(target_depth_from, clip_path, target_model, start_time, end_time,
+                                   resolution, limit_resolution, target_argv, log=log)
+                log(f"  reusing saved target depth: {target_depth_from}")
+                pass_dirs[i][1] = target_depth_from
+                continue
             pass_b_dir = path.join(work_dir, f"clip{i}_target")
             model_obj = _run_export_pass(clip_path, target_model, pass_b_dir, start_time, end_time,
                                           gpu, resolution, limit_resolution, depth_model=model_obj,
                                           extra_argv=target_argv)
+            _write_pass_manifest(pass_b_dir, clip_path, target_model, start_time, end_time,
+                                 resolution, limit_resolution, target_argv)
             pass_dirs[i][1] = pass_b_dir
-        _release_model(model_obj)
+        if model_obj is not None:
+            _release_model(model_obj)
 
         log(f"[depth-curve-calibrate] [3/3] sampling pixels and building the curve...")
         source_values_all, target_values_all = [], []
@@ -404,6 +489,14 @@ def create_parser():
                               "normalize -> curve). E.g. --source-model VDA_L --target-model VDA_L "
                               "--target-reset-look --target-apply-curve my_curve.json learns ONE curve "
                               "equal to 'my curve + the reset look'."))
+    parser.add_argument("--source-depth-from", type=str, default=None,
+                        help=("ADR-502: reuse the SOURCE depth saved by an earlier calibration (its work "
+                              "dir's clip0_source folder) instead of exporting it again. Checked against "
+                              "this run's settings first. Needs exactly one --clip, same range."))
+    parser.add_argument("--target-depth-from", type=str, default=None,
+                        help=("ADR-502: same, for the TARGET depth (e.g. a saved Any_V3 reset-look pass "
+                              "in clip0_target), so a new mix (different --target-apply-curve, "
+                              "--max-stretch, ...) is built in minutes."))
     parser.add_argument("--num-points", type=int, default=512,
                          help="Resolution of the saved lookup table.")
     parser.add_argument("--output", "-o", type=str, default=None,
@@ -477,6 +570,11 @@ def run(args):
     if getattr(args, "target_apply_curve", None) and not path.exists(args.target_apply_curve):
         print(f"ERROR: --target-apply-curve file does not exist: {args.target_apply_curve}", file=sys.stderr)
         return 1
+    for opt in ("source_depth_from", "target_depth_from"):
+        if getattr(args, opt, None) and not path.isdir(getattr(args, opt)):
+            print(f"ERROR: --{opt.replace('_', '-')} folder does not exist: {getattr(args, opt)}",
+                  file=sys.stderr)
+            return 1
     if (args.source_model == args.target_model and not getattr(args, "target_reset_look", False)
             and not getattr(args, "target_apply_curve", None)):
         print("ERROR: --source-model and --target-model must be different -- there is "
@@ -499,6 +597,8 @@ def run(args):
             max_stretch=getattr(args, "max_stretch", DEFAULT_MAX_STRETCH),
             target_reset_look=bool(getattr(args, "target_reset_look", False)),
             target_apply_curve=getattr(args, "target_apply_curve", None),
+            source_depth_from=getattr(args, "source_depth_from", None),
+            target_depth_from=getattr(args, "target_depth_from", None),
         )
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
@@ -906,6 +1006,75 @@ def _self_test_target_apply_curve():
     print("_self_test_target_apply_curve: PASS")
 
 
+def _self_test_reuse_saved_depth():
+    """ADR-502: a saved pass is reused (no export) when its settings match, refused when not."""
+    import tempfile as _tf
+    import json
+    from . import depth_curve_calibrate_cli as M
+    calls = []
+
+    def _fake(input_path, model_name, pass_dir, start_time, end_time, gpu, resolution,
+              limit_resolution, depth_model=None, extra_argv=None):
+        calls.append(model_name)
+        d = _pass_depth_dir(pass_dir, input_path); os.makedirs(d, exist_ok=True)
+        for k in range(3):
+            _make_fake_depth_png(path.join(d, f"{k:06d}.png"), 0.3 + 0.1 * k)
+        return object()
+    orig, orig_rel = M._run_export_pass, M._release_model
+    M._run_export_pass, M._release_model = _fake, (lambda m: None)
+    argv = ["--ema-normalize", "--ema-decay", "0.99", "--ema-buffer", "650"]
+    quiet = (lambda *_: None)
+    try:
+        with _tf.TemporaryDirectory() as td:
+            vid = path.join(td, "movie.mkv"); open(vid, "wb").close()
+            clip = [("00:00:00", "00:00:05")]
+            M.calibrate(vid, "VDA_L", "Any_V3_Metric_Large", clip, output_path=path.join(td, "a.json"),
+                        work_dir=path.join(td, "w1"), log=quiet, extra_argv=argv,
+                        target_reset_look=True, resolution=518)
+            assert calls == ["VDA_L", "Any_V3_Metric_Large"], calls
+            src = path.join(td, "w1", "clip0_source"); tgt = path.join(td, "w1", "clip0_target")
+            assert json.load(open(path.join(src, PASS_MANIFEST)))["model"] == "VDA_L"
+            calls.clear()   # reuse both: no exports at all, identical curve
+            M.calibrate(vid, "VDA_L", "Any_V3_Metric_Large", clip, output_path=path.join(td, "b.json"),
+                        work_dir=path.join(td, "w2"), log=quiet, extra_argv=argv, target_reset_look=True,
+                        resolution=518, source_depth_from=src, target_depth_from=tgt)
+            assert calls == [], calls
+            a = json.load(open(path.join(td, "a.json"))); b = json.load(open(path.join(td, "b.json")))
+            assert a["lut_y"] == b["lut_y"]
+            # reuse only the source for a new mix: only the target is exported
+            M.calibrate(vid, "VDA_L", "VDA_L", clip, output_path=path.join(td, "c.json"),
+                        work_dir=path.join(td, "w3"), log=quiet, extra_argv=argv,
+                        target_reset_look=True, resolution=518, source_depth_from=src)
+            assert calls == ["VDA_L"], calls
+            # mismatches refused: wrong model, wrong reset/model, wrong resolution, wrong range
+            for kw in (dict(source_depth_from=tgt), dict(target_depth_from=src),
+                       dict(source_depth_from=src, resolution=392),
+                       dict(source_depth_from=src, clips=[("00:00:00", "00:00:09")])):
+                clips = kw.pop("clips", clip); res = kw.pop("resolution", 518)
+                try:
+                    M.calibrate(vid, "VDA_L", "Any_V3_Metric_Large", clips,
+                                output_path=path.join(td, "x.json"), work_dir=path.join(td, "wx"),
+                                log=quiet, extra_argv=argv, target_reset_look=True, resolution=res, **kw)
+                    raise AssertionError(f"mismatch not refused: {kw}")
+                except ValueError:
+                    pass
+            # older pass without a manifest: falls back to iw3_export.yml
+            os.remove(path.join(src, PASS_MANIFEST))
+            with open(path.join(src, "movie", "iw3_export.yml"), "w", encoding="utf-8") as f:
+                f.write("user_data:\n  export_options:\n    depth_model: VDA_L\n    ema_normalize: true\n"
+                        "    ema_decay: 0.99\n    ema_buffer: 650\n    scene_detect: false\n")
+            _check_reused_pass(src, vid, "VDA_L", "00:00:00", "00:00:05", 518, False, argv, log=quiet)
+            try:
+                _check_reused_pass(src, vid, "VDA_L", "00:00:00", "00:00:05", 518, False,
+                                   argv + ["--scene-detect"], log=quiet)
+                raise AssertionError("reset mismatch not refused")
+            except ValueError:
+                pass
+    finally:
+        M._run_export_pass, M._release_model = orig, orig_rel
+    print("_self_test_reuse_saved_depth: PASS")
+
+
 def _run_self_tests():
     _self_test_pass_depth_dir_layout()
     _self_test_sample_pixels_from_dir()
@@ -913,6 +1082,7 @@ def _run_self_tests():
     _self_test_model_settings_argv()
     _self_test_target_reset_look()
     _self_test_target_apply_curve()
+    _self_test_reuse_saved_depth()
     _self_test_calibrate_end_to_end_with_fake_passes()
     _self_test_calibrate_pools_multiple_clips()
     _self_test_calibrate_pools_multiple_movies()

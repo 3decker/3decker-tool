@@ -13,7 +13,11 @@ it matters.
 
 ---
 
-## Latest Update — November 25, 2026
+## Latest Update — November 26, 2026
+
+**Added: "3DECKER Preview": watch a conversion halfway, in your own player.** While a video is still being converted it has no time length yet, so players can't show the length or jump around. Right-click the file being made → **Send to → 3DECKER Preview** (or drag it onto the **3DECKER Preview** icon on your desktop). A few seconds later a playable copy, with its length so far and working seeking, opens in your normal player (VLC, MPC-HC...). The copy goes into a "previews" folder next to the file; the conversion itself is not touched.
+
+## Update — November 25, 2026
 
 **Added: depth curves can reuse depth that was already calculated.** Building a Depth Curve Match curve normally runs both depth models over the movie again, which takes hours for a whole movie. It can now reuse the depth saved from an earlier calibration, after checking it was made with the same settings (model, reset look, resolution, EMA and time range). Building a new curve "mix" from saved depth takes minutes instead of hours. For now this is a command-line option (`--source-depth-from` / `--target-depth-from`), not in the Calibrate window.
 

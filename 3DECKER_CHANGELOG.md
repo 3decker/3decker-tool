@@ -17,6 +17,8 @@ it matters.
 
 **Added: "3DECKER Preview": watch a conversion halfway, in your own player.** While a video is still being converted it has no time length yet, so players can't show the length or jump around. Right-click the file being made → **Send to → 3DECKER Preview** (or drag it onto the **3DECKER Preview** icon on your desktop). A few seconds later a playable copy, with its length so far and working seeking, opens in your normal player (VLC, MPC-HC...). The copy goes into a "previews" folder next to the file; the conversion itself is not touched.
 
+**Added: "3DECKER Auto Preview": previews made for you, ready for the NVIDIA Shield.** Runs quietly in the background (starts with Windows). Every 5 minutes, for every movie being converted, it refreshes a playable copy in a "previews" folder next to it, named with how far it goes (for example `..._PREVIEW_upto_0h47m.mkv`), so on the Shield you just open the one with the biggest number. A preview you are watching is never replaced; older ones are cleaned up, and all previews of a movie are deleted when its conversion finishes.
+
 ## Update — November 25, 2026
 
 **Added: depth curves can reuse depth that was already calculated.** Building a Depth Curve Match curve normally runs both depth models over the movie again, which takes hours for a whole movie. It can now reuse the depth saved from an earlier calibration, after checking it was made with the same settings (model, reset look, resolution, EMA and time range). Building a new curve "mix" from saved depth takes minutes instead of hours. For now this is a command-line option (`--source-depth-from` / `--target-depth-from`), not in the Calibrate window.

@@ -78,6 +78,18 @@ def _write_pass_manifest(pass_dir, input_path, model_name, start_time, end_time,
         json.dump(info, f, indent=1)
 
 
+def _argv_key(argv):
+    """Groups an argv list into (flag, values...) tuples and sorts them, so two lists
+    with the same flags in a different order compare equal."""
+    groups = []
+    for tok in list(argv or []):
+        if str(tok).startswith("--") or not groups:
+            groups.append([str(tok)])
+        else:
+            groups[-1].append(str(tok))
+    return sorted(tuple(g) for g in groups)
+
+
 def _check_reused_pass(pass_dir, input_path, model_name, start_time, end_time,
                        resolution, limit_resolution, extra_argv, log=print):
     """ADR-502: confirms a saved export pass matches what this calibration would export,
@@ -98,7 +110,9 @@ def _check_reused_pass(pass_dir, input_path, model_name, start_time, end_time,
                 "start_time": start_time, "end_time": end_time,
                 "resolution": resolution, "limit_resolution": bool(limit_resolution),
                 "extra_argv": argv}
-        bad = [k for k in want if info.get(k) != want[k]]
+        # flag order doesn't change the export: compare each flag with its values, unordered
+        bad = [k for k in want if (_argv_key(info.get(k)) != _argv_key(want[k]) if k == "extra_argv"
+                                   else info.get(k) != want[k])]
         if bad:
             raise ValueError(f"saved depth in {pass_dir} was made with different settings: " +
                              ", ".join(f"{k}={info.get(k)!r} (need {want[k]!r})" for k in bad))
@@ -1046,6 +1060,15 @@ def _self_test_reuse_saved_depth():
                         work_dir=path.join(td, "w3"), log=quiet, extra_argv=argv,
                         target_reset_look=True, resolution=518, source_depth_from=src)
             assert calls == ["VDA_L"], calls
+            # same flags in another order are accepted; a different value is not
+            reordered = ["--ema-buffer", "650", "--ema-normalize", "--ema-decay", "0.99"]
+            _check_reused_pass(src, vid, "VDA_L", "00:00:00", "00:00:05", 518, False, reordered, log=quiet)
+            try:
+                _check_reused_pass(src, vid, "VDA_L", "00:00:00", "00:00:05", 518, False,
+                                   ["--ema-buffer", "30", "--ema-normalize", "--ema-decay", "0.99"], log=quiet)
+                raise AssertionError("different EMA buffer not refused")
+            except ValueError:
+                pass
             # mismatches refused: wrong model, wrong reset/model, wrong resolution, wrong range
             for kw in (dict(source_depth_from=tgt), dict(target_depth_from=src),
                        dict(source_depth_from=src, resolution=392),

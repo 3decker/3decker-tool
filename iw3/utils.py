@@ -11379,6 +11379,11 @@ def create_parser(required_true=True):
                         help="ADR-505: largest 3D Strength reduction for one scene (0.10 = at most 10%%)")
     parser.add_argument("--scene-safety-max-conv-raise", type=float, default=0.10,
                         help="ADR-505: largest Convergence raise for one scene (0.10 = at most +0.10)")
+    parser.add_argument("--scene-strength-plan", type=str, default=None,
+                        help=("ADR-511: per-scene 3D Strength plan made by 'python -m iw3.mismatch_plan_cli' from "
+                              "an earlier render of the SAME movie (measured left/right mismatch). Each scene's "
+                              "3D Strength is multiplied by its factor at the cut, held for the whole scene. Needs "
+                              "Pre-Plan Every Scene + Auto 3D Strength with Use Real Scene Cuts"))
     parser.add_argument("--scene-auto-convergence", action="store_true",
                         help=("ADR-507: Auto Convergence per Scene -- each real scene's Convergence is chosen at "
                               "its cut so the same share of the picture sits in front of the screen (same feel "

@@ -1595,6 +1595,31 @@ def _scene_subject_saliency(state, rgb, depth):
         return None
 
 
+def _load_strength_plan(st, plan_path, conv_plan=None):
+    """ADR-511: {scene index: 3D Strength factor} from iw3.mismatch_plan_cli's JSON, loaded once per
+    job. Warns (once) if its scene count differs from this job's Pre-Plan -- then the plan was made
+    for a different movie or range and scene numbers may not line up."""
+    cached = getattr(st, "_strength_plan_cache", None)
+    if cached is not None and cached[0] == plan_path:
+        return cached[1]
+    plan = {}
+    try:
+        import json
+        with open(plan_path, encoding="utf-8") as f:
+            data = json.load(f)
+        plan = {int(s["i"]): float(s["factor"]) for s in data.get("scenes", []) if s.get("factor") is not None}
+        n_cut = sum(1 for v in plan.values() if v < 1.0)
+        _say(f"Measured mismatch plan: {path.basename(plan_path)} -- {n_cut} of {len(plan)} scenes get a cut "
+             f"(made from {data.get('source', '?')[:60]})")
+        if conv_plan and len(conv_plan) != len(plan):
+            _say(f"WARNING: the plan has {len(plan)} scenes but this job has {len(conv_plan)} -- it was made "
+                 f"for a different movie/range; scene numbers may not line up")
+    except Exception as e:  # noqa
+        _say(f"Measured mismatch plan could not be read ({e}) -- not applied")
+    st._strength_plan_cache = (plan_path, plan)
+    return plan
+
+
 def _scene_safety(st, args, d4, i4, divs):
     """ADR-505: Scene Safety Check (--scene-safety). Measures each REAL scene once, on its
     first frames seen, in the same depth space the stereo step compares to Convergence
@@ -1609,7 +1634,8 @@ def _scene_safety(st, args, d4, i4, divs):
     (may be negative), so it is applied at the cut and held for the whole scene."""
     safety_on = bool(getattr(args, "scene_safety", False))
     auto_on = bool(getattr(args, "scene_auto_convergence", False))
-    if not (safety_on or auto_on):
+    plan_path = getattr(args, "scene_strength_plan", None)  # ADR-511: measured mismatch plan
+    if not (safety_on or auto_on or plan_path):
         return divs, None
     sids = getattr(st, "last_frame_scene_ids", None)
     if not sids or len(sids) != len(divs):
@@ -1627,6 +1653,7 @@ def _scene_safety(st, args, d4, i4, divs):
     plan = getattr(conv_model, "_scene_plan", None)
     max_cut = float(getattr(args, "scene_safety_max_strength_cut", 0.10) or 0.0)
     max_raise = float(getattr(args, "scene_safety_max_conv_raise", 0.10) or 0.0)
+    strength_plan = _load_strength_plan(st, plan_path, plan) if plan_path else {}
     for sid in sorted(set(sids)):
         if sid in cache:
             continue
@@ -1692,6 +1719,10 @@ def _scene_safety(st, args, d4, i4, divs):
                 flicker_high=getattr(args, "scene_safety_flicker_high", None))
         else:
             factor, offset, reasons = 1.0, 0.0, []
+        plan_f = float(strength_plan.get(sid, 1.0))  # ADR-511: the stronger cut wins, never both
+        if plan_f < 1.0:
+            reasons = reasons + [f"measured mismatch in the earlier render -> x{plan_f:.2f}"]
+            factor = min(factor, plan_f)
         if auto_on:
             try:
                 from iw3.utils import _slot_real_label
@@ -1773,6 +1804,20 @@ def _self_test_scene_safety():
     assert out3 == [3.8] * 4, "auto convergence alone never changes 3D Strength"
     assert abs((0.5 + off3[0]) - 0.85) < 0.01 and off3[0] == off3[1], off3      # wide planned 0.5 -> 0.85
     assert abs((0.5 + off3[2]) - 0.65) < 0.01 and off3[2] == off3[3], off3      # 0.17 wanted, limited to 0.85-0.20
+    # ADR-511 measured-mismatch plan alone: scene 1 x0.65, scene 0 untouched, held per scene
+    import json, tempfile, os as _os
+    with tempfile.TemporaryDirectory() as td:
+        pj = _os.path.join(td, "plan.json")
+        json.dump({"source": "x", "scenes": [{"i": 0, "factor": 1.0}, {"i": 1, "factor": 0.65}]}, open(pj, "w"))
+        args4 = types.SimpleNamespace(scene_safety=False, scene_auto_convergence=False, scene_strength_plan=pj,
+                                      convergence=0.5, mapper="none", depth_curve_match_strength=0.0,
+                                      state={"convergence_model": _Conv(), "foreground_scale_model": None})
+        st4 = types.SimpleNamespace(last_frame_scene_ids=[0, 0, 1, 1])
+        out4, off4 = _scene_safety(st4, args4, d3, torch.full((4, 3, 32, 48), 0.5), [3.7] * 4)
+        assert out4[:2] == [3.7, 3.7] and abs(out4[2] - 2.4) < 1e-6 and out4[2] == out4[3], out4
+        assert off4 == [0.0] * 4, off4
+    print("_self_test_scene_safety: PASS")
+    return
     print("_self_test_scene_safety: PASS")
 
 

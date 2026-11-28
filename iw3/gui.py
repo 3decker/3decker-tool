@@ -2824,6 +2824,26 @@ class MainFrame(wx.Frame):
               "Cons: that scene pops out less." + "\n"
               "Values: 0.10 (default) or 0.20 (more freedom)." + "\n"
               "Recommended: 0.10; 0.20 with depth reset (more pop to tame)."))
+        self.lbl_scene_strength_plan = wx.StaticText(self.grp_stereo, label=T("Measured Mismatch Plan (file)"))
+        self.txt_scene_strength_plan = wx.TextCtrl(self.grp_stereo, name="txt_scene_strength_plan")
+        self.txt_scene_strength_plan.SetToolTip(
+            T("Only with Pre-Plan Every Scene + Auto 3D Strength. Leave empty for normal use." + "\n"
+              "What: 'measure, then fix'. After a first conversion, a measuring tool checks the FINISHED "
+              "3D movie scene by scene for left/right mismatch on moving characters (the doubled / out of "
+              "focus look) and writes a plan file. Put that file here and convert the SAME movie again: "
+              "the scenes that measured worst get lower 3D Strength (held for the whole scene), the rest "
+              "stay as they are." + "\n"
+              "Why: some bad scenes can't be predicted before the 3D exists (Mario 16:49 workshop with "
+              "depth reset); measuring the real result finds them." + "\n"
+              "Pros: targets exactly the scenes that really came out bad." + "\n"
+              "Cons: needs two conversions of the movie; only valid for the same movie, range and scene "
+              "cuts (a warning appears in the log if the scene count doesn't match). If Scene Safety Check "
+              "also cuts a scene, the stronger cut wins -- they never add up." + "\n"
+              "Values: path to the .json plan; empty = off (default). The plan is made with: python -m "
+              "iw3.mismatch_plan_cli -i <finished 3D movie> --scene-plan <its _scene_plan.txt> -o plan.json "
+              "--max-cut 0.35" + "\n"
+              "Recommended: use when a finished movie shows mismatch in some scenes, especially with depth "
+              "reset."))
         self.chk_scene_auto_convergence = wx.CheckBox(
             self.grp_stereo, label=T("Auto Convergence per Scene"), name="chk_scene_auto_convergence")
         self.chk_scene_auto_convergence.SetValue(False)
@@ -5350,6 +5370,9 @@ class MainFrame(wx.Frame):
             for _s in _pairs:
                 layout.Add(getattr(self, f"lbl_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
                 layout.Add(getattr(self, f"cbo_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
+            if _c == "chk_scene_safety":  # ADR-511
+                layout.Add(self.lbl_scene_strength_plan, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+                layout.Add(self.txt_scene_strength_plan, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13695,6 +13718,7 @@ class MainFrame(wx.Frame):
             self.chk_scene_safety,  # ADR-505..510
             self.lbl_scene_safety_max_strength_cut, self.cbo_scene_safety_max_strength_cut,
             self.lbl_scene_safety_max_conv_raise, self.cbo_scene_safety_max_conv_raise,
+            self.lbl_scene_strength_plan, self.txt_scene_strength_plan,  # ADR-511
             self.chk_scene_auto_convergence,
             self.lbl_scene_auto_convergence_mode, self.cbo_scene_auto_convergence_mode,
             self.lbl_scene_auto_convergence_front, self.cbo_scene_auto_convergence_front,
@@ -14955,6 +14979,7 @@ class MainFrame(wx.Frame):
             scene_safety=self.chk_scene_safety.GetValue(),  # ADR-505..510
             scene_safety_max_strength_cut=float(self.cbo_scene_safety_max_strength_cut.GetValue() or 0.10),
             scene_safety_max_conv_raise=float(self.cbo_scene_safety_max_conv_raise.GetValue() or 0.10),
+            scene_strength_plan=(self.txt_scene_strength_plan.GetValue().strip().strip('"') or None),  # ADR-511
             scene_auto_convergence=self.chk_scene_auto_convergence.GetValue(),
             scene_auto_convergence_mode=self.cbo_scene_auto_convergence_mode.GetValue() or "front",
             scene_auto_convergence_front=float(self.cbo_scene_auto_convergence_front.GetValue() or 0.15),
@@ -16440,6 +16465,7 @@ class MainFrame(wx.Frame):
             f"{float(getattr(args, 'scene_safety_max_strength_cut', 0.10) or 0.10):.2f}")
         self.cbo_scene_safety_max_conv_raise.SetValue(
             f"{float(getattr(args, 'scene_safety_max_conv_raise', 0.10) or 0.10):.2f}")
+        self.txt_scene_strength_plan.SetValue(getattr(args, "scene_strength_plan", None) or "")  # ADR-511
         self.chk_scene_auto_convergence.SetValue(bool(getattr(args, "scene_auto_convergence", False)))
         self.cbo_scene_auto_convergence_mode.SetStringSelection(
             getattr(args, "scene_auto_convergence_mode", "front") or "front")
@@ -42364,6 +42390,10 @@ def _self_test_scene_safety_gui():
             ["-i", "a.mp4", "-o", "o", "--scene-safety", "--scene-safety-max-strength-cut", "0.3",
              "--scene-auto-convergence-mode", "subject"]))
         assert frame.chk_scene_safety.GetValue() and frame.cbo_scene_safety_max_strength_cut.GetValue() == "0.30"
+        assert frame.txt_scene_strength_plan.GetValue() == ""  # ADR-511
+        frame.txt_scene_strength_plan.SetValue(r"E:\x\plan.json")
+        assert frame.parse_args(skip_set_state=True).scene_strength_plan == r"E:\x\plan.json"
+        assert "--scene-strength-plan" in frame.get_cli_command()
         assert not frame.chk_scene_auto_convergence.GetValue()
         assert frame.cbo_scene_auto_convergence_mode.GetValue() == "subject"
     finally:

@@ -13,7 +13,13 @@ it matters.
 
 ---
 
-## Latest Update — November 26, 2026
+## Latest Update — November 27, 2026
+
+**Added: "Scene Safety Check" (off by default, command line for now: `--scene-safety`).** It looks at each scene once, at the cut, and only steps in for risky ones: scenes with a deep background full of detail (where the two eyes disagree most, like the rubble in Mario's ruins at 8:12) get up to 10% less 3D strength, and scenes where something pops out very far or is cut off by the frame edge get a slightly higher Convergence. The change is held for the whole scene and every changed scene is listed in the job log. In the Mario test it changed 34 of 276 scenes and made the ruins about 4% cleaner; overall the effect is small by design.
+
+**Good to know (tests, no setting changed):** Foreground Scale with matched Convergence (Wides 0.25, Mid 0.5, Close-Ups 0.75) made the 3D about 9% cleaner around moving characters and 14% less smeary, with slightly shallower backgrounds. Edge Snap and Smear Guard each help a little, and turning either off made things slightly worse.
+
+## Update — November 26, 2026
 
 **Added: "3DECKER Preview": watch a conversion halfway, in your own player.** While a video is still being converted it has no time length yet, so players can't show the length or jump around. Right-click the file being made → **Send to → 3DECKER Preview** (or drag it onto the **3DECKER Preview** icon on your desktop). A few seconds later a playable copy, with its length so far and working seeking, opens in your normal player (VLC, MPC-HC...). The copy goes into a "previews" folder next to the file; the conversion itself is not touched.
 

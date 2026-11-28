@@ -820,6 +820,7 @@ class _RunState:
         wide_floor_cutoff = float(wide_floor_cutoff) if wide_floor_cutoff is not None else None
         if "frame_scene_ids" not in locals():
             frame_scene_ids, group_plan = None, None
+        self.last_frame_scene_ids = frame_scene_ids  # ADR-505: Scene Safety Check reads this
         used = self.tracker.run(scores, embs, reset_pts, own_cuts,
                                 lambda c: strength_curve(c, lo, typical, hi, closeup, wide,
                                                           wide_floor, wide_floor_cutoff))
@@ -1551,6 +1552,124 @@ def _cat(parts):
     return parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
 
 
+def _scene_safety(st, args, d4, i4, divs):
+    """ADR-505: Scene Safety Check (--scene-safety). Measures each REAL scene once, on its
+    first frames seen, in the same depth space the stereo step compares to Convergence
+    (that scene's Foreground Scale mapper, then Depth Curve Match), and returns per-frame
+    (strengths, convergence offsets): a capped 3D-Strength cut for busy deep backgrounds
+    and a capped Convergence raise for too much pop-out / frame-edge cut-offs. The
+    decision is cached per scene, so it is identical for every frame of that scene and
+    for iw3's second (alpha) call on the same batch. No-op (None offsets) when off."""
+    if not getattr(args, "scene_safety", False):
+        return divs, None
+    sids = getattr(st, "last_frame_scene_ids", None)
+    if not sids or len(sids) != len(divs):
+        if not getattr(st, "_safety_warned", False):
+            st._safety_warned = True
+            _say("Scene Safety Check needs Pre-Plan Every Scene with Use Real Scene Cuts -- not applied")
+        return divs, None
+    from iw3 import scene_safety as SS
+    from iw3.mapper import get_mapper, resolve_mapper_name
+    state = args.state if isinstance(getattr(args, "state", None), dict) else {}
+    cache = st.__dict__.setdefault("_safety_cache", {})
+    conv_model = state.get("convergence_model")
+    fs_model = state.get("foreground_scale_model")
+    plan = getattr(conv_model, "_scene_plan", None)
+    max_cut = float(getattr(args, "scene_safety_max_strength_cut", 0.10) or 0.0)
+    max_raise = float(getattr(args, "scene_safety_max_conv_raise", 0.10) or 0.0)
+    for sid in sorted(set(sids)):
+        if sid in cache:
+            continue
+        idx = [i for i, s in enumerate(sids) if s == sid][:4]
+        shot = plan[sid] if plan and 0 <= sid < len(plan) else None
+        conv = conv_model._value_for_shot_type(shot) if (conv_model is not None and shot) else None
+        if conv is None:
+            conv = float(getattr(args, "convergence", 0.5))
+        if fs_model is not None:
+            fs = fs_model._value_for_shot_type(shot) if shot else None
+            if fs is None:
+                fs = float(getattr(args, "foreground_scale", 0.0) or 0.0)
+            mapper = get_mapper(resolve_mapper_name(mapper=None, foreground_scale=fs,
+                                                    metric_depth=fs_model.metric_depth,
+                                                    mapper_type=fs_model.mapper_type))
+        else:
+            mapper = get_mapper(args.mapper)
+        with torch.no_grad():
+            x = mapper(d4[idx].float())
+            strength = float(getattr(args, "depth_curve_match_strength", 0.0) or 0.0)
+            if strength > 0:
+                matcher = state.get("_depth_curve_matcher")
+                if matcher is None:
+                    from iw3.depth_curve_match import DepthCurveMatcher
+                    matcher = DepthCurveMatcher(getattr(args, "depth_curve_match_path", None))
+                if matcher.enabled:
+                    x = matcher.to(x.device).apply(x, strength=strength)
+            m = SS.measure(x, i4[idx], float(conv), float(divs[idx[0]]))
+        factor, offset, reasons = SS.decide(m, max_cut, max_raise)
+        cache[sid] = (factor, offset)
+        st._safety_counts = getattr(st, "_safety_counts", [0, 0, 0])
+        st._safety_counts[0] += 1
+        if factor < 1.0:
+            st._safety_counts[1] += 1
+        if offset > 0:
+            st._safety_counts[2] += 1
+        if reasons:
+            try:  # real shot name (with Invert off the 'wide' slot holds real close-ups)
+                from iw3.utils import _slot_real_label
+                label = _slot_real_label(shot) or shot
+            except Exception:
+                label = shot
+            # scene number = the Pre-Plan scene list's own numbering (starts at 0)
+            _say(f"Scene Safety: scene {sid} ({label or '?'}): " + "; ".join(reasons)
+                 + (f" -> 3D Strength x{factor:.2f}" if factor < 1.0 else "")
+                 + (f" -> Convergence +{offset:.2f}" if offset > 0 else "")
+                 + f"  [checked {st._safety_counts[0]}, strength cut {st._safety_counts[1]}, "
+                   f"convergence raised {st._safety_counts[2]}]")
+    out, offsets = [], []
+    for i, sid in enumerate(sids):
+        factor, offset = cache[sid]
+        out.append(round(divs[i] * factor / STEP) * STEP if factor < 1.0 else divs[i])
+        offsets.append(offset)
+    return out, offsets
+
+
+def _self_test_scene_safety():
+    """ADR-505: per-scene decisions, held for every frame of a scene, cached for the
+    repeat (alpha) call, off by default, warns once without Pre-Plan scene ids."""
+    import types
+
+    class _Conv:
+        _scene_plan = ["wide", "wide", "closeup"]
+
+        def _value_for_shot_type(self, t):
+            return {"wide": 0.5, "closeup": 0.2}.get(t)
+
+    torch.manual_seed(0)
+    n = 6
+    depth = torch.full((n, 1, 32, 48), 0.6)
+    depth[0:2] = 0.02                         # scene 0: deep...
+    depth[4:6] = 0.3
+    depth[4:6, ..., :2] = 1.0                 # scene 2: near object cut by the left edge
+    im = torch.full((n, 3, 32, 48), 0.5)
+    im[0:2] = torch.rand(2, 3, 32, 48)        # ...and busy
+    args = types.SimpleNamespace(scene_safety=True, convergence=0.5, mapper="none",
+                                 depth_curve_match_strength=0.0,
+                                 state={"convergence_model": _Conv(), "foreground_scale_model": None})
+    st = types.SimpleNamespace(last_frame_scene_ids=[0, 0, 1, 1, 2, 2])
+    divs = [3.8] * n
+    out, off = _scene_safety(st, args, depth, im, divs)
+    assert out[0] == out[1] < 3.8 and out[2] == out[3] == 3.8, out
+    assert off[0] == off[1] == off[2] == off[3] == 0.0 and off[4] == off[5] > 0.0, off
+    again = _scene_safety(st, args, depth, im, divs)
+    assert again == (out, off), "repeat call must give the same decisions"
+    args.scene_safety = False
+    assert _scene_safety(st, args, depth, im, divs) == (divs, None)
+    args.scene_safety = True
+    st2 = types.SimpleNamespace(last_frame_scene_ids=None)
+    assert _scene_safety(st2, args, depth, im, divs) == (divs, None) and st2._safety_warned
+    print("_self_test_scene_safety: PASS")
+
+
 def _patch_utils(U):
     # ADR-479: register the Group Short Scenes pre-scan with core iw3 (core never
     # imports this add-on; it only calls this hook when it has been registered).
@@ -1593,11 +1712,15 @@ def _patch_utils(U):
             settled_list = getattr(st, "last_settled_list", None) or [True] * len(divs)
             if len(settled_list) < len(divs):
                 settled_list = settled_list + [True] * (len(divs) - len(settled_list))
+            divs, safety_offsets = _scene_safety(st, args, d4, i4, divs)  # ADR-505
+        if safety_offsets is None:
+            safety_offsets = [0.0] * len(divs)
         overlay = _overlay_on(args) and not st.repeat
 
-        def run(d, x, value, settled, count, rp, lrp):
+        def run(d, x, value, settled, count, rp, lrp, conv_offset=0.0):
             a = copy.copy(args)                # args.state is shared, as it should be
             a.divergence = value
+            a._scene_safety_conv_offset = conv_offset  # ADR-505 (0.0 = untouched)
             # ADR-441: consumed by ShotLockEstimator's own opt-in wait_for_settle
             # (iw3/shot_lock_estimator.py) via iw3/utils.py's getattr() of this same
             # name -- a complete no-op for every caller/mode that never reads it.
@@ -1612,7 +1735,7 @@ def _patch_utils(U):
             return left, right
 
         if not batch:
-            return run(depth, im, divs[0], settled_list[0], 1, reset_pts, log_reset_pts)
+            return run(depth, im, divs[0], settled_list[0], 1, reset_pts, log_reset_pts, safety_offsets[0])
         lefts, rights = [], []
         i, n = 0, len(divs)
         while i < n:
@@ -1623,13 +1746,15 @@ def _patch_utils(U):
             # genuinely settled (a real, if narrow, possibility right at the
             # moment a glide finishes), and each sub-batch needs exactly one
             # settled flag to stamp via run() above.
-            while j < n and divs[j] == divs[i] and settled_list[j] == settled_list[i]:
+            while (j < n and divs[j] == divs[i] and settled_list[j] == settled_list[i]
+                   and safety_offsets[j] == safety_offsets[i]):  # ADR-505: one offset per sub-batch
                 j += 1
             rp = None if reset_pts is None else list(reset_pts[i:j])
             lrp = None if log_reset_pts is None else list(log_reset_pts[i:j])
             if i == 0 and j == n:
-                return run(depth, im, divs[i], settled_list[i], n, rp, lrp)
-            left, right = run(depth[i:j], im[i:j], divs[i], settled_list[i], j - i, rp, lrp)
+                return run(depth, im, divs[i], settled_list[i], n, rp, lrp, safety_offsets[i])
+            left, right = run(depth[i:j], im[i:j], divs[i], settled_list[i], j - i, rp, lrp,
+                              safety_offsets[i])
             lefts.append(left)
             rights.append(right)
             i = j

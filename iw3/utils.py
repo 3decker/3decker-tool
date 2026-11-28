@@ -6353,6 +6353,11 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
                                                            log_reset_pts=log_reset_pts,
                                                            divergence=getattr(args, "divergence", None),
                                                            divergence_settled=getattr(args, "_divergence_settled", None))
+            # ADR-505: Scene Safety Check's per-scene Convergence raise (set per
+            # sub-batch by nt_auto3d's wrapper; 0.0 / absent = untouched).
+            safety_off = float(getattr(args, "_scene_safety_conv_offset", 0.0) or 0.0)
+            if safety_off > 0.0:
+                convergence = (convergence + safety_off).clamp(0.0, 1.0)
             if mapper_fn is None:  # ADR-475: follow-Convergence Foreground Scale
                 fs_shot_type = getattr(args.state["convergence_model"], "locked_shot_type", None)
                 mapper_fn = fs_model(divergence=getattr(args, "divergence", None),
@@ -11345,6 +11350,16 @@ def create_parser(required_true=True):
                         help=("ADR-501: Depth Edge Snap -- re-shapes the depth map with the picture's own outlines as "
                               "a guide (guided filter), so depth edges land on the objects' outlines and the soft "
                               "object/background band (the 'jello' around edges) narrows. 0 = off (default), 1.0 = full"))
+    parser.add_argument("--scene-safety", action="store_true",
+                        help=("ADR-505: Scene Safety Check -- measures each real scene once (its first frames) and "
+                              "holds a small correction for the whole scene: lowers 3D Strength for busy deep "
+                              "backgrounds (where left/right mismatch grows) and raises Convergence when something "
+                              "pops out very far or is cut off by the frame edge. Needs Auto 3D Strength with Use "
+                              "Real Scene Cuts and Pre-Plan Every Scene. Off by default"))
+    parser.add_argument("--scene-safety-max-strength-cut", type=float, default=0.10,
+                        help="ADR-505: largest 3D Strength reduction for one scene (0.10 = at most 10%%)")
+    parser.add_argument("--scene-safety-max-conv-raise", type=float, default=0.10,
+                        help="ADR-505: largest Convergence raise for one scene (0.10 = at most +0.10)")
     parser.add_argument("--depth-jump-glide", type=float, default=0.0,
                         help=("ADR-498: Depth Jump Glide -- when an object's depth suddenly snaps far more than "
                               "its normal frame-to-frame movement (e.g. Video Depth Anything re-estimating it at "

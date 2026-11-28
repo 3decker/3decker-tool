@@ -2774,6 +2774,102 @@ class MainFrame(wx.Frame):
               "Values: 0 = off (default), 0.5 = half, 1.0 = full." + "\n"
               "Recommended: try 0.5-1.0 and compare edges around moving characters."))
 
+        # ADR-505..510: Scene Safety Check + Auto Convergence per Scene.
+        self.chk_scene_safety = wx.CheckBox(
+            self.grp_stereo, label=T("Scene Safety Check (per scene, at the cut)"), name="chk_scene_safety")
+        self.chk_scene_safety.SetValue(False)
+        self.chk_scene_safety.SetToolTip(
+            T("Only with Auto 3D Strength + Pre-Plan Every Scene (the Convergence part also needs Convergence "
+              "Shot Lock)." + "\n"
+              "What: checks every scene once, at its cut, and only steps in for risky ones. It LOWERS that "
+              "scene's 3D Strength when the scene has a deep background full of detail, lots of movement "
+              "(measured over the WHOLE scene in the pre-scan), or depth that shakes while the picture is "
+              "still. It RAISES that scene's Convergence (less pop-out) when something pops out very far or "
+              "is cut off by the left/right frame edge. The change is held for the whole scene, and every "
+              "changed scene is listed in the job log with the reason." + "\n"
+              "Why: left/right mismatch (characters looking doubled or out of focus) grows with the amount "
+              "of depth; only less depth reduces it, and only some scenes need it." + "\n"
+              "Pros: normal scenes are untouched; capped; fully logged." + "\n"
+              "Cons: changed scenes get flatter; it is a prediction made before the 3D exists, so it can "
+              "miss a scene or cut one that was fine. Real Mario test (Mario curve, no reset): 34 of 276 "
+              "scenes changed, the 8:12 ruins about 4% cleaner -- a small effect." + "\n"
+              "Values: on / off (default off). How much it may change is set by the two boxes below." + "\n"
+              "Recommended: on with depth reset (where mismatch is highest); optional otherwise."))
+        self.lbl_scene_safety_max_strength_cut = wx.StaticText(
+            self.grp_stereo, label=T("Safety: Max 3D Strength Cut"))
+        self.cbo_scene_safety_max_strength_cut = EditableComboBox(
+            self.grp_stereo, choices=["0.10", "0.20", "0.30", "0.35"], name="cbo_scene_safety_max_strength_cut")
+        self.cbo_scene_safety_max_strength_cut.SetValue("0.10")
+        self.cbo_scene_safety_max_strength_cut.SetToolTip(
+            T("Only with Scene Safety Check on." + "\n"
+              "What: the most the check may lower one scene's 3D Strength. Only the riskiest scenes get the "
+              "full amount; milder ones get part of it." + "\n"
+              "Why: in the Mario tests, mismatch went down about one-for-one with 3D Strength, so a 30% cut "
+              "makes a bad scene roughly a quarter to a third cleaner." + "\n"
+              "Pros: higher = bad scenes get much cleaner." + "\n"
+              "Cons: higher = those scenes look flatter; below about 2.5 3D Strength scenes start to look "
+              "noticeably flat (3.7 minus 35% = 2.4)." + "\n"
+              "Values: 0.10 = at most 10% (default) ... 0.35 = at most 35%." + "\n"
+              "Recommended: 0.10 without depth reset; 0.30-0.35 with depth reset."))
+        self.lbl_scene_safety_max_conv_raise = wx.StaticText(
+            self.grp_stereo, label=T("Safety: Max Convergence Raise"))
+        self.cbo_scene_safety_max_conv_raise = EditableComboBox(
+            self.grp_stereo, choices=["0.10", "0.20"], name="cbo_scene_safety_max_conv_raise")
+        self.cbo_scene_safety_max_conv_raise.SetValue("0.10")
+        self.cbo_scene_safety_max_conv_raise.SetToolTip(
+            T("Only with Scene Safety Check on and Convergence Shot Lock." + "\n"
+              "What: the most the check may raise one scene's Convergence (moves the scene back, less "
+              "pop-out) when something pops out very far or touches the frame edge." + "\n"
+              "Pros: protects against eye strain and 'broken' edges." + "\n"
+              "Cons: that scene pops out less." + "\n"
+              "Values: 0.10 (default) or 0.20 (more freedom)." + "\n"
+              "Recommended: 0.10; 0.20 with depth reset (more pop to tame)."))
+        self.chk_scene_auto_convergence = wx.CheckBox(
+            self.grp_stereo, label=T("Auto Convergence per Scene"), name="chk_scene_auto_convergence")
+        self.chk_scene_auto_convergence.SetValue(False)
+        self.chk_scene_auto_convergence.SetToolTip(
+            T("Only with Convergence Shot Lock + Pre-Plan Every Scene + Auto 3D Strength." + "\n"
+              "What: instead of one Convergence value per shot type (Wide / Mid / Close-Up), each scene gets "
+              "its own value, worked out from that scene's depth at its cut and held for the whole scene "
+              "(nothing moves mid-scene). Neighbouring scenes may differ by at most 0.20. Every scene's "
+              "value is written to the job log." + "\n"
+              "Why: a fixed value per shot type ignores what's actually in the scene." + "\n"
+              "Pros: consistent feel or comfortable subject placement in every scene, automatically." + "\n"
+              "Cons: Convergence only MOVES the depth, it doesn't reduce mismatch; values can differ more "
+              "between neighbouring scenes than with fixed values. Not yet tested on a real movie." + "\n"
+              "Values: on / off (default off). Mode and Share in Front below." + "\n"
+              "Recommended: try on a test clip first and compare with your per-shot values."))
+        self.lbl_scene_auto_convergence_mode = wx.StaticText(
+            self.grp_stereo, label=T("Auto Convergence: Mode"))
+        self.cbo_scene_auto_convergence_mode = wx.ComboBox(
+            self.grp_stereo, choices=["front", "subject"], style=wx.CB_READONLY,
+            name="cbo_scene_auto_convergence_mode")
+        self.cbo_scene_auto_convergence_mode.SetSelection(0)
+        self.cbo_scene_auto_convergence_mode.SetToolTip(
+            T("Only with Auto Convergence per Scene on." + "\n"
+              "What: how each scene's Convergence is chosen. front ('same feel'): the same share of the "
+              "picture sits in front of the screen in every scene (set by Share in Front). subject: an AI "
+              "finds the main subject (iw3's own subject detector) and the screen is placed just behind it, "
+              "so the subject sits at / slightly in front of the screen and the background behind -- like "
+              "real 3D films." + "\n"
+              "Pros: front = steady amount of pop everywhere; subject = most comfortable to watch." + "\n"
+              "Cons: front = the character you watch may sit far in front of or behind the screen; subject = "
+              "less pop-out, and if the AI picks the wrong thing that scene's plane is off (no clear subject: "
+              "it falls back to front)." + "\n"
+              "Values: front (default) or subject." + "\n"
+              "Recommended: subject for comfort, front for consistent pop."))
+        self.lbl_scene_auto_convergence_front = wx.StaticText(
+            self.grp_stereo, label=T("Auto Convergence: Share in Front"))
+        self.cbo_scene_auto_convergence_front = EditableComboBox(
+            self.grp_stereo, choices=["0.10", "0.15", "0.18", "0.20"], name="cbo_scene_auto_convergence_front")
+        self.cbo_scene_auto_convergence_front.SetValue("0.15")
+        self.cbo_scene_auto_convergence_front.SetToolTip(
+            T("Only with Auto Convergence per Scene in 'front' mode (also used by 'subject' when a scene has "
+              "no clear subject)." + "\n"
+              "What: the share of the picture placed in front of the screen in every scene." + "\n"
+              "Values: 0.10 = 10% pops out (calmer) ... 0.20 = 20% (more pop). Default 0.15." + "\n"
+              "Recommended: 0.15; 0.18 matches the Mario D2 movie's average."))
+
         # ADR-498: Depth Jump Glide.
         self.lbl_depth_jump_glide = wx.StaticText(self.grp_stereo, label=T("Depth Jump Glide"))
         self.cbo_depth_jump_glide = EditableComboBox(
@@ -5247,6 +5343,13 @@ class MainFrame(wx.Frame):
                    "depth_jump_glide", "depth_edge_snap"):  # ADR-494/497/498/501
             layout.Add(getattr(self, f"lbl_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
             layout.Add(getattr(self, f"cbo_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
+        for _c, _pairs in (("chk_scene_safety", ("scene_safety_max_strength_cut", "scene_safety_max_conv_raise")),
+                           ("chk_scene_auto_convergence", ("scene_auto_convergence_mode",
+                                                           "scene_auto_convergence_front"))):  # ADR-505..510
+            layout.Add(getattr(self, _c), (i := i + 1, 0), (1, 3), flag=wx.EXPAND)
+            for _s in _pairs:
+                layout.Add(getattr(self, f"lbl_{_s}"), (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
+                layout.Add(getattr(self, f"cbo_{_s}"), (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.lbl_convergence_lock_settle_wait_max, (i := i + 1, 0), flag=wx.ALIGN_CENTER_VERTICAL)
         layout.Add(self.cbo_convergence_lock_settle_wait_max, (i, 1), (1, 2), flag=wx.EXPAND)
         layout.Add(self.chk_clip_shot_symmetric, (i := i + 1, 0), (1, 3), flag=wx.ALIGN_CENTER_VERTICAL)
@@ -13589,6 +13692,12 @@ class MainFrame(wx.Frame):
             self.lbl_edge_steady, self.cbo_edge_steady,  # ADR-497
             self.lbl_depth_jump_glide, self.cbo_depth_jump_glide,  # ADR-498
             self.lbl_depth_edge_snap, self.cbo_depth_edge_snap,  # ADR-501
+            self.chk_scene_safety,  # ADR-505..510
+            self.lbl_scene_safety_max_strength_cut, self.cbo_scene_safety_max_strength_cut,
+            self.lbl_scene_safety_max_conv_raise, self.cbo_scene_safety_max_conv_raise,
+            self.chk_scene_auto_convergence,
+            self.lbl_scene_auto_convergence_mode, self.cbo_scene_auto_convergence_mode,
+            self.lbl_scene_auto_convergence_front, self.cbo_scene_auto_convergence_front,
             self.lbl_edge_steady_limit, self.cbo_edge_steady_limit,
             self.lbl_convergence_lock_settle_wait_max, self.cbo_convergence_lock_settle_wait_max,
             self.chk_clip_shot_symmetric, self.lbl_clip_shot_bias_strength, self.cbo_clip_shot_bias_strength,
@@ -14843,6 +14952,12 @@ class MainFrame(wx.Frame):
             edge_steady=float(self.cbo_edge_steady.GetValue() or 0),  # ADR-497
             depth_jump_glide=float(self.cbo_depth_jump_glide.GetValue() or 0),  # ADR-498
             depth_edge_snap=float(self.cbo_depth_edge_snap.GetValue() or 0),  # ADR-501
+            scene_safety=self.chk_scene_safety.GetValue(),  # ADR-505..510
+            scene_safety_max_strength_cut=float(self.cbo_scene_safety_max_strength_cut.GetValue() or 0.10),
+            scene_safety_max_conv_raise=float(self.cbo_scene_safety_max_conv_raise.GetValue() or 0.10),
+            scene_auto_convergence=self.chk_scene_auto_convergence.GetValue(),
+            scene_auto_convergence_mode=self.cbo_scene_auto_convergence_mode.GetValue() or "front",
+            scene_auto_convergence_front=float(self.cbo_scene_auto_convergence_front.GetValue() or 0.15),
             edge_steady_limit=float(self.cbo_edge_steady_limit.GetValue() or 1.0),
             midground_roundness=float(self.cbo_midground_roundness.GetValue() or 0),
             midground_roundness_center=float(self.cbo_midground_roundness_center.GetValue() or 0.5),
@@ -16320,6 +16435,16 @@ class MainFrame(wx.Frame):
         self.cbo_edge_steady.SetValue(f"{float(getattr(args, 'edge_steady', 0.0) or 0.0):g}")  # ADR-497
         self.cbo_depth_jump_glide.SetValue(f"{float(getattr(args, 'depth_jump_glide', 0.0) or 0.0):g}")  # ADR-498
         self.cbo_depth_edge_snap.SetValue(f"{float(getattr(args, 'depth_edge_snap', 0.0) or 0.0):g}")  # ADR-501
+        self.chk_scene_safety.SetValue(bool(getattr(args, "scene_safety", False)))  # ADR-505..510
+        self.cbo_scene_safety_max_strength_cut.SetValue(
+            f"{float(getattr(args, 'scene_safety_max_strength_cut', 0.10) or 0.10):.2f}")
+        self.cbo_scene_safety_max_conv_raise.SetValue(
+            f"{float(getattr(args, 'scene_safety_max_conv_raise', 0.10) or 0.10):.2f}")
+        self.chk_scene_auto_convergence.SetValue(bool(getattr(args, "scene_auto_convergence", False)))
+        self.cbo_scene_auto_convergence_mode.SetStringSelection(
+            getattr(args, "scene_auto_convergence_mode", "front") or "front")
+        self.cbo_scene_auto_convergence_front.SetValue(
+            f"{float(getattr(args, 'scene_auto_convergence_front', 0.15) or 0.15):.2f}")
         self.cbo_edge_steady_limit.SetValue(f"{float(getattr(args, 'edge_steady_limit', 1.0) or 1.0):g}")
         self.cbo_midground_roundness.SetValue(f"{float(getattr(args, 'midground_roundness', 0.0) or 0.0):g}")  # ADR-492
         self.cbo_midground_roundness_center.SetValue(f"{float(getattr(args, 'midground_roundness_center', 0.5)):g}")
@@ -42033,9 +42158,11 @@ def _self_test_shot_lock_pre_plan():
     with tempfile.TemporaryDirectory() as td:
         cp = os.path.join(td, "sub", "prescan_x.json")
         AD._save_prescan_cache(cp, [0.1, 0.2, 0.3], 24.0)
-        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0, None)
+        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0, None, None)
         AD._save_prescan_cache(cp, [0.1, 0.2, 0.3], 24.0, [9.0, 9.5, 10.0])
-        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0, [9.0, 9.5, 10.0])
+        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0, [9.0, 9.5, 10.0], None)
+        AD._save_prescan_cache(cp, [0.1, 0.2, 0.3], 24.0, [9.0, 9.5, 10.0], [0.0, 0.01, 0.02])  # ADR-510
+        assert AD._load_prescan_cache(cp) == ([0.1, 0.2, 0.3], 24.0, [9.0, 9.5, 10.0], [0.0, 0.01, 0.02])
         raw = AD.prescan_scene_strengths("does-not-exist.mkv", a, [0.0, float("inf")], cache_path=cp,
                                          return_raw=True)
         assert raw == ([0.1, 0.2, 0.3], [9.0, 9.5, 10.0], 24.0), raw
@@ -42205,6 +42332,45 @@ def _self_test_depth_edge_snap():
             frame.Destroy()
         app.Destroy()
     print("_self_test_depth_edge_snap: PASS")
+
+
+def _self_test_scene_safety_gui():
+    """ADR-505..510: Scene Safety Check / Auto Convergence per Scene controls -- off by default,
+    reach the command when set, restore from a command."""
+    import iw3.utils as U
+    app = wx.App()
+    frame = None
+    try:
+        frame = MainFrame()
+        assert not frame.chk_scene_safety.GetValue() and not frame.chk_scene_auto_convergence.GetValue()
+        cmd = frame.get_cli_command()
+        assert "--scene-safety" not in cmd and "--scene-auto-convergence" not in cmd, cmd
+        frame.chk_scene_safety.SetValue(True)
+        frame.cbo_scene_safety_max_strength_cut.SetValue("0.35")
+        frame.cbo_scene_safety_max_conv_raise.SetValue("0.20")
+        frame.chk_scene_auto_convergence.SetValue(True)
+        frame.cbo_scene_auto_convergence_mode.SetStringSelection("subject")
+        frame.cbo_scene_auto_convergence_front.SetValue("0.18")
+        args = frame.parse_args(skip_set_state=True)
+        assert args.scene_safety and args.scene_safety_max_strength_cut == 0.35
+        assert args.scene_safety_max_conv_raise == 0.20 and args.scene_auto_convergence
+        assert args.scene_auto_convergence_mode == "subject" and args.scene_auto_convergence_front == 0.18
+        cmd = frame.get_cli_command()
+        for s in ("--scene-safety", "--scene-safety-max-strength-cut 0.35", "--scene-safety-max-conv-raise 0.2",
+                  "--scene-auto-convergence", "--scene-auto-convergence-mode subject",
+                  "--scene-auto-convergence-front 0.18"):
+            assert s in cmd, (s, cmd)
+        frame.apply_parsed_args_to_gui(U.create_parser(required_true=False).parse_args(
+            ["-i", "a.mp4", "-o", "o", "--scene-safety", "--scene-safety-max-strength-cut", "0.3",
+             "--scene-auto-convergence-mode", "subject"]))
+        assert frame.chk_scene_safety.GetValue() and frame.cbo_scene_safety_max_strength_cut.GetValue() == "0.30"
+        assert not frame.chk_scene_auto_convergence.GetValue()
+        assert frame.cbo_scene_auto_convergence_mode.GetValue() == "subject"
+    finally:
+        if frame is not None:
+            frame.Destroy()
+        app.Destroy()
+    print("_self_test_scene_safety_gui: PASS")
 
 
 def _self_test_depth_jump_glide():
@@ -44021,6 +44187,7 @@ def _run_self_tests():
         _self_test_edge_steady,
         _self_test_depth_jump_glide,
         _self_test_depth_edge_snap,
+        _self_test_scene_safety_gui,
         _self_test_invert_shot_lock_swap_and_fs_overlay,
         _self_test_experience_level_default_and_migration,
         _self_test_experience_level_visibility_and_live_switch,

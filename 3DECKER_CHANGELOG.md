@@ -13,7 +13,15 @@ it matters.
 
 ---
 
-## Latest Update — November 27, 2026
+## Latest Update — November 28, 2026
+
+**Added to the 3DECKER window (Advanced level, right after Depth Edge Snap):**
+- **Scene Safety Check** with **Max 3D Strength Cut** and **Max Convergence Raise**: checks every scene at its cut and only steps in for risky ones (deep detailed backgrounds, lots of movement, shaky depth, extreme pop-out, objects cut off at the frame edge). Off by default.
+- **Auto Convergence per Scene** with **Mode** and **Share in Front**: instead of one Convergence per shot type, every scene gets its own, decided at the cut and held for the whole scene. "front" puts the same share of the picture in front of the screen every scene; "subject" places the main character at the screen with the background behind, like real 3D films. Off by default; not yet tested on a full movie.
+
+**Good to know:** the checks that judge a scene *before* the 3D is made could not catch every bad scene (for example Mario's 16:49 workshop with depth reset). A "measure, then fix" step that checks the real finished 3D is being built for that.
+
+## Update — November 27, 2026
 
 **Added: "Scene Safety Check" (off by default, command line for now: `--scene-safety`).** It looks at each scene once, at the cut, and only steps in for risky ones: scenes with a deep background full of detail (where the two eyes disagree most, like the rubble in Mario's ruins at 8:12) get up to 10% less 3D strength, and scenes where something pops out very far or is cut off by the frame edge get a slightly higher Convergence. The change is held for the whole scene and every changed scene is listed in the job log. In the Mario test it changed 34 of 276 scenes and made the ruins about 4% cleaner; overall the effect is small by design.
 

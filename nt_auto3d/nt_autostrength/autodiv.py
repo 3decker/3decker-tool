@@ -1260,7 +1260,7 @@ def scene_strengths_from_scores(scores, fps, scene_edges, args, whole_scene=Fals
 
 
 # ADR-481: bump when the estimator or its scan size changes, so old saved scans are ignored.
-PRESCAN_CACHE_VERSION = 2  # ADR-484: v2 also stores each frame's real time
+PRESCAN_CACHE_VERSION = 3  # ADR-484: v2 also stores each frame's real time; ADR-510: v3 adds per-frame motion
 
 
 def _load_prescan_cache(cache_path):
@@ -1276,12 +1276,21 @@ def _load_prescan_cache(cache_path):
         if not scores or not fps or data.get("version") != PRESCAN_CACHE_VERSION:
             return None
         times = [float(v) for v in times] if times and len(times) == len(scores) else None
-        return [float(v) for v in scores], float(fps), times
+        motion = data.get("motion")
+        motion = [float(v) for v in motion] if motion and len(motion) == len(scores) else None
+        return [float(v) for v in scores], float(fps), times, motion
     except Exception:  # noqa
         return None
 
 
-def _save_prescan_cache(cache_path, scores, fps, times=None):
+def _stash_prescan_motion(args, motion, times, fps, start):
+    """ADR-510: per-frame whole-movie motion for the Scene Safety moving-edge check (core iw3
+    turns it into per-scene values with the real scene edges)."""
+    if isinstance(getattr(args, "state", None), dict) and motion:
+        args.state["_prescan_motion"] = (list(motion), list(times) if times else None, float(fps), float(start))
+
+
+def _save_prescan_cache(cache_path, scores, fps, times=None, motion=None):
     """ADR-481: atomic write (temp file + replace) so a cancelled job never leaves
     a half-written file behind. Failing to save is harmless (next run rescans)."""
     if not cache_path:
@@ -1293,7 +1302,8 @@ def _save_prescan_cache(cache_path, scores, fps, times=None):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"version": PRESCAN_CACHE_VERSION, "fps": fps,
                        "scores": [round(float(v), 5) for v in scores],
-                       "times": [round(float(v), 4) for v in times] if times else None}, f)
+                       "times": [round(float(v), 4) for v in times] if times else None,
+                       "motion": [round(float(v), 6) for v in motion] if motion else None}, f)
         os.replace(tmp, cache_path)
     except Exception:  # noqa
         pass
@@ -1314,7 +1324,8 @@ def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps
     return_raw=True returns (scores, times, fps) instead of strengths."""
     cached = _load_prescan_cache(cache_path)
     if cached is not None:
-        c_scores, c_fps, c_times = cached
+        c_scores, c_fps, c_times, c_motion = cached
+        _stash_prescan_motion(args, c_motion, c_times, c_fps, scene_edges[0])
         print(f"[iw3] Scene pre-scan: reusing the saved scan ({len(c_scores)} frames).", file=sys.stderr)
         if return_raw:
             return c_scores, c_times, c_fps
@@ -1325,6 +1336,8 @@ def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps
     est = Estimator(device)
     fps_box = [None]
     scores, buffer, pts_list = [], [], []
+    from iw3 import scene_safety as _SS  # ADR-510: per-frame motion, measured in this same pass
+    motion, prev_luma = [], [None]
 
     def _flush():
         if buffer:
@@ -1337,8 +1350,13 @@ def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps
         if frame is None:
             _flush()
             return
-        buffer.append(VU.to_tensor(frame, device=device))
+        x = VU.to_tensor(frame, device=device)
+        buffer.append(x)
         pts_list.append(getattr(frame, "pts", None))
+        luma = _SS._luma(x[None].float())
+        motion.append(0.0 if prev_luma[0] is None or prev_luma[0].shape != luma.shape
+                      else _SS.frame_motion(prev_luma[0], luma))
+        prev_luma[0] = luma
         if len(buffer) >= SCAN_FAST_BATCH_SIZE:
             _flush()
 
@@ -1372,8 +1390,11 @@ def prescan_scene_strengths(input_path, args, scene_edges, device="cpu", max_fps
         if (abs(times[0] - float(start)) > 10.0
                 or any(t2 <= t1 for t1, t2 in zip(times, times[1:]))):
             times = None
+    if len(motion) != len(scores):
+        motion = None
+    _stash_prescan_motion(args, motion, times, fps_box[0], start)
     if not (stop_event is not None and stop_event.is_set()):
-        _save_prescan_cache(cache_path, scores, fps_box[0], times)
+        _save_prescan_cache(cache_path, scores, fps_box[0], times, motion)
     if return_raw:
         return scores, times, fps_box[0]
     return scene_strengths_from_scores(scores, fps_box[0], scene_edges, args, whole_scene=whole_scene,
@@ -1552,6 +1573,28 @@ def _cat(parts):
     return parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
 
 
+def _scene_subject_saliency(state, rgb, depth):
+    """ADR-509: subject mask (0..1) from iw3's own SOD_v1 subject detector (the sod_v1
+    Convergence mode's model), loaded once per job and cached in args.state. None if it can't
+    load (the caller then falls back to the front-share rule)."""
+    try:
+        model = state.get("_scene_sod_model")
+        if model is None:
+            from iw3.convergence_estimator import _load_sod_model
+            dev = rgb.device.index if rgb.is_cuda else -1
+            model = _load_sod_model(dev if dev is not None else 0)
+            state["_scene_sod_model"] = model
+        from nunif.device import autocast
+        with torch.inference_mode(), autocast(rgb.device):
+            sal, _ = model.infer(rgb.float(), depth.float())
+        return sal.float()
+    except Exception as e:  # never break a conversion over the optional subject mode
+        if not state.get("_scene_sod_failed"):
+            state["_scene_sod_failed"] = True
+            _say(f"Auto Convergence subject mode: subject detector unavailable ({e}) -- using front share")
+        return None
+
+
 def _scene_safety(st, args, d4, i4, divs):
     """ADR-505: Scene Safety Check (--scene-safety). Measures each REAL scene once, on its
     first frames seen, in the same depth space the stereo step compares to Convergence
@@ -1587,7 +1630,7 @@ def _scene_safety(st, args, d4, i4, divs):
     for sid in sorted(set(sids)):
         if sid in cache:
             continue
-        idx = [i for i, s in enumerate(sids) if s == sid][:4]
+        idx = [i for i, s in enumerate(sids) if s == sid][:8]  # ADR-508: consecutive frames for motion/flicker
         shot = plan[sid] if plan and 0 <= sid < len(plan) else None
         conv = conv_model._value_for_shot_type(shot) if (conv_model is not None and shot) else None
         if conv is None:
@@ -1612,21 +1655,41 @@ def _scene_safety(st, args, d4, i4, divs):
                 if matcher.enabled:
                     x = matcher.to(x.device).apply(x, strength=strength)
             auto_off = 0.0
-            if auto_on:  # ADR-507
-                new_conv = SS.auto_convergence(
-                    x, float(getattr(args, "scene_auto_convergence_front", 0.15)),
-                    prev=getattr(st, "_prev_auto_conv", None),
-                    max_step=float(getattr(args, "scene_auto_convergence_max_step", 0.20)))
+            how = ""
+            if auto_on:  # ADR-507 / ADR-509
+                prev = getattr(st, "_prev_auto_conv", None)
+                step = float(getattr(args, "scene_auto_convergence_max_step", 0.20))
+                new_conv = None
+                if getattr(args, "scene_auto_convergence_mode", "front") == "subject":
+                    sal = _scene_subject_saliency(state, i4[idx], d4[idx])
+                    if sal is not None:
+                        new_conv = SS.subject_convergence(
+                            x, sal, float(getattr(args, "scene_auto_convergence_subject_margin", 0.03)))
+                        if new_conv is not None:
+                            new_conv, how = SS.limit_step(new_conv, prev, step), "subject"
+                    if new_conv is None:
+                        how = "no clear subject -> front share"
+                if new_conv is None:
+                    new_conv = SS.auto_convergence(
+                        x, float(getattr(args, "scene_auto_convergence_front", 0.15)), prev=prev, max_step=step)
+                    how = how or "front share"
                 st._prev_auto_conv = new_conv
                 auto_off = new_conv - float(conv)
             m = SS.measure(x, i4[idx], float(conv) + auto_off, float(divs[idx[0]]))
+            smt = state.get("_scene_motion_t")  # ADR-510: whole-scene motion from the pre-scan
+            if smt and 0 <= sid < len(smt):
+                m["scene_motion_t"] = float(smt[sid])
         if safety_on:
             factor, offset, reasons = SS.decide(
                 m, max_cut, max_raise,
                 busy_low=getattr(args, "scene_safety_busy_low", None),
                 busy_high=getattr(args, "scene_safety_busy_high", None),
                 pop_limit=getattr(args, "scene_safety_pop_limit", None),
-                edge_limit=getattr(args, "scene_safety_edge_limit", None))
+                edge_limit=getattr(args, "scene_safety_edge_limit", None),
+                motion_low=getattr(args, "scene_safety_motion_low", None),
+                motion_high=getattr(args, "scene_safety_motion_high", None),
+                flicker_low=getattr(args, "scene_safety_flicker_low", None),
+                flicker_high=getattr(args, "scene_safety_flicker_high", None))
         else:
             factor, offset, reasons = 1.0, 0.0, []
         if auto_on:
@@ -1636,7 +1699,7 @@ def _scene_safety(st, args, d4, i4, divs):
             except Exception:
                 alabel = shot
             _say(f"Auto Convergence: scene {sid} ({alabel or '?'}): {float(conv) + auto_off:.3f} "
-                 f"(planned {float(conv):.2f})" + (f", then safety +{offset:.2f}" if offset > 0 else ""))
+                 f"(planned {float(conv):.2f}, {how})" + (f", then safety +{offset:.2f}" if offset > 0 else ""))
         cache[sid] = (factor, offset + auto_off)
         st._safety_counts = getattr(st, "_safety_counts", [0, 0, 0])
         st._safety_counts[0] += 1

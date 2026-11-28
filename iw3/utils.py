@@ -8741,6 +8741,24 @@ def _plan_every_scene_for_job(input_filename, output_path, args, durations, min_
         if not strengths:
             print("[iw3] Pre-Plan Every Scene: pre-scan gave no result -- skipped for this job.", file=sys.stderr)
             return None
+        # ADR-510: whole-scene motion for the Scene Safety moving-edge check -- each scene's busiest
+        # stretch (wherever it happens in the scene), ranked against this movie's own scenes.
+        args.state["_scene_motion_t"] = None
+        pm = args.state.get("_prescan_motion")
+        if pm and getattr(args, "scene_safety", False):
+            try:
+                from . import scene_safety as SS
+                motion, mtimes, mfps, mstart = pm
+                if not mtimes:
+                    mtimes = [mstart + i / mfps for i in range(len(motion))]
+                ramp, lo, hi = SS.scene_motion_ramp(SS.scene_motion_scores(motion, mtimes, edges))
+                args.state["_scene_motion_t"] = ramp
+                if lo is not None:
+                    print(f"[iw3] Scene Safety: whole-scene motion measured for {len(ramp)} scenes "
+                          f"({sum(1 for r in ramp if r > 0)} busy enough for a cut, levels {lo:.4f}..{hi:.4f}).",
+                          file=sys.stderr)
+            except Exception as e:  # noqa -- optional; the other checks still run
+                print(f"[iw3] Scene Safety: whole-scene motion unavailable ({e})", file=sys.stderr)
         final, starts = plan_scene_strengths(
             durations, strengths, min_len=min_scene_len,
             group_short=bool(getattr(args, "shot_lock_group_short_scenes", False)),
@@ -11371,6 +11389,20 @@ def create_parser(required_true=True):
                         help="ADR-507: share of the picture in front of the screen (0.15 = 15%%)")
     parser.add_argument("--scene-auto-convergence-max-step", type=float, default=0.20,
                         help="ADR-507: largest Convergence change from one scene to the next")
+    parser.add_argument("--scene-auto-convergence-mode", type=str, default="front", choices=["front", "subject"],
+                        help=("ADR-509: front = the same share of the picture in front of the screen every scene; "
+                              "subject = the main subject (iw3's SOD subject detector) sits at / just in front of "
+                              "the screen, background behind (falls back to front when there is no clear subject)"))
+    parser.add_argument("--scene-auto-convergence-subject-margin", type=float, default=0.03,
+                        help="ADR-509: how far in front of the screen the main subject sits (depth units, 0.03)")
+    parser.add_argument("--scene-safety-motion-low", type=float, default=None,
+                        help="ADR-508: moving-characters-with-big-depth-edges risk where the strength cut starts")
+    parser.add_argument("--scene-safety-motion-high", type=float, default=None,
+                        help="ADR-508: moving-edges risk where the full strength cut applies")
+    parser.add_argument("--scene-safety-flicker-low", type=float, default=None,
+                        help="ADR-508: unstable-depth-on-a-still-picture risk where the strength cut starts")
+    parser.add_argument("--scene-safety-flicker-high", type=float, default=None,
+                        help="ADR-508: unstable-depth risk where the full strength cut applies")
     parser.add_argument("--scene-safety-busy-low", type=float, default=None,
                         help=("ADR-506: busy-deep-background risk where the strength cut starts "
                               "(default: the D2-calibrated 0.007). Set per depth setup after calibrating"))

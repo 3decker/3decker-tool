@@ -6355,8 +6355,9 @@ def apply_divergence(depth, im, args, side_model, reset_pts=None, log_reset_pts=
                                                            divergence_settled=getattr(args, "_divergence_settled", None))
             # ADR-505: Scene Safety Check's per-scene Convergence raise (set per
             # sub-batch by nt_auto3d's wrapper; 0.0 / absent = untouched).
+            # ADR-507: may also be negative (Auto Convergence per Scene moves either way).
             safety_off = float(getattr(args, "_scene_safety_conv_offset", 0.0) or 0.0)
-            if safety_off > 0.0:
+            if safety_off != 0.0:
                 convergence = (convergence + safety_off).clamp(0.0, 1.0)
             if mapper_fn is None:  # ADR-475: follow-Convergence Foreground Scale
                 fs_shot_type = getattr(args.state["convergence_model"], "locked_shot_type", None)
@@ -11360,6 +11361,16 @@ def create_parser(required_true=True):
                         help="ADR-505: largest 3D Strength reduction for one scene (0.10 = at most 10%%)")
     parser.add_argument("--scene-safety-max-conv-raise", type=float, default=0.10,
                         help="ADR-505: largest Convergence raise for one scene (0.10 = at most +0.10)")
+    parser.add_argument("--scene-auto-convergence", action="store_true",
+                        help=("ADR-507: Auto Convergence per Scene -- each real scene's Convergence is chosen at "
+                              "its cut so the same share of the picture sits in front of the screen (same feel "
+                              "every scene), held for the whole scene. Replaces the per-shot-type Convergence "
+                              "values (Foreground Scale and 3D Strength per shot stay). Needs Convergence Shot "
+                              "Lock + Pre-Plan Every Scene + Auto 3D Strength with Use Real Scene Cuts"))
+    parser.add_argument("--scene-auto-convergence-front", type=float, default=0.15,
+                        help="ADR-507: share of the picture in front of the screen (0.15 = 15%%)")
+    parser.add_argument("--scene-auto-convergence-max-step", type=float, default=0.20,
+                        help="ADR-507: largest Convergence change from one scene to the next")
     parser.add_argument("--scene-safety-busy-low", type=float, default=None,
                         help=("ADR-506: busy-deep-background risk where the strength cut starts "
                               "(default: the D2-calibrated 0.007). Set per depth setup after calibrating"))

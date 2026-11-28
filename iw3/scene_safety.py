@@ -73,6 +73,19 @@ def measure(final_depth, im, convergence, divergence):
     return {"pop": pop, "edge_pop": edge_pop, "busy": busy}
 
 
+def auto_convergence(final_depth, front_share=0.15, prev=None, max_step=0.20):
+    """ADR-507: the Convergence that puts exactly `front_share` of this scene's picture in front
+    of the screen (depth above the plane pops out), so every scene gets the same feel. Limited
+    to +-max_step from the previous scene's value so neighbouring scenes don't jump."""
+    flat = final_depth.float().reshape(-1)
+    if flat.numel() > 2_000_000:
+        flat = flat[torch.randperm(flat.numel(), device=flat.device)[:2_000_000]]
+    conv = float(torch.quantile(flat, 1.0 - float(front_share)))
+    if prev is not None and max_step is not None and max_step > 0:
+        conv = min(max(conv, prev - max_step), prev + max_step)
+    return min(max(conv, 0.0), 1.0)
+
+
 def decide(m, max_strength_cut=0.10, max_conv_raise=0.10, busy_low=None, busy_high=None,
            pop_limit=None, edge_limit=None):
     """Risk numbers -> (strength_factor, conv_offset, reasons). The trigger levels default to
@@ -131,6 +144,12 @@ def _self_test():
     assert decide(m, pop_limit=99, edge_limit=99)[1] == 0.0
     mild = {"busy": 0.005, "pop": 0.0, "edge_pop": 0.0}
     assert decide(mild)[0] == 1.0 and decide(mild, busy_low=0.001, busy_high=0.005, max_strength_cut=0.3)[0] == 0.7
+    # ADR-507 auto Convergence: exactly front_share in front; jump limited vs the previous scene
+    ramp = torch.linspace(0, 1, 10000).view(1, 1, 100, 100)
+    c = auto_convergence(ramp, 0.15)
+    assert abs(c - 0.85) < 0.01 and abs(float((ramp > c).float().mean()) - 0.15) < 0.01, c
+    assert abs(auto_convergence(ramp, 0.15, prev=0.5, max_step=0.2) - 0.7) < 1e-6
+    assert abs(auto_convergence(ramp, 0.15, prev=0.8, max_step=0.2) - c) < 1e-6
     print("scene_safety self-test: PASS")
 
 

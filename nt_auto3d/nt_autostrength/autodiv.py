@@ -1559,14 +1559,21 @@ def _scene_safety(st, args, d4, i4, divs):
     (strengths, convergence offsets): a capped 3D-Strength cut for busy deep backgrounds
     and a capped Convergence raise for too much pop-out / frame-edge cut-offs. The
     decision is cached per scene, so it is identical for every frame of that scene and
-    for iw3's second (alpha) call on the same batch. No-op (None offsets) when off."""
-    if not getattr(args, "scene_safety", False):
+    for iw3's second (alpha) call on the same batch. No-op (None offsets) when off.
+    ADR-507 (--scene-auto-convergence): before the safety decision, the scene's Convergence is
+    chosen so a fixed share of its picture sits in front of the screen (same feel every scene),
+    limited to a max step from the previous scene; returned as an offset from the planned value
+    (may be negative), so it is applied at the cut and held for the whole scene."""
+    safety_on = bool(getattr(args, "scene_safety", False))
+    auto_on = bool(getattr(args, "scene_auto_convergence", False))
+    if not (safety_on or auto_on):
         return divs, None
     sids = getattr(st, "last_frame_scene_ids", None)
     if not sids or len(sids) != len(divs):
         if not getattr(st, "_safety_warned", False):
             st._safety_warned = True
-            _say("Scene Safety Check needs Pre-Plan Every Scene with Use Real Scene Cuts -- not applied")
+            _say("Scene Safety Check / Auto Convergence per Scene need Pre-Plan Every Scene with "
+                 "Use Real Scene Cuts -- not applied")
         return divs, None
     from iw3 import scene_safety as SS
     from iw3.mapper import get_mapper, resolve_mapper_name
@@ -1604,14 +1611,33 @@ def _scene_safety(st, args, d4, i4, divs):
                     matcher = DepthCurveMatcher(getattr(args, "depth_curve_match_path", None))
                 if matcher.enabled:
                     x = matcher.to(x.device).apply(x, strength=strength)
-            m = SS.measure(x, i4[idx], float(conv), float(divs[idx[0]]))
-        factor, offset, reasons = SS.decide(
-            m, max_cut, max_raise,
-            busy_low=getattr(args, "scene_safety_busy_low", None),
-            busy_high=getattr(args, "scene_safety_busy_high", None),
-            pop_limit=getattr(args, "scene_safety_pop_limit", None),
-            edge_limit=getattr(args, "scene_safety_edge_limit", None))
-        cache[sid] = (factor, offset)
+            auto_off = 0.0
+            if auto_on:  # ADR-507
+                new_conv = SS.auto_convergence(
+                    x, float(getattr(args, "scene_auto_convergence_front", 0.15)),
+                    prev=getattr(st, "_prev_auto_conv", None),
+                    max_step=float(getattr(args, "scene_auto_convergence_max_step", 0.20)))
+                st._prev_auto_conv = new_conv
+                auto_off = new_conv - float(conv)
+            m = SS.measure(x, i4[idx], float(conv) + auto_off, float(divs[idx[0]]))
+        if safety_on:
+            factor, offset, reasons = SS.decide(
+                m, max_cut, max_raise,
+                busy_low=getattr(args, "scene_safety_busy_low", None),
+                busy_high=getattr(args, "scene_safety_busy_high", None),
+                pop_limit=getattr(args, "scene_safety_pop_limit", None),
+                edge_limit=getattr(args, "scene_safety_edge_limit", None))
+        else:
+            factor, offset, reasons = 1.0, 0.0, []
+        if auto_on:
+            try:
+                from iw3.utils import _slot_real_label
+                alabel = _slot_real_label(shot) or shot
+            except Exception:
+                alabel = shot
+            _say(f"Auto Convergence: scene {sid} ({alabel or '?'}): {float(conv) + auto_off:.3f} "
+                 f"(planned {float(conv):.2f})" + (f", then safety +{offset:.2f}" if offset > 0 else ""))
+        cache[sid] = (factor, offset + auto_off)
         st._safety_counts = getattr(st, "_safety_counts", [0, 0, 0])
         st._safety_counts[0] += 1
         if factor < 1.0:
@@ -1672,6 +1698,18 @@ def _self_test_scene_safety():
     args.scene_safety = True
     st2 = types.SimpleNamespace(last_frame_scene_ids=None)
     assert _scene_safety(st2, args, depth, im, divs) == (divs, None) and st2._safety_warned
+    # ADR-507 Auto Convergence per Scene (safety off): 15% in front, held per scene, jump-limited
+    ramp = torch.linspace(0, 1, 32 * 48).view(1, 1, 32, 48)
+    d3 = torch.cat([ramp, ramp, ramp * 0.2, ramp * 0.2])          # scene 0: full range, scene 1: very flat
+    args3 = types.SimpleNamespace(scene_safety=False, scene_auto_convergence=True, scene_auto_convergence_front=0.15,
+                                  scene_auto_convergence_max_step=0.20, convergence=0.5, mapper="none",
+                                  depth_curve_match_strength=0.0,
+                                  state={"convergence_model": _Conv(), "foreground_scale_model": None})
+    st3 = types.SimpleNamespace(last_frame_scene_ids=[0, 0, 1, 1])
+    out3, off3 = _scene_safety(st3, args3, d3, torch.full((4, 3, 32, 48), 0.5), [3.8] * 4)
+    assert out3 == [3.8] * 4, "auto convergence alone never changes 3D Strength"
+    assert abs((0.5 + off3[0]) - 0.85) < 0.01 and off3[0] == off3[1], off3      # wide planned 0.5 -> 0.85
+    assert abs((0.5 + off3[2]) - 0.65) < 0.01 and off3[2] == off3[3], off3      # 0.17 wanted, limited to 0.85-0.20
     print("_self_test_scene_safety: PASS")
 
 

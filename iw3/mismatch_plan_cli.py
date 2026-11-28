@@ -130,6 +130,8 @@ def main(argv=None):
     ap.add_argument("--every", type=int, default=12, help="sample one frame pair every N frames (12 = 0.5 s)")
     ap.add_argument("--start-pct", type=float, default=85,
                     help="cutting starts at this percentile of the movie's scenes (85 = worst 15%%; 75 = worst 25%%)")
+    ap.add_argument("--full-pct", type=float, default=98,
+                    help="the full --max-cut applies from this percentile up (98 = worst 2%%; 90 = worst 10%%)")
     ap.add_argument("--from-plan", default=None,
                     help="re-plan from an earlier plan's saved measurements (no decoding); --input/--scene-plan ignored")
     a = ap.parse_args(argv)
@@ -146,7 +148,7 @@ def main(argv=None):
         print(f"[mismatch plan] {len(scenes)} scenes; measuring {path.basename(a.input)} ...", file=sys.stderr, flush=True)
         samples = measure_movie(a.input, scenes, a.layout, a.every, log=lambda s: print(s, file=sys.stderr, flush=True))
         per = scene_scores(samples, scenes)
-    factors, lo, hi = plan_factors([m for m, _, _ in per], a.max_cut, low_pct=a.start_pct)
+    factors, lo, hi = plan_factors([m for m, _, _ in per], a.max_cut, low_pct=a.start_pct, high_pct=a.full_pct)
     out = {"version": 1, "source": path.basename(a.input), "scene_plan": path.basename(a.scene_plan),
            "max_cut": a.max_cut, "levels": [lo, hi], "scenes": [
                {"i": idx, "start": round(st, 2), "dur": dur, "moving": m, "whole": wv, "samples": n, "factor": f}

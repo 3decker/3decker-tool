@@ -11360,6 +11360,15 @@ def create_parser(required_true=True):
                         help="ADR-505: largest 3D Strength reduction for one scene (0.10 = at most 10%%)")
     parser.add_argument("--scene-safety-max-conv-raise", type=float, default=0.10,
                         help="ADR-505: largest Convergence raise for one scene (0.10 = at most +0.10)")
+    parser.add_argument("--scene-safety-busy-low", type=float, default=None,
+                        help=("ADR-506: busy-deep-background risk where the strength cut starts "
+                              "(default: the D2-calibrated 0.007). Set per depth setup after calibrating"))
+    parser.add_argument("--scene-safety-busy-high", type=float, default=None,
+                        help="ADR-506: risk where the full strength cut applies (default 0.017)")
+    parser.add_argument("--scene-safety-pop-limit", type=float, default=None,
+                        help="ADR-506: pop-out above which Convergence is raised (default 2.6)")
+    parser.add_argument("--scene-safety-edge-limit", type=float, default=None,
+                        help="ADR-506: frame-edge pop above which Convergence is raised (default 2.45)")
     parser.add_argument("--depth-jump-glide", type=float, default=0.0,
                         help=("ADR-498: Depth Jump Glide -- when an object's depth suddenly snaps far more than "
                               "its normal frame-to-frame movement (e.g. Video Depth Anything re-estimating it at "

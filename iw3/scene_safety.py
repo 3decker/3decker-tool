@@ -73,20 +73,27 @@ def measure(final_depth, im, convergence, divergence):
     return {"pop": pop, "edge_pop": edge_pop, "busy": busy}
 
 
-def decide(m, max_strength_cut=0.10, max_conv_raise=0.10):
-    """Risk numbers -> (strength_factor, conv_offset, reasons)."""
+def decide(m, max_strength_cut=0.10, max_conv_raise=0.10, busy_low=None, busy_high=None,
+           pop_limit=None, edge_limit=None):
+    """Risk numbers -> (strength_factor, conv_offset, reasons). The trigger levels default to
+    the D2-calibrated constants above; a run with very different depth (e.g. no curve + depth
+    reset) passes its own calibrated levels (ADR-506 CLI flags)."""
+    busy_low = BUSY_RISK_LOW if busy_low is None else float(busy_low)
+    busy_high = BUSY_RISK_HIGH if busy_high is None else float(busy_high)
+    pop_limit = POP_LIMIT if pop_limit is None else float(pop_limit)
+    edge_limit = EDGE_LIMIT if edge_limit is None else float(edge_limit)
     reasons = []
-    t = (m["busy"] - BUSY_RISK_LOW) / (BUSY_RISK_HIGH - BUSY_RISK_LOW)
+    t = (m["busy"] - busy_low) / max(busy_high - busy_low, 1e-9)
     t = min(max(t, 0.0), 1.0)
     factor = 1.0 - max_strength_cut * t
     if t > 0:
         reasons.append(f"busy deep background (risk {m['busy']:.3f})")
     raise_by = 0.0
-    if m["pop"] > POP_LIMIT:
-        raise_by = max(raise_by, (m["pop"] - POP_LIMIT) / 10.0)
+    if m["pop"] > pop_limit:
+        raise_by = max(raise_by, (m["pop"] - pop_limit) / 10.0)
         reasons.append(f"pops out far (pop {m['pop']:.2f})")
-    if m["edge_pop"] > EDGE_LIMIT:
-        raise_by = max(raise_by, (m["edge_pop"] - EDGE_LIMIT) / 10.0)
+    if m["edge_pop"] > edge_limit:
+        raise_by = max(raise_by, (m["edge_pop"] - edge_limit) / 10.0)
         reasons.append(f"near object at the frame edge (edge pop {m['edge_pop']:.2f})")
     conv_offset = min(raise_by, max_conv_raise)
     return factor, conv_offset, reasons
@@ -120,6 +127,10 @@ def _self_test():
     m = measure(big_pop, flat_im, 0.0, 4.3)
     f, o, r = decide(m, max_conv_raise=0.05)
     assert o == 0.05 and any("pops out" in x for x in r), (m, o, r)
+    # per-run trigger levels: a higher pop limit stops the raise; a lower busy range triggers
+    assert decide(m, pop_limit=99, edge_limit=99)[1] == 0.0
+    mild = {"busy": 0.005, "pop": 0.0, "edge_pop": 0.0}
+    assert decide(mild)[0] == 1.0 and decide(mild, busy_low=0.001, busy_high=0.005, max_strength_cut=0.3)[0] == 0.7
     print("scene_safety self-test: PASS")
 
 

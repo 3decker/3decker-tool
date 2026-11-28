@@ -1605,7 +1605,12 @@ def _scene_safety(st, args, d4, i4, divs):
                 if matcher.enabled:
                     x = matcher.to(x.device).apply(x, strength=strength)
             m = SS.measure(x, i4[idx], float(conv), float(divs[idx[0]]))
-        factor, offset, reasons = SS.decide(m, max_cut, max_raise)
+        factor, offset, reasons = SS.decide(
+            m, max_cut, max_raise,
+            busy_low=getattr(args, "scene_safety_busy_low", None),
+            busy_high=getattr(args, "scene_safety_busy_high", None),
+            pop_limit=getattr(args, "scene_safety_pop_limit", None),
+            edge_limit=getattr(args, "scene_safety_edge_limit", None))
         cache[sid] = (factor, offset)
         st._safety_counts = getattr(st, "_safety_counts", [0, 0, 0])
         st._safety_counts[0] += 1

@@ -128,15 +128,25 @@ def main(argv=None):
     ap.add_argument("--layout", choices=["half_tb", "half_sbs"], default="half_tb")
     ap.add_argument("--max-cut", type=float, default=0.35, help="largest 3D Strength cut for the worst scenes")
     ap.add_argument("--every", type=int, default=12, help="sample one frame pair every N frames (12 = 0.5 s)")
+    ap.add_argument("--start-pct", type=float, default=85,
+                    help="cutting starts at this percentile of the movie's scenes (85 = worst 15%%; 75 = worst 25%%)")
+    ap.add_argument("--from-plan", default=None,
+                    help="re-plan from an earlier plan's saved measurements (no decoding); --input/--scene-plan ignored")
     a = ap.parse_args(argv)
-    scenes = read_scene_plan(a.scene_plan)
-    if not scenes:
-        print("ERROR: no scenes found in the scene plan", file=sys.stderr)
-        return 1
-    print(f"[mismatch plan] {len(scenes)} scenes; measuring {path.basename(a.input)} ...", file=sys.stderr, flush=True)
-    samples = measure_movie(a.input, scenes, a.layout, a.every, log=lambda s: print(s, file=sys.stderr, flush=True))
-    per = scene_scores(samples, scenes)
-    factors, lo, hi = plan_factors([m for m, _, _ in per], a.max_cut)
+    if a.from_plan:
+        old = json.load(open(a.from_plan, encoding="utf-8"))
+        scenes = [(s["i"], s["start"], s["dur"]) for s in old["scenes"]]
+        per = [(s["moving"], s["whole"], s["samples"]) for s in old["scenes"]]
+        a.input, a.scene_plan = old.get("source", "?"), old.get("scene_plan", "?")
+    else:
+        scenes = read_scene_plan(a.scene_plan)
+        if not scenes:
+            print("ERROR: no scenes found in the scene plan", file=sys.stderr)
+            return 1
+        print(f"[mismatch plan] {len(scenes)} scenes; measuring {path.basename(a.input)} ...", file=sys.stderr, flush=True)
+        samples = measure_movie(a.input, scenes, a.layout, a.every, log=lambda s: print(s, file=sys.stderr, flush=True))
+        per = scene_scores(samples, scenes)
+    factors, lo, hi = plan_factors([m for m, _, _ in per], a.max_cut, low_pct=a.start_pct)
     out = {"version": 1, "source": path.basename(a.input), "scene_plan": path.basename(a.scene_plan),
            "max_cut": a.max_cut, "levels": [lo, hi], "scenes": [
                {"i": idx, "start": round(st, 2), "dur": dur, "moving": m, "whole": wv, "samples": n, "factor": f}
